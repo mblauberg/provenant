@@ -29,7 +29,7 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
         let selected = if globals.project.is_some() {
             use provenant_confinement::{UtilityBudget, UtilityRuntime};
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-            let runtime = UtilityRuntime::read_only(git)?;
+            let runtime = UtilityRuntime::read_only(git, resolved.roots.state.as_path())?;
             let executor = provenant_os::exec::SystemExecutor::new(1)?;
             let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))?;
             let location = runtime
@@ -43,10 +43,15 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
             None
         };
         let local = provenant_cli::console::read(&resolved.roots, selected, &command)?;
-        if let Console::Detail { id } = &command
+        if matches!(command, Console::Detail { .. })
             && local["reason"] == "remote_detail_requires_host_read"
         {
-            let (host, attempt) = id.split_once('/').ok_or("invalid remote detail ID")?;
+            let host = local["lane_id"]["host"]
+                .as_str()
+                .ok_or("invalid remote detail ID")?;
+            let attempt = local["lane_id"]["attempt_id"]
+                .as_str()
+                .ok_or("invalid remote detail ID")?;
             let context = provenant_cli::fabric::Context::open_read_only(
                 resolved.roots,
                 &resolved.home,
@@ -582,9 +587,11 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let hosts = vec![HostId::from_bytes([2; 16]), HostId::from_bytes([3; 16])];
+        let project = ProjectId::from_bytes([5; 16]);
+        let key = provenant_records::WorkKey::new(project, "graph", "node", 1).unwrap();
         let local = serde_json::json!({"lanes":[{
-            "lane_id":{"host":HostId::from_bytes([1; 16]),"attempt_id":AttemptId::from_bytes([4; 16])},
-            "metadata":{"attempt":{"project_id":ProjectId::from_bytes([5; 16])}}
+            "lane_id":{"host":HostId::from_bytes([1; 16]),"key":key,"attempt_id":AttemptId::from_bytes([4; 16])},
+            "metadata":{"attempt":{"project_id":project}}
         }],"next_cursor":"local-cursor","coverage":{"scope":"local"}});
         let start = Instant::now();
         let budget = Duration::from_millis(300);

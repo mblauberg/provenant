@@ -1,4 +1,4 @@
-//! Planned typed wire projections for the CLI and MCP.
+//! Planned typed wire projections for the CLI.
 //!
 //! Each planned projection has a builder-written
 //! JSON Schema (draft 2020-12) beside it; tests validate serialised values
@@ -27,7 +27,6 @@
 pub mod cancel;
 pub mod error;
 pub mod lane;
-pub mod mcp;
 pub mod output;
 pub mod schema;
 
@@ -162,26 +161,6 @@ pub fn error_envelope_schema() -> Value {
     )
 }
 
-/// Schemas MCP publishes as `outputSchema`, by tool name.
-pub fn mcp_output_schema(tool: &str) -> Option<Value> {
-    let (schema, title) = match tool {
-        "fabric_run" => (mcp::run_result_schema(), "fabric_run structuredContent"),
-        "fabric_output" => (
-            mcp::output_result_schema(),
-            "fabric_output structuredContent",
-        ),
-        _ => return None,
-    };
-    Some(root(
-        &format!("{SCHEMA_ID_BASE}mcp/{tool}.schema.json"),
-        title,
-        schema,
-    ))
-}
-
-/// MCP tools with a typed output schema from this module.
-pub const MCP_TOOLS: &[&str] = &["fabric_run", "fabric_output"];
-
 /// Every published schema as `(relative file name, schema)`, in stable order.
 /// `scripts/generate-reference` writes them under the untracked `docs/reference/schemas/`.
 pub fn published() -> Vec<(String, Value)> {
@@ -192,11 +171,6 @@ pub fn published() -> Vec<(String, Value)> {
         }
     }
     files.push(("error.schema.json".to_owned(), error_envelope_schema()));
-    for tool in MCP_TOOLS {
-        if let Some(schema) = mcp_output_schema(tool) {
-            files.push((format!("mcp/{tool}.schema.json"), schema));
-        }
-    }
     files
 }
 

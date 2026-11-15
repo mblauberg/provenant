@@ -4,8 +4,8 @@ Create or materially revise a skill under an explicit write grant.
 
 ## Build
 
-1. Choose the smallest container: a project rule, a skill, a tested script, an
-   MCP or app, or a separately versioned plugin. Split only for a distinct
+1. Choose the appropriate owner with the least standing cost: a project rule, a skill, a tested script, an
+   app, or a separately versioned plugin. Split only for a distinct
    trigger, authority, artefact or gate; merge skills that compete for the same
    request.
 2. Keep project-only policy in the project. A project skill that only points at

@@ -973,52 +973,72 @@ mod tests {
     }
 
     #[test]
-    fn shell_output_secrets_split_across_chunks_are_never_emitted() {
-        for prefix in [
-            b"git push --force origin main\nstdout: ".as_slice(),
-            b"rm -rf ../state\nstderr: ".as_slice(),
-        ] {
-            let mut redactor = Redactor::new([b"token-123".to_vec()]).expect("valid secret");
-            let output = joined(&mut redactor, &[prefix, b"tok", b"en-123 suffix"]);
-            assert!(
-                !output
-                    .windows(b"token-123".len())
-                    .any(|window| window == b"token-123")
-            );
-            assert!(output.starts_with(prefix));
-            assert!(output.ends_with(b" suffix"));
-            assert!(
-                output
-                    .windows(REDACTED.len())
-                    .any(|window| window == REDACTED)
-            );
+    fn literal_redaction_is_chunk_invariant_and_preserves_unmatched_text() {
+        let cases = [
+            (
+                vec![b"token-123".to_vec()],
+                b"git push --force origin main\nstdout: token-123 suffix".as_slice(),
+                b"git push --force origin main\nstdout: [REDACTED] suffix".as_slice(),
+            ),
+            (
+                vec![b"token-123".to_vec()],
+                b"rm -rf ../state\nstderr: token-123 suffix".as_slice(),
+                b"rm -rf ../state\nstderr: [REDACTED] suffix".as_slice(),
+            ),
+            (
+                vec![b"abcde".to_vec(), b"cd".to_vec()],
+                b"abcde".as_slice(),
+                REDACTED,
+            ),
+            (
+                vec![b"secret-value".to_vec()],
+                b"ordinary secretx and done".as_slice(),
+                b"ordinary secretx and done".as_slice(),
+            ),
+            (
+                vec![b"secret-value".to_vec()],
+                b"ordinary secret-".as_slice(),
+                b"ordinary secret-".as_slice(),
+            ),
+        ];
+
+        for (secrets, input, expected) in cases {
+            for split in 0..=input.len() {
+                let mut redactor = Redactor::new(secrets.clone()).expect("valid secrets");
+                assert_eq!(
+                    joined(&mut redactor, &[&input[..split], &input[split..]]),
+                    expected,
+                    "split {split} for {input:?}"
+                );
+            }
         }
-    }
 
-    #[test]
-    fn nested_literal_matches_mask_the_longer_secret_across_chunks() {
-        let whole: [&[u8]; 1] = [b"abcde"];
-        let split: [&[u8]; 3] = [b"ab", b"cd", b"e"];
-        for chunks in [&whole[..], &split[..]] {
-            let mut redactor =
-                Redactor::new([b"abcde".to_vec(), b"cd".to_vec()]).expect("valid secrets");
-            assert_eq!(joined(&mut redactor, chunks), REDACTED);
-        }
-    }
+        // Retain the original multi-chunk paths as well as every single split.
+        let mut redactor = Redactor::new([b"token-123".to_vec()]).expect("valid secret");
+        assert_eq!(
+            joined(
+                &mut redactor,
+                &[
+                    b"git push --force origin main\nstdout: ",
+                    b"tok",
+                    b"en-123 suffix",
+                ]
+            ),
+            b"git push --force origin main\nstdout: [REDACTED] suffix"
+        );
 
-    #[test]
-    fn incomplete_literal_prefix_is_preserved_after_mismatch_across_chunks() {
-        let mut redactor = Redactor::new([b"secret-value".to_vec()]).expect("valid secret");
-        let output = joined(&mut redactor, &[b"ordinary secr", b"etx and done"]);
-        assert_eq!(output, b"ordinary secretx and done");
-    }
+        let mut redactor = Redactor::new([b"token-123".to_vec()]).expect("valid secret");
+        assert_eq!(
+            joined(
+                &mut redactor,
+                &[b"rm -rf ../state\nstderr: ", b"tok", b"en-123 suffix",]
+            ),
+            b"rm -rf ../state\nstderr: [REDACTED] suffix"
+        );
 
-    #[test]
-    fn eof_flushes_unmatched_literal_tail() {
-        let mut redactor = Redactor::new([b"secret-value".to_vec()]).expect("valid secret");
-        let mut output = redactor.filter(b"ordinary secret-").expect("bounded input");
-        output.extend(redactor.finish().expect("bounded finish"));
-        assert_eq!(output, b"ordinary secret-");
+        let mut redactor =
+            Redactor::new([b"abcde".to_vec(), b"cd".to_vec()]).expect("valid secrets");
+        assert_eq!(joined(&mut redactor, &[b"ab", b"cd", b"e"]), REDACTED);
     }
 
     #[test]
@@ -1038,6 +1058,18 @@ mod tests {
     }
 
     #[test]
+    fn token_shapes_are_redacted_or_preserved_across_chunk_boundaries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        token_markers_split_across_chunks_redact_only_at_word_boundaries();
+        json_escaped_boundaries_redact_all_token_shapes_across_chunks();
+        raw_backslashes_before_tokens_do_not_disable_redaction_across_chunks();
+        unicode_escapes_inside_tokens_are_redacted_across_chunks();
+        bearer_and_credential_url_values_split_across_chunks_are_hidden();
+        token_markers_redact_at_minimum_body_lengths_across_chunks();
+        token_split_across_the_session_chunk_boundary_is_redacted()?;
+        Ok(())
+    }
+
     fn token_markers_split_across_chunks_redact_only_at_word_boundaries() {
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let output = joined(
@@ -1047,7 +1079,6 @@ mod tests {
         assert_eq!(output, b"xsk-embedded [REDACTED]");
     }
 
-    #[test]
     fn json_escaped_boundaries_redact_all_token_shapes_across_chunks() {
         for (marker, kind) in TOKEN_MARKERS {
             let body = match kind {
@@ -1083,7 +1114,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn raw_backslashes_before_tokens_do_not_disable_redaction_across_chunks() {
         for (marker, kind) in TOKEN_MARKERS {
             let bodies: &[&str] = match kind {
@@ -1117,7 +1147,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn unicode_escapes_inside_tokens_are_redacted_across_chunks() {
         for (marker, kind) in TOKEN_MARKERS {
             let body = match kind {
@@ -1176,7 +1205,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn bearer_and_credential_url_values_split_across_chunks_are_hidden() {
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let output = joined(
@@ -1219,7 +1247,6 @@ mod tests {
         assert!(redactor.has_redaction());
     }
 
-    #[test]
     fn token_markers_redact_at_minimum_body_lengths_across_chunks() {
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let output = joined(
@@ -1425,7 +1452,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn token_split_across_the_session_chunk_boundary_is_redacted()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;

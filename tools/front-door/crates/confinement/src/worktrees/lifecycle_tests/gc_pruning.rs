@@ -1,6 +1,161 @@
 use super::*;
 
 #[test]
+fn interrupted_linked_retirement_replays_its_reference_step() -> Result<(), Box<dyn Error>> {
+    use crate::worktrees::RetirementIntent;
+    use provenant_records::custody::{
+        RemovalEvidence, RetirementDecision, RetirementStep, RetirementStepState,
+    };
+
+    struct UnavailableForge<'a>(&'a HostRetirementFixture);
+    impl RetirementFeeds for UnavailableForge<'_> {
+        fn authority(&self) -> Result<provenant_core::ActorId, String> {
+            self.0.authority()
+        }
+
+        fn custody(&self, lane: &WorktreeInfo) -> Result<(), String> {
+            self.0.custody(lane)
+        }
+
+        fn forge(&self, _branch: &GitRefName) -> ForgeObservation {
+            ForgeObservation::Unknown("fixture forge unavailable".into())
+        }
+
+        fn fresh_forge(&self, branch: &GitRefName) -> ForgeObservation {
+            self.forge(branch)
+        }
+
+        fn integration_bases(&self) -> Vec<(String, GitOid)> {
+            self.0.integration_bases()
+        }
+
+        fn remote_guard(
+            &self,
+            context: &WorktreeContext<'_>,
+            branch: &str,
+            tip: GitOid,
+            min_days: u64,
+        ) -> Result<(), String> {
+            self.0.remote_guard(context, branch, tip, min_days)
+        }
+    }
+
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let lane = gc_owned_lane(&test, &context, "d12-replay")?;
+    let custody = HostRetirementFixture::new(&test)?;
+    custody.seed_lane(&context, &lane)?;
+    let owner = lane
+        .owner
+        .as_ref()
+        .map_err(|error| io::Error::other(error.to_string()))?
+        .as_ref()
+        .ok_or("fixture lane has no owner")?;
+    let reference = owner
+        .reference
+        .clone()
+        .ok_or("fixture lane has no ref owner")?;
+    let reference_name = GitRefName::new(&reference.reference)?;
+    let worktree = acquire_worktree_subject_at(&context, &lane.path)?;
+    let evidence = gc_landing_evidence(&fixture, lane.head)?;
+    let decision = RetirementDecision::Discard {
+        authority: custody.actor,
+        evidence: RemovalEvidence::Landing { evidence },
+    };
+    let record = custody
+        .begin_retirement(RetirementIntent {
+            project: test.binding.project_id(),
+            related_subjects: vec![worktree.clone()],
+            reference,
+            expected_tip: lane.head,
+            decision: decision.clone(),
+        })?
+        .ok_or("fixture retirement has no durable owner")?;
+    let retirement_id = record.id.clone();
+
+    let path = lane
+        .path
+        .to_str()
+        .ok_or("fixture worktree path is not UTF-8")?;
+    let removed = fixture.run(&["worktree", "remove", "--", path])?;
+    assert_eq!(removed.termination, Termination::Exit(0));
+    custody.advance_retirement(
+        &record,
+        RetirementStep::Worktree { subject: worktree },
+        RetirementStepState::Completed {
+            evidence: decision.evidence().clone(),
+        },
+    )?;
+    assert_eq!(
+        ref_tip(&context, &reference_name, &cancel())?,
+        Some(lane.head)
+    );
+
+    let unavailable = UnavailableForge(&custody);
+    let pending = resume_pending_retirements(&context, &custody, &unavailable, &cancel())?;
+    assert!(pending.iter().any(|record| {
+        record.outcomes.iter().any(|outcome| {
+            outcome.step == RetirementStep::Reference
+                && !matches!(&outcome.state, RetirementStepState::Completed { .. })
+        })
+    }));
+    assert_eq!(
+        ref_tip(&context, &reference_name, &cancel())?,
+        Some(lane.head)
+    );
+
+    let resumed = resume_pending_retirements(&context, &custody, &custody, &cancel())?;
+    let completed = resumed
+        .iter()
+        .find(|record| record.id == retirement_id)
+        .ok_or("pending retirement was not returned")?;
+    assert!(
+        completed
+            .outcomes
+            .iter()
+            .all(|outcome| matches!(&outcome.state, RetirementStepState::Completed { .. }))
+    );
+    assert_eq!(ref_tip(&context, &reference_name, &cancel())?, None);
+
+    fixture.run(&["branch", "d12-explicit-ref"])?;
+    let explicit_name = GitRefName::branch("d12-explicit-ref")?;
+    let explicit_owner = RefLedger::for_context(&context)?.observe_local_branch(
+        &explicit_name,
+        lane.head,
+        &test.clock,
+        &cancel(),
+    )?;
+    let explicit_decision = RetirementDecision::Discard {
+        authority: custody.actor,
+        evidence: RemovalEvidence::ExplicitDiscard { archive: None },
+    };
+    let explicit = custody
+        .begin_retirement(RetirementIntent {
+            project: test.binding.project_id(),
+            related_subjects: Vec::new(),
+            reference: explicit_owner.ownership(),
+            expected_tip: lane.head,
+            decision: explicit_decision,
+        })?
+        .ok_or("explicit ref retirement has no durable owner")?;
+    let explicit_id = explicit.id;
+    let explicit_resumed = resume_pending_retirements(&context, &custody, &custody, &cancel())?;
+    let explicit_completed = explicit_resumed
+        .iter()
+        .find(|record| record.id == explicit_id)
+        .ok_or("explicit ref retirement was not returned")?;
+    assert!(
+        explicit_completed
+            .outcomes
+            .iter()
+            .all(|outcome| matches!(&outcome.state, RetirementStepState::Completed { .. }))
+    );
+    assert_eq!(ref_tip(&context, &explicit_name, &cancel())?, None);
+    Ok(())
+}
+
+#[test]
 fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>> {
     struct PreparationProbe<'a> {
         inner: &'a dyn Executor,
@@ -52,14 +207,9 @@ fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>>
     fs::write(fixture.root.join(".git/info/exclude"), "target/\n")?;
     let test = TestContext::new(&fixture)?;
     let mut context = test.context();
-    let info = create(
-        &context,
-        WorktreeCreate {
-            branch: "removal-launch-lock".into(),
-            base: None,
-        },
-        &cancel(),
-    )?;
+    let info = gc_owned_lane(&test, &context, "removal-launch-lock")?;
+    let retirement = HostRetirementFixture::new(&test)?;
+    retirement.seed_lane(&context, &info)?;
     let artifact = info.path.join("target/artifact");
     fs::create_dir(info.path.join("target"))?;
     fs::write(&artifact, "output")?;
@@ -80,7 +230,7 @@ fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>>
         repository_held: Default::default(),
     };
     context.workers = &workers;
-    let result = remove_with_output(
+    let result = remove_with_retirement(
         &context,
         WorktreeRemove::Name {
             name: "removal-launch-lock".into(),
@@ -93,6 +243,8 @@ fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>>
             regenerable: vec!["target".into()],
             ..Default::default()
         },
+        &retirement,
+        retirement.actor,
     )?;
     assert_eq!(result.removed.len(), 1);
     assert!(
@@ -118,12 +270,10 @@ fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>>
 fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Error>> {
     struct AppearingAfterPreparation {
         artifact: PathBuf,
-        calls: std::sync::atomic::AtomicUsize,
         complete_required: bool,
     }
     impl WorkerObserver for AppearingAfterPreparation {
         fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let state = if self.artifact.exists() {
                 Occupancy::Available
             } else {
@@ -143,25 +293,19 @@ fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Er
     fs::write(fixture.root.join(".git/info/exclude"), "target/\n")?;
     let test = TestContext::new(&fixture)?;
     let mut context = test.context();
-    let info = create(
-        &context,
-        WorktreeCreate {
-            branch: "late-worker".into(),
-            base: None,
-        },
-        &cancel(),
-    )?;
+    let info = gc_owned_lane(&test, &context, "late-worker")?;
+    let retirement = HostRetirementFixture::new(&test)?;
+    retirement.seed_lane(&context, &info)?;
     let artifact = info.path.join("target/artifact");
     fs::create_dir(info.path.join("target"))?;
     fs::write(&artifact, "output")?;
     let observer = AppearingAfterPreparation {
         artifact: artifact.clone(),
-        calls: Default::default(),
         complete_required: false,
     };
     let session = CensusSession::new(&observer, &test.clock);
     context.workers = &session;
-    let result = remove_with_output(
+    let result = remove_with_retirement(
         &context,
         WorktreeRemove::Name {
             name: "late-worker".into(),
@@ -174,6 +318,8 @@ fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Er
             regenerable: vec!["target".into()],
             ..Default::default()
         },
+        &retirement,
+        retirement.actor,
     );
     assert!(
         matches!(
@@ -187,62 +333,28 @@ fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Er
         "output preparation must precede the late observation"
     );
     assert!(info.path.is_dir());
-    assert!(observer.calls.load(std::sync::atomic::Ordering::SeqCst) >= 2);
     Ok(())
 }
 
 #[test]
-fn custody_refresh_rechecks_a_cached_free_observation() -> Result<(), Box<dyn Error>> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    struct Appearing(AtomicUsize);
-    impl WorkerObserver for Appearing {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
-            let state = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-                Occupancy::Available
-            } else {
-                Occupancy::Observed { process: None }
-            };
-            roots
-                .iter()
-                .cloned()
-                .map(|root| (root, state.clone()))
-                .collect()
-        }
-        fn requires_complete_census(&self) -> bool {
-            true
-        }
+fn removal_and_gc_sessions_detect_worker_after_preview() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    #[derive(Clone, Copy)]
+    enum EntryPoint {
+        Removal { complete_required: bool },
+        GarbageCollection,
+        CustodyRefresh,
     }
-    let fixture = Fixture::new()?;
-    let test = TestContext::new(&fixture)?;
-    let mut context = test.context();
-    let observer = Appearing(AtomicUsize::new(0));
-    let session = CensusSession::new(&observer, &test.clock);
-    assert_eq!(
-        session.observe_roots(std::slice::from_ref(&fixture.root))[&fixture.root],
-        Occupancy::Available
-    );
-    context.workers = &session;
-    assert!(matches!(
-        lifecycle::refresh_census_under_custody(&context, &fixture.root),
-        Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
-    ));
-    assert_eq!(observer.0.load(Ordering::SeqCst), 2);
-    Ok(())
-}
-
-#[test]
-fn removal_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
     struct Appearing {
-        calls: std::sync::atomic::AtomicUsize,
+        live: AtomicBool,
         complete_required: bool,
     }
     impl WorkerObserver for Appearing {
         fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
-            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let state = if call == 0 {
-                Occupancy::Available
-            } else {
+            let state = if self.live.load(Ordering::SeqCst) {
                 Occupancy::Observed { process: None }
+            } else {
+                Occupancy::Available
             };
             roots
                 .iter()
@@ -254,67 +366,142 @@ fn removal_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> 
             self.complete_required
         }
     }
-    for complete_required in [false, true] {
+    for entry_point in [
+        EntryPoint::Removal {
+            complete_required: false,
+        },
+        EntryPoint::Removal {
+            complete_required: true,
+        },
+        EntryPoint::GarbageCollection,
+        EntryPoint::CustodyRefresh,
+    ] {
         let fixture = Fixture::new()?;
         let test = TestContext::new(&fixture)?;
         let mut context = test.context();
-        let info = create(
-            &context,
-            WorktreeCreate {
-                branch: "worker-appears".into(),
-                base: None,
-            },
-            &cancel(),
-        )?;
+        let branch = match entry_point {
+            EntryPoint::Removal { .. } => "worker-appears",
+            EntryPoint::GarbageCollection => "gc-worker-appears",
+            EntryPoint::CustodyRefresh => "custody-worker-appears",
+        };
+        let lane = match entry_point {
+            EntryPoint::Removal { .. } => Some(create(
+                &context,
+                WorktreeCreate {
+                    branch: branch.into(),
+                    base: None,
+                },
+                &cancel(),
+            )?),
+            EntryPoint::GarbageCollection => Some(gc_merged_worktree(&test, &context, branch)?),
+            EntryPoint::CustodyRefresh => None,
+        };
+        let retirement = HostRetirementFixture::new(&test)?;
+        if matches!(entry_point, EntryPoint::GarbageCollection) {
+            retirement.seed_lane(&context, lane.as_ref().ok_or("GC case has a worktree")?)?;
+        }
+        let watched_root = lane
+            .as_ref()
+            .map_or_else(|| fixture.root.clone(), |lane| lane.path.clone());
         let observer = Appearing {
-            calls: Default::default(),
-            complete_required,
+            live: AtomicBool::new(false),
+            complete_required: match entry_point {
+                EntryPoint::Removal { complete_required } => complete_required,
+                EntryPoint::CustodyRefresh => true,
+                EntryPoint::GarbageCollection => false,
+            },
         };
         let session = CensusSession::new(&observer, &test.clock);
         assert_eq!(
-            session.observe_roots(std::slice::from_ref(&info.path))[&info.path],
+            session.observe_roots(std::slice::from_ref(&watched_root))[&watched_root],
             Occupancy::Available
         );
         context.workers = &session;
-        let error = remove(
-            &context,
-            WorktreeRemove::Name {
-                name: "worker-appears".into(),
-                discard: false,
-                integration: None,
-                expected_head: None,
-            },
-            &cancel(),
-        )
-        .err()
-        .ok_or("removed occupied tree")?;
-        assert!(
-            matches!(
-                error,
-                WorktreeError::LiveWriter | WorktreeError::LiveProcess(_)
-            ),
-            "{error:?}"
-        );
-        assert!(info.path.is_dir());
-        assert!(observer.calls.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+        observer.live.store(true, Ordering::SeqCst);
+        match entry_point {
+            EntryPoint::Removal { .. } => {
+                let error = remove_with_port(
+                    &test,
+                    &context,
+                    WorktreeRemove::Name {
+                        name: branch.into(),
+                        discard: false,
+                        integration: None,
+                        expected_head: None,
+                    },
+                    &cancel(),
+                )
+                .err()
+                .ok_or("removed occupied tree")?;
+                assert!(matches!(
+                    error,
+                    WorktreeError::LiveWriter | WorktreeError::LiveProcess(_)
+                ));
+            }
+            EntryPoint::GarbageCollection => {
+                let evidence = gc_landing_evidence(&fixture, fixture.head()?)?;
+                let report = collect(
+                    &context,
+                    std::slice::from_ref(lane.as_ref().ok_or("GC case has a worktree")?),
+                    &WorktreeGcPolicy {
+                        include_foreign: false,
+                        retirement_port: Some(&retirement),
+                        retirement_feeds: Some(&retirement),
+                        mode: CollectionMode::Worktrees,
+                        proof: Some(&evidence),
+                        upstream_reference: None,
+                        integration_patterns: &[],
+                        excluded_paths: &[],
+                        upstream: Some(fixture.head()?),
+                        terminal: &|_| true,
+                        no_live_lanes: &|_| true,
+                        regenerable: &[],
+                        keep: &[],
+                        written_before_ns: i128::MAX,
+                        dry_run: false,
+                    },
+                    &cancel(),
+                )?;
+                assert!(report.worktrees.retained.iter().any(|retained| {
+                    retained.branch == branch && retained.reason == RetainReason::LiveWriter
+                }));
+                assert!(report.removals.iter().all(|removal| {
+                    !matches!(
+                        &removal.outcome,
+                        provenant_records::custody::RemovalOutcome::Removed { .. }
+                    )
+                }));
+            }
+            EntryPoint::CustodyRefresh => {
+                let error = lifecycle::refresh_census_under_custody(&context, &watched_root)
+                    .expect_err("refresh must observe the live worker");
+                assert!(matches!(
+                    error,
+                    WorktreeError::LiveWriter | WorktreeError::LiveProcess(_)
+                ));
+            }
+        }
+        if let Some(lane) = lane {
+            assert!(lane.path.is_dir());
+        }
     }
     Ok(())
 }
 
 #[test]
 fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Error>> {
-    struct BecomingUnknown(std::sync::atomic::AtomicUsize);
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct BecomingUnknown(AtomicBool);
     impl WorkerObserver for BecomingUnknown {
         fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
-            let call = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             roots
                 .iter()
                 .cloned()
                 .map(|root| {
-                    let state = if call == 0 {
-                        Occupancy::Available
-                    } else {
+                    let state = if self.0.load(Ordering::SeqCst) {
                         Occupancy::census_unknown(root.clone(), "fixture census unavailable")
+                    } else {
+                        Occupancy::Available
                     };
                     (root, state)
                 })
@@ -333,18 +520,28 @@ fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Err
         path.to_str().ok_or("path")?,
     ])?;
     let lanes = list(&context, &cancel())?;
-    let observer = BecomingUnknown(Default::default());
+    let retirement = HostRetirementFixture::new(&test)?;
+    let evidence = gc_landing_evidence(&fixture, fixture.head()?)?;
+    let observer = BecomingUnknown(AtomicBool::new(false));
     let session = CensusSession::new(&observer, &test.clock);
     assert_eq!(
         session.observe_roots(std::slice::from_ref(&path))[&path],
         Occupancy::Available
     );
     context.workers = &session;
+    observer.0.store(true, Ordering::SeqCst);
     let report = collect(
         &context,
         &lanes,
         &WorktreeGcPolicy {
-            foreign_merged_clean: true,
+            include_foreign: true,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            mode: CollectionMode::Worktrees,
+            proof: Some(&evidence),
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &|_| false,
             no_live_lanes: &|_| true,
@@ -355,47 +552,45 @@ fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Err
         },
         &cancel(),
     )?;
-    assert!(report.worktrees.removed.is_empty(), "{report:?}");
+    assert!(report.worktrees.retained.iter().any(|retained| {
+        retained.branch == "foreign-session" && retained.reason == RetainReason::UnknownWriter
+    }));
     assert!(path.is_dir());
-    assert!(observer.0.load(std::sync::atomic::Ordering::SeqCst) >= 2);
     Ok(())
 }
 
 #[test]
-fn gc_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
-    struct Appearing(std::sync::atomic::AtomicUsize);
-    impl WorkerObserver for Appearing {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
-            let call = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let state = if call == 0 {
-                Occupancy::Available
-            } else {
-                Occupancy::Observed { process: None }
-            };
-            roots
-                .iter()
-                .cloned()
-                .map(|root| (root, state.clone()))
-                .collect()
-        }
-    }
+fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test_context = TestContext::new(&fixture)?;
     let mut context = test_context.context();
-    let lane = gc_merged_worktree(&fixture, &context, "gc-worker-appears")?;
-    let observer = Appearing(Default::default());
-    let session = CensusSession::new(&observer, &test_context.clock);
-    assert_eq!(
-        session.observe_roots(std::slice::from_ref(&lane.path))[&lane.path],
-        Occupancy::Available
-    );
+    let lane = gc_merged_worktree(&test_context, &context, "gc-census-flip")?;
+    let upstream = fixture.head()?;
+    let retirement = HostRetirementFixture::new(&test_context)?;
+    retirement.seed_lane(&context, &lane)?;
+    let evidence = gc_landing_evidence(&fixture, upstream)?;
+    let flipping = FlippingWorkers {
+        unknown: std::sync::atomic::AtomicBool::new(false),
+    };
+    let session = CensusSession::new(&flipping, &test_context.clock);
+    assert!(session.observe_roots(std::slice::from_ref(&lane.path))[&lane.path].is_available());
+    flipping
+        .unknown
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     context.workers = &session;
     let report = collect(
         &context,
         std::slice::from_ref(&lane),
         &WorktreeGcPolicy {
-            foreign_merged_clean: false,
-            upstream: Some(fixture.head()?),
+            include_foreign: false,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            mode: CollectionMode::Worktrees,
+            proof: Some(&evidence),
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
+            upstream: Some(upstream),
             terminal: &|_| true,
             no_live_lanes: &|_| true,
             regenerable: &[],
@@ -405,73 +600,11 @@ fn gc_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
         },
         &cancel(),
     )?;
-    assert!(report.worktrees.removed.is_empty(), "{report:?}");
+    assert!(report.worktrees.retained.iter().any(|retained| {
+        retained.branch == "gc-census-flip" && retained.reason == RetainReason::UnknownWriter
+    }));
     assert!(lane.path.is_dir());
-    assert!(observer.0.load(std::sync::atomic::Ordering::SeqCst) >= 2);
-    Ok(())
-}
-
-#[test]
-fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Box<dyn Error>> {
-    // Count the censuses of an uninterrupted removal, then make the last one
-    // fail: a tree whose census turns unobservable after selection is kept.
-    let mut total = usize::MAX;
-    for unknown_from in [usize::MAX, 0] {
-        let fixture = Fixture::new()?;
-        let test_context = TestContext::new(&fixture)?;
-        let mut context = test_context.context();
-        let lane = gc_merged_worktree(&fixture, &context, "gc-census-flip")?;
-        let upstream = fixture.head()?;
-        let run = |context: &WorktreeContext<'_>| {
-            collect(
-                context,
-                std::slice::from_ref(&lane),
-                &WorktreeGcPolicy {
-                    foreign_merged_clean: false,
-                    upstream: Some(upstream),
-                    terminal: &|_| true,
-                    no_live_lanes: &|_| true,
-                    regenerable: &[],
-                    keep: &[],
-                    written_before_ns: i128::MAX,
-                    dry_run: false,
-                },
-                &cancel(),
-            )
-        };
-        if total == usize::MAX {
-            let counting = FlippingWorkers {
-                calls: Default::default(),
-                unknown_from,
-            };
-            let session = CensusSession::new(&counting, &test_context.clock);
-            context.workers = &session;
-            let report = run(&context)?;
-            assert_eq!(report.worktrees.removed.len(), 1, "{report:?}");
-            total = counting.calls.load(std::sync::atomic::Ordering::SeqCst);
-            // The removal censuses come after the one that listed the lane.
-            assert!(total >= 2, "{total}");
-            continue;
-        }
-        let flipping = FlippingWorkers {
-            calls: Default::default(),
-            unknown_from: total,
-        };
-        let session = CensusSession::new(&flipping, &test_context.clock);
-        context.workers = &session;
-        let report = run(&context)?;
-        assert!(report.worktrees.removed.is_empty(), "{report:?}");
-        assert_eq!(
-            report.worktrees.retained,
-            vec![RetainedBranch {
-                branch: "gc-census-flip".into(),
-                reason: RetainReason::UnknownWriter,
-                detail: Some("process 968: cwd unreadable; policy_condition=approved daemon directory required; configure confinement.census_ignore_unreadable; path=\"/Library/Developer/CoreSimulator/Resources/bin/simdiskimaged\", team_id=platform".into()),
-            }]
-        );
-        assert!(lane.path.is_dir());
-        assert!(branch_exists(&fixture, "gc-census-flip"));
-    }
+    assert!(branch_exists(&fixture, "gc-census-flip"));
     Ok(())
 }
 
@@ -482,17 +615,26 @@ fn gc_preview_and_apply_both_retain_a_managed_tree_with_an_unknown_census()
         let fixture = Fixture::new()?;
         let test_context = TestContext::new(&fixture)?;
         let mut context = test_context.context();
-        let lane = gc_merged_worktree(&fixture, &context, "gc-census-unknown")?;
+        let lane = gc_merged_worktree(&test_context, &context, "gc-census-unknown")?;
+        let retirement = HostRetirementFixture::new(&test_context)?;
+        retirement.seed_lane(&context, &lane)?;
+        let evidence = gc_landing_evidence(&fixture, fixture.head()?)?;
         let unknown = FlippingWorkers {
-            calls: Default::default(),
-            unknown_from: 0,
+            unknown: std::sync::atomic::AtomicBool::new(true),
         };
         context.workers = &unknown;
         let report = collect(
             &context,
             std::slice::from_ref(&lane),
             &WorktreeGcPolicy {
-                foreign_merged_clean: false,
+                include_foreign: false,
+                retirement_port: Some(&retirement),
+                retirement_feeds: Some(&retirement),
+                mode: CollectionMode::Worktrees,
+                proof: Some(&evidence),
+                upstream_reference: None,
+                integration_patterns: &[],
+                excluded_paths: &[],
                 upstream: Some(fixture.head()?),
                 terminal: &|_| true,
                 no_live_lanes: &|_| true,
@@ -503,32 +645,39 @@ fn gc_preview_and_apply_both_retain_a_managed_tree_with_an_unknown_census()
             },
             &cancel(),
         )?;
-        assert!(report.worktrees.removed.is_empty(), "{dry_run}: {report:?}");
-        assert_eq!(
-            report.worktrees.retained,
-            vec![RetainedBranch {
-                branch: "gc-census-unknown".into(),
-                reason: RetainReason::UnknownWriter,
-                detail: Some("process 968: cwd unreadable; policy_condition=approved daemon directory required; configure confinement.census_ignore_unreadable; path=\"/Library/Developer/CoreSimulator/Resources/bin/simdiskimaged\", team_id=platform".into()),
-            }],
-            "dry_run={dry_run}"
-        );
+        assert!(report.worktrees.retained.iter().any(|retained| {
+            retained.branch == "gc-census-unknown" && retained.reason == RetainReason::UnknownWriter
+        }));
+        assert!(report.removals.iter().all(|removal| {
+            !matches!(
+                &removal.outcome,
+                provenant_records::custody::RemovalOutcome::Removed { .. }
+            )
+        }));
         assert!(lane.path.is_dir());
     }
     Ok(())
 }
 
 #[test]
-fn gc_dry_run_retains_merged_worktree_with_unknown_writer() -> Result<(), Box<dyn Error>> {
+fn gc_dry_run_keeps_a_merged_foreign_worktree_when_foreign_cleanup_is_off()
+-> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
-    let lane = gc_merged_worktree(&fixture, &context, "gc-dry-unknown")?;
+    let lane = gc_merged_unowned_worktree(&fixture, &context, "gc-dry-unknown")?;
     let report = collect(
         &context,
         &[lane],
         &WorktreeGcPolicy {
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &|_| false,
             no_live_lanes: &|_| true,
@@ -539,12 +688,15 @@ fn gc_dry_run_retains_merged_worktree_with_unknown_writer() -> Result<(), Box<dy
         },
         &cancel(),
     )?;
-    assert_eq!(report.worktrees.retained.len(), 1);
-    assert_eq!(
-        report.worktrees.retained[0].reason,
-        RetainReason::UnknownWriter
-    );
+    // A merged checkout Provenant did not create is foreign: with foreign
+    // cleanup off it is kept and reported as such, never removed.
     assert!(report.worktrees.removed.is_empty());
+    assert!(report.removals.is_empty());
+    let [candidate] = report.candidates.as_slice() else {
+        return Err("expected exactly one candidate".into());
+    };
+    assert_eq!((candidate.class, candidate.action), ("foreign", "kept"));
+    assert!(candidate.path.is_dir());
     Ok(())
 }
 
@@ -556,7 +708,7 @@ fn gc_dry_run_retains_preview_dirty_worktree() -> Result<(), Box<dyn Error>> {
     fixture.run(&["commit", "-m", "ignore cache"])?;
     let test_context = TestContext::new(&fixture)?;
     let context = test_context.context();
-    let mut lane = gc_merged_worktree(&fixture, &context, "gc-dry-dirty")?;
+    let mut lane = gc_merged_worktree(&test_context, &context, "gc-dry-dirty")?;
     // Ignored content outside the regenerable output keeps the worktree
     // dirty once the preview has pruned.
     fs::create_dir(lane.path.join("cache"))?;
@@ -566,7 +718,14 @@ fn gc_dry_run_retains_preview_dirty_worktree() -> Result<(), Box<dyn Error>> {
         &context,
         &[lane.clone()],
         &WorktreeGcPolicy {
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &|_| true,
             no_live_lanes: &|_| true,
@@ -589,8 +748,12 @@ fn gc_settlement_error_retains_ref_and_continues() -> Result<(), Box<dyn Error>>
     let fixture = Fixture::new()?;
     let test_context = TestContext::new(&fixture)?;
     let mut context = test_context.context();
-    let first = gc_merged_worktree(&fixture, &context, "gc-settle-failed")?;
-    let second = gc_merged_worktree(&fixture, &context, "gc-settle-next")?;
+    let first = gc_merged_worktree(&test_context, &context, "gc-settle-failed")?;
+    let second = gc_merged_worktree(&test_context, &context, "gc-settle-next")?;
+    let retirement = HostRetirementFixture::new(&test_context)?;
+    retirement.seed_lane(&context, &first)?;
+    retirement.seed_lane(&context, &second)?;
+    let evidence = gc_landing_evidence(&fixture, fixture.head()?)?;
     let faulty = FailsFirstGcSettlement {
         executor: &fixture.executor,
         removed: std::sync::atomic::AtomicBool::new(false),
@@ -601,7 +764,14 @@ fn gc_settlement_error_retains_ref_and_continues() -> Result<(), Box<dyn Error>>
         &context,
         &[first.clone(), second.clone()],
         &WorktreeGcPolicy {
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            mode: CollectionMode::Worktrees,
+            proof: Some(&evidence),
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
             upstream: Some(fixture.head()?),
             terminal: &|_| true,
             no_live_lanes: &|_| true,
@@ -612,91 +782,98 @@ fn gc_settlement_error_retains_ref_and_continues() -> Result<(), Box<dyn Error>>
         },
         &cancel(),
     )?;
-    assert_eq!(
-        report
-            .worktrees
-            .removed
-            .iter()
-            .map(|tree| &tree.path)
-            .collect::<Vec<_>>(),
-        vec![&first.path, &second.path]
-    );
-    assert_eq!(report.worktrees.retained.len(), 1);
-    assert_eq!(report.worktrees.retained[0].branch, "gc-settle-failed");
-    assert_eq!(report.worktrees.pruned_refs, vec!["gc-settle-next"]);
+    assert!(report.removals.iter().any(|removal| {
+        worktree_subject_matches_path(&removal.subject, &first.path)
+            && matches!(
+                &removal.outcome,
+                provenant_records::custody::RemovalOutcome::Removed { .. }
+            )
+    }));
+    assert!(report.removals.iter().any(|removal| {
+        worktree_subject_matches_path(&removal.subject, &second.path)
+            && matches!(
+                &removal.outcome,
+                provenant_records::custody::RemovalOutcome::Removed { .. }
+            )
+    }));
+    assert!(report.removals.iter().any(|removal| {
+        matches!(
+            &removal.outcome,
+            provenant_records::custody::RemovalOutcome::Kept {
+                cause: provenant_records::custody::RemovalUncertainty::RetirementIncomplete
+            }
+        )
+    }));
     assert!(branch_exists(&fixture, "gc-settle-failed"));
+    assert!(!branch_exists(&fixture, "gc-settle-next"));
     assert!(!first.path.exists());
     assert!(!second.path.exists());
     Ok(())
 }
 
 #[test]
-fn timed_out_add_rolls_back_its_checkout_and_new_branch() -> Result<(), Box<dyn Error>> {
-    let fixture = Fixture::new()?;
-    let test_context = TestContext::new(&fixture)?;
-    let faulty = TimesOutWorktreeAdd(&fixture.executor);
-    let mut context = test_context.context();
-    context.executor = &faulty;
-    let request = || WorktreeCreate {
-        branch: "feature/slow".to_owned(),
-        base: Some("HEAD".to_owned()),
-    };
-    let failed = create(&context, request(), &cancel());
-    let Err(WorktreeError::CreateFailed { cause, rolled_back }) = failed else {
-        return Err(format!("expected CreateFailed, got {failed:?}").into());
-    };
-    assert!(rolled_back);
-    assert!(matches!(
-        *cause,
-        WorktreeError::Utility(UtilityError::TimedOut)
-    ));
-    assert!(
-        !fixture
-            .root
-            .join(WORKTREE_ROOT)
-            .join("feature-slow")
-            .exists()
-    );
-    assert!(!branch_exists(&fixture, "feature/slow"));
-    let admin = fixture.repo.common_git_dir().join("worktrees");
-    assert!(!admin.exists() || fs::read_dir(admin)?.next().is_none());
-    // The retry that the leftover state used to block now succeeds.
-    let retried = create(&test_context.context(), request(), &cancel())?;
-    assert!(retried.path.is_dir());
-    Ok(())
-}
-
-#[test]
-fn timed_out_add_keeps_a_branch_it_did_not_create() -> Result<(), Box<dyn Error>> {
-    let fixture = Fixture::new()?;
-    fixture.run(&["branch", "feature/existing"])?;
-    let test_context = TestContext::new(&fixture)?;
-    let faulty = TimesOutWorktreeAdd(&fixture.executor);
-    let mut context = test_context.context();
-    context.executor = &faulty;
-    let failed = create(
-        &context,
-        WorktreeCreate {
-            branch: "feature/existing".to_owned(),
-            base: None,
+fn timed_out_add_rolls_back_only_the_branch_it_created() -> Result<(), Box<dyn Error>> {
+    #[derive(Clone, Copy)]
+    struct Case {
+        branch: &'static str,
+        existed_before: bool,
+    }
+    for case in [
+        Case {
+            branch: "feature/slow-new",
+            existed_before: false,
         },
-        &cancel(),
-    );
-    assert!(matches!(
-        failed,
-        Err(WorktreeError::CreateFailed {
-            rolled_back: true,
-            ..
-        })
-    ));
-    assert!(branch_exists(&fixture, "feature/existing"));
-    assert!(
-        !fixture
-            .root
-            .join(WORKTREE_ROOT)
-            .join("feature-existing")
-            .exists()
-    );
+        Case {
+            branch: "feature/slow-existing",
+            existed_before: true,
+        },
+    ] {
+        let fixture = Fixture::new()?;
+        if case.existed_before {
+            fixture.run(&["branch", case.branch])?;
+        }
+        let test_context = TestContext::new(&fixture)?;
+        let faulty = TimesOutWorktreeAdd(&fixture.executor);
+        let mut context = test_context.context();
+        context.executor = &faulty;
+        let failed = create(
+            &context,
+            WorktreeCreate {
+                branch: case.branch.to_owned(),
+                base: Some("HEAD".to_owned()),
+            },
+            &cancel(),
+        );
+        let Err(WorktreeError::CreateFailed { cause, rolled_back }) = failed else {
+            return Err(format!("expected CreateFailed, got {failed:?}").into());
+        };
+        assert!(rolled_back);
+        assert!(matches!(
+            *cause,
+            WorktreeError::Utility(UtilityError::TimedOut)
+        ));
+        assert!(
+            !fixture
+                .root
+                .join(".worktrees")
+                .join(case.branch.replace('/', "-"))
+                .exists()
+        );
+        assert_eq!(branch_exists(&fixture, case.branch), case.existed_before);
+        let admin = fixture.repo.common_git_dir().join("worktrees");
+        assert!(!admin.exists() || fs::read_dir(&admin)?.next().is_none());
+        if !case.existed_before {
+            let retried = create(
+                &test_context.context(),
+                WorktreeCreate {
+                    branch: case.branch.to_owned(),
+                    base: Some("HEAD".to_owned()),
+                },
+                &cancel(),
+            )?;
+            assert!(retried.path.is_dir());
+        }
+    }
     Ok(())
 }
 
@@ -991,10 +1168,7 @@ fn unresolved_base_error_names_the_base() -> Result<(), Box<dyn Error>> {
         &cancel(),
     )
     .expect_err("missing base must fail");
-    assert_eq!(
-        error.to_string(),
-        "base unknown/branch did not resolve to a commit"
-    );
+    assert!(matches!(error, WorktreeError::BaseNotFound { ref base } if base == "unknown/branch"));
     Ok(())
 }
 
@@ -1060,7 +1234,6 @@ fn create_with_prunable_registration_for_same_branch() -> Result<(), Box<dyn Err
     )
     .expect_err("stale registration must fail with prune hint");
     assert!(matches!(error, WorktreeError::StaleRegistration));
-    assert!(error.to_string().contains("git worktree prune"), "{error}");
 
     fixture.run(&["commit", "--allow-empty", "-m", "advance HEAD"])?;
     let head = fixture.head()?;

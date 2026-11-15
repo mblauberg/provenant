@@ -8,8 +8,8 @@ pub enum Verdict {
     Off,
     /// Usage is within the budget; `used` tokens so far.
     Within { used: u64 },
-    /// Usage has passed the budget: end the attempt and attempt to commit its
-    /// work so a continuation can pick it up.
+    /// Usage has passed the target. The resolved action chooses whether to
+    /// warn, resume once to wrap up, or stop dirty work.
     Over { used: u64, budget: u64 },
     /// The provider reported no usage. Warn; never refuse.
     Unreported,
@@ -77,23 +77,24 @@ mod tests {
             cache_read: Some(400),
             cache_write: Some(50),
             output_excluding_reasoning: Some(10),
+            reasoning: Some(5),
             ..UsageRecord::default()
         };
-        // 100 (uncached) + 50 (cache write) + 10 (output) = 160.
+        // 100 (uncached) + 50 (cache write) + 10 (output) + 5 (reasoning) = 165.
         // Cache read (400) is ignored.
-        assert_eq!(used(&usage), Some(160));
+        assert_eq!(used(&usage), Some(165));
         assert_eq!(
             judge(&usage, 150),
             Verdict::Over {
-                used: 160,
+                used: 165,
                 budget: 150
             }
         );
-        assert_eq!(judge(&usage, 200), Verdict::Within { used: 160 });
+        assert_eq!(judge(&usage, 200), Verdict::Within { used: 165 });
     }
 
     #[test]
-    fn a_fake_provider_passing_the_budget_ends_the_attempt_and_silence_only_warns() {
+    fn reported_usage_crosses_the_target_and_missing_usage_never_implies_a_stop() {
         let provider = FakeProvider(vec![Some(100_000), Some(499_999), Some(500_001)]);
         assert_eq!(
             judge(&provider.report(0), 500_000),
@@ -114,24 +115,6 @@ mod tests {
         assert_eq!(
             judge(&FakeProvider(vec![None]).report(0), 500_000),
             Verdict::Unreported
-        );
-    }
-
-    #[test]
-    fn budget_capture_applies_the_budget_for_providers_reporting_live_usage() {
-        let input = crate::tests::input();
-        let task = &input.request.tasks[0];
-        assert_eq!(
-            crate::launch::capture_plan(task, 60, 500, "codex").token_budget,
-            500
-        );
-        assert_eq!(
-            crate::launch::capture_plan(task, 60, 500, "opencode").token_budget,
-            0
-        );
-        assert_eq!(
-            crate::launch::capture_plan(task, 60, 500, "claude").token_budget,
-            500
         );
     }
 

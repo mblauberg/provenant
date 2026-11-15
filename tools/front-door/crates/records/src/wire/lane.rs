@@ -21,16 +21,22 @@ macro_rules! lane_row {
     }
 }
 
+fn settlement_reason_schema() -> Value {
+    let mut schema = choices(&[]);
+    schema["enum"] = json!(crate::run::SettlementReason::ALL);
+    schema
+}
+
 lane_row! {
     required {
         project_id: String => string();
-        run_id: String => string();
-        task_id: String => string();
+        graph: String => string();
+        node: String => string();
         attempt_id: String => string();
         attempt_number: u64 => unsigned();
         retry_of: Option<String> => nullable(string());
         superseded_by: Option<String> => nullable(string());
-        cause: Option<crate::run::SettlementReason> => nullable(choices(&["completed", "handoff_missing", "declared_stop", "provider_stop", "uncommitted_work", "pre_launch_refusal", "cancelled", "lost", "unsettled", "failed"]));
+        cause: Option<crate::run::SettlementReason> => nullable(settlement_reason_schema());
         state: String => string();
         exit_code: Option<i64> => nullable(integer());
         reason: Option<String> => nullable(string());
@@ -66,10 +72,11 @@ lane_row! {
     optional {
         git_import_failure: Value => object(&[("reason", string()), ("head", nullable(string())), ("retained_objects", nullable(super::schema::worktree_path()))], &[]);
         write_grants: Value => nullable(array(grant_schema()));
-        terminal_cause: crate::run::TerminalCause => choices(&["preparation_refused", "source_view_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "cloud_placement_removed", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_unobserved", "stopped_no_work", "context_handoff", "lane_token_lost"]);
+        terminal_cause: crate::run::TerminalCause => choices(&["source_view_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "cloud_placement_removed", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_mismatch", "stopped_no_work", "context_handoff", "blocked", "lane_token_lost"]);
         host: String => string();
         title: String => string();
         requested_priority: i64 => integer();
+        limits: Value => any();
         provider_seconds: f64 => nullable(number());
         handoff: Value => any();
         provider_error: String => string();
@@ -101,22 +108,31 @@ impl LaneRow {
         detail: bool,
     ) -> (String, Option<String>) {
         use crate::run::AttemptState;
+        if let Some(stop) = state.stop()
+            && let Err(error) = stop.handoff_result()
+            && let AttemptState::Terminal { outcome, .. } = state
+        {
+            return (
+                serde_json::to_value(outcome)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default(),
+                Some(crate::diagnostic::safe_text(&error.to_string())),
+            );
+        }
         match state {
             AttemptState::Terminal {
                 outcome,
                 reason,
-                extra,
+                terminal_cause,
+                terminal_note,
                 ..
             } => (
                 serde_json::to_value(outcome)
                     .ok()
                     .and_then(|value| value.as_str().map(str::to_owned))
                     .unwrap_or_default(),
-                extra
-                    .get("terminal_cause")
-                    .and_then(|value| {
-                        serde_json::from_value::<crate::run::TerminalCause>(value.clone()).ok()
-                    })
+                terminal_cause
                     .map(|cause| {
                         if detail {
                             cause.detail()
@@ -131,14 +147,12 @@ impl LaneRow {
                     })
                     // The note is Provenant's own fixed-form text (a retry
                     // decision or a configured executable), never provider output.
-                    .map(
-                        |safe| match extra.get("terminal_note").and_then(Value::as_str) {
-                            Some(note) if detail && !note.is_empty() => {
-                                format!("{safe}; {}", crate::diagnostic::safe_text(note))
-                            }
-                            _ => safe,
-                        },
-                    ),
+                    .map(|safe| match terminal_note.as_deref() {
+                        Some(note) if detail && !note.is_empty() => {
+                            format!("{safe}; {}", crate::diagnostic::safe_text(note))
+                        }
+                        _ => safe,
+                    }),
             ),
             other => (
                 serde_json::to_value(other)
@@ -229,22 +243,20 @@ impl LaneRow {
         {
             use crate::run::SettlementReason;
             let detail = match reason {
-                SettlementReason::HandoffMissing => match &lane.state {
-                    AttemptState::Terminal { extra, .. }
-                        if extra.get("terminal_cause")
-                            == Some(&json!(crate::run::TerminalCause::EmptyWriterResult)) =>
-                    {
-                        Some(crate::run::TerminalCause::EmptyWriterResult.detail())
-                    }
-                    _ => Some("the lane finished without a handoff; inspect its result"),
-                },
+                SettlementReason::HandoffMalformed => Some(
+                    "the lane finished with a malformed handoff; inspect its field diagnostics",
+                ),
+                SettlementReason::HandoffMissing => {
+                    Some("the lane finished without a handoff; inspect its result")
+                }
+                SettlementReason::EmptyResult => {
+                    Some(crate::run::TerminalCause::EmptyWriterResult.detail())
+                }
                 SettlementReason::DeclaredStop => match &lane.state {
-                    AttemptState::Terminal { extra, .. }
-                        if extra.get("terminal_cause")
-                            == Some(&json!(crate::run::TerminalCause::StoppedNoWork)) =>
-                    {
-                        Some(crate::run::TerminalCause::StoppedNoWork.detail())
-                    }
+                    AttemptState::Terminal {
+                        terminal_cause: Some(crate::run::TerminalCause::StoppedNoWork),
+                        ..
+                    } => Some(crate::run::TerminalCause::StoppedNoWork.detail()),
                     _ => Some("the lane stopped with work remaining; inspect its result"),
                 },
                 SettlementReason::ProviderStop => {
@@ -259,6 +271,11 @@ impl LaneRow {
                 terminal_reason = Some(detail.to_owned());
             }
         }
+        if let Some(stop) = lane.state.stop()
+            && let Err(error) = stop.handoff_result()
+        {
+            terminal_reason = Some(crate::diagnostic::safe_text(&error.to_string()));
+        }
         if matches!(
             lane.state,
             AttemptState::Terminal {
@@ -267,8 +284,8 @@ impl LaneRow {
             }
         ) {
             terminal_reason = Some(format!(
-                "the lane outcome is uncertain; inspect status for operation {} before retrying",
-                lane.operation_id
+                "the lane outcome is uncertain; inspect `provenant status {}` before retrying",
+                lane.key
             ));
         }
         let git_import_failure =
@@ -365,8 +382,8 @@ impl LaneRow {
             });
         Self {
             project_id: lane.project_id.to_string(),
-            run_id: lane.run_id.to_string(),
-            task_id: lane.task_id.to_string(),
+            graph: lane.key.graph().to_owned(),
+            node: lane.key.node().to_owned(),
             attempt_id: lane.attempt_id.to_string(),
             attempt_number: lane.attempt_number,
             retry_of: lane.retry_of.map(|id| id.to_string()),
@@ -390,9 +407,7 @@ impl LaneRow {
                 Some(crate::run::TerminalCause::SettlementFailure)
             } else {
                 match &lane.state {
-                    AttemptState::Terminal { extra, .. } => extra
-                        .get("terminal_cause")
-                        .and_then(|value| serde_json::from_value(value.clone()).ok()),
+                    AttemptState::Terminal { terminal_cause, .. } => *terminal_cause,
                     _ => None,
                 }
             },
@@ -455,7 +470,8 @@ impl LaneRow {
                 .filter(|priority| Some(i32::from(*priority)) != lane.priority)
                 .map(i64::from),
             provider_seconds: facts.provider_seconds,
-            handoff: None,
+            limits: lane.limits.as_ref().map(|limits| json!(limits)),
+            handoff: lane.state.stop().map(|stop| json!(stop.handoff_result())),
             provider_error: None,
             capabilities: None,
             payload: facts.payload_evicted.then(|| "evicted".to_owned()),
@@ -521,11 +537,46 @@ pub fn lane_list_schema() -> Value {
     )
 }
 
-/// MCP's `provider_seconds`: the record's whole milliseconds as fractional
+/// The relay's `provider_seconds`: the record's whole milliseconds as fractional
 /// seconds. The single definition of the conversion `fabric-runtime` applies
 /// when it encodes an attempt, so the two cannot disagree.
 pub fn provider_seconds(provider_ms: Option<u64>) -> Option<f64> {
     provider_ms.map(|millis| millis as f64 / 1000.0)
+}
+
+impl crate::run::TerminalCause {
+    pub const ALL: &'static [Self] = &[
+        Self::SourceViewRefused,
+        Self::AccountLoginRequired,
+        Self::RouteResolutionRefused,
+        Self::AccessPolicyRefused,
+        Self::DiskFloor,
+        Self::DiskObservationUnavailable,
+        Self::StoredPromptUnreadable,
+        Self::CloudPlacementRemoved,
+        Self::WriteGrantsRefused,
+        Self::WorktreeBusy,
+        Self::HandoffRefused,
+        Self::RetainedWriterImport,
+        Self::UnsupportedPlatform,
+        Self::UnknownPacingAccount,
+        Self::UnregisteredAccount,
+        Self::DeliveryPrepareCredentialHelper,
+        Self::SpawnFailure,
+        Self::ProcessCrash,
+        Self::TokenBudget,
+        Self::SettlementFailure,
+        Self::ProviderEarlyStop,
+        Self::FreePoolQuota,
+        Self::CommandUnavailable,
+        Self::HostNativeUnconfigured,
+        Self::IdentityMismatch,
+        Self::StoppedNoWork,
+        Self::EmptyWriterResult,
+        Self::ContextHandoff,
+        Self::Blocked,
+        Self::LaneTokenLost,
+    ];
 }
 
 #[cfg(test)]
@@ -533,50 +584,50 @@ mod terminal_cause_tests {
     use super::*;
     use crate::run::{AttemptState, Outcome, TerminalCause};
 
+    fn every_terminal_cause_is_covered(cause: TerminalCause) {
+        match cause {
+            TerminalCause::SourceViewRefused
+            | TerminalCause::AccountLoginRequired
+            | TerminalCause::RouteResolutionRefused
+            | TerminalCause::AccessPolicyRefused
+            | TerminalCause::DiskFloor
+            | TerminalCause::DiskObservationUnavailable
+            | TerminalCause::StoredPromptUnreadable
+            | TerminalCause::CloudPlacementRemoved
+            | TerminalCause::WriteGrantsRefused
+            | TerminalCause::WorktreeBusy
+            | TerminalCause::HandoffRefused
+            | TerminalCause::RetainedWriterImport
+            | TerminalCause::UnsupportedPlatform
+            | TerminalCause::UnknownPacingAccount
+            | TerminalCause::UnregisteredAccount
+            | TerminalCause::DeliveryPrepareCredentialHelper
+            | TerminalCause::SpawnFailure
+            | TerminalCause::ProcessCrash
+            | TerminalCause::TokenBudget
+            | TerminalCause::SettlementFailure
+            | TerminalCause::ProviderEarlyStop
+            | TerminalCause::FreePoolQuota
+            | TerminalCause::CommandUnavailable
+            | TerminalCause::HostNativeUnconfigured
+            | TerminalCause::IdentityMismatch
+            | TerminalCause::StoppedNoWork
+            | TerminalCause::EmptyWriterResult
+            | TerminalCause::ContextHandoff
+            | TerminalCause::Blocked
+            | TerminalCause::LaneTokenLost => {}
+        }
+    }
+
     #[test]
     fn terminal_reasons_use_typed_causes_without_provider_text() {
-        for cause in [
-            TerminalCause::PreparationRefused,
-            TerminalCause::SourceViewRefused,
-            TerminalCause::AccountLoginRequired,
-            TerminalCause::RouteResolutionRefused,
-            TerminalCause::AccessPolicyRefused,
-            TerminalCause::DiskFloor,
-            TerminalCause::DiskObservationUnavailable,
-            TerminalCause::StoredPromptUnreadable,
-            TerminalCause::CloudPlacementRemoved,
-            TerminalCause::WriteGrantsRefused,
-            TerminalCause::WorktreeBusy,
-            TerminalCause::HandoffRefused,
-            TerminalCause::RetainedWriterImport,
-            TerminalCause::UnsupportedPlatform,
-            TerminalCause::UnknownPacingAccount,
-            TerminalCause::UnregisteredAccount,
-            TerminalCause::DeliveryPrepareCredentialHelper,
-            TerminalCause::SpawnFailure,
-            TerminalCause::ProcessCrash,
-            TerminalCause::TokenBudget,
-            TerminalCause::SettlementFailure,
-            TerminalCause::ProviderEarlyStop,
-            TerminalCause::FreePoolQuota,
-            TerminalCause::CommandUnavailable,
-            TerminalCause::HostNativeUnconfigured,
-            TerminalCause::IdentityUnobserved,
-            TerminalCause::StoppedNoWork,
-            TerminalCause::ContextHandoff,
-            TerminalCause::LaneTokenLost,
-        ] {
-            let mut extra = crate::ExtraFields::default();
-            extra.insert(
-                "terminal_cause".into(),
-                serde_json::to_value(cause).unwrap(),
-            );
-            extra.insert(
-                "terminal_note".into(),
-                Value::String("fixture scoped note".into()),
-            );
+        for cause in TerminalCause::ALL.iter().copied() {
+            every_terminal_cause_is_covered(cause);
             let state = AttemptState::Terminal {
-                extra,
+                extra: Default::default(),
+                terminal_cause: Some(cause),
+                terminal_note: Some("fixture scoped note".into()),
+                stop: None,
                 outcome: Outcome::Failed,
                 exit_code: Some(1),
                 finished_at: provenant_core::WallTime::from_micros(1).unwrap(),
@@ -590,7 +641,6 @@ mod terminal_cause_tests {
             assert_eq!(label.as_deref(), Some(cause.reason()));
             let label = label.unwrap();
             assert!(label.len() <= 60, "{cause:?}: {label}");
-            assert!(label.contains("provenant output ID"), "{label}");
             assert!(!label.contains("fixture scoped note"), "{label}");
             assert!(!label.contains("secret"));
         }

@@ -26,7 +26,7 @@ fn disk_policy_refusal_uses_resource_projection() {
             .detail
             .as_deref()
             .unwrap()
-            .contains("gc.free_floor")
+            .contains("gc.critical_free")
     );
     assert!(
         diagnostic
@@ -55,80 +55,44 @@ fn disk_policy_refusal_uses_resource_projection() {
 }
 
 #[test]
-fn all_refused_render_keeps_the_full_typed_receipt() -> Result<(), Box<dyn std::error::Error>> {
-    let run = provenant_core::RunId::from_bytes([3; 16]);
-    let first = AttemptId::from_bytes([1; 16]);
-    let second = AttemptId::from_bytes([2; 16]);
-    let started = [
-        run::Started::Refused {
-            attempt: first,
-            kind: run::RefusalKind::Policy,
-            reason: "disk refused".into(),
-        },
-        run::Started::Refused {
-            attempt: second,
-            kind: run::RefusalKind::Preparation,
-            reason: "preparation refused".into(),
-        },
-    ];
-    let data = json!({"run_id":run, "operation_id":"fixture", "started":started, "lanes":[
-        {"attempt_id":first,"state":"rejected"},
-        {"attempt_id":second,"state":"rejected"}
-    ]});
-    let mut rendered = reply("run", Ok((data.clone(), String::new())));
-    apply_launch_policy(&mut rendered);
-    assert_eq!(rendered.result.status, Status::Refused);
-    assert!(rendered.result.error.is_some());
-    assert_eq!(rendered.result.data, data);
-    assert_eq!(
-        rendered.result.data["started"][0]["Refused"]["attempt"],
-        first.to_string()
-    );
-    assert_eq!(
-        rendered.result.data["started"][1]["Refused"]["kind"],
-        "Preparation"
-    );
-    for state in ["starting", "running", "succeeded"] {
-        let mixed = json!({"run_id":run, "started":[
-            run::Started::Refused { attempt:first, kind:run::RefusalKind::Policy, reason:"disk refused".into() },
-            run::Started::Launched(second)
-        ], "lanes":[
-            {"attempt_id":first,"state":"rejected"},
-            {"attempt_id":second,"state":state}
-        ]});
-        let mut rendered = reply("run", Ok((mixed.clone(), String::new())));
-        apply_launch_policy(&mut rendered);
-        assert_eq!(rendered.result.status, Status::Ok);
-        assert!(rendered.result.error.is_none());
-        assert_eq!(rendered.result.data["started"], mixed["started"]);
-    }
-    Ok(())
-}
-
-#[test]
-fn retained_import_refusal_names_worktree_attempt_and_recovery() {
-    let run_id = provenant_core::RunId::from_bytes([3; 16]);
+fn retained_import_refusal_carries_custody_and_recovery_targets() {
     let attempt = AttemptId::from_bytes([4; 16]);
+    let fence = provenant_supervisor::custody::PendingImport {
+        scope: provenant_records::custody::Scope {
+            attempt,
+            generation: 3,
+        },
+        fence: "/tmp/custody/reservation.json".into(),
+        lane: provenant_records::WorkKey::new(
+            provenant_core::ProjectId::from_bytes([1; 16]),
+            "retained",
+            "writer",
+            2,
+        )
+        .expect("key"),
+    };
     let failure = check_launch_policy(&[run::Started::Refused {
         attempt: AttemptId::from_bytes([1; 16]),
         kind: run::RefusalKind::RetainedImport {
-            run: run_id,
-            attempt,
+            fence: fence.clone(),
             worktree: "/tmp/writer".into(),
         },
         reason: "retained".into(),
     }])
     .expect_err("retained import must refuse");
     assert_eq!(failure.kind.code(), "WRITER_IMPORT_RETAINED");
-    assert!(failure.message.contains("/tmp/writer"));
-    assert!(failure.message.contains(&attempt.to_string()));
     let diagnostic = failure.projection.expect("diagnostic");
-    assert!(
-        diagnostic
-            .next
-            .iter()
-            .any(|next| next.contains(&format!("reconcile --abandon {run_id}/{attempt}")))
+    let custody = diagnostic.custody.as_ref().expect("typed custody fields");
+    assert_eq!(custody.scope, fence.scope);
+    assert_eq!(
+        custody.fence.as_deref(),
+        Some(fence.fence.to_string_lossy().as_ref())
     );
+    assert_eq!(custody.lane, fence.lane);
+    assert_eq!(custody.reconcile, fence.reconcile());
+    assert_eq!(custody.abandon, fence.abandon());
+    let next = diagnostic.next.as_deref().expect("recovery targets");
+    assert!(next.contains(&fence.reconcile()) && next.contains(&fence.abandon()));
 }
 
 #[test]
@@ -221,17 +185,74 @@ fn writer_gc_settings_use_defaults_when_configuration_is_unreadable()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     std::os::unix::fs::symlink(temp.path().join("missing"), temp.path().join("config.toml"))?;
+    let policy = provenant_records::policy::Policy::default();
     assert_eq!(
-        writer_gc_settings(temp.path()),
+        writer_gc_settings(temp.path(), &policy),
         provenant_config::GcSettings::default()
+    );
+    let rule = policy.rule("RUN_WRITER_GC_SETTINGS_NONE");
+    assert_eq!(rule.rule.code, "RUN_WRITER_GC_SETTINGS_NONE");
+    assert_eq!(
+        rule.rule.strength,
+        provenant_records::policy::Strength::Warn
     );
     Ok(())
 }
 
+/// The resolved policy with `DISK_FLOOR` set as a host knob would set it.
+fn disk_policy(strength: provenant_records::policy::Strength) -> provenant_records::policy::Policy {
+    let mut policy = provenant_records::policy::Policy::default();
+    policy.overlay(
+        &std::collections::BTreeMap::from([(provenant_config::DISK_FLOOR.to_owned(), strength)]),
+        provenant_records::policy::Source::Host,
+    );
+    policy
+}
+
 #[test]
-fn writer_requires_space_on_every_output_volume() -> Result<(), String> {
+fn writer_disk_check_follows_the_declared_disk_floor_policy() -> Result<(), String> {
+    use provenant_records::policy::Strength;
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
+        critical_free: Some("50B".into()),
+        schedule: false,
+        ..Default::default()
+    };
+    // The shipped rule warns; only an explicit refuse holds a writer.
+    assert_eq!(
+        provenant_records::policy::Policy::default()
+            .rule(provenant_config::DISK_FLOOR)
+            .rule
+            .strength,
+        Strength::Warn
+    );
+    for strength in Strength::ALL {
+        let policy = disk_policy(strength);
+        let refuses = policy.rule(provenant_config::DISK_FLOOR).rule.strength == Strength::Refuse;
+        for free in [0, 49, 50, 99, 100] {
+            let result = check_writer_disk_with(
+                &settings,
+                &policy,
+                Path::new("/state"),
+                Path::new("/tree"),
+                Path::new("/home"),
+                |_| Ok(free),
+            );
+            assert_eq!(
+                result.is_err(),
+                refuses && free < 50,
+                "{strength:?} at {free}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn writer_requires_critical_space_on_every_output_volume() -> Result<(), String> {
+    let settings = provenant_config::GcSettings {
+        free_floor: Some("100B".into()),
+        critical_free: Some("100B".into()),
         ..Default::default()
     };
     let state = Path::new("/state");
@@ -240,10 +261,17 @@ fn writer_requires_space_on_every_output_volume() -> Result<(), String> {
     let cache = home.join("Library/Caches/provenant-lane-cargo");
     for low in [worktree, state, cache.as_path()] {
         let mut observed = Vec::new();
-        let result = check_writer_disk_with(&settings, state, worktree, home, |path| {
-            observed.push(path.to_path_buf());
-            Ok(if path == low { 99 } else { 1000 })
-        });
+        let result = check_writer_disk_with(
+            &settings,
+            &disk_policy(provenant_records::policy::Strength::Refuse),
+            state,
+            worktree,
+            home,
+            |path| {
+                observed.push(path.to_path_buf());
+                Ok(if path == low { 99 } else { 1000 })
+            },
+        );
         let error = result
             .err()
             .ok_or_else(|| format!("writer accepted low volume {}", low.display()))?;
@@ -252,7 +280,14 @@ fn writer_requires_space_on_every_output_volume() -> Result<(), String> {
         );
         assert!(observed.contains(&low.to_path_buf()));
     }
-    check_writer_disk_with(&settings, state, worktree, home, |_| Ok(100))?;
+    check_writer_disk_with(
+        &settings,
+        &disk_policy(provenant_records::policy::Strength::Refuse),
+        state,
+        worktree,
+        home,
+        |_| Ok(100),
+    )?;
     Ok(())
 }
 
@@ -262,6 +297,7 @@ fn writer_disk_default_floor_names_its_source() -> Result<(), String> {
     let settings = provenant_config::GcSettings::default();
     let error = check_writer_disk_with(
         &settings,
+        &disk_policy(provenant_records::policy::Strength::Refuse),
         directory.path(),
         directory.path(),
         directory.path(),
@@ -283,10 +319,12 @@ fn writer_disk_default_floor_names_its_source() -> Result<(), String> {
 fn writer_disk_observation_failure_warns_and_continues() -> Result<(), String> {
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
+        critical_free: Some("100B".into()),
         ..Default::default()
     };
     let result = check_writer_disk_with(
         &settings,
+        &disk_policy(provenant_records::policy::Strength::Refuse),
         Path::new("/state"),
         Path::new("/worktree"),
         Path::new("/home"),
@@ -300,6 +338,7 @@ fn writer_rechecks_once_after_collection_and_reports_reclaimed_bytes() -> Result
     use std::cell::Cell;
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
+        critical_free: Some("100B".into()),
         ..Default::default()
     };
     for remaining in [99, 100] {
@@ -307,6 +346,7 @@ fn writer_rechecks_once_after_collection_and_reports_reclaimed_bytes() -> Result
         let samples = Cell::new(0);
         let result = check_writer_disk_with_collection(
             &settings,
+            &disk_policy(provenant_records::policy::Strength::Refuse),
             Path::new("/state"),
             Path::new("/tree"),
             Path::new("/home"),
@@ -338,6 +378,7 @@ fn writer_rechecks_once_after_collection_and_reports_reclaimed_bytes() -> Result
     let calls = Cell::new(0);
     check_writer_disk_with_collection(
         &settings,
+        &disk_policy(provenant_records::policy::Strength::Refuse),
         Path::new("/state"),
         Path::new("/tree"),
         Path::new("/home"),
@@ -355,6 +396,7 @@ fn writer_rechecks_once_after_collection_and_reports_reclaimed_bytes() -> Result
     assert!(
         check_writer_disk_with_collection(
             &disabled,
+            &disk_policy(provenant_records::policy::Strength::Refuse),
             Path::new("/state"),
             Path::new("/tree"),
             Path::new("/home"),
@@ -377,11 +419,20 @@ fn writer_samples_missing_roots_without_creating_them() -> Result<(), Box<dyn st
     let base = temp.path().canonicalize()?;
     let settings = provenant_config::GcSettings {
         free_floor: Some("1B".into()),
+        critical_free: Some("1B".into()),
         ..Default::default()
     };
     let state = base.join("missing/state");
     let home = base.join("missing/home");
-    check_writer_disk(&settings, &state, &base, &base, &home).map_err(String::from)?;
+    check_writer_disk(
+        &settings,
+        &provenant_records::policy::Policy::default(),
+        &state,
+        &base,
+        &base,
+        &home,
+    )
+    .map_err(String::from)?;
     assert!(!base.join("missing").exists());
     Ok(())
 }
@@ -391,10 +442,12 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     use provenant_records::run::TerminalCause;
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
+        critical_free: Some("100B".into()),
         ..Default::default()
     };
     let check = check_writer_disk_with(
         &settings,
+        &disk_policy(provenant_records::policy::Strength::Refuse),
         Path::new("/state"),
         Path::new("/worktree"),
         Path::new("/home"),
@@ -403,7 +456,8 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     .err()
     .ok_or("writer accepted insufficient disk")?;
     let refusal = disk_policy_refusal(check);
-    assert_eq!(refusal.terminal_cause, Some(TerminalCause::DiskFloor));
+    assert_eq!(refusal.terminal_cause, TerminalCause::DiskFloor);
+    assert!(refusal.policy_code.is_none());
     assert_eq!(
         refusal.resource,
         Some(provenant_records::diagnostic::ResourceFact::Disk {
@@ -420,8 +474,12 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     assert!(!TerminalCause::DiskFloor.detail().contains("access grants"));
     let unobserved = disk_policy_refusal(DiskCheck::Unobserved("HOST_ERROR_SENTINEL".into()));
     assert_eq!(
+        unobserved.policy_code.as_deref(),
+        Some("SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE")
+    );
+    assert_eq!(
         unobserved.terminal_cause,
-        Some(TerminalCause::DiskObservationUnavailable)
+        TerminalCause::DiskObservationUnavailable
     );
     assert!(unobserved.terminal_note.is_none());
     assert!(

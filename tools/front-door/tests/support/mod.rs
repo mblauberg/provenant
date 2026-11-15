@@ -1,8 +1,10 @@
 //! Isolated process fixtures; no ambient config, credentials, or product state.
 #![allow(dead_code)]
 use provenant_os::exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -11,10 +13,128 @@ use std::{
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+// Current graph format, mirrored here because the validator/journal do not
+// expose their version declarations to integration fixtures.
+pub const GRAPH_DOCUMENT_SCHEMA_VERSION: u32 = 2;
+pub const GRAPH_CHECKPOINT_SCHEMA_VERSION: u64 = 2;
+
+pub fn rig() -> Result<TestRig> {
+    TestRig::new()
+}
+
+pub fn json(output: &ExecOutcome) -> Result<serde_json::Value> {
+    last_json_record(&output.stdout.bytes)
+}
+
+pub fn json_lines(bytes: &[u8]) -> Result<Vec<serde_json::Value>> {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        .map(|line| serde_json::from_slice(line).map_err(Into::into))
+        .collect()
+}
+
+pub fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<serde_json::Value> {
+    call_with_stdin(rig, args, None, expected)
+}
+
+pub fn call_with_stdin(
+    rig: &TestRig,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    expected: i64,
+) -> Result<serde_json::Value> {
+    let mut words = vec![
+        "--state-dir",
+        rig.state.to_str().ok_or("state path")?,
+        "--json",
+    ];
+    words.extend_from_slice(args);
+    let binary = option_env!("CARGO_BIN_EXE_provenant")
+        .ok_or("production binary path is only available to integration targets")?;
+    let output = rig.execute(Path::new(binary), &words, stdin)?;
+    assert_eq!(
+        code(&output),
+        expected,
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout.bytes),
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    json(&output)
+}
+
+pub fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
+    let program = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let output = rig.execute(&program, args, None)?;
+    if code(&output) != 0 {
+        return Err(format!(
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        )
+        .into());
+    }
+    Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+}
+
+/// Parse every JSON record in a command stream and return its final envelope.
+/// Event-producing commands retain their summary as the last record.
+pub fn last_json_record(bytes: &[u8]) -> Result<serde_json::Value> {
+    json_lines(bytes)?
+        .pop()
+        .ok_or_else(|| "command emitted no JSON records".into())
+}
+
 pub const FIXTURE_STDOUT_LIMIT: usize = 2 * 1024 * 1024;
 pub const FIXTURE_STDERR_LIMIT: usize = 64 * 1024;
 
 static PROCESS_SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+/// Install a fake Claude auth-status executable for identity-probe fixtures.
+pub fn install_fake_claude_auth(rig: &mut TestRig) -> Result {
+    let bin = rig.root.join("fixture-bin");
+    fs::create_dir_all(&bin)?;
+    let executable = bin.join("claude");
+    rig.with_process_spawn_lock(|| {
+        fs::write(
+            &executable,
+            "#!/bin/sh\nif [ -f \"$CLAUDE_CONFIG_DIR/.fixture-email\" ]; then\n  printf '{\"loggedIn\":true,\"email\":\"%s\"}\n' \"$(cat \"$CLAUDE_CONFIG_DIR/.fixture-email\")\"\nelse\n  printf '{\"loggedIn\":false}\n'\nfi\n",
+        )?;
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+        Ok(())
+    })?;
+    set_rig_env(
+        rig,
+        "PATH",
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    );
+    set_rig_env(rig, "USER", "fixture-user".into());
+    Ok(())
+}
+
+/// Set the path used by the hook as the current Claude config directory.
+pub fn set_claude_config_dir(rig: &mut TestRig, directory: &Path) {
+    set_rig_env(rig, "CLAUDE_CONFIG_DIR", directory.as_os_str().to_owned());
+}
+
+/// Configure the fake provider's verified account identity and return its key.
+pub fn write_fake_claude_identity(directory: &Path, email: &str) -> Result<String> {
+    fs::create_dir_all(directory)?;
+    fs::write(directory.join(".fixture-email"), email)?;
+    provenant_providers::identity::fingerprint(email)
+        .ok_or_else(|| "invalid fixture identity".into())
+}
+
+fn set_rig_env(rig: &mut TestRig, name: &str, value: OsString) {
+    if let Some((_, current)) = rig
+        .env
+        .iter_mut()
+        .find(|(key, _)| key.as_os_str() == OsStr::new(name))
+    {
+        *current = value;
+    } else {
+        rig.env.push((name.into(), value));
+    }
+}
 
 pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
     provenant_os::fixture::tempdir(|root| tempfile::Builder::new().prefix(".tmp").tempdir_in(root))
@@ -69,6 +189,144 @@ pub fn clear_accounts(rig: &TestRig) -> Result {
     doc["domains"]["accounts"]["entries"] = toml_edit::table();
     fs::write(config, doc.to_string())?;
     Ok(())
+}
+
+/// Configure the forge and CI-observation ports to use this harness's fake adapter.
+pub fn configure_fake_forge_ports(state: &Path, project: &Path, executable: &Path) -> Result {
+    let command = serde_json::json!({
+        "argv": [executable.to_string_lossy(), "--forge-port", project.to_string_lossy()],
+        "exit_codes": {"success": [0], "unknown": [75], "other": "refused"}
+    });
+    let port = serde_json::json!({
+        "source": "host",
+        "backend": {"kind": "command", "command": command}
+    });
+    let document = serde_json::json!({
+        "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
+        "forge": port,
+        "ci_observation": port
+    });
+    fs::create_dir_all(state)?;
+    fs::write(state.join("ports.json"), serde_json::to_vec(&document)?)?;
+    Ok(())
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the fake forge port re-executes this test binary as its fixture gh"
+)]
+pub fn fake_forge_port(args: &[String]) -> Result<u8> {
+    use std::{
+        io::{self, Write},
+        process::Command,
+    };
+
+    let cwd = std::env::current_dir()?;
+    let fixture_dir = args
+        .get(1)
+        .ok_or("fake forge fixture directory is missing")?;
+    let mut gh = args.iter().skip(2).cloned().collect::<Vec<_>>();
+    let request_path = std::env::var("PROVENANT_PORT_REQUEST_PATH").ok();
+    if let Some(path) = &request_path {
+        if gh.first().is_some_and(|value| value == "api") {
+            gh.remove(0);
+        }
+        if gh.first().is_none_or(|value| value != "--include") {
+            gh.insert(0, "--include".into());
+        }
+        gh.insert(0, "api".into());
+        if !gh.iter().any(|value| value == path) {
+            gh.push(path.clone());
+        }
+    }
+    let output = Command::new(std::env::current_exe()?)
+        .args(&gh)
+        .current_dir(&cwd)
+        .env("FIXTURE_GH_DIR", fixture_dir)
+        .stdin(std::process::Stdio::inherit())
+        .output()?;
+
+    if request_path.is_none() {
+        io::stdout().write_all(&output.stdout)?;
+        io::stderr().write_all(&output.stderr)?;
+        return Ok(output
+            .status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .unwrap_or(1));
+    }
+
+    let (status, headers, body) = split_fake_http_response(&output.stdout)?;
+    // A status line is a typed HTTP observation even when fake gh exits nonzero
+    // for a rate limit. Carry that response through the successful command port.
+    if status.is_none() && !output.status.success() {
+        io::stderr().write_all(&output.stderr)?;
+        return Ok(output
+            .status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .unwrap_or(1));
+    }
+    let mut response = serde_json::Map::new();
+    response.insert(
+        "status".into(),
+        serde_json::Value::from(status.unwrap_or(200)),
+    );
+    if let Some(headers) = headers {
+        response.insert("headers".into(), serde_json::to_value(headers)?);
+    }
+    response.insert(
+        "body".into(),
+        serde_json::Value::String(String::from_utf8(body)?),
+    );
+    serde_json::to_writer(io::stdout().lock(), &response)?;
+    Ok(0)
+}
+
+/// Status, headers and body of a fake HTTP response.
+type FakeHttpParts = (
+    Option<u16>,
+    Option<std::collections::BTreeMap<String, String>>,
+    Vec<u8>,
+);
+
+fn split_fake_http_response(bytes: &[u8]) -> Result<FakeHttpParts> {
+    let separator = bytes
+        .windows(4)
+        .position(|part| part == b"\r\n\r\n")
+        .map(|at| (at, 4))
+        .or_else(|| {
+            bytes
+                .windows(2)
+                .position(|part| part == b"\n\n")
+                .map(|at| (at, 2))
+        });
+    let Some((offset, width)) = separator else {
+        return Ok((None, None, bytes.to_vec()));
+    };
+    let header = std::str::from_utf8(&bytes[..offset])?;
+    let mut lines = header.lines();
+    let Some(status) = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+    else {
+        return Ok((None, None, bytes.to_vec()));
+    };
+    if !header.starts_with("HTTP/") {
+        return Ok((None, None, bytes.to_vec()));
+    }
+    let headers = lines
+        .filter_map(|line| {
+            line.split_once(':')
+                .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
+        })
+        .collect();
+    Ok((
+        Some(status),
+        Some(headers),
+        bytes[offset + width..].to_vec(),
+    ))
 }
 
 pub struct TestRig {
@@ -291,7 +549,62 @@ impl TestRig {
         }
         Ok(result)
     }
-    pub fn assert_legacy_unchanged(&self) -> Result {
+    /// `run ARGS --json`: the launch's exit code and envelope. `run` returns
+    /// once work is launched or refused; it never waits for it to settle.
+    pub fn launch(&self, args: &[&str]) -> Result<(ExecOutcome, serde_json::Value)> {
+        let mut argv = vec!["run"];
+        argv.extend_from_slice(args);
+        argv.push("--json");
+        let out = self.command(&argv)?;
+        let value = serde_json::from_slice(&out.stdout.bytes)
+            .map_err(|error| format!("launch output: {error}: {out:?}"))?;
+        Ok((out, value))
+    }
+
+    /// `run ARGS` then `wait NAME --timeout SPAN`, the way a caller waits for
+    /// the graph its launch named. The result keeps the launch envelope, the
+    /// wait's own outcome and the graph's checkpoint as the wait left it.
+    pub fn run_and_wait(&self, args: &[&str], timeout: &str) -> Result<Settled> {
+        let (launch, launch_value) = self.launch(args)?;
+        let graph = launch_value["data"]["checkpoint"]["graph_id"]
+            .as_str()
+            .ok_or_else(|| format!("launch named no graph: {launch_value}"))?
+            .to_owned();
+        let wait = self.command(&["wait", &graph, "--timeout", timeout, "--json"])?;
+        let wait_value = last_json_record(&wait.stdout.bytes)
+            .map_err(|error| format!("wait output: {error}: {wait:?}"))?;
+        let checkpoint = self.checkpoint(&graph)?;
+        Ok(Settled {
+            launch,
+            launch_value,
+            wait,
+            wait_value,
+            graph,
+            checkpoint,
+        })
+    }
+
+    /// A graph's checkpoint as JSON, read from its journal without a lock.
+    pub fn checkpoint(&self, graph: &str) -> Result<serde_json::Value> {
+        let identity = self.command(&["fabric", "identity", "--json"])?;
+        let identity: serde_json::Value = serde_json::from_slice(&identity.stdout.bytes)?;
+        let project = identity["data"]["project"]
+            .as_str()
+            .ok_or("project id")?
+            .parse()?;
+        let mut inputs = provenant_core::RootInputs::new(self.home.clone(), self.project.clone());
+        inputs.state_dir = Some(self.state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+            &roots.state,
+            project,
+            graph,
+        )?
+        .ok_or_else(|| format!("no checkpoint for {graph}"))?;
+        Ok(serde_json::to_value(checkpoint)?)
+    }
+
+    pub fn assert_v1_root_untouched(&self) -> Result {
         for tail in [
             ".agents/sentinel",
             ".local/state/agent-harness/sentinel",
@@ -312,4 +625,24 @@ pub fn code(output: &ExecOutcome) -> i64 {
     }
 }
 
-pub mod mcp;
+/// A launched graph after `wait` returned: what the launch said, how the wait
+/// ended and where the graph stands.
+pub struct Settled {
+    pub launch: ExecOutcome,
+    pub launch_value: serde_json::Value,
+    pub wait: ExecOutcome,
+    pub wait_value: serde_json::Value,
+    pub graph: String,
+    pub checkpoint: serde_json::Value,
+}
+impl Settled {
+    /// The wait's exit code: 0 settled successfully, 1 unsuccessfully, 5 needs
+    /// input, 124 the budget expired.
+    pub fn exit(&self) -> i64 {
+        code(&self.wait)
+    }
+    /// Whether the wait ran out of time with the work unsettled.
+    pub fn timed_out(&self) -> bool {
+        self.wait_value["data"]["timed_out"] == true
+    }
+}

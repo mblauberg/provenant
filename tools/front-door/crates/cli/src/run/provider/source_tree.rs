@@ -647,7 +647,7 @@ pub(super) fn snapshot_source(
     let host_home = super::host_git_home(roots.state.as_path()).map_err(|_| {
         SourceViewError::failed(Step::TemporaryDirectory, "host Git home unavailable")
     })?;
-    let utility = UtilityRuntime::new(git, host_home.path())
+    let utility = UtilityRuntime::new(git, host_home.path(), roots.state.as_path())
         .map_err(SourceViewError::utility(Step::Repository))?;
     let executor = SystemExecutor::new(1)
         .map_err(|_| SourceViewError::failed(Step::Repository, "executor unavailable"))?;

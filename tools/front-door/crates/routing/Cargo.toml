@@ -1,13 +1,19 @@
 [package]
 name = "provenant-routing"
-version = "1.11.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
 
 [features]
-fixture = []
+fixture = [
+    "provenant-core/fixture",
+    "provenant-records/fixture",
+    "provenant-config/fixture",
+    "provenant-quota/fixture",
+    "provenant-providers/fixture",
+]
 
 [dependencies]
 jiff = { workspace = true }
@@ -20,6 +26,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 toml_edit = { workspace = true }
+
+[dev-dependencies]
+provenant-test-support = { path = "../test-support" }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

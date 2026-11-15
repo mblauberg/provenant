@@ -4,8 +4,7 @@
 
 Give each assignment its outcome, acceptance evidence, source SHA, read roots,
 literal write scope, authority, budget, output location and stop conditions.
-Writer budgets near 35 to 60 minutes are a default; longer lanes suit coupled
-work. Writers commit recoverable steps, run targeted checks and report
+Set budgets to fit the work. Writers commit recoverable steps, run targeted checks and report
 environment failures without repairing unrelated code. Confirm a stopped
 process has exited before adopting its worktree.
 
@@ -14,11 +13,8 @@ process has exited before adopting its worktree.
 The runtime enforces confinement, writer exclusion, source pins and gates; the
 chair still picks the boundary and checks returned work against it.
 
-- Writers on trusted routes run unsandboxed; read-only lanes, narrowed-network
-  lanes and the OpenCode Zen tier run sandboxed. Pass `--sandbox` (graphs:
-  `attempt.sandbox = "on"`) for a writer that must not touch the host outside
-  its worktree.
-
+- Select confinement for the assignment; see `provenant help --all` and the
+  config schema for available controls.
 - Partition by stable interfaces; serialise overlapping or dependent writes.
 - Keep credentials, authentication stores and unrelated paths out of briefs,
   read roots, outputs and disclosure.

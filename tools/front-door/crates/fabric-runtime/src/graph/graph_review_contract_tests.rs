@@ -30,7 +30,6 @@ fn panel(topology: &str) -> GraphDocument {
 fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
     let library = template::TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::from([
-        ("review-topology".into(), vec![topology.to_owned()]),
         (
             "review-panel".into(),
             lenses.iter().map(|lens| (*lens).to_owned()).collect(),
@@ -43,6 +42,7 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
         ("review-advice-tests".into(), vec![String::new()]),
     ]);
     let mut resolvers = resolvers;
+    resolvers.extend(super::when_tests::stages(topology));
     for lens in lenses {
         resolvers.insert(format!("review-advice-{lens}"), vec![String::new()]);
     }
@@ -55,245 +55,368 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
     graph(vec![panel])
 }
 
-    #[test]
-    fn every_review_topology_preserves_partial_panel_coverage() {
-        for frame in [false, true] {
-            for verify in [false, true] {
-                for synthesis in [false, true] {
-                    let topology = format!(
-                        "f{}-v{}-s{}",
-                        u8::from(frame),
-                        u8::from(verify),
-                        u8::from(synthesis)
-                    );
-                    let document = panel(&topology);
-                    let mut observations = VecDeque::new();
-                    if frame {
-                        observations.push_back(terminal_with_result(
-                            AttemptOutcome::Succeeded,
-                            "Pinned subject and acceptance criteria",
-                        ));
-                    }
-                    let mut note = finding();
-                    note["severity"] = json!("low");
-                    note["triage"]["worth_fixing"] = json!(false);
-                    note["triage"]["blocking_class"] = json!("none");
+#[test]
+fn every_review_topology_preserves_partial_panel_coverage() {
+    for frame in [false, true] {
+        for verify in [false, true] {
+            for synthesis in [false, true] {
+                let topology = format!(
+                    "f{}-v{}-s{}",
+                    u8::from(frame),
+                    u8::from(verify),
+                    u8::from(synthesis)
+                );
+                let document = panel(&topology);
+                let mut observations = VecDeque::new();
+                if frame {
                     observations.push_back(terminal_with_result(
                         AttemptOutcome::Succeeded,
-                        &answer(json!([note]), "VERDICT: PASS"),
+                        "Pinned subject and acceptance criteria",
+                    ));
+                }
+                let mut note = finding();
+                note["severity"] = json!("low");
+                note["triage"]["worth_fixing"] = json!(false);
+                note["triage"]["blocking_class"] = json!("none");
+                observations.push_back(terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &answer(json!([note]), "VERDICT: PASS"),
+                ));
+                observations.push_back(terminal(AttemptOutcome::UsageLimited));
+                if verify {
+                    observations.push_back(terminal_with_result(
+                        AttemptOutcome::Succeeded,
+                        &answer(
+                            json!([{
+                                "id":"F1","verification":"upheld","reason":"Reproduced"
+                            }]),
+                            "VERDICT: PASS",
+                        ),
                     ));
                     observations.push_back(terminal(AttemptOutcome::UsageLimited));
-                    if verify {
-                        observations.push_back(terminal_with_result(
-                            AttemptOutcome::Succeeded,
-                            &answer(
-                                json!([{
-                                    "id":"F1","verification":"upheld","reason":"Reproduced"
-                                }]),
-                                "VERDICT: PASS",
-                            ),
-                        ));
-                        observations.push_back(terminal(AttemptOutcome::UsageLimited));
-                    }
-                    if synthesis {
-                        observations.push_back(terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([{
+                }
+                if synthesis {
+                    observations.push_back(terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([{
                             "id":"F1","disposition":"rejected","reason":"Permitted by the contract"
                         }]), "VERDICT: PASS")));
-                    }
-                    let mut owner = FakeOwner {
-                        observations,
-                        ..Default::default()
-                    };
-                    let mut journal = MemoryJournal::default();
-                    let run = advance(&document, &mut owner, &mut journal).unwrap();
-                    assert_eq!(run.status, GraphStatus::Complete, "{topology}");
-                    assert!(
-                        owner.observations.is_empty(),
-                        "downstream stages must run: {topology}"
-                    );
-                    let output = run
-                        .checkpoint
-                        .nodes
-                        .iter()
-                        .find(|node| node.id == "panel")
-                        .unwrap()
-                        .outputs
-                        .as_ref()
-                        .unwrap();
-                    assert_eq!(
-                        output.extra.get("review_partial"),
-                        Some(&json!(true)),
-                        "{topology}"
-                    );
-                    assert_eq!(output.findings_available, Some(false), "{topology}");
-                    assert_eq!(
-                        output.verdict.as_deref(),
-                        Some("VERDICT: INCONCLUSIVE"),
-                        "{topology}"
-                    );
-                    assert!(
-                        output
-                            .findings
-                            .iter()
-                            .any(|finding| finding.summary == "The failing path is reachable"),
-                        "{topology}"
-                    );
-                    assert_eq!(
-                        advance(&document, &mut owner, &mut journal)
-                            .unwrap()
-                            .checkpoint,
-                        run.checkpoint,
-                        "{topology}"
-                    );
                 }
+                let mut owner = FakeOwner {
+                    // These members have exhausted their restart allowance;
+                    // this test judges final panel coverage, not alias redraw.
+                    retry_limit: Some(0),
+                    observations,
+                    ..Default::default()
+                };
+                let mut journal = MemoryJournal::default();
+                let run = advance(&document, &mut owner, &mut journal).unwrap();
+                assert_eq!(run.status, GraphStatus::Complete, "{topology}");
+                assert!(
+                    owner.observations.is_empty(),
+                    "downstream stages must run: {topology}"
+                );
+                let output = run
+                    .checkpoint
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == "panel")
+                    .unwrap()
+                    .outputs
+                    .as_ref()
+                    .unwrap();
+                assert_eq!(&output.partial, &true, "{topology}");
+                assert_eq!(output.findings_available, Some(false), "{topology}");
+                assert_eq!(
+                    output.verdict.as_deref(),
+                    Some("VERDICT: INCONCLUSIVE"),
+                    "{topology}"
+                );
+                assert!(
+                    output
+                        .findings
+                        .iter()
+                        .any(|finding| finding.summary == "The failing path is reachable"),
+                    "{topology}"
+                );
+                assert_eq!(
+                    advance(&document, &mut owner, &mut journal)
+                        .unwrap()
+                        .checkpoint,
+                    run.checkpoint,
+                    "{topology}"
+                );
             }
         }
     }
+}
 
-    #[test]
-    fn complete_panels_reduce_verifier_verdicts_and_partial_panels_keep_fail() {
-        for frame in [false, true] {
-            for verdict in ["VERDICT: PASS", "VERDICT: FAIL", "VERDICT: INCONCLUSIVE"] {
-                for quota_limited in [false, true] {
-                    let document = panel(&format!("f{}-v1-s0", u8::from(frame)));
-                    let mut observations = VecDeque::new();
-                    if frame {
-                        observations
-                            .push_back(terminal_with_result(AttemptOutcome::Succeeded, "Frame"));
-                    }
-                    observations.push_back(terminal_with_result(
-                        AttemptOutcome::Succeeded,
-                        &answer(json!([]), "VERDICT: PASS"),
-                    ));
-                    observations.push_back(if quota_limited {
-                        terminal(AttemptOutcome::UsageLimited)
-                    } else {
-                        terminal_with_result(
-                            AttemptOutcome::Succeeded,
-                            &answer(json!([]), "VERDICT: PASS"),
-                        )
-                    });
-                    let findings = if verdict == "VERDICT: FAIL" {
-                        let mut new = finding();
-                        new["verification"] = json!("new");
-                        new["reason"] = json!("Found while testing the boundary");
-                        json!([new])
-                    } else {
-                        json!([])
-                    };
-                    observations.push_back(terminal_with_result(
-                        AttemptOutcome::Succeeded,
-                        &answer(findings, verdict),
-                    ));
-                    observations.push_back(terminal_with_result(
-                        AttemptOutcome::Succeeded,
-                        &answer(json!([]), "VERDICT: PASS"),
-                    ));
-                    let mut owner = FakeOwner {
-                        observations,
-                        ..Default::default()
-                    };
-                    let run =
-                        advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-                    let output = run
-                        .checkpoint
-                        .nodes
-                        .iter()
-                        .find(|node| node.id == "panel")
-                        .unwrap()
-                        .outputs
-                        .as_ref()
-                        .unwrap();
-                    let expected = if verdict == "VERDICT: FAIL" {
-                        "VERDICT: REQUEST_CHANGES"
-                    } else if quota_limited || verdict == "VERDICT: INCONCLUSIVE" {
-                        "VERDICT: INCONCLUSIVE"
-                    } else {
-                        "VERDICT: APPROVE"
-                    };
-                    // Reduction uses the canonical review vocabulary at composite boundaries.
-                    assert_eq!(
-                        output.verdict.as_deref(),
-                        Some(expected),
-                        "{frame} {verdict} {quota_limited}"
-                    );
-                    assert_eq!(output.findings_available, Some(!quota_limited));
-                    assert_eq!(review::partial(output), quota_limited);
-                    assert!(owner.observations.is_empty());
+#[test]
+fn complete_panels_reduce_verifier_verdicts_and_partial_panels_keep_fail() {
+    for frame in [false, true] {
+        for verdict in ["VERDICT: PASS", "VERDICT: FAIL", "VERDICT: INCONCLUSIVE"] {
+            for quota_limited in [false, true] {
+                let document = panel(&format!("f{}-v1-s0", u8::from(frame)));
+                let mut observations = VecDeque::new();
+                if frame {
+                    observations
+                        .push_back(terminal_with_result(AttemptOutcome::Succeeded, "Frame"));
                 }
+                observations.push_back(terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &answer(json!([]), "VERDICT: PASS"),
+                ));
+                observations.push_back(if quota_limited {
+                    terminal(AttemptOutcome::UsageLimited)
+                } else {
+                    terminal_with_result(
+                        AttemptOutcome::Succeeded,
+                        &answer(json!([]), "VERDICT: PASS"),
+                    )
+                });
+                let findings = if verdict == "VERDICT: FAIL" {
+                    let mut new = finding();
+                    new["verification"] = json!("new");
+                    new["reason"] = json!("Found while testing the boundary");
+                    json!([new])
+                } else {
+                    json!([])
+                };
+                observations.push_back(terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &answer(findings, verdict),
+                ));
+                observations.push_back(terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &answer(json!([]), "VERDICT: PASS"),
+                ));
+                let mut owner = FakeOwner {
+                    // These members have exhausted their restart allowance;
+                    // this test judges final panel coverage, not alias redraw.
+                    retry_limit: Some(0),
+                    observations,
+                    ..Default::default()
+                };
+                let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+                let output = run
+                    .checkpoint
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == "panel")
+                    .unwrap()
+                    .outputs
+                    .as_ref()
+                    .unwrap();
+                let expected = if verdict == "VERDICT: FAIL" {
+                    "VERDICT: REQUEST_CHANGES"
+                } else if quota_limited || verdict == "VERDICT: INCONCLUSIVE" {
+                    "VERDICT: INCONCLUSIVE"
+                } else {
+                    "VERDICT: APPROVE"
+                };
+                // Reduction uses the canonical review vocabulary at composite boundaries.
+                assert_eq!(
+                    output.verdict.as_deref(),
+                    Some(expected),
+                    "{frame} {verdict} {quota_limited}"
+                );
+                assert_eq!(output.findings_available, Some(!quota_limited));
+                assert_eq!(review::partial(output), quota_limited);
+                assert!(owner.observations.is_empty());
             }
         }
     }
+}
 
-    #[test]
-    fn a_contract_invalid_member_keeps_its_finding_through_verification_and_synthesis() {
-        let document = panel("f0-v1-s1");
-        let mut owner = FakeOwner { observations: [
+#[test]
+fn a_contract_invalid_member_keeps_its_finding_through_verification_and_synthesis() {
+    let document = panel("f0-v1-s1");
+    let mut owner = FakeOwner { observations: [
             terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([finding(), {}]), "VERDICT: FAIL")),
             terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([]), "VERDICT: PASS")),
             terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([{"id":"F1","verification":"upheld","reason":"Reproduced"}]), "VERDICT: FAIL")),
             terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([{"id":"F1","verification":"upheld","reason":"Independently reproduced"}]), "VERDICT: FAIL")),
             terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([{"id":"F1","disposition":"accepted","reason":"Input x still panics"}]), "VERDICT: FAIL")),
         ].into(), ..Default::default() };
-        let mut journal = MemoryJournal::default();
-        let run = advance(&document, &mut owner, &mut journal).unwrap();
-        assert!(owner.observations.is_empty());
-        assert!(
-            run.checkpoint
-                .nodes
-                .iter()
-                .find(|node| node.id == "panel")
-                .unwrap()
-                .outputs
-                .is_some(),
-            "{:?}",
-            run.checkpoint
-                .nodes
-                .iter()
-                .map(|node| (
-                    &node.id,
-                    node.state,
-                    &node.advance_error_code,
-                    &node.advance_error
-                ))
-                .collect::<Vec<_>>()
-        );
-        let invalid = run
-            .checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id.ends_with("lenses--correctness"))
-            .unwrap();
-        assert_eq!(invalid.state, NodeState::Failed);
-        assert_eq!(
-            invalid.advance_error_code.as_deref(),
-            Some("review_findings_invalid")
-        );
-        let output = run
-            .checkpoint
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(owner.observations.is_empty());
+    assert!(
+        run.checkpoint
             .nodes
             .iter()
             .find(|node| node.id == "panel")
             .unwrap()
             .outputs
-            .as_ref()
-            .unwrap();
-        assert!(review::partial(output));
-        assert_eq!(output.findings_available, Some(false));
-        assert_eq!(output.verdict.as_deref(), Some("VERDICT: REQUEST_CHANGES"));
-        assert!(
-            output
-                .findings
-                .iter()
-                .any(|finding| finding.disposition.as_deref() == Some("accepted")
-                    && finding.extra.get("evidence") == Some(&json!("Input x reaches the panic")))
+            .is_some(),
+        "{:?}",
+        run.checkpoint
+            .nodes
+            .iter()
+            .map(|node| (
+                &node.id,
+                node.state,
+                &node.advance_error_code,
+                &node.advance_error
+            ))
+            .collect::<Vec<_>>()
+    );
+    let invalid = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id.ends_with("lenses--correctness"))
+        .unwrap();
+    assert_eq!(invalid.state, NodeState::Failed);
+    assert_eq!(
+        invalid.advance_error_code.as_deref(),
+        Some("review_findings_invalid")
+    );
+    let output = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "panel")
+        .unwrap()
+        .outputs
+        .as_ref()
+        .unwrap();
+    assert!(review::partial(output));
+    assert_eq!(output.findings_available, Some(false));
+    assert_eq!(output.verdict.as_deref(), Some("VERDICT: REQUEST_CHANGES"));
+    assert!(
+        output
+            .findings
+            .iter()
+            .any(|finding| finding.disposition.as_deref() == Some("accepted")
+                && finding.evidence.as_deref() == Some("Input x reaches the panic"))
+    );
+    assert!(
+        owner
+            .prompts
+            .iter()
+            .skip(2)
+            .all(|prompt| prompt.contains("Input x reaches the panic"))
+    );
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+}
+
+#[test]
+fn synthesis_cannot_restore_inconclusive_verifier_evidence() {
+    let document = panel("f0-v1-s1");
+    let mut owner = FakeOwner {
+        observations: [
+            "VERDICT: PASS",
+            "VERDICT: PASS",
+            "VERDICT: INCONCLUSIVE",
+            "VERDICT: PASS",
+            "VERDICT: PASS",
+        ]
+        .map(|verdict| terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([]), verdict)))
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let output = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "panel")
+        .unwrap()
+        .outputs
+        .as_ref()
+        .unwrap();
+    assert_eq!(output.verdict.as_deref(), Some("VERDICT: INCONCLUSIVE"));
+    assert!(review::partial(output));
+    assert!(owner.observations.is_empty());
+}
+
+#[test]
+fn invalid_propagation_cannot_alias_an_independent_sibling_finding() {
+    let document = panel("f0-v0-s1");
+    let mut forged = finding();
+    forged["propagates"] = json!("tests:F1");
+    let mut second = finding();
+    second["file"] = json!("b.rs");
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &answer(json!([forged]), "VERDICT: FAIL"),
+            ),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &answer(json!([second]), "VERDICT: FAIL"),
+            ),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &answer(json!([]), "VERDICT: INCONCLUSIVE"),
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let invalid = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id.ends_with("lenses--correctness"))
+        .unwrap();
+    assert_eq!(
+        invalid.advance_error_code.as_deref(),
+        Some("review_propagation_invalid")
+    );
+    let synthesis = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id.ends_with("--synthesis"))
+        .unwrap();
+    assert_eq!(
+        synthesis.advance_error_code.as_deref(),
+        Some("disposition_count")
+    );
+    let findings = &synthesis.outputs.as_ref().unwrap().findings;
+    assert_eq!(findings.len(), 2);
+    assert_ne!(findings[0].id, findings[1].id);
+    assert_ne!(findings[0].file, findings[1].file);
+}
+
+#[test]
+fn typed_contract_rejects_invalid_verdicts_even_without_a_pass_requirement() {
+    for verdict in [
+        "",
+        "VERDICT: BANANA",
+        "VERDICT: APPROVE",
+        "VERDICT: PASS\nVERDICT: PASS",
+    ] {
+        let mut node = review("review.tests", "review");
+        // Repair panels remove the PASS requirement, not the output contract.
+        node.required_verdict = None;
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([]), verdict)),
+                terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([]), verdict)),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let document = graph(vec![node]);
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let progress = &run.checkpoint.nodes[0];
+        assert_eq!(progress.state, NodeState::Failed, "{verdict}");
+        assert_eq!(
+            progress.attempts.last().unwrap().outcome,
+            Some(AttemptOutcome::TaskFailed)
         );
-        assert!(
-            owner
-                .prompts
-                .iter()
-                .skip(2)
-                .all(|prompt| prompt.contains("Input x reaches the panic"))
+        assert_eq!(
+            progress.advance_error_code.as_deref(),
+            Some("review_verdict_invalid")
         );
         assert_eq!(
             advance(&document, &mut owner, &mut journal)
@@ -302,142 +425,77 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
             run.checkpoint
         );
     }
+}
 
-    #[test]
-    fn synthesis_cannot_restore_inconclusive_verifier_evidence() {
-        let document = panel("f0-v1-s1");
-        let mut owner = FakeOwner {
-            observations: [
-                "VERDICT: PASS",
-                "VERDICT: PASS",
-                "VERDICT: INCONCLUSIVE",
-                "VERDICT: PASS",
-                "VERDICT: PASS",
-            ]
-            .map(|verdict| {
-                terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([]), verdict))
-            })
-            .into(),
-            ..Default::default()
-        };
-        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-        let output = run
-            .checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id == "panel")
-            .unwrap()
-            .outputs
-            .as_ref()
-            .unwrap();
-        assert_eq!(output.verdict.as_deref(), Some("VERDICT: INCONCLUSIVE"));
-        assert!(review::partial(output));
-        assert!(owner.observations.is_empty());
-    }
+#[test]
+fn review_contract_accepts_verdict_followed_only_by_handoff() {
+    let mut node = review("review.tests", "review");
+    node.required_verdict = None;
+    let response = format!(
+        "{}\nReview completed.\nVERDICT: FAIL\n```handoff\n{{\"schema_version\":2,\"status\":\"done\",\"note\":\"Reviewed\",\"remaining\":[],\"decisions\":[],\"verify\":[]}}\n```\n",
+        answer(json!([]), "").trim_end()
+    );
+    let mut owner = FakeOwner {
+        observations: [terminal_with_result(AttemptOutcome::Succeeded, &response)].into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![node]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let progress = &run.checkpoint.nodes[0];
+    assert_eq!(progress.state, NodeState::Succeeded);
+    assert_eq!(
+        progress.outputs.as_ref().unwrap().verdict.as_deref(),
+        Some("VERDICT: FAIL")
+    );
+    assert_eq!(progress.advance_error_code, None);
+}
 
-    #[test]
-    fn invalid_propagation_cannot_alias_an_independent_sibling_finding() {
-        let document = panel("f0-v0-s1");
-        let mut forged = finding();
-        forged["propagates"] = json!("tests:F1");
-        let mut second = finding();
-        second["file"] = json!("b.rs");
-        let mut owner = FakeOwner {
-            observations: [
-                terminal_with_result(
-                    AttemptOutcome::Succeeded,
-                    &answer(json!([forged]), "VERDICT: FAIL"),
-                ),
-                terminal_with_result(
-                    AttemptOutcome::Succeeded,
-                    &answer(json!([second]), "VERDICT: FAIL"),
-                ),
-                terminal_with_result(
-                    AttemptOutcome::Succeeded,
-                    &answer(json!([]), "VERDICT: INCONCLUSIVE"),
-                ),
-            ]
-            .into(),
-            ..Default::default()
-        };
-        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-        let invalid = run
-            .checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id.ends_with("lenses--correctness"))
-            .unwrap();
-        assert_eq!(
-            invalid.advance_error_code.as_deref(),
-            Some("review_propagation_invalid")
-        );
-        let synthesis = run
-            .checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id.ends_with("--synthesis"))
-            .unwrap();
-        assert_eq!(
-            synthesis.advance_error_code.as_deref(),
-            Some("disposition_count")
-        );
-        let findings = &synthesis.outputs.as_ref().unwrap().findings;
-        assert_eq!(findings.len(), 2);
-        assert_ne!(findings[0].id, findings[1].id);
-        assert_ne!(findings[0].file, findings[1].file);
-    }
-
-    #[test]
-    fn typed_contract_rejects_invalid_verdicts_even_without_a_pass_requirement() {
-        for verdict in [
-            "",
-            "VERDICT: BANANA",
-            "VERDICT: APPROVE",
-            "VERDICT: PASS\nVERDICT: PASS",
-        ] {
-            let mut node = review("review.tests", "review");
-            // Repair panels remove the PASS requirement, not the output contract.
-            node.required_verdict = None;
-            let mut owner = FakeOwner {
-                observations: [terminal_with_result(
-                    AttemptOutcome::Succeeded,
-                    &answer(json!([]), verdict),
-                ), terminal_with_result(AttemptOutcome::Succeeded, &answer(json!([]), verdict))]
-                .into(),
-                ..Default::default()
-            };
-            let document = graph(vec![node]);
-            let mut journal = MemoryJournal::default();
-            let run = advance(&document, &mut owner, &mut journal).unwrap();
-            let progress = &run.checkpoint.nodes[0];
-            assert_eq!(progress.state, NodeState::Failed, "{verdict}");
-            assert_eq!(
-                progress.attempts.last().unwrap().outcome,
-                Some(AttemptOutcome::TaskFailed)
-            );
-            assert_eq!(
-                progress.advance_error_code.as_deref(),
-                Some("review_verdict_invalid")
-            );
-            assert_eq!(
-                advance(&document, &mut owner, &mut journal)
-                    .unwrap()
-                    .checkpoint,
-                run.checkpoint
-            );
-        }
-    }
-
-    #[test]
-    fn review_contract_accepts_verdict_followed_only_by_handoff() {
+/// A long review ending in one verdict, a blank line and a pretty-printed
+/// handoff block is one verdict. Size alone (past the run store's head
+/// window) costs neither complete findings nor the verdict.
+#[test]
+fn a_long_review_with_a_spaced_handoff_keeps_its_single_verdict() {
+    let overlong = format!("Traced {} to its call sites.", "a/b/c ".repeat(400));
+    let sections = (1..=40)
+        .map(|index| format!("{index}. Checked the boundary of module {index}: nothing found."))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let handoff = serde_json::to_string_pretty(&json!({
+        "schema_version": 2, "status": "done", "note": "Reviewed",
+        "remaining": [], "decisions": ["Read the diff in full"],
+        "verify": ["Ran the focused tests"]
+    }))
+    .unwrap();
+    let response = format!(
+        "# Review\n\n{overlong}\n\n{sections}\n\n{}\nVERDICT: PASS\n\n```handoff\n{handoff}\n```\n",
+        answer(json!([]), "").trim_end()
+    );
+    assert!(response.len() > 4096 && overlong.len() > 1024);
+    for source_truncated in [false, true] {
         let mut node = review("review.tests", "review");
         node.required_verdict = None;
-        let response = format!(
-            "{}\nReview completed.\nVERDICT: FAIL\n```handoff\n{{\"schema_version\":2,\"status\":\"done\",\"note\":\"Reviewed\",\"remaining\":[],\"decisions\":[],\"verify\":[]}}\n```\n",
-            answer(json!([]), "").trim_end()
-        );
+        let mut result = capture(&response);
+        assert_eq!(result.verdict.as_deref(), Some("VERDICT: PASS"));
+        assert!(!result.verdict_invalid && result.handoff.is_ok());
+        result.source_truncated = source_truncated;
         let mut owner = FakeOwner {
-            observations: [terminal_with_result(AttemptOutcome::Succeeded, &response)].into(),
+            observations: [AttemptObservation::Terminal {
+                attempt_ref: None,
+                outcome: AttemptOutcome::Succeeded,
+                launched: true,
+                result: Some(Box::new(result)),
+                result_warning: None,
+                result_path: None,
+                branch: None,
+                commit: None,
+                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                stop: None,
+            }]
+            .into(),
             ..Default::default()
         };
         let run = advance(
@@ -447,270 +505,222 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
         )
         .unwrap();
         let progress = &run.checkpoint.nodes[0];
-        assert_eq!(progress.state, NodeState::Succeeded);
         assert_eq!(
             progress.outputs.as_ref().unwrap().verdict.as_deref(),
-            Some("VERDICT: FAIL")
+            Some("VERDICT: PASS"),
+            "{source_truncated}"
         );
-        assert_eq!(progress.advance_error_code, None);
+        assert_ne!(
+            progress.advance_error_code.as_deref(),
+            Some("review_verdict_invalid"),
+            "{source_truncated}"
+        );
+        assert_eq!(
+            progress.state == NodeState::Succeeded,
+            !source_truncated,
+            "{source_truncated}: {:?}",
+            progress.advance_error_code
+        );
     }
+}
 
-    /// A long review ending in one verdict, a blank line and a pretty-printed
-    /// handoff block is one verdict. Size alone (past the run store's head
-    /// window) costs the findings, never the verdict.
-    #[test]
-    fn a_long_review_with_a_spaced_handoff_keeps_its_single_verdict() {
-        let overlong = format!("Traced {} to its call sites.", "a/b/c ".repeat(400));
-        let sections = (1..=40)
-            .map(|index| format!("{index}. Checked the boundary of module {index}: nothing found."))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let handoff = serde_json::to_string_pretty(&json!({
-            "schema_version": 2, "status": "done", "note": "Reviewed",
-            "remaining": [], "decisions": ["Read the diff in full"],
-            "verify": ["Ran the focused tests"]
-        }))
+#[test]
+fn verifier_requires_a_reasoned_assessment_of_every_finding() {
+    for entries in [
+        json!([]),
+        json!([{"id":"F1"}]),
+        json!([{"id":"F1","verification":"maybe","reason":"Unclear"}]),
+        json!([{"id":"F1","verification":"upheld","reason":" "}]),
+    ] {
+        let mut verifier = review("review.verify", "verify");
+        verifier.depends_on = vec!["source".into()];
+        verifier.inputs =
+            vec![serde_json::from_value(json!({"node":"source","outputs":["findings"]})).unwrap()];
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &answer(json!([finding()]), "VERDICT: FAIL"),
+                ),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &answer(entries, "VERDICT: INCONCLUSIVE"),
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![node("source", route("fixture")), verifier]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
         .unwrap();
-        let response = format!(
-            "# Review\n\n{overlong}\n\n{sections}\n\n{}\nVERDICT: PASS\n\n```handoff\n{handoff}\n```\n",
-            answer(json!([]), "").trim_end()
+        let progress = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "verify")
+            .unwrap();
+        assert_eq!(progress.state, NodeState::Failed);
+        assert_eq!(
+            progress.advance_error_code.as_deref(),
+            Some("verification_incomplete")
         );
-        assert!(response.len() > 4096 && overlong.len() > 1024);
-        for source_truncated in [false, true] {
-            let mut node = review("review.tests", "review");
-            node.required_verdict = None;
-            let mut result = capture(&response);
-            assert_eq!(result.verdict.as_deref(), Some("VERDICT: PASS"));
-            assert!(!result.verdict_invalid && result.handoff.is_ok());
-            result.source_truncated = source_truncated;
-            let mut owner = FakeOwner {
-                observations: [AttemptObservation::Terminal {
-                    attempt_ref: None,
-                    outcome: AttemptOutcome::Succeeded,
-                    launched: true,
-                    result: Some(Box::new(result)),
-                    result_warning: None,
-                    result_path: None,
-                    branch: None,
-                    commit: None,
-                }]
-                .into(),
-                ..Default::default()
-            };
-            let run = advance(
-                &graph(vec![node]),
-                &mut owner,
-                &mut MemoryJournal::default(),
-            )
-            .unwrap();
-            let progress = &run.checkpoint.nodes[0];
-            assert_eq!(
-                progress.outputs.as_ref().unwrap().verdict.as_deref(),
-                Some("VERDICT: PASS"),
-                "{source_truncated}"
-            );
-            assert_ne!(
-                progress.advance_error_code.as_deref(),
-                Some("review_verdict_invalid"),
-                "{source_truncated}"
-            );
-            assert_eq!(
-                progress.state == NodeState::Succeeded,
-                !source_truncated,
-                "{source_truncated}: {:?}",
-                progress.advance_error_code
-            );
-        }
+        assert_eq!(
+            progress.outputs.as_ref().unwrap().findings[0]
+                .evidence
+                .as_deref()
+                .unwrap(),
+            "Input x reaches the panic"
+        );
     }
+}
 
-    #[test]
-    fn verifier_requires_a_reasoned_assessment_of_every_finding() {
-        for entries in [
-            json!([]),
-            json!([{"id":"F1"}]),
-            json!([{"id":"F1","verification":"maybe","reason":"Unclear"}]),
-            json!([{"id":"F1","verification":"upheld","reason":" "}]),
-        ] {
-            let mut verifier = review("review.verify", "verify");
-            verifier.depends_on = vec!["source".into()];
-            verifier.inputs = vec![
-                serde_json::from_value(json!({"node":"source","outputs":["findings"]})).unwrap(),
-            ];
+#[test]
+fn typed_contract_reports_malformed_findings_and_preserves_usable_entries() {
+    let good = finding();
+    let mut cases = vec![json!({}), json!(null)];
+    for field in [
+        "id",
+        "severity",
+        "file",
+        "summary",
+        "status",
+        "evidence",
+        "proposed_fix",
+    ] {
+        let mut bad = good.clone();
+        bad.as_object_mut().unwrap().remove(field);
+        cases.push(bad);
+        let mut blank = good.clone();
+        blank[field] = json!(" ");
+        cases.push(blank);
+        let mut wrong_type = good.clone();
+        wrong_type[field] = json!(42);
+        cases.push(wrong_type);
+    }
+    for mut bad in cases {
+        if bad.get("id") == Some(&json!("F1")) {
+            bad["id"] = json!("F2");
+        }
+        let mut owner = FakeOwner {
+            observations: [terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &answer(json!([good, bad]), "VERDICT: FAIL"),
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![review("review.tests", "review")]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        let progress = &run.checkpoint.nodes[0];
+        assert_eq!(progress.state, NodeState::Failed);
+        assert_eq!(
+            progress.advance_error_code.as_deref(),
+            Some("review_findings_invalid"),
+            "{bad} {:?}",
+            progress.advance_error
+        );
+        assert!(
+            progress
+                .outputs
+                .as_ref()
+                .unwrap()
+                .findings
+                .iter()
+                .any(|finding| finding.id == "F1")
+        );
+    }
+}
+
+#[test]
+fn lens_pass_conflicts_with_untriaged_boundary_and_default_path_findings() {
+    for class in ["boundary", "data_loss", "none"] {
+        let mut item = finding();
+        item.as_object_mut().unwrap().remove("triage");
+        item["class"] = json!(class);
+        if class != "none" {
+            item.as_object_mut().unwrap().remove("trigger");
+        }
+        let document = graph(vec![review("review.tests", "review")]);
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([terminal_with_result(
+                AttemptOutcome::DeclaredStop,
+                &answer(json!([item]), "VERDICT: PASS"),
+            )]),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(
+            run.checkpoint.nodes[0].advance_error_code.as_deref(),
+            Some("review_verdict_conflict"),
+            "{class}"
+        );
+    }
+}
+
+#[test]
+fn typed_contract_distinguishes_valid_fail_from_a_contradictory_pass() {
+    let mut accepted = finding();
+    accepted["disposition"] = json!("accepted");
+    accepted["reason"] = json!("Reproduced");
+    for (name, findings) in [
+        ("review.tests", json!([finding()])),
+        ("review.synthesis", json!([accepted])),
+    ] {
+        for verdict in ["VERDICT: PASS", "VERDICT: FAIL"] {
+            let mut nodes = Vec::new();
+            let mut observations = VecDeque::new();
+            let mut reviewer = review(name, "review");
+            if name == "review.synthesis" {
+                nodes.push(node("source", route("fixture")));
+                observations.push_back(terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &answer(json!([]), "VERDICT: PASS"),
+                ));
+                reviewer.depends_on.push("source".into());
+                reviewer.inputs.push(
+                    serde_json::from_value(json!({"node":"source","outputs":["findings"]}))
+                        .unwrap(),
+                );
+            }
+            nodes.push(reviewer);
+            observations.push_back(terminal_with_result(
+                AttemptOutcome::DeclaredStop,
+                &answer(findings.clone(), verdict),
+            ));
             let mut owner = FakeOwner {
-                observations: [
-                    terminal_with_result(
-                        AttemptOutcome::Succeeded,
-                        &answer(json!([finding()]), "VERDICT: FAIL"),
-                    ),
-                    terminal_with_result(
-                        AttemptOutcome::Succeeded,
-                        &answer(entries, "VERDICT: INCONCLUSIVE"),
-                    ),
-                ]
-                .into(),
+                observations,
                 ..Default::default()
             };
-            let run = advance(
-                &graph(vec![node("source", route("fixture")), verifier]),
-                &mut owner,
-                &mut MemoryJournal::default(),
-            )
-            .unwrap();
+            let run = advance(&graph(nodes), &mut owner, &mut MemoryJournal::default()).unwrap();
             let progress = run
                 .checkpoint
                 .nodes
                 .iter()
-                .find(|node| node.id == "verify")
+                .find(|node| node.id == "review")
                 .unwrap();
-            assert_eq!(progress.state, NodeState::Failed);
-            assert_eq!(
-                progress.advance_error_code.as_deref(),
-                Some("verification_incomplete")
-            );
-            assert_eq!(
-                progress.outputs.as_ref().unwrap().findings[0].extra["evidence"],
-                "Input x reaches the panic"
-            );
-        }
-    }
-
-    #[test]
-    fn typed_contract_reports_malformed_findings_and_preserves_usable_entries() {
-        let good = finding();
-        let mut cases = vec![json!({}), json!(null)];
-        for field in [
-            "id",
-            "severity",
-            "file",
-            "summary",
-            "status",
-            "evidence",
-            "proposed_fix",
-        ] {
-            let mut bad = good.clone();
-            bad.as_object_mut().unwrap().remove(field);
-            cases.push(bad);
-            let mut blank = good.clone();
-            blank[field] = json!(" ");
-            cases.push(blank);
-            let mut wrong_type = good.clone();
-            wrong_type[field] = json!(42);
-            cases.push(wrong_type);
-        }
-        for mut bad in cases {
-            if bad.get("id") == Some(&json!("F1")) {
-                bad["id"] = json!("F2");
-            }
-            let mut owner = FakeOwner {
-                observations: [terminal_with_result(
-                    AttemptOutcome::Succeeded,
-                    &answer(json!([good, bad]), "VERDICT: FAIL"),
-                )]
-                .into(),
-                ..Default::default()
-            };
-            let run = advance(
-                &graph(vec![review("review.tests", "review")]),
-                &mut owner,
-                &mut MemoryJournal::default(),
-            )
-            .unwrap();
-            let progress = &run.checkpoint.nodes[0];
-            assert_eq!(progress.state, NodeState::Failed);
-            assert_eq!(
-                progress.advance_error_code.as_deref(),
-                Some("review_findings_invalid")
-            );
-            assert!(
-                progress
-                    .outputs
-                    .as_ref()
-                    .unwrap()
-                    .findings
-                    .iter()
-                    .any(|finding| finding.id == "F1")
-            );
-        }
-    }
-
-    #[test]
-    fn lens_pass_conflicts_with_untriaged_boundary_and_default_path_findings() {
-        for class in ["boundary", "data_loss", "none"] {
-            let mut item = finding();
-            item.as_object_mut().unwrap().remove("triage");
-            item["class"] = json!(class);
-            if class != "none" {
-                item.as_object_mut().unwrap().remove("trigger");
-            }
-            let document = graph(vec![review("review.tests", "review")]);
-            let mut owner = FakeOwner {
-                observations: VecDeque::from([terminal_with_result(AttemptOutcome::DeclaredStop,
-                    &answer(json!([item]), "VERDICT: PASS"))]),
-                ..Default::default()
-            };
-            let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-            assert_eq!(run.checkpoint.nodes[0].advance_error_code.as_deref(), Some("review_verdict_conflict"), "{class}");
-        }
-    }
-
-    #[test]
-    fn typed_contract_distinguishes_valid_fail_from_a_contradictory_pass() {
-        let mut accepted = finding();
-        accepted["disposition"] = json!("accepted");
-        accepted["reason"] = json!("Reproduced");
-        for (name, findings) in [
-            ("review.tests", json!([finding()])),
-            ("review.synthesis", json!([accepted])),
-        ] {
-            for verdict in ["VERDICT: PASS", "VERDICT: FAIL"] {
-                let mut nodes = Vec::new();
-                let mut observations = VecDeque::new();
-                let mut reviewer = review(name, "review");
-                if name == "review.synthesis" {
-                    nodes.push(node("source", route("fixture")));
-                    observations.push_back(terminal_with_result(
-                        AttemptOutcome::Succeeded,
-                        &answer(json!([]), "VERDICT: PASS"),
-                    ));
-                    reviewer.depends_on.push("source".into());
-                    reviewer.inputs.push(
-                        serde_json::from_value(json!({"node":"source","outputs":["findings"]}))
-                            .unwrap(),
-                    );
-                }
-                nodes.push(reviewer);
-                observations.push_back(terminal_with_result(
-                    AttemptOutcome::DeclaredStop,
-                    &answer(findings.clone(), verdict),
-                ));
-                let mut owner = FakeOwner {
-                    observations,
-                    ..Default::default()
-                };
-                let run =
-                    advance(&graph(nodes), &mut owner, &mut MemoryJournal::default()).unwrap();
-                let progress = run
-                    .checkpoint
-                    .nodes
-                    .iter()
-                    .find(|node| node.id == "review")
-                    .unwrap();
-                if verdict == "VERDICT: PASS" {
-                    assert_eq!(progress.state, NodeState::Failed);
-                    assert_eq!(
-                        progress.advance_error_code.as_deref(),
-                        Some("review_verdict_conflict")
-                    );
-                } else {
-                    assert_eq!(progress.state, NodeState::Succeeded);
-                    assert_eq!(
-                        progress.attempts.last().unwrap().outcome,
-                        Some(AttemptOutcome::Succeeded)
-                    );
-                }
+            if verdict == "VERDICT: PASS" {
+                assert_eq!(progress.state, NodeState::Failed);
+                assert_eq!(
+                    progress.advance_error_code.as_deref(),
+                    Some("review_verdict_conflict")
+                );
+            } else {
+                assert_eq!(progress.state, NodeState::Succeeded);
+                assert_eq!(
+                    progress.attempts.last().unwrap().outcome,
+                    Some(AttemptOutcome::Succeeded)
+                );
             }
         }
     }
+}
 
 #[test]
 fn malformed_lens_is_corrected_once_without_repeating_siblings() {
@@ -720,15 +730,15 @@ fn malformed_lens_is_corrected_once_without_repeating_siblings() {
         let lens = plan
             .nodes
             .iter()
-            .find(|node| node.extra.get("review_lens") == Some(&json!("correctness")))
+            .find(|node| node.review_lens.as_deref() == Some("correctness"))
             .unwrap();
         let lenses = plan
             .nodes
             .iter()
             .find(|node| {
-                node.composite.as_ref().is_some_and(|spec| {
-                    spec.exports.iter().any(|export| export.node == lens.id)
-                })
+                node.composite
+                    .as_ref()
+                    .is_some_and(|spec| spec.exports.iter().any(|export| export.node == lens.id))
             })
             .unwrap();
         let mut owner = FakeOwner {
@@ -902,7 +912,11 @@ fn realistic_aggregate_findings_do_not_require_overflow_proof() {
             .unwrap();
         assert!(!output.findings.is_empty());
         let (plan, positions) = validate_plan(&document).unwrap();
-        let verifiers: Vec<_> = plan.nodes.iter().filter(|node| template::review_verifier(node)).collect();
+        let verifiers: Vec<_> = plan
+            .nodes
+            .iter()
+            .filter(|node| template::review_verifier(node))
+            .collect();
         assert!(!verifiers.is_empty());
         for verifier in verifiers {
             let progress = &run.checkpoint.nodes[positions[&verifier.id]];
@@ -991,7 +1005,7 @@ fn correction_admission_failure_is_fenced_and_panel_proceeds() {
     let lens = plan
         .nodes
         .iter()
-        .find(|node| node.extra.get("review_lens") == Some(&json!("correctness")))
+        .find(|node| node.review_lens.as_deref() == Some("correctness"))
         .unwrap();
     let limits = crate::config::GraphLimits {
         node_prompt_bytes: plan
@@ -1029,7 +1043,7 @@ fn correction_admission_failure_is_fenced_and_panel_proceeds() {
         .find(|node| node.id == lens.id)
         .unwrap();
     assert_eq!(lens.state, NodeState::Failed);
-    assert!(lens.extra.contains_key("review_verdict_correction_refused"));
+    assert!(lens.review_verdict_correction_refused.is_some());
     assert!(lens.previous_attempts.is_empty());
     assert_eq!(
         owner
@@ -1149,4 +1163,79 @@ fn maximal_panel_verify_and_synthesis_prompts_fit_default_limits() {
     }
     assert_eq!(verifiers, 2);
     assert_eq!(synthesis, 1);
+}
+
+/// Medium: size affects only the checkpoint summary. The full artifact,
+/// verdict and every blocking finding survive storage, replay and retrieval.
+#[test]
+fn oversized_blocking_findings_remain_retrievable_with_the_verdict() {
+    let mut entries = Vec::new();
+    while canonical_len(&entries) <= FINDINGS_BYTES {
+        let index = entries.len();
+        let mut entry = finding();
+        entry["id"] = json!(format!("F{index}"));
+        entry["summary"] = json!(format!("Finding {index}: {}", "full evidence ".repeat(60)));
+        entry["triage"]["reason"] = json!("Verified the failing path. ".repeat(15));
+        entry["evidence"] = json!("Trace the reachable failing path. ".repeat(12));
+        entries.push(entry);
+    }
+    let response = answer(json!(entries), "VERDICT: FAIL");
+    let mut capture = crate::result_capture::ResultCapture::new(None);
+    for chunk in response.as_bytes().chunks(37) {
+        capture.push(chunk);
+    }
+    let captured = capture.finish();
+    assert!(!captured.source_truncated);
+    let mut observation = terminal_with_result(AttemptOutcome::Succeeded, &response);
+    if let AttemptObservation::Terminal {
+        result,
+        result_path,
+        ..
+    } = &mut observation
+    {
+        *result = Some(Box::new(captured));
+        *result_path = Some("attempts/review/result.md".into());
+    }
+    let document = graph(vec![review("review.tests", "review")]);
+    let mut owner = FakeOwner {
+        observations: [observation].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let progress = &run.checkpoint.nodes[0];
+    let outputs = progress.outputs.as_ref().unwrap();
+    assert_eq!(outputs.verdict.as_deref(), Some("VERDICT: FAIL"));
+    assert!(canonical_len(&outputs.findings) <= FINDINGS_BYTES);
+    assert_eq!(outputs.findings_available, Some(true));
+    assert_eq!(
+        outputs.result.as_ref().unwrap().path.as_deref(),
+        Some("attempts/review/result.md")
+    );
+    let temp = crate::test_support::tempdir().unwrap();
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    let mut stored = json!({"checkpoint":run.checkpoint});
+    prompt_store::externalise(&directory, &document.graph_id, &mut stored).unwrap();
+    assert!(stored["checkpoint"]["nodes"][0]["outputs"]["_artifact_findings"].is_null());
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    assert!(bytes.len() < response.len());
+    let hydrated = prompt_store::rehydrate(&directory, &document.graph_id, &bytes).unwrap();
+    let hydrated: Value = serde_json::from_slice(&hydrated).unwrap();
+    let mut checkpoint: GraphCheckpoint =
+        serde_json::from_value(hydrated["checkpoint"].clone()).unwrap();
+    materialise_checkpoint_findings(&document, &mut checkpoint).unwrap();
+    let findings = &checkpoint.nodes[0].outputs.as_ref().unwrap().findings;
+    for entry in &entries {
+        let id = entry["id"].as_str().unwrap();
+        let finding = findings.iter().find(|finding| finding.id == id).unwrap();
+        assert_eq!(finding.summary, entry["summary"].as_str().unwrap());
+        assert_eq!(finding.evidence.as_deref(), entry["evidence"].as_str());
+        assert!(repair::blocking(finding));
+    }
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
 }

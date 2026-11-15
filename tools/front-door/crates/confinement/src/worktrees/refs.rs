@@ -8,40 +8,22 @@
 //! earlier proof. A ref without a record is unobserved; consumers retain it.
 use super::*;
 use provenant_core::{OperationId, ProjectId, WallTime};
+use provenant_records::custody::{RefEndpoint, RefOrigin, RefOwnership};
 
 const LEDGER: &str = "refs";
 const LEDGER_LOCK: &str = "refs.lock";
+const GENERATION_SEQUENCE: &str = "last-generation";
 const LEDGER_LOCK_SECONDS: u64 = 5;
 const MAX_REMOTE: usize = 256;
 const MAX_PUSH_URL: usize = 4096;
+const MAX_WORKTREE_PATH: usize = 4096;
+const PRIVATE_HEAD: &str = "HEAD";
 /// Bound on records a listing reads; far above any one repository's lanes.
 const MAX_LEDGER_RECORDS: usize = 65_536;
-
-/// Where the ref lives. A remote endpoint names the remote and push URL the
-/// host bound for delivery; it is never inferred from a default remote name.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum RefEndpoint {
-    /// The repository's own ref store.
-    Local,
-    Remote {
-        remote: String,
-        push_url: String,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RefOrigin {
-    /// Provenant created the ref; no one else had it at that name.
-    Created,
-    /// The ref existed before Provenant used it.
-    Adopted,
-}
+const MAX_LEDGER_ENTRIES: usize = MAX_LEDGER_RECORDS + 2;
 
 /// The durable ownership record for one ref generation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RefRecord {
     pub schema_version: u64,
     /// Project binding of the repository's Git common directory.
@@ -49,7 +31,7 @@ pub struct RefRecord {
     pub endpoint: RefEndpoint,
     /// Full ref name, such as `refs/heads/lane/x`.
     pub reference: String,
-    /// Starts at 1 and increases with every creation or adoption.
+    /// Repository-wide generation token; it is never reused after forgetting.
     pub generation: u64,
     pub origin: RefOrigin,
     /// The ref's commit when this generation was recorded.
@@ -59,6 +41,17 @@ pub struct RefRecord {
     pub attempt_id: Option<AttemptId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<OperationId>,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GenerationSequence {
+    schema_version: u64,
+    repository: ProjectId,
+    last_generation: u64,
+    #[serde(flatten, default)]
+    extra: provenant_records::ExtraFields,
 }
 
 impl RefRecord {
@@ -72,17 +65,6 @@ impl RefRecord {
             origin: self.origin,
         }
     }
-}
-
-/// A worktree owner's reference to the ledger generation of its branch.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RefOwnership {
-    pub repository: ProjectId,
-    pub endpoint: RefEndpoint,
-    pub reference: String,
-    pub generation: u64,
-    pub origin: RefOrigin,
 }
 
 /// One observation to record. `origin` says what the caller saw: `Created`
@@ -103,6 +85,13 @@ pub struct RefLedger {
     repository: ProjectId,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecordMode {
+    Register,
+    Observe,
+    ScopedOwner,
+}
+
 impl RefLedger {
     /// The ledger under `<state>/worktrees/<project>/refs`, shared with the
     /// worktree registry of the same project.
@@ -117,11 +106,93 @@ impl RefLedger {
         Self::within(context.project_state, context.binding.project_id())
     }
 
+    /// Observe the single ref ledger without creating state in a preview.
+    pub fn observe_context(context: &WorktreeContext<'_>) -> Result<Option<Self>, WorktreeError> {
+        match context
+            .project_state
+            .open_verified_directory(OsStr::new(LEDGER))
+        {
+            Ok(directory) => Ok(Some(Self {
+                directory,
+                repository: context.binding.project_id(),
+            })),
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn within(project_state: &Directory, repository: ProjectId) -> Result<Self, WorktreeError> {
         Ok(Self {
             directory: private_child(project_state, OsStr::new(LEDGER))?,
             repository,
         })
+    }
+
+    fn generation_high_water(
+        &self,
+        current: Option<&RefRecord>,
+    ) -> Result<GenerationSequence, WorktreeError> {
+        let bytes = match read_bounded(
+            &self.directory,
+            OsStr::new(GENERATION_SEQUENCE),
+            MAX_STATE_RECORD,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) if error.is_not_found() => {
+                let names = provenant_os::fs::entry_names(&self.directory, MAX_LEDGER_ENTRIES)?;
+                if names.iter().any(|name| {
+                    name.as_bytes().ends_with(b".json") && !name.as_bytes().starts_with(b".")
+                }) {
+                    return Err(WorktreeError::InvalidOutput);
+                }
+                return Ok(GenerationSequence {
+                    schema_version: 1,
+                    repository: self.repository,
+                    last_generation: 0,
+                    extra: Default::default(),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let sequence: GenerationSequence = provenant_records::decode(
+            bytes.as_slice(),
+            provenant_records::Limits {
+                max_bytes: MAX_STATE_RECORD,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| WorktreeError::InvalidOutput)?;
+        if sequence.schema_version != 1
+            || sequence.repository != self.repository
+            || sequence.last_generation == 0
+            || current.is_some_and(|record| record.generation > sequence.last_generation)
+        {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        Ok(sequence)
+    }
+
+    fn write_generation_high_water(
+        &self,
+        last_generation: u64,
+        extra: provenant_records::ExtraFields,
+    ) -> Result<(), WorktreeError> {
+        let sequence = GenerationSequence {
+            schema_version: 1,
+            repository: self.repository,
+            last_generation,
+            extra,
+        };
+        self.directory
+            .atomic_write(
+                OsStr::new(GENERATION_SEQUENCE),
+                ".ref-generation-",
+                &serde_json::to_vec(&sequence).map_err(|_| WorktreeError::InvalidOutput)?,
+                PublishMode::Replace,
+            )?
+            .require_durable()
+            .map_err(|_| WorktreeError::RegistrationUnconfirmed)?;
+        Ok(())
     }
 
     pub fn repository(&self) -> ProjectId {
@@ -134,17 +205,39 @@ impl RefLedger {
         endpoint: &RefEndpoint,
         reference: &GitRefName,
     ) -> Result<Option<RefRecord>, WorktreeError> {
+        self.load_identity(endpoint, reference.as_str())
+    }
+
+    /// The current generation for a detached worktree's real private `HEAD`.
+    pub fn load_worktree_head(&self, path: &Path) -> Result<Option<RefRecord>, WorktreeError> {
+        let endpoint = worktree_endpoint(path)?;
+        self.load_identity(&endpoint, PRIVATE_HEAD)
+    }
+
+    fn load_identity(
+        &self,
+        endpoint: &RefEndpoint,
+        reference: &str,
+    ) -> Result<Option<RefRecord>, WorktreeError> {
+        validate_endpoint(endpoint)?;
+        validate_reference(endpoint, reference)?;
         let name = record_name(endpoint, reference)?;
         let bytes = match read_bounded(&self.directory, OsStr::new(&name), MAX_STATE_RECORD) {
             Ok(bytes) => bytes,
             Err(error) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let record: RefRecord =
-            serde_json::from_slice(&bytes).map_err(|_| WorktreeError::InvalidOutput)?;
+        let record: RefRecord = provenant_records::decode(
+            bytes.as_slice(),
+            provenant_records::Limits {
+                max_bytes: MAX_STATE_RECORD,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| WorktreeError::InvalidOutput)?;
         if record.repository != self.repository
             || &record.endpoint != endpoint
-            || record.reference != reference.as_str()
+            || record.reference != reference
         {
             return Err(WorktreeError::InvalidOutput);
         }
@@ -154,13 +247,9 @@ impl RefLedger {
 
     /// Record a creation or adoption and return the resulting generation.
     ///
-    /// A creation is always a new generation. An adoption keeps the current
-    /// record when the ref still holds the commit that record names: nothing
-    /// observable distinguishes it from the generation already recorded.
-    /// Otherwise an adoption replaces it, so a later created proof is never
-    /// inherited by a ref someone else replaced. An attempt replaying its own
-    /// observation, such as a sealed delivery receipt read again, is the same
-    /// generation rather than a recreation.
+    /// A fresh creation or adoption starts a generation, even when the ref
+    /// still has the same tip. Only a replay carrying the same stable owner
+    /// identity and tip reuses its generation.
     pub fn record(
         &self,
         observation: RefObservation,
@@ -168,36 +257,150 @@ impl RefLedger {
         cancel: &CancelToken,
     ) -> Result<RefRecord, WorktreeError> {
         validate_endpoint(&observation.endpoint)?;
-        if !observation.reference.as_str().starts_with("refs/") {
+        if matches!(&observation.endpoint, RefEndpoint::Worktree { .. }) {
             return Err(WorktreeError::InvalidRequest);
         }
+        let reference = observation.reference.as_str().to_owned();
+        self.record_identity(
+            observation.endpoint,
+            reference,
+            observation.origin,
+            observation.tip,
+            observation.recorded_at,
+            observation.attempt_id,
+            observation.operation_id,
+            RecordMode::Register,
+            clock,
+            cancel,
+        )
+    }
+
+    /// Adopt an observed local branch into the shared generation sequence.
+    /// Repeated observations of the same tip reuse its identity atomically;
+    /// a changed tip advances the generation while preserving known ownership.
+    pub fn observe_local_branch(
+        &self,
+        branch: &GitRefName,
+        tip: GitOid,
+        clock: &dyn Clock,
+        cancel: &CancelToken,
+    ) -> Result<RefRecord, WorktreeError> {
+        let recorded_at = clock
+            .wall_now()
+            .map_err(|_| WorktreeError::InvalidRequest)?;
+        self.record_identity(
+            RefEndpoint::Local,
+            branch.as_str().to_owned(),
+            RefOrigin::Adopted,
+            tip,
+            recorded_at,
+            None,
+            None,
+            RecordMode::Observe,
+            clock,
+            cancel,
+        )
+    }
+
+    /// Adopt the actual private `HEAD` of a detached worktree into the same
+    /// generation sequence as local and remote refs. Replays at the same path
+    /// and tip reuse the generation; a moved tip starts a new one.
+    pub fn record_worktree_head(
+        &self,
+        path: &Path,
+        tip: GitOid,
+        clock: &dyn Clock,
+        cancel: &CancelToken,
+    ) -> Result<RefRecord, WorktreeError> {
+        let endpoint = canonical_worktree_endpoint(path)?;
+        let recorded_at = clock
+            .wall_now()
+            .map_err(|_| WorktreeError::InvalidRequest)?;
+        self.record_identity(
+            endpoint,
+            PRIVATE_HEAD.to_owned(),
+            RefOrigin::Adopted,
+            tip,
+            recorded_at,
+            None,
+            None,
+            RecordMode::ScopedOwner,
+            clock,
+            cancel,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_identity(
+        &self,
+        endpoint: RefEndpoint,
+        reference: String,
+        origin: RefOrigin,
+        tip: GitOid,
+        recorded_at: WallTime,
+        attempt_id: Option<AttemptId>,
+        operation_id: Option<OperationId>,
+        mode: RecordMode,
+        clock: &dyn Clock,
+        cancel: &CancelToken,
+    ) -> Result<RefRecord, WorktreeError> {
+        validate_endpoint(&endpoint)?;
+        validate_reference(&endpoint, &reference)?;
         let _lock = self.lock(clock, cancel)?;
-        let current = self.load(&observation.endpoint, &observation.reference)?;
-        if let Some(current) = current.as_ref()
-            && current.tip == observation.tip
-            && (observation.origin == RefOrigin::Adopted
-                || observation.attempt_id.is_some()
-                    && current.attempt_id == observation.attempt_id
-                    && current.origin == observation.origin)
-        {
-            return Ok(current.clone());
+        let current = self.load_identity(&endpoint, &reference)?;
+        let sequence = self.generation_high_water(current.as_ref())?;
+        let last_generation = sequence.last_generation;
+        if let Some(current) = current.as_ref() {
+            let replay_matches = match mode {
+                RecordMode::Register => {
+                    (attempt_id.is_some() || operation_id.is_some())
+                        && current.attempt_id == attempt_id
+                        && current.operation_id == operation_id
+                }
+                RecordMode::Observe => true,
+                RecordMode::ScopedOwner => {
+                    current.attempt_id == attempt_id && current.operation_id == operation_id
+                }
+            };
+            if current.tip == tip && replay_matches {
+                return Ok(current.clone());
+            }
         }
+        let (origin, attempt_id, operation_id) = if mode == RecordMode::Observe {
+            current
+                .as_ref()
+                .map_or((origin, attempt_id, operation_id), |current| {
+                    (
+                        current.origin,
+                        current.attempt_id,
+                        current.operation_id.clone(),
+                    )
+                })
+        } else {
+            (origin, attempt_id, operation_id)
+        };
+        let generation = last_generation
+            .checked_add(1)
+            .ok_or(WorktreeError::InvalidRequest)?;
+        // Publish the high-water mark first. A failed record write may leave a
+        // gap, but forgetting a RefRecord can never make its token reusable.
+        self.write_generation_high_water(generation, sequence.extra)?;
         let record = RefRecord {
             schema_version: 1,
             repository: self.repository,
-            endpoint: observation.endpoint,
-            reference: observation.reference.as_str().to_owned(),
-            generation: current
+            endpoint,
+            reference: reference.clone(),
+            generation,
+            origin,
+            tip,
+            recorded_at,
+            attempt_id,
+            operation_id,
+            extra: current
                 .as_ref()
-                .map_or(Some(1), |current| current.generation.checked_add(1))
-                .ok_or(WorktreeError::InvalidRequest)?,
-            origin: observation.origin,
-            tip: observation.tip,
-            recorded_at: observation.recorded_at,
-            attempt_id: observation.attempt_id,
-            operation_id: observation.operation_id,
+                .map_or_else(Default::default, |record| record.extra.clone()),
         };
-        let name = record_name(&record.endpoint, &observation.reference)?;
+        let name = record_name(&record.endpoint, &record.reference)?;
         self.directory
             .atomic_write(
                 OsStr::new(&name),
@@ -209,6 +412,34 @@ impl RefLedger {
             .map_err(|_| WorktreeError::RegistrationUnconfirmed)?;
         Ok(record)
     }
+}
+
+/// Keep a worktree tip reachable across checkout retirement and durably record
+/// the ref before the caller writes its retirement intent. The ref name is
+/// stable per object, so an interrupted retry repairs the ledger record rather
+/// than creating another preservation ref.
+pub(super) fn preserve_tip(
+    context: &WorktreeContext<'_>,
+    tip: GitOid,
+    cancel: &CancelToken,
+) -> Result<RefRecord, WorktreeError> {
+    let reference =
+        GitRefName::preserved_tip(tip.to_string()).map_err(|_| WorktreeError::InvalidRequest)?;
+    match super::ref_tip(context, &reference, cancel)? {
+        Some(actual) if actual == tip => {}
+        Some(_) => return Err(WorktreeError::IdentityChanged),
+        None => {
+            super::lifecycle::execute_mutation(
+                context,
+                GitMutation::CreatePreservationRef {
+                    reference: reference.clone(),
+                    tip,
+                },
+                cancel,
+            )?;
+        }
+    }
+    RefLedger::for_context(context)?.observe_local_branch(&reference, tip, context.clock, cancel)
 }
 
 impl RefLedger {
@@ -233,7 +464,7 @@ impl RefLedger {
     /// belongs elsewhere is skipped, so the ref it names stays unobserved and
     /// is retained. The listing is bounded; a larger ledger is an error.
     pub fn list(&self) -> Result<Vec<RefRecord>, WorktreeError> {
-        let mut names = provenant_os::fs::entry_names(&self.directory, MAX_LEDGER_RECORDS)?;
+        let mut names = provenant_os::fs::entry_names(&self.directory, MAX_LEDGER_ENTRIES)?;
         names.sort();
         let mut records = Vec::new();
         for name in names {
@@ -243,15 +474,21 @@ impl RefLedger {
             let Ok(bytes) = read_bounded(&self.directory, &name, MAX_STATE_RECORD) else {
                 continue;
             };
-            let Ok(record) = serde_json::from_slice::<RefRecord>(&bytes) else {
-                continue;
-            };
-            let Ok(reference) = GitRefName::new(&record.reference) else {
+            let Ok(record) = provenant_records::decode::<RefRecord, _>(
+                bytes.as_slice(),
+                provenant_records::Limits {
+                    max_bytes: MAX_STATE_RECORD,
+                    ..Default::default()
+                },
+            ) else {
                 continue;
             };
             if record.repository != self.repository
                 || validate_record(&record).is_err()
-                || record_name(&record.endpoint, &reference).ok().as_deref() != name.to_str()
+                || record_name(&record.endpoint, &record.reference)
+                    .ok()
+                    .as_deref()
+                    != name.to_str()
             {
                 continue;
             }
@@ -268,13 +505,17 @@ impl RefLedger {
         clock: &dyn Clock,
         cancel: &CancelToken,
     ) -> Result<bool, WorktreeError> {
-        let reference =
-            GitRefName::new(&record.reference).map_err(|_| WorktreeError::InvalidRequest)?;
+        validate_record(record)?;
         let _lock = self.lock(clock, cancel)?;
-        if self.load(&record.endpoint, &reference)?.as_ref() != Some(record) {
+        if self
+            .load_identity(&record.endpoint, &record.reference)?
+            .as_ref()
+            != Some(record)
+        {
             return Ok(false);
         }
-        let name = record_name(&record.endpoint, &reference)?;
+        self.generation_high_water(Some(record))?;
+        let name = record_name(&record.endpoint, &record.reference)?;
         self.directory.unlink(OsStr::new(&name))?;
         self.directory.sync()?;
         Ok(true)
@@ -290,9 +531,9 @@ fn private_child(parent: &Directory, name: &OsStr) -> Result<Directory, Worktree
     Ok(parent.open_verified_directory(name)?)
 }
 
-fn record_name(endpoint: &RefEndpoint, reference: &GitRefName) -> Result<String, WorktreeError> {
-    let key = serde_json::to_vec(&(endpoint, reference.as_str()))
-        .map_err(|_| WorktreeError::InvalidRequest)?;
+fn record_name(endpoint: &RefEndpoint, reference: &str) -> Result<String, WorktreeError> {
+    let key =
+        serde_json::to_vec(&(endpoint, reference)).map_err(|_| WorktreeError::InvalidRequest)?;
     Ok(format!("{}.json", hex(&Sha256::digest(key))))
 }
 
@@ -309,19 +550,74 @@ fn validate_endpoint(endpoint: &RefEndpoint) -> Result<(), WorktreeError> {
                 Ok(())
             }
         }
+        RefEndpoint::Worktree { path } if valid_worktree_path(path) => Ok(()),
+        RefEndpoint::Worktree { .. } => Err(WorktreeError::InvalidRequest),
+    }
+}
+
+fn valid_worktree_path(path: &str) -> bool {
+    let path = Path::new(path);
+    let text = path.to_string_lossy();
+    text.len() <= MAX_WORKTREE_PATH
+        && !text.is_empty()
+        && !text.contains("//")
+        && !text.chars().any(char::is_control)
+        && text
+            .split('/')
+            .skip(1)
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+        && path.is_absolute()
+        && path
+            .components()
+            .any(|component| matches!(component, std::path::Component::Normal(_)))
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
+}
+
+fn worktree_endpoint(path: &Path) -> Result<RefEndpoint, WorktreeError> {
+    let path = path.to_str().ok_or(WorktreeError::InvalidRequest)?;
+    let endpoint = RefEndpoint::Worktree {
+        path: path.to_owned(),
+    };
+    validate_endpoint(&endpoint)?;
+    Ok(endpoint)
+}
+
+fn canonical_worktree_endpoint(path: &Path) -> Result<RefEndpoint, WorktreeError> {
+    let path = canonicalize(path).map_err(|_| WorktreeError::NotFound)?;
+    worktree_endpoint(&path)
+}
+
+fn validate_reference(endpoint: &RefEndpoint, reference: &str) -> Result<(), WorktreeError> {
+    match endpoint {
+        RefEndpoint::Worktree { .. } if reference == PRIVATE_HEAD => Ok(()),
+        RefEndpoint::Worktree { .. } => Err(WorktreeError::InvalidRequest),
+        RefEndpoint::Local
+            if reference.starts_with("refs/") && GitRefName::new(reference).is_ok() =>
+        {
+            Ok(())
+        }
+        RefEndpoint::Local if GitRefName::parse_preserved_tip(reference).is_ok() => Ok(()),
+        RefEndpoint::Remote { .. }
+            if reference.starts_with("refs/") && GitRefName::new(reference).is_ok() =>
+        {
+            Ok(())
+        }
+        RefEndpoint::Local | RefEndpoint::Remote { .. } => Err(WorktreeError::InvalidRequest),
     }
 }
 
 fn validate_record(record: &RefRecord) -> Result<(), WorktreeError> {
     validate_endpoint(&record.endpoint).map_err(|_| WorktreeError::InvalidOutput)?;
-    if record.schema_version != 1
-        || record.generation == 0
-        || GitRefName::new(&record.reference).is_err()
-        || !record.reference.starts_with("refs/")
-    {
+    if record.schema_version != 1 || record.generation == 0 {
         return Err(WorktreeError::InvalidOutput);
     }
-    Ok(())
+    validate_reference(&record.endpoint, &record.reference)
+        .map_err(|_| WorktreeError::InvalidOutput)
 }
 
 /// Record a local branch the lifecycle just created or reused. Failure leaves
@@ -354,4 +650,67 @@ pub(super) fn record_local_branch(
         context.clock,
         cancel,
     )
+}
+
+#[cfg(test)]
+mod stored_shape_tests {
+    use super::*;
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
+
+    fn decode_limits() -> provenant_records::Limits {
+        provenant_records::Limits {
+            max_bytes: MAX_STATE_RECORD,
+            ..Default::default()
+        }
+    }
+
+    fn round_trip_unknown<T>(mut payload: serde_json::Value)
+    where
+        T: DeserializeOwned + Serialize,
+    {
+        let future = serde_json::json!({"newer_writer": {"enabled": true}});
+        payload
+            .as_object_mut()
+            .expect("stored record object")
+            .insert("future_member".into(), future.clone());
+        let bytes = provenant_records::encode(&payload).expect("encode test payload");
+        let decoded: T = provenant_records::decode(bytes.as_slice(), decode_limits())
+            .expect("decode bounded stored record");
+        let rewritten = provenant_records::encode(&decoded).expect("encode typed record");
+        let value: serde_json::Value =
+            provenant_records::decode(rewritten.as_slice(), decode_limits())
+                .expect("decode rewritten record");
+        assert_eq!(value, payload);
+        assert_eq!(value["future_member"], future);
+    }
+
+    #[test]
+    fn ref_record_round_trips_unknown_fields_through_the_bounded_decoder() {
+        let record = RefRecord {
+            schema_version: 1,
+            repository: ProjectId::parse("01abcdef2345678901abcdef23456789").unwrap(),
+            endpoint: RefEndpoint::Local,
+            reference: "refs/heads/topic".into(),
+            generation: 1,
+            origin: RefOrigin::Created,
+            tip: GitOid::parse(&"ab".repeat(20)).unwrap(),
+            recorded_at: WallTime::from_unix_seconds(0).unwrap(),
+            attempt_id: None,
+            operation_id: None,
+            extra: Default::default(),
+        };
+        round_trip_unknown::<RefRecord>(serde_json::to_value(record).unwrap());
+    }
+
+    #[test]
+    fn generation_sequence_round_trips_unknown_fields_through_the_bounded_decoder() {
+        let sequence = GenerationSequence {
+            schema_version: 1,
+            repository: ProjectId::parse("01abcdef2345678901abcdef23456789").unwrap(),
+            last_generation: 1,
+            extra: Default::default(),
+        };
+        round_trip_unknown::<GenerationSequence>(serde_json::to_value(sequence).unwrap());
+    }
 }

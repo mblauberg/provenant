@@ -2,10 +2,10 @@
 use super::*;
 
 #[test]
-fn settlement_defers_adopted_writer_cleanup()
--> Result<(), Box<dyn std::error::Error>> {
-    if host_test("fabric::peer_tests::peer_writer_delivery::settlement_defers_adopted_writer_cleanup")?
-    {
+fn settlement_defers_adopted_writer_cleanup() -> Result<(), Box<dyn std::error::Error>> {
+    if host_test(
+        "fabric::peer_tests::peer_writer_delivery::settlement_defers_adopted_writer_cleanup",
+    )? {
         return Ok(());
     }
     let fixture = SettlementFixture::resumed()?;
@@ -38,28 +38,45 @@ fn settlement_defers_adopted_writer_cleanup()
         cancel: &cancel,
     };
     settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
-    let mut receipt = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?
+    let mut receipt = fixture
+        .store
+        .worktree_settlement(fixture.settled.attempt_id, &call)?
         .ok_or("deferred receipt")?;
     assert_eq!(receipt["state"], "retained");
     assert_eq!(receipt["cleanup_deferred"], true);
     assert!(fixture.worktree.exists());
     // Repeating settlement keeps its deferred receipt and makes one more attempt.
-    receipt.as_object_mut().ok_or("receipt object")?.remove("cleanup_warning");
-    let spawned = gc_cleanup::SPAWNED.with_borrow(|spawned| spawned.as_ref().map(Vec::len).map_err(Clone::clone))?;
+    receipt
+        .as_object_mut()
+        .ok_or("receipt object")?
+        .remove("cleanup_warning");
+    let spawned = gc_cleanup::SPAWNED
+        .with_borrow(|spawned| spawned.as_ref().map(Vec::len).map_err(Clone::clone))?;
     settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
-    assert_eq!(fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?, Some(receipt));
-    assert_eq!(gc_cleanup::SPAWNED.with_borrow(|spawned| spawned.as_ref().map(Vec::len).map_err(Clone::clone))?, spawned + 1);
+    assert_eq!(
+        fixture
+            .store
+            .worktree_settlement(fixture.settled.attempt_id, &call)?,
+        Some(receipt)
+    );
+    assert_eq!(
+        gc_cleanup::SPAWNED
+            .with_borrow(|spawned| spawned.as_ref().map(Vec::len).map_err(Clone::clone))?,
+        spawned + 1
+    );
     gc_cleanup::collect_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
     assert!(fixture.worktree.exists());
-    let retained = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?.ok_or("retained receipt")?;
+    let retained = fixture
+        .store
+        .worktree_settlement(fixture.settled.attempt_id, &call)?
+        .ok_or("retained receipt")?;
     assert_eq!(retained["state"], "retained");
     assert_eq!(retained["cleanup_complete"], true);
     Ok(())
 }
 
 #[test]
-fn settlement_defers_tracking_ref_refresh()
--> Result<(), Box<dyn std::error::Error>> {
+fn settlement_defers_tracking_ref_refresh() -> Result<(), Box<dyn std::error::Error>> {
     if host_test(
         "fabric::peer_tests::peer_writer_delivery::settlement_defers_tracking_ref_refresh",
     )? {
@@ -88,15 +105,24 @@ fn settlement_defers_tracking_ref_refresh()
     assert_eq!(receipt["state"], "retained", "{receipt}");
     assert_eq!(receipt["cleanup_deferred"], true);
     gc_cleanup::collect_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
-    let completed = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?.ok_or("completed receipt")?;
-    assert_eq!(completed["state"], "pruned", "{completed}");
+    // An unreachable remote proves nothing: the refresh failure is reported
+    // and the worktree stays for a later retry, never removed on it.
+    let completed = fixture
+        .store
+        .worktree_settlement(fixture.settled.attempt_id, &call)?
+        .ok_or("completed receipt")?;
+    assert_eq!(completed["state"], "retained", "{completed}");
+    assert_eq!(completed["retryable"], true, "{completed}");
     assert!(completed["tracking_ref_warning"].is_string(), "{completed}");
+    assert!(fixture.worktree.exists());
     Ok(())
 }
 
 #[test]
 fn unmatched_graph_writer_keeps_its_worktree() -> Result<(), Box<dyn std::error::Error>> {
-    if host_test("fabric::peer_tests::peer_writer_delivery::unmatched_graph_writer_keeps_its_worktree")? {
+    if host_test(
+        "fabric::peer_tests::peer_writer_delivery::unmatched_graph_writer_keeps_its_worktree",
+    )? {
         return Ok(());
     }
     for corrupt in [false, true] {
@@ -107,31 +133,49 @@ fn unmatched_graph_writer_keeps_its_worktree() -> Result<(), Box<dyn std::error:
         };
         let clock = SystemClock;
         let cancel = CancelToken::new();
-        let call = provenant_run::Request { clock: &clock, cancel: &cancel };
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
         if corrupt {
             drop(provenant_fabric_runtime::graph::FileJournal::open(
-                &fixture.roots.state, fixture.settled.project_id, "broken",
-                call.lock_budget(), &cancel, &clock,
+                &fixture.roots.state,
+                fixture.settled.project_id,
+                "broken",
+                call.lock_budget(),
+                &cancel,
+                &clock,
             )?);
-            let path = fixture.roots.state.as_path().join("fabric/graphs")
-                .join(fixture.settled.project_id.to_string()).join("graph-broken.json");
+            let path = fixture
+                .roots
+                .state
+                .as_path()
+                .join("fabric/graphs")
+                .join(fixture.settled.project_id.to_string())
+                .join("graph-broken.json");
             std::fs::write(path, b"invalid checkpoint")?;
         }
         settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
-        let receipt = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?
+        let receipt = fixture
+            .store
+            .worktree_settlement(fixture.settled.attempt_id, &call)?
             .ok_or("missing settlement")?;
         assert_eq!(receipt["state"], "retained");
-        assert!(receipt["reason"].as_str().is_some_and(|reason| !reason.is_empty()));
+        assert!(
+            receipt["reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty())
+        );
         assert!(fixture.worktree.exists());
     }
     Ok(())
 }
 
 #[test]
-fn resumed_lane_settlement_ignores_terminal_graph()
--> Result<(), Box<dyn std::error::Error>> {
-    if host_test("fabric::peer_tests::peer_writer_delivery::resumed_lane_settlement_ignores_terminal_graph")?
-    {
+fn resumed_lane_settlement_ignores_terminal_graph() -> Result<(), Box<dyn std::error::Error>> {
+    if host_test(
+        "fabric::peer_tests::peer_writer_delivery::resumed_lane_settlement_ignores_terminal_graph",
+    )? {
         return Ok(());
     }
     use provenant_fabric_runtime::graph::{self, GraphJournal};
@@ -143,13 +187,26 @@ fn resumed_lane_settlement_ignores_terminal_graph()
             "access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
     }))?;
     let checkpoint: graph::GraphCheckpoint = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"terminal-unrelated","plan_digest":"digest",
+        "schema_version":2,"graph_id":"terminal-unrelated","plan_digest":"digest",
         "nodes":[{"id":"one","state":"succeeded","attempts":[]}]
     }))?;
-    let mut journal = graph::FileJournal::open(&fixture.roots.state, fixture.settled.project_id,
-        "terminal-unrelated", WaitBudget::cli(clock.mono_now(), 10)?, &cancel, &clock)?;
-    journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
-        directory: fixture.rig.project.clone(), document })?;
+    let mut journal = graph::FileJournal::open(
+        &fixture.roots.state,
+        fixture.settled.project_id,
+        "terminal-unrelated",
+        WaitBudget::cli(clock.mono_now(), 10)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(graph::GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
+        bases: None,
+        directory: fixture.rig.project.clone(),
+        document,
+        extra: Default::default(),
+    })?;
     journal.save(&checkpoint)?;
     drop(journal);
     graph::take_checkpoint_read_ids();
@@ -172,8 +229,6 @@ fn resumed_lane_settlement_ignores_terminal_graph()
         fixture
             .rig
             .state
-            .join("runs")
-            .join(fixture.settled.run_id.to_string())
             .join("attempts")
             .join(fixture.settled.attempt_id.to_string())
             .join("worktree-settlement.json")
@@ -183,10 +238,11 @@ fn resumed_lane_settlement_ignores_terminal_graph()
 }
 
 #[test]
-fn resumed_lane_settlement_defers_cleanup_and_records_its_receipt()
+fn resumed_lane_settlement_defers_cleanup_and_keeps_work_without_removal_proof()
 -> Result<(), Box<dyn std::error::Error>> {
-    if host_test("fabric::peer_tests::peer_writer_delivery::resumed_lane_settlement_defers_cleanup_and_records_its_receipt")?
-    {
+    if host_test(
+        "fabric::peer_tests::peer_writer_delivery::resumed_lane_settlement_defers_cleanup_and_keeps_work_without_removal_proof",
+    )? {
         return Ok(());
     }
     let fixture = SettlementFixture::resumed()?;
@@ -194,10 +250,23 @@ fn resumed_lane_settlement_defers_cleanup_and_records_its_receipt()
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 10)?;
     drop(provenant_fabric_runtime::graph::FileJournal::open(
-        &fixture.roots.state, fixture.settled.project_id, "unrelated", budget, &cancel, &clock,
+        &fixture.roots.state,
+        fixture.settled.project_id,
+        "unrelated",
+        budget,
+        &cancel,
+        &clock,
     )?);
-    std::fs::write(fixture.roots.state.as_path().join("fabric/graphs")
-        .join(fixture.settled.project_id.to_string()).join("graph-unrelated.json"), b"invalid checkpoint")?;
+    std::fs::write(
+        fixture
+            .roots
+            .state
+            .as_path()
+            .join("fabric/graphs")
+            .join(fixture.settled.project_id.to_string())
+            .join("graph-unrelated.json"),
+        b"invalid checkpoint",
+    )?;
     settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
     let call = provenant_run::Request {
         clock: &clock,
@@ -212,21 +281,30 @@ fn resumed_lane_settlement_defers_cleanup_and_records_its_receipt()
     assert!(fixture.worktree.exists());
     // Settlement only starts collection; the detached GC entry point owns removal.
     let request_json = gc_cleanup::SPAWNED
-        .with_borrow(|spawned| spawned.as_ref().ok().and_then(|spawned| spawned.last().cloned()))
+        .with_borrow(|spawned| {
+            spawned
+                .as_ref()
+                .ok()
+                .and_then(|spawned| spawned.last().cloned())
+        })
         .ok_or("settlement did not start collection")?;
-    gc_cleanup::run(&request_json, &FreeWorkers)?;
-    assert!(!fixture.worktree.exists());
-    let completed = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?.ok_or("completed receipt")?;
-    assert_eq!(completed["state"], "pruned", "{completed}");
-    // A replay still completes after the worktree has gone.
-    gc_cleanup::run(&request_json, &FreeWorkers)?;
+    // With no delivery and no integration target there is no exact ref to prove
+    // removal, so collection keeps the work, stays retryable and replays cleanly.
+    for _ in 0..2 {
+        gc_cleanup::run(&request_json, &FreeWorkers)?;
+        assert!(fixture.worktree.exists());
+        let kept = fixture
+            .store
+            .worktree_settlement(fixture.settled.attempt_id, &call)?
+            .ok_or("kept receipt")?;
+        assert_eq!(kept["state"], "retained", "{kept}");
+        assert_eq!(kept["retryable"], true, "{kept}");
+    }
 
     assert!(
         fixture
             .rig
             .state
-            .join("runs")
-            .join(fixture.settled.run_id.to_string())
             .join("attempts")
             .join(fixture.settled.attempt_id.to_string())
             .join("worktree-settlement.json")
@@ -236,8 +314,8 @@ fn resumed_lane_settlement_defers_cleanup_and_records_its_receipt()
 }
 
 #[test]
-fn deliver_none_does_not_try_to_settle_a_missing_delivery()
--> Result<(), Box<dyn std::error::Error>> {
+fn deliver_none_does_not_try_to_settle_a_missing_delivery() -> Result<(), Box<dyn std::error::Error>>
+{
     struct NoWorkers;
     impl provenant_confinement::worktrees::WorkerObserver for NoWorkers {
         fn observe_roots(
@@ -305,6 +383,9 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
     ] {
         let state = AttemptState::Terminal {
             extra: Default::default(),
+            terminal_cause: None,
+            terminal_note: None,
+            stop: None,
             outcome,
             exit_code: Some(1),
             finished_at: provenant_core::WallTime::from_micros(0)?,
@@ -315,6 +396,9 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
     }
     let succeeded = AttemptState::Terminal {
         extra: Default::default(),
+        terminal_cause: None,
+        terminal_note: None,
+        stop: None,
         outcome: Outcome::Succeeded,
         exit_code: Some(0),
         finished_at: provenant_core::WallTime::from_micros(0)?,
@@ -329,14 +413,13 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
         },
         ..delivered
     };
-    assert!(
-        super::settlement_retention_reason(&succeeded, true, Some(&failed_delivery)).is_some()
-    );
+    assert!(super::settlement_retention_reason(&succeeded, true, Some(&failed_delivery)).is_some());
     Ok(())
 }
 
 #[test]
-fn settlement_intent_replays_a_prune_after_a_crash() -> Result<(), Box<dyn std::error::Error>> {
+fn settlement_intent_keeps_prune_pending_until_custody_replay()
+-> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let worktree = temp.path().join("lane");
     std::fs::create_dir(&worktree)?;
@@ -347,8 +430,9 @@ fn settlement_intent_replays_a_prune_after_a_crash() -> Result<(), Box<dyn std::
     std::fs::remove_dir(&worktree)?;
     let receipt = super::replay_worktree_settlement(Some(&intent), &worktree)?
         .ok_or("missing recovered prune receipt")?;
-    assert_eq!(receipt["state"], "pruned");
+    assert_eq!(receipt["state"], "pruning");
     assert_eq!(receipt["recovered_from_intent"], true);
+    assert_ne!(receipt["state"], "pruned");
     assert_eq!(
         super::replay_worktree_settlement(Some(&receipt), &worktree)?,
         Some(receipt)
@@ -367,11 +451,11 @@ fn submit_io_keeps_the_inner_operation_without_inventing_a_path() {
     assert_eq!(
         error,
         super::FacadeError::Io {
-        delivery_limit: None,
-        delivery_stage: None,
-        resource: None,
-        input_failure: None,
-        cause: None,
+            delivery_limit: None,
+            delivery_stage: None,
+            resource: None,
+            input_failure: None,
+            cause: None,
             operation: "submit: access Fabric database".into(),
             path: None,
         }
@@ -393,11 +477,11 @@ fn submit_io_retains_single_prefix_for_peer_error_and_scopes_local_error() {
     assert_eq!(
         rescoped,
         super::FacadeError::Io {
-        delivery_limit: None,
-        delivery_stage: None,
-        resource: None,
-        input_failure: None,
-        cause: None,
+            delivery_limit: None,
+            delivery_stage: None,
+            resource: None,
+            input_failure: None,
+            cause: None,
             operation: "submit: open writer repository".into(),
             path: Some("/repo".into()),
         }
@@ -416,11 +500,11 @@ fn submit_io_retains_single_prefix_for_peer_error_and_scopes_local_error() {
     assert_eq!(
         scoped,
         super::FacadeError::Io {
-        delivery_limit: None,
-        delivery_stage: None,
-        resource: None,
-        input_failure: None,
-        cause: None,
+            delivery_limit: None,
+            delivery_stage: None,
+            resource: None,
+            input_failure: None,
+            cause: None,
             operation: "submit: open writer repository".into(),
             path: Some("/repo".into()),
         }
@@ -432,12 +516,13 @@ fn writer_repository_open_failure_hides_unanchored_project_path()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let root = std::fs::canonicalize(temp.path())?;
+    let project = provenant_core::ProjectId::from_bytes([1; 16]);
     let request = provenant_run::WriterRequest {
         extra: Default::default(),
+        custody_project: Some(project),
         project: root.clone(),
         worktree: root.join("writer"),
     };
-    let project = provenant_core::ProjectId::from_bytes([1; 16]);
     let error = match provenant_run::prepare_writer(&request, &root, project) {
         Ok(_) => return Err("non-repository unexpectedly opened".into()),
         Err(error) => super::run_error(error),
@@ -462,7 +547,7 @@ fn typed_run_errors_keep_their_codes() {
             provenant_run::RunError::ProviderStateExpired,
             "provider_state_expired",
         ),
-        // The CLI and MCP share one categorisation.
+        // The CLI and relay share one categorisation.
         (
             provenant_run::RunError::Validation("input"),
             "invalid_input",
@@ -484,18 +569,17 @@ fn typed_run_errors_keep_their_codes() {
 }
 
 #[test]
-fn peer_run_errors_stay_typed_through_cli_rendering() -> Result<(), Box<dyn std::error::Error>>
-{
+fn peer_run_errors_stay_typed_through_cli_rendering() -> Result<(), Box<dyn std::error::Error>> {
     for error in [
         super::FacadeError::NotTerminal,
         super::FacadeError::OperationConflict,
         super::FacadeError::OwnerUnavailable,
         super::FacadeError::Io {
-        delivery_limit: None,
-        delivery_stage: None,
-        resource: None,
-        input_failure: None,
-        cause: None,
+            delivery_limit: None,
+            delivery_stage: None,
+            resource: None,
+            input_failure: None,
+            cause: None,
             operation: "openat directory".into(),
             path: Some("/state/worktrees".into()),
         },
@@ -511,8 +595,7 @@ fn peer_run_errors_stay_typed_through_cli_rendering() -> Result<(), Box<dyn std:
             },
             extra: Default::default(),
         });
-        let response: super::PeerResult =
-            serde_json::from_slice(&serde_json::to_vec(&response)?)?;
+        let response: super::PeerResult = serde_json::from_slice(&serde_json::to_vec(&response)?)?;
         let super::PeerResult::Error {
             data: provenant_fabric_runtime::hosts::PeerResultError { error, .. },
             ..
@@ -542,7 +625,7 @@ fn submit_lane_refusal_maps_to_dispatch_refused() -> Result<(), Box<dyn std::err
     // A nonexistent read root is refused before any state tree is touched.
     let fail = provenant_cli::run::lane_access(
         &provenant_cli::Access {
-    attach: Vec::new(),
+            attach: Vec::new(),
             mode: None,
             worktree: None,
             read_root: vec!["/fixture/missing-root".into()],
@@ -552,7 +635,7 @@ fn submit_lane_refusal_maps_to_dispatch_refused() -> Result<(), Box<dyn std::err
             no_capability: Vec::new(),
         },
         Path::new("never-opened-state"),
-        Path::new("/fixture/host-home"),
+        &provenant_core::CredentialRoots::for_home(Path::new("/fixture/host-home")),
     )
     .err()
     .ok_or("missing root refuses")?;
@@ -565,7 +648,10 @@ fn submit_lane_refusal_maps_to_dispatch_refused() -> Result<(), Box<dyn std::err
     }
     // The kind alone renders as invalid input; the dispatch edge must not
     // lose the refusal by rerendering it.
-    assert_eq!(super::facade_error_for_kind(kind), FacadeError::InvalidInput { detail: None });
+    assert_eq!(
+        super::facade_error_for_kind(kind),
+        FacadeError::InvalidInput { detail: None }
+    );
     Ok(())
 }
 
@@ -601,8 +687,7 @@ fn host_probe_budget_is_shared_fairly() {
 }
 
 #[test]
-fn forwarded_unobservable_cancel_keeps_its_operation() -> Result<(), Box<dyn std::error::Error>>
-{
+fn forwarded_unobservable_cancel_keeps_its_operation() -> Result<(), Box<dyn std::error::Error>> {
     let error = super::FacadeError::LaunchUnknown {
         operation_id: provenant_core::OperationId::parse("stop")?,
     };

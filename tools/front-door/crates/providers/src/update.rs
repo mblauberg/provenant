@@ -8,6 +8,8 @@ use provenant_os::{
 use serde::{Deserialize, Serialize};
 use std::{ffi::OsString, path::Path, time::Duration};
 
+const STORED_RECORD_BYTES: u64 = 4096;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateRecord {
     pub checked_unix_seconds: i64,
@@ -16,14 +18,59 @@ pub struct UpdateRecord {
     pub outcome: String,
 }
 
+/// The on-disk form retains fields introduced by a newer minor. The public
+/// record remains the small provider-update view exposed to callers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredUpdateRecord {
+    #[serde(flatten)]
+    record: UpdateRecord,
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
+}
+
+impl std::ops::Deref for StoredUpdateRecord {
+    type Target = UpdateRecord;
+
+    fn deref(&self) -> &Self::Target {
+        &self.record
+    }
+}
+
+impl std::ops::DerefMut for StoredUpdateRecord {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.record
+    }
+}
+
+impl From<&StoredUpdateRecord> for UpdateRecord {
+    fn from(record: &StoredUpdateRecord) -> Self {
+        record.record.clone()
+    }
+}
+
+impl From<UpdateRecord> for StoredUpdateRecord {
+    fn from(record: UpdateRecord) -> Self {
+        Self {
+            record,
+            extra: Default::default(),
+        }
+    }
+}
+
 fn record_name(provider: &str) -> OsString {
     format!("{provider}.json").into()
 }
 
 pub fn latest(state: &Path, provider: &str) -> Option<UpdateRecord> {
+    latest_stored(state, provider)
+        .as_ref()
+        .map(UpdateRecord::from)
+}
+
+fn latest_stored(state: &Path, provider: &str) -> Option<StoredUpdateRecord> {
     let dir = Directory::open_anchor(&state.join("provider-updates")).ok()?;
-    let read = |name: &std::ffi::OsStr| -> Option<UpdateRecord> {
-        serde_json::from_slice(&dir.read_stable(name, 4096).ok()?).ok()
+    let read = |name: &std::ffi::OsStr| -> Option<StoredUpdateRecord> {
+        decode_stored(&dir.read_stable(name, STORED_RECORD_BYTES).ok()?)
     };
     let result = read(&record_name(provider));
     let attempt = read(&attempt_name(provider));
@@ -31,12 +78,26 @@ pub fn latest(state: &Path, provider: &str) -> Option<UpdateRecord> {
         (Some(result), Some(mut attempt))
             if attempt.checked_unix_seconds > result.checked_unix_seconds =>
         {
-            attempt.old_version = attempt.old_version.or(result.old_version);
-            attempt.new_version = attempt.new_version.or(result.new_version);
+            attempt.old_version = attempt.old_version.clone().or(result.old_version.clone());
+            attempt.new_version = attempt.new_version.clone().or(result.new_version.clone());
+            retain_older_fields(&mut attempt.extra, result.extra);
             Some(attempt)
+        }
+        (Some(mut result), Some(attempt)) => {
+            retain_older_fields(&mut result.extra, attempt.extra);
+            Some(result)
         }
         (Some(result), _) => Some(result),
         (None, attempt) => attempt,
+    }
+}
+
+fn retain_older_fields(
+    newer: &mut provenant_records::ExtraFields,
+    older: provenant_records::ExtraFields,
+) {
+    for (key, value) in older {
+        newer.entry(key).or_insert(value);
     }
 }
 
@@ -62,6 +123,45 @@ pub struct WorkerRecord {
     pub failure: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredWorkerRecord {
+    #[serde(flatten)]
+    record: WorkerRecord,
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
+}
+
+impl std::ops::Deref for StoredWorkerRecord {
+    type Target = WorkerRecord;
+
+    fn deref(&self) -> &Self::Target {
+        &self.record
+    }
+}
+
+impl std::ops::DerefMut for StoredWorkerRecord {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.record
+    }
+}
+
+impl From<&StoredWorkerRecord> for WorkerRecord {
+    fn from(record: &StoredWorkerRecord) -> Self {
+        record.record.clone()
+    }
+}
+
+fn decode_stored<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+    provenant_records::decode(
+        bytes,
+        provenant_records::Limits {
+            max_bytes: STORED_RECORD_BYTES,
+            ..provenant_records::Limits::default()
+        },
+    )
+    .ok()
+}
+
 fn worker_directory(state: &Path) -> Result<Directory, String> {
     let root = Directory::open_anchor(state).map_err(|e| e.to_string())?;
     match root.mkdir(std::ffi::OsStr::new("provider-updates"), 0o700) {
@@ -74,50 +174,53 @@ fn worker_directory(state: &Path) -> Result<Directory, String> {
 }
 
 pub fn worker(state: &Path) -> Option<WorkerRecord> {
+    stored_worker(state).as_ref().map(WorkerRecord::from)
+}
+
+fn stored_worker(state: &Path) -> Option<StoredWorkerRecord> {
     let dir = Directory::open_anchor(&state.join("provider-updates")).ok()?;
-    serde_json::from_slice(
-        &dir.read_stable(std::ffi::OsStr::new(WORKER_RECORD), 4096)
+    decode_stored(
+        &dir.read_stable(std::ffi::OsStr::new(WORKER_RECORD), STORED_RECORD_BYTES)
             .ok()?,
     )
-    .ok()
 }
 
 /// Claim the right to launch the detached worker. False inside the backoff, or
 /// when the claim cannot be stored, since an unrecorded launch cannot back off.
 pub fn reserve_worker(state: &Path, now: i64) -> bool {
-    if worker(state).is_some_and(|record| {
+    let mut record = stored_worker(state);
+    if record.as_ref().is_some_and(|record| {
         now.saturating_sub(record.started_unix_seconds) < WORKER_BACKOFF.delay(0).as_secs() as i64
     }) {
         return false;
     }
+    let mut record = record.take().unwrap_or_else(|| StoredWorkerRecord {
+        record: WorkerRecord {
+            started_unix_seconds: now,
+            failure: None,
+        },
+        extra: Default::default(),
+    });
+    record.started_unix_seconds = now;
+    record.failure = None;
     worker_directory(state)
-        .and_then(|dir| {
-            save(
-                &dir,
-                std::ffi::OsStr::new(WORKER_RECORD),
-                &WorkerRecord {
-                    started_unix_seconds: now,
-                    failure: None,
-                },
-            )
-        })
+        .and_then(|dir| save(&dir, std::ffi::OsStr::new(WORKER_RECORD), &record))
         .is_ok()
 }
 
 /// Keep the worker's cause where a later reader can find it; its own stderr is
 /// detached. Best effort: the launch claim already holds the backoff.
 pub fn finish_worker(state: &Path, now: i64, failure: Option<&str>) {
-    let started = worker(state).map_or(now, |record| record.started_unix_seconds);
-    let _ = worker_directory(state).and_then(|dir| {
-        save(
-            &dir,
-            std::ffi::OsStr::new(WORKER_RECORD),
-            &WorkerRecord {
-                started_unix_seconds: started,
-                failure: failure.map(|reason| reason.chars().take(512).collect()),
-            },
-        )
+    let mut record = stored_worker(state).unwrap_or_else(|| StoredWorkerRecord {
+        record: WorkerRecord {
+            started_unix_seconds: now,
+            failure: None,
+        },
+        extra: Default::default(),
     });
+    record.failure = failure.map(|reason| reason.chars().take(512).collect());
+    let _ = worker_directory(state)
+        .and_then(|dir| save(&dir, std::ffi::OsStr::new(WORKER_RECORD), &record));
 }
 
 /// A read-only hint for quota events. The worker rechecks under the lease.
@@ -130,7 +233,7 @@ pub fn due(state: &Path, provider: &str, settings: &ProviderSettings, now: i64) 
 }
 
 fn save(dir: &Directory, name: &std::ffi::OsStr, value: &impl Serialize) -> Result<(), String> {
-    let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
+    let bytes = provenant_records::encode(value).map_err(|e| e.to_string())?;
     dir.atomic_write(name, "provider-update", &bytes, PublishMode::Replace)
         .and_then(|p| p.require_durable())
         .map_err(|e| e.to_string())
@@ -218,18 +321,21 @@ pub fn check(
         // attempt destination or lock file) can still publish to the result.
         // If both destinations are unwritable, durable backoff is impossible.
         if let Ok(dir) = Directory::open_anchor(&state.join("provider-updates")) {
-            let latest = latest(state, provider);
+            let latest = latest_stored(state, provider);
             if latest
                 .as_ref()
                 .is_some_and(|record| record.checked_unix_seconds > now)
             {
                 return result;
             }
-            let mut record = latest.unwrap_or(UpdateRecord {
-                checked_unix_seconds: now,
-                old_version: None,
-                new_version: None,
-                outcome: String::new(),
+            let mut record = latest.unwrap_or_else(|| {
+                UpdateRecord {
+                    checked_unix_seconds: now,
+                    old_version: None,
+                    new_version: None,
+                    outcome: String::new(),
+                }
+                .into()
             });
             record.checked_unix_seconds = now;
             record.outcome = format!("failed: {error}");
@@ -249,7 +355,7 @@ fn check_inner(
     lease: &provenant_os::fs::LockGuard,
 ) -> Result<Option<UpdateRecord>, String> {
     let dir = Directory::open_anchor(&state.join("provider-updates")).map_err(|e| e.to_string())?;
-    let previous = latest(state, provider);
+    let previous = latest_stored(state, provider);
     let argv = command(provider, executable, &settings.update);
     if previous.as_ref().is_some_and(|record| {
         now.saturating_sub(record.checked_unix_seconds)
@@ -268,26 +374,38 @@ fn check_inner(
     }
     // Reserve the interval independently of result publication. If that
     // destination is broken, subsequent events still back off on the error.
-    let mut record = UpdateRecord {
-        checked_unix_seconds: now,
-        old_version: previous
+    let mut record = StoredUpdateRecord {
+        record: UpdateRecord {
+            checked_unix_seconds: now,
+            old_version: previous
+                .as_ref()
+                .and_then(|record| record.old_version.clone()),
+            new_version: previous
+                .as_ref()
+                .and_then(|record| record.new_version.clone()),
+            outcome: "failed (interrupted)".into(),
+        },
+        extra: previous
             .as_ref()
-            .and_then(|record| record.old_version.clone()),
-        new_version: previous
-            .as_ref()
-            .and_then(|record| record.new_version.clone()),
-        outcome: "failed (interrupted)".into(),
+            .map(|record| record.extra.clone())
+            .unwrap_or_default(),
     };
     save(&dir, &attempt_name(provider), &record)?;
     let Some(argv) = argv else {
-        let record = UpdateRecord {
-            checked_unix_seconds: now,
-            old_version: None,
-            new_version: None,
-            outcome: "unknown install method".into(),
+        let record = StoredUpdateRecord {
+            record: UpdateRecord {
+                checked_unix_seconds: now,
+                old_version: None,
+                new_version: None,
+                outcome: "unknown install method".into(),
+            },
+            extra: previous
+                .as_ref()
+                .map(|previous| previous.extra.clone())
+                .unwrap_or_default(),
         };
         save(&dir, &record_name(provider), &record)?;
-        return Ok(Some(record));
+        return Ok(Some((&record).into()));
     };
     if let Some(old_version) = version(executor, executable, state) {
         record.old_version = Some(old_version.clone());
@@ -315,7 +433,7 @@ fn check_inner(
         version(executor, executable, state).or_else(|| record.old_version.clone());
     record.outcome = if succeeded { "updated" } else { "failed" }.into();
     save(&dir, &record_name(provider), &record)?;
-    Ok(Some(record))
+    Ok(Some((&record).into()))
 }
 
 #[cfg(test)]
@@ -326,6 +444,60 @@ mod tests {
         os::unix::fs::PermissionsExt,
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn update_record_keeps_newer_fields_when_rewritten() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let dir_path = temp.path().join("provider-updates");
+        std::fs::create_dir(&dir_path)?;
+        let result = br#"{"checked_unix_seconds":1,"old_version":"old","new_version":null,"outcome":"previous","future_result":{"enabled":true}}"#;
+        let attempt = br#"{"checked_unix_seconds":2,"old_version":null,"new_version":"new","outcome":"interrupted","future_attempt":[1,2]}"#;
+        std::fs::write(dir_path.join("claude.json"), result)?;
+        std::fs::write(dir_path.join("claude.attempt.json"), attempt)?;
+
+        let stored = latest_stored(temp.path(), "claude").expect("bounded stored records decode");
+        let dir = Directory::open_anchor(&dir_path)?;
+        save(&dir, &record_name("claude"), &stored)?;
+        let rewritten = latest_stored(temp.path(), "claude").expect("rewritten record decodes");
+        let encoded = provenant_records::encode(&rewritten)?;
+        let value: serde_json::Value = serde_json::from_slice(&encoded)?;
+
+        assert_eq!(rewritten.old_version.as_deref(), Some("old"));
+        assert_eq!(rewritten.new_version.as_deref(), Some("new"));
+        assert_eq!(
+            value.get("future_result"),
+            Some(&serde_json::json!({"enabled": true}))
+        );
+        assert_eq!(
+            value.get("future_attempt"),
+            Some(&serde_json::json!([1, 2]))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn worker_record_keeps_newer_fields_when_finished() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let dir_path = temp.path().join("provider-updates");
+        std::fs::create_dir(&dir_path)?;
+        std::fs::write(
+            dir_path.join(WORKER_RECORD),
+            br#"{"started_unix_seconds":7,"failure":null,"future_worker":{"epoch":2}}"#,
+        )?;
+
+        finish_worker(temp.path(), 9, Some("fixture failure"));
+        let rewritten = stored_worker(temp.path()).expect("rewritten worker record decodes");
+        let encoded = provenant_records::encode(&rewritten)?;
+        let value: serde_json::Value = serde_json::from_slice(&encoded)?;
+
+        assert_eq!(rewritten.started_unix_seconds, 7);
+        assert_eq!(rewritten.failure.as_deref(), Some("fixture failure"));
+        assert_eq!(
+            value.get("future_worker"),
+            Some(&serde_json::json!({"epoch": 2}))
+        );
+        Ok(())
+    }
 
     struct Fake<'a> {
         state: &'a Path,

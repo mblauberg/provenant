@@ -126,12 +126,9 @@ fn optional_findings_distinguish_missing_invalid_and_valid_empty() {
             .as_ref()
             .unwrap();
         assert_eq!(output.findings_available, Some(available));
-        let mut stored = serde_json::to_value(output).unwrap();
+        let stored = serde_json::to_value(output).unwrap();
         let decoded: NodeOutputs = serde_json::from_value(stored.clone()).unwrap();
         assert_eq!(decoded.findings_available, Some(available));
-        stored.as_object_mut().unwrap().remove("findings_available");
-        let older: NodeOutputs = serde_json::from_value(stored).unwrap();
-        assert_eq!(older.findings_available, None);
         let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
         let replayed = replay
             .checkpoint
@@ -432,20 +429,31 @@ fn findings_and_verdict_at_the_end_of_a_large_result_are_parsed() {
         "id": "F1", "severity": "high", "file": "a.rs", "line": 1,
         "summary": "issue", "status": "open"
     });
-    for invalid in [
-        vec![finding.clone(); MAX_FINDINGS + 1],
-        vec![serde_json::json!({
+    let many = vec![finding.clone(); MAX_FINDINGS + 1];
+    let block = serde_json::json!({"schema_version": 1, "findings": many});
+    let captured = capture(&format!("```findings\n{block}\n```"));
+    let mut outputs = make_outputs(Some(&captured), None, None, None, None);
+    assert_eq!(outputs.findings_available, Some(true));
+    compact_findings(&mut outputs, Some(&captured), &[]);
+    assert!(!outputs.findings.is_empty());
+    assert!(canonical_len(&outputs.findings) <= FINDINGS_BYTES);
+
+    let oversized = serde_json::json!({
+        "schema_version": 1,
+        "findings": [{
             "id": "F1", "severity": "high", "file": "a.rs", "line": 1,
             "summary": "x".repeat(OUTPUT_FIELD_BYTES + 1), "status": "open"
-        })],
-    ] {
-        let block = serde_json::json!({"schema_version": 1, "findings": invalid});
-        let text = format!("```findings\n{block}\n```");
-        let outputs = make_outputs(Some(&capture(&text)), None, None, None, None);
-        assert!(outputs.findings.is_empty());
-        assert_eq!(outputs.warnings.len(), 1);
-        assert!(outputs.warnings[0].starts_with(FINDINGS_INVALID));
-    }
+        }]
+    });
+    let captured = capture(&format!("```findings\n{oversized}\n```"));
+    let outputs = make_outputs(Some(&captured), None, None, None, None);
+    assert_eq!(outputs.findings_available, Some(false));
+    assert!(
+        outputs
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with(FINDINGS_INVALID))
+    );
 }
 
 #[test]
@@ -1105,6 +1113,8 @@ fn required_verdict_checks_exact_lines_and_missing_results() {
                 result_path: None,
                 branch: None,
                 commit: None,
+                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                stop: None,
             }]),
             ..Default::default()
         };
@@ -1155,12 +1165,22 @@ fn checked_findings_group_before_writer_and_dispute_reaches_synthesis() {
     second["id"] = "same-cause".into();
     let review_text = findings_text(&format!("{confirmed},{rejected},{second}"));
     let mut writer = node("writer", route("fixture"));
-    writer.extra.insert("repair_writer".into(), true.into());
+    writer.repair_writer = true;
     writer.depends_on = vec!["review".into()];
-    writer.inputs = vec![GraphInput { extra: Default::default(), required_outputs: vec![], node: "review".into(), outputs: vec![OutputKind::Findings] }];
+    writer.inputs = vec![GraphInput {
+        extra: Default::default(),
+        required_outputs: vec![],
+        node: "review".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
     let mut synthesis = node("synthesis", route("fixture"));
     synthesis.depends_on = vec!["writer".into()];
-    synthesis.inputs = vec![GraphInput { extra: Default::default(), required_outputs: vec![], node: "writer".into(), outputs: vec![OutputKind::Result] }];
+    synthesis.inputs = vec![GraphInput {
+        extra: Default::default(),
+        required_outputs: vec![],
+        node: "writer".into(),
+        outputs: vec![OutputKind::Result],
+    }];
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(AttemptOutcome::Succeeded, &review_text),
@@ -1169,16 +1189,44 @@ fn checked_findings_group_before_writer_and_dispute_reaches_synthesis() {
         ].into(),
         ..Default::default()
     };
-    let run = advance(&graph(vec![node("review", route("fixture")), writer, synthesis]), &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.checkpoint.nodes[0].outputs.as_ref().unwrap().findings.len(), 3);
+    let run = advance(
+        &graph(vec![node("review", route("fixture")), writer, synthesis]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        run.checkpoint.nodes[0]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .findings
+            .len(),
+        3
+    );
     assert_eq!(run.checkpoint.nodes[1].state, NodeState::Succeeded);
     assert_eq!(run.checkpoint.nodes[2].state, NodeState::Succeeded);
     assert!(!owner.prompts[1].contains("REJECTED_DO_NOT_REPAIR"));
-    let writer_files = owner.file_requests.iter().find(|requests| requests.iter().any(|request| request.label == "review")).unwrap();
-    assert!(writer_files.iter().all(|request| request.attempt_ref.is_none()));
-    let staged = writer_files.iter().flat_map(|request| request.inline_findings.as_ref().unwrap()).collect::<Vec<_>>();
+    let writer_files = owner
+        .file_requests
+        .iter()
+        .find(|requests| requests.iter().any(|request| request.label == "review"))
+        .unwrap();
+    assert!(
+        writer_files
+            .iter()
+            .all(|request| request.attempt_ref.is_none())
+    );
+    let staged = writer_files
+        .iter()
+        .flat_map(|request| request.inline_findings.as_ref().unwrap())
+        .collect::<Vec<_>>();
     assert_eq!(staged.len(), 2);
-    assert!(staged.iter().all(|finding| finding.summary != "REJECTED_DO_NOT_REPAIR"));
+    assert!(
+        staged
+            .iter()
+            .all(|finding| finding.summary != "REJECTED_DO_NOT_REPAIR")
+    );
     let (_, input) = owner.prompts[1].split_once("review findings: ").unwrap();
     let groups: serde_json::Value = serde_json::from_str(input.lines().next().unwrap()).unwrap();
     assert_eq!(groups.as_array().unwrap().len(), 1);

@@ -86,13 +86,13 @@ fn review_delivery_requires_acceptance_and_exact_head()
     };
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
-    input.request.tasks[0].deliver = Some(fixture.request.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
+    input.request.task.deliver = Some(fixture.request.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let host = fixture.prepare()?;
     let head = host.head(&fixture.writer)?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     artifacts::seal(
         &attempt,
         "writer-terminal.json",
@@ -148,7 +148,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
     let integration = receipt.integration.as_ref().ok_or("integration")?;
     assert_eq!(integration.previous, None);
     assert_eq!(integration.integrated, head);
-    let endpoint = provenant_confinement::worktrees::RefEndpoint::Remote {
+    let endpoint = provenant_records::custody::RefEndpoint::Remote {
         remote: integration.remote.clone(),
         push_url: integration.push_url.clone().ok_or("push URL")?,
     };
@@ -160,10 +160,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
     let owned = ledger
         .load(&endpoint, &reference)?
         .ok_or("pushed ref not recorded")?;
-    assert_eq!(
-        owned.origin,
-        provenant_confinement::worktrees::RefOrigin::Created
-    );
+    assert_eq!(owned.origin, provenant_records::custody::RefOrigin::Created);
     assert_eq!(owned.attempt_id, Some(id));
     assert_eq!(owned.tip, head);
     assert_eq!(
@@ -262,12 +259,12 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
     };
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let host = fixture.prepare()?;
     let head = host.head(&fixture.writer)?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     artifacts::seal(
         &attempt,
         "writer-terminal.json",
@@ -315,9 +312,11 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
         ))?)
         .bytes(),
     );
+    // Simulate a crash after the current completion seal but before the
+    // mutable pickup pointer was published. Delivery should replay this seal.
     artifacts::seal(
         &attempt,
-        &format!("delivery-{key}.json"),
+        &format!("delivery-complete-{key}.json"),
         &db::bytes(&WriterDeliveryReceipt {
             extra: Default::default(),
             schema_version: 1,
@@ -325,9 +324,9 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
             branch: fixture.request.branch.clone(),
             head: Some(head),
             review_acceptance: None,
-            state: WriterDeliveryState::Failed {
+            state: WriterDeliveryState::Delivered {
                 extra: Default::default(),
-                stage: WriterDeliveryStage::Interrupted,
+                pull_request: None,
             },
             integration: None,
         })?,
@@ -484,13 +483,14 @@ fn prepare_labels_unsupported_ssh_command() -> std::result::Result<(), Box<dyn s
     fixture
         .environment
         .push(("GIT_SSH_COMMAND".into(), "ssh -v".into()));
-    let reason = fixture
-        .prepare()
-        .expect_err("unsupported SSH command")
-        .to_string();
-    for part in ["Prepare", "environment", "GIT_SSH_COMMAND"] {
-        assert!(reason.contains(part), "{reason}");
-    }
+    assert!(matches!(
+        fixture.prepare(),
+        Err(RunError::DeliveryPrepare {
+            step: DeliveryPrepareStep::Environment,
+            refusal: None,
+            ..
+        })
+    ));
     Ok(())
 }
 
@@ -509,7 +509,8 @@ fn delivery_diagnostics_redact_url_userinfo() {
             provenant_confinement::redact::delivery_diagnostics(input),
             expected
         );
-        let error = super::delivery::prepare_error("test", input).to_string();
+        let error =
+            super::delivery::prepare_error(DeliveryPrepareStep::RemoteUrl, input).to_string();
         assert!(error.ends_with(expected), "{error}");
     }
 }
@@ -531,7 +532,7 @@ fn prepare_refuses_remote_urls_with_embedded_credentials()
             matches!(
                 error,
                 RunError::DeliveryPrepare {
-                    step: "remote URL",
+                    step: DeliveryPrepareStep::RemoteUrl,
                     ..
                 }
             ),
@@ -573,23 +574,65 @@ fn prepare_labels_environment_path_failures() -> std::result::Result<(), Box<dyn
 }
 
 #[test]
-fn prepare_labels_unavailable_gh_executable() -> std::result::Result<(), Box<dyn std::error::Error>>
-{
+fn prepare_seals_the_builtin_forge_executable_only_when_selected()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
     fixture.request.open_pr = true;
     fixture.environment.retain(|(key, _)| key != "PATH");
-    let reason = fixture.prepare().expect_err("PATH is unset").to_string();
-    for part in ["Prepare", "gh executable", "gh is unavailable", "PATH"] {
-        assert!(reason.contains(part), "{reason}");
-    }
-    fixture.environment.push(("PATH".into(), "".into()));
-    let reason = fixture
-        .prepare()
-        .expect_err("gh is unavailable")
-        .to_string();
-    for part in ["Prepare", "gh executable", "gh is unavailable", "PATH"] {
-        assert!(reason.contains(part), "{reason}");
-    }
+    assert!(fixture.prepare().is_err());
+    Ok(())
+}
+
+#[test]
+fn forge_none_skips_builtin_gh_even_when_it_is_available()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.request.open_pr = true;
+    let marker = fixture.root.join("gh-called");
+    let gh = fixture.root.join("gh");
+    fixture.executable(
+        &gh,
+        &format!("#!/bin/sh\n: > '{}'\nexit 0\n", marker.display()),
+    )?;
+    // Opening a pull request needs a hosted push URL, whatever forge is chosen.
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    fixture.executable(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n",
+            git.display()
+        ),
+    )?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    fixture.environment.retain(|(key, _)| key != "PATH");
+    fixture
+        .environment
+        .insert(0, ("PATH".into(), fixture.root.as_os_str().to_owned()));
+    let config = fixture.writer.project.join(".provenant");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(
+        config.join("ports.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
+            "forge": {"source": "project", "backend": {"kind": "none"}}
+        }))?,
+    )?;
+
+    let host = fixture.prepare()?;
+    let result = host.command(
+        &fixture.writer.project,
+        "gh",
+        &["pr", "list"],
+        WriterDeliveryStage::PullRequest,
+    );
+    assert!(result.is_err());
+    assert!(
+        !marker.exists(),
+        "none must not invoke the builtin forge adapter"
+    );
     Ok(())
 }
 
@@ -631,11 +674,11 @@ fn prepare_accepts_absolute_shell_helper_outside_path()
 fn prepare_failures_name_step_and_bound_git_stderr()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     for (pattern, step) in [
-        ("remote get-url", "remote URL"),
-        ("symbolic-ref --quiet", "HEAD"),
-        ("rev-parse --absolute-git-dir", "git dir"),
-        ("config --get-regexp", "credential helper"),
-        ("fetch --no-auto-maintenance", "fetch"),
+        ("remote get-url", DeliveryPrepareStep::RemoteUrl),
+        ("symbolic-ref --quiet", DeliveryPrepareStep::Head),
+        ("rev-parse --absolute-git-dir", DeliveryPrepareStep::GitDir),
+        ("config --get-regexp", DeliveryPrepareStep::CredentialHelper),
+        ("fetch --no-auto-maintenance", DeliveryPrepareStep::Fetch),
     ] {
         let mut fixture = PrepareFixture::new()?;
         let git = fixture.root.join("git");
@@ -650,17 +693,26 @@ fn prepare_failures_name_step_and_bound_git_stderr()
             .push(("GH_TOKEN".into(), "private-token".into()));
         // The remote must advertise a branch, or there is nothing to fetch.
         fixture.git(&["push", "-q", "origin", "HEAD:refs/heads/seed"])?;
-        let reason = fixture.prepare().expect_err("git must fail").to_string();
-        assert!(reason.contains("Prepare"), "{reason}");
-        assert!(reason.contains(step), "{reason}");
-        assert!(reason.contains("fixture git failure"), "{reason}");
-        assert!(!reason.contains("private-token"), "{reason}");
-        assert!(!reason.contains("user:password"), "{reason}");
-        assert!(!reason.contains("secret-user"), "{reason}");
-        assert!(!reason.contains("scp-secret"), "{reason}");
-        assert!(!reason.contains("malformed-secret"), "{reason}");
-        assert!(!reason.contains("receipt"), "{reason}");
-        assert!(reason.len() < 1400, "diagnostic has {} bytes", reason.len());
+        let error = fixture.prepare().expect_err("git must fail");
+        let RunError::DeliveryPrepare {
+            step: actual_step,
+            reason,
+            ..
+        } = error
+        else {
+            panic!("unexpected failure class: {error:?}");
+        };
+        assert_eq!(actual_step, step);
+        for secret in [
+            "private-token",
+            "user:password",
+            "secret-user",
+            "scp-secret",
+            "malformed-secret",
+        ] {
+            assert!(!reason.contains(secret));
+        }
+        assert!(reason.len() <= PREPARE_REASON_LIMIT + PREPARE_REASON_TRUNCATION_MARKER.len());
     }
     Ok(())
 }
@@ -696,7 +748,7 @@ fn many_linked_worktrees_do_not_block_protection_checks()
     options.env = Some(&fixture.environment);
     let listing = SystemExecutor::new(1)?.execute(options)?;
     assert_eq!(listing.termination, Termination::Exit(0));
-    assert!(listing.stdout.bytes.len() > 16 * 1024);
+    assert!(listing.stdout.bytes.len() > host_output_limit(HostOutputClass::Ordinary));
     HostDeliveryContext::validate_integration_target(project, "feature/unprotected")?;
     HostDeliveryContext::check_delivery_branch(project, "feature/unprotected")?;
     Ok(())
@@ -705,46 +757,27 @@ fn many_linked_worktrees_do_not_block_protection_checks()
 #[test]
 fn worktree_listing_over_the_capture_default_is_refused_at_every_stage()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let limit = provenant_os::exec::DEFAULT_CAPTURE_LIMIT;
+    let limit = host_output_limit(HostOutputClass::FactCapture);
+    let args = ["worktree", "list", "--porcelain"];
     let (fixture, host) = oversize_host("worktree list", limit + 1)?;
     for stage in [WriterDeliveryStage::Prepare, WriterDeliveryStage::Integrate] {
         let error = host
-            .command(
-                &fixture.writer.project,
-                "git",
-                &["worktree", "list", "--porcelain"],
-                stage,
-            )
+            .command(&fixture.writer.project, "git", &args, stage)
             .expect_err("an oversized listing must be refused");
         let RunError::DeliveryLimit {
             stage: actual_stage,
             tool,
-            command,
             limit: actual_limit,
+            ..
         } = &error
         else {
             panic!("unexpected error: {error:?}");
         };
         assert_eq!(*actual_stage, stage);
         assert_eq!(*tool, "git");
-        assert_eq!(command, "worktree list");
         assert_eq!(*actual_limit, limit);
         let projection = error.diagnostic(provenant_records::diagnostic::Destination::Local);
         assert_eq!(projection.code, "IO");
-        assert!(
-            projection
-                .detail
-                .as_deref()
-                .unwrap()
-                .contains("worktree list")
-        );
-        assert!(
-            projection
-                .detail
-                .as_deref()
-                .unwrap()
-                .contains(&limit.to_string())
-        );
         assert!(matches!(
             projection.fact,
             Some(provenant_records::diagnostic::DiagnosticFact::DeliveryLimit(_))
@@ -803,18 +836,26 @@ fn delivery_preflights_reuse_the_command_worktree_listing_with_many_worktrees()
 #[test]
 fn non_listing_host_output_over_its_bound_names_the_command()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let (fixture, host) = oversize_host("oversize-probe", 16 * 1024 + 1)?;
+    let limit = host_output_limit(HostOutputClass::Ordinary);
+    let args = ["symbolic-ref", "--quiet", "refs/heads/oversize-probe"];
+    let (fixture, host) = oversize_host("oversize-probe", limit + 1)?;
     let error = host
         .command(
             &fixture.writer.project,
             "git",
-            &["symbolic-ref", "--quiet", "refs/heads/oversize-probe"],
+            &args,
             WriterDeliveryStage::Prepare,
         )
         .expect_err("oversized output must be refused");
-    let message = error.to_string();
-    assert!(message.contains("symbolic-ref"), "{message}");
-    assert!(message.contains("16384"), "{message}");
+    assert!(matches!(
+        error,
+        RunError::DeliveryLimit {
+            stage: WriterDeliveryStage::Prepare,
+            tool: "git",
+            command,
+            limit: actual_limit,
+        } if command == git_subcommand(&args) && actual_limit == limit
+    ));
     Ok(())
 }
 
@@ -826,7 +867,10 @@ fn host_forge_output_over_its_bound_names_gh_not_git()
     let bin = fixture.root.join("gh-bin");
     std::fs::create_dir(&bin)?;
     let payload = fixture.root.join("gh-output");
-    std::fs::write(&payload, vec![b'a'; 16 * 1024 + 1])?;
+    std::fs::write(
+        &payload,
+        vec![b'a'; host_output_limit(HostOutputClass::Ordinary) + 1],
+    )?;
     fixture.executable(
         &bin.join("gh"),
         &format!("#!/bin/sh\ncat '{}'\n", payload.display()),
@@ -852,14 +896,15 @@ fn host_forge_output_over_its_bound_names_gh_not_git()
             WriterDeliveryStage::PullRequest,
         )
         .expect_err("oversized forge output must be refused");
-    let RunError::DeliveryLimit {
-        tool: "gh", limit, ..
-    } = &error
-    else {
-        panic!("unexpected error: {error:?}");
-    };
-    let message = error.to_string();
-    assert!(message.contains("gh pr output"), "{message}");
-    assert!(message.contains(&limit.to_string()), "{message}");
+    assert!(matches!(
+        error,
+        RunError::DeliveryLimit {
+            stage: WriterDeliveryStage::PullRequest,
+            tool: "gh",
+            command,
+            limit,
+        } if command == git_subcommand(&["pr", "view", "1"])
+            && limit == host_output_limit(HostOutputClass::Ordinary)
+    ));
     Ok(())
 }

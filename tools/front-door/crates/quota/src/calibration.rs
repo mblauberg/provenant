@@ -1,6 +1,6 @@
 //! Expiring dashboard floors are applied to copies of raw ledger observations.
 //! Never persist the adjusted windows: expiry must reveal the original ledger.
-use crate::{AccountRecord, QuotaStatus, QuotaWindow};
+use crate::{AccountRecord, QuotaWindow};
 use provenant_core::WallTime;
 use serde::{Deserialize, Serialize};
 
@@ -43,10 +43,18 @@ impl crate::Settings {
             keys.insert(record.account.account_key.clone());
         }
         for record in records {
-            if !provenant_records::AdapterSpec::get(&record.account.adapter).is_some_and(|spec| {
-                spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
-            }) || record.account.account_key == "zen"
-            {
+            let local_ledger = provenant_records::AdapterSpec::get(&record.account.adapter)
+                .and_then(|spec| {
+                    spec.account_plan(
+                        record
+                            .snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.details.as_ref())
+                            .and_then(|details| details.plan.as_deref()),
+                    )
+                })
+                .is_some_and(|plan| plan.quota == provenant_records::AccountQuota::LocalLedger);
+            if !local_ledger {
                 continue;
             }
             let Some(snapshot) = &mut record.snapshot else {
@@ -88,22 +96,13 @@ impl crate::Settings {
                     window.used_basis_points = window.used_basis_points.max(percent * 100);
                 } else {
                     snapshot.windows.push(QuotaWindow {
+                        extra: Default::default(),
                         pool: pool.into(),
                         used_basis_points: percent * 100,
                         window_seconds: Some(seconds),
                         resets_unix_seconds: None,
                     });
                 }
-            }
-            if matches!(
-                snapshot.status,
-                QuotaStatus::Available | QuotaStatus::Unknown
-            ) && snapshot
-                .windows
-                .iter()
-                .any(|w| w.used_basis_points >= 10_000)
-            {
-                snapshot.status = QuotaStatus::Exhausted;
             }
         }
     }
@@ -112,6 +111,7 @@ impl crate::Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::QuotaStatus;
     use provenant_config::DomainConfig;
 
     fn settings(expires: &str) -> crate::Settings {
@@ -128,14 +128,16 @@ mod tests {
         settings
     }
 
-    fn ledger(account: &str) -> AccountRecord {
+    fn ledger(account: &str, plan: Option<&str>) -> AccountRecord {
         let scope = crate::AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: account.into(),
             label: account.into(),
         };
         let mut record = AccountRecord::empty(scope.clone());
         record.snapshot = Some(crate::QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: scope,
             revision: 0,
@@ -146,13 +148,17 @@ mod tests {
             windows: [("five_hour", 401), ("seven_day", 160), ("thirty_day", 7000)]
                 .into_iter()
                 .map(|(pool, used_basis_points)| QuotaWindow {
+                    extra: Default::default(),
                     pool: pool.into(),
                     used_basis_points,
                     window_seconds: None,
                     resets_unix_seconds: None,
                 })
                 .collect(),
-            details: None,
+            details: Some(crate::QuotaDetails {
+                plan: plan.map(str::to_owned),
+                ..Default::default()
+            }),
         });
         record
     }
@@ -161,7 +167,12 @@ mod tests {
     fn calibration_takes_maximum_and_expires_even_with_cached_ledger() {
         let settings = settings("2026-11-04T00:00:00Z");
         let expiry = settings.calibration["go"].expiry();
-        let raw = vec![ledger("go"), ledger("zen")];
+        let raw = vec![
+            ledger("go", Some("go")),
+            ledger("zen", Some("zen")),
+            ledger("missing", None),
+            ledger("unknown", Some("unrecognised")),
+        ];
         let mut active = raw.clone();
         settings.apply_calibration(&mut active, expiry - 1);
         let snapshot = active[0].snapshot.as_ref().unwrap();
@@ -177,7 +188,9 @@ mod tests {
             snapshot.details.as_ref().unwrap().calibrated_windows.len(),
             3
         );
-        assert_eq!(active[1], raw[1]);
+        for (before, after) in raw.iter().zip(&active).skip(1) {
+            assert_eq!(before, after);
+        }
         for now in [expiry, expiry + 1] {
             let mut expired = raw.clone();
             settings.apply_calibration(&mut expired, now);
@@ -199,24 +212,35 @@ mod tests {
     }
 
     #[test]
-    fn calibration_is_validated_and_cannot_hide_exhaustion() {
+    fn calibration_does_not_promote_partial_usage_to_exhaustion() {
         assert!(settings("2026-11-04T00:00:00Z").validate().is_empty());
         let mut settings = settings("2026-11-04T00:00:00Z");
         settings.calibration.get_mut("go").unwrap().five_hour = Some(101);
         assert!(!settings.validate().is_empty());
         settings.calibration.get_mut("go").unwrap().five_hour = Some(100);
-        let mut records = vec![ledger("go")];
+        let mut records = vec![ledger("go", Some("go"))];
         settings.apply_calibration(&mut records, 1);
+        let snapshot = records[0].snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.status, QuotaStatus::Available);
         assert_eq!(
-            records[0].snapshot.as_ref().unwrap().status,
-            QuotaStatus::Exhausted
+            snapshot
+                .windows
+                .iter()
+                .find(|window| window.pool == "five_hour")
+                .unwrap()
+                .used_basis_points,
+            10_000
+        );
+        assert_eq!(
+            snapshot.details.as_ref().unwrap().coverage.as_deref(),
+            Some("partial")
         );
     }
 
     #[test]
     fn calibration_accepts_unique_label_but_not_ambiguous_label() {
         let settings = settings("2026-11-04T00:00:00Z");
-        let mut first = ledger("opencode-go");
+        let mut first = ledger("opencode-go", Some("go"));
         first.account.label = "go".into();
         first.snapshot.as_mut().unwrap().account.label = "go".into();
         let mut unique = vec![first.clone()];
@@ -225,7 +249,7 @@ mod tests {
             unique[0].snapshot.as_ref().unwrap().windows[0].used_basis_points,
             4300
         );
-        let mut second = ledger("other");
+        let mut second = ledger("other", Some("go"));
         second.account.label = "go".into();
         second.snapshot.as_mut().unwrap().account.label = "go".into();
         let mut ambiguous = vec![first, second];

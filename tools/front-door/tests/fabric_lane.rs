@@ -7,7 +7,6 @@ use provenant_fabric_runtime::{
 };
 use provenant_os::clock::SystemClock;
 use serde_json::{Value, json};
-use std::{ffi::OsString, path::Path};
 use support::{Result, TestRig, code};
 
 fn host(rig: &TestRig, args: &[&str]) -> Result<Value> {
@@ -37,48 +36,6 @@ fn lane_environment(rig: &mut TestRig, attempt: AttemptId) -> Result {
     ]);
     Ok(())
 }
-fn mcp(rig: &TestRig, name: &str, arguments: Value) -> Result<Value> {
-    let frames = [
-        json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}),
-        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}}),
-    ];
-    let input = frames
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .join("\n")
-        + "\n";
-    let args: Vec<OsString> = vec![
-        "fabric".into(),
-        "mcp".into(),
-        "--client".into(),
-        "codex".into(),
-    ];
-    let output = rig.execute_os(
-        Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &args,
-        Some(input.as_bytes()),
-    )?;
-    assert_eq!(
-        code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    for line in output
-        .stdout
-        .bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let value: Value = serde_json::from_slice(line)?;
-        if value["id"] == 1 {
-            return Ok(value["result"].clone());
-        }
-    }
-    Err("missing MCP reply".into())
-}
 
 #[test]
 fn lane_reads_wal_outside_home_without_mutating_the_database() -> Result {
@@ -104,12 +61,6 @@ fn lane_reads_wal_outside_home_without_mutating_the_database() -> Result {
     let listed = host(&rig, &["fabric", "events", "read", "--json"])?;
     assert_eq!(
         listed["data"]["page"]["items"][0]["record"]["detail"],
-        "visible through WAL"
-    );
-    let listed = mcp(&rig, "fabric_events", json!({"op":"read","limit":10}))?;
-    assert_ne!(listed["isError"], true, "{listed}");
-    assert_eq!(
-        listed["structuredContent"]["page"]["items"][0]["record"]["detail"],
         "visible through WAL"
     );
     let after = files
@@ -147,6 +98,7 @@ fn lane_messaging_uses_the_host_attempt_actor_and_closes_with_the_endpoint() -> 
         &context.roots.state,
         &context.identity,
         &context.config,
+        context.local_observation.clone(),
         &home,
         &cwd,
         &executor,
@@ -154,15 +106,16 @@ fn lane_messaging_uses_the_host_attempt_actor_and_closes_with_the_endpoint() -> 
         &ThreadPause,
         &CancelToken::new(),
     )?);
-    let relay = provenant_fabric_mcp::lane::HostRelay::start(
+    let relay = provenant_fabric_runtime::relay::HostRelay::start(
         socket.clone(),
         provenant_records::Limits::CONFIG,
         move |call, cancel, within| {
-            let budget = provenant_fabric_mcp::lane::host_budget(&clock, within)?;
+            let budget = provenant_fabric_runtime::relay::host_budget(&clock, within)?;
             let service = CoordinationService::for_identity(
                 &context.roots.state,
                 &context.identity,
                 &context.config,
+                context.local_observation.clone(),
                 &home,
                 &cwd,
                 &executor,
@@ -175,10 +128,21 @@ fn lane_messaging_uses_the_host_attempt_actor_and_closes_with_the_endpoint() -> 
     )?;
     lane_environment(&mut rig, attempt)?;
     // The request and even a forged lane environment cannot choose the sender.
-    let args = json!({"op":"send","recipients":[identity["data"]["inbox"]["actor"]],"kind":"note","body":"host-relayed message","artifacts":[],"operation_id":"lane-message"});
-    let first = mcp(&rig, "fabric_mail", args.clone())?;
-    assert_ne!(first["isError"], true, "{first}");
-    assert_eq!(first, mcp(&rig, "fabric_mail", args)?);
+    let recipient = identity["data"]["inbox"]["agent"].as_str().ok_or("agent")?;
+    let send = [
+        "fabric",
+        "mail",
+        "send",
+        "--to",
+        recipient,
+        "--body",
+        "host-relayed message",
+        "--operation-id",
+        "lane-message",
+        "--json",
+    ];
+    let first = host(&rig, &send)?;
+    assert_eq!(first, host(&rig, &send)?);
     let mail = host(&rig, &["fabric", "mail", "read", "--after", "0", "--json"])?;
     let items = mail["data"]["page"]["items"].as_array().ok_or("mail")?;
     assert_eq!(items.len(), 1);
@@ -197,18 +161,6 @@ fn lane_messaging_uses_the_host_attempt_actor_and_closes_with_the_endpoint() -> 
     config["domains"]["fabric"]["peers"]["fixture"]["host"] = toml_edit::value(remote.to_string());
     config["domains"]["fabric"]["peers"]["fixture"]["destination"] = toml_edit::value("fixture");
     std::fs::write(rig.state.join("config.toml"), config.to_string())?;
-    let remote_mail = mcp(
-        &rig,
-        "fabric_mail",
-        json!({"op":"read","after":0,"limit":10}),
-    )?;
-    assert_ne!(remote_mail["isError"], true, "{remote_mail}");
-    assert!(
-        remote_mail["structuredContent"]["page"]["items"]
-            .as_array()
-            .ok_or("remote mail")?
-            .is_empty()
-    );
     let remote_mail = host(&rig, &["fabric", "mail", "read", "--after", "0", "--json"])?;
     assert!(
         remote_mail["data"]["page"]["items"]
@@ -219,12 +171,19 @@ fn lane_messaging_uses_the_host_attempt_actor_and_closes_with_the_endpoint() -> 
     drop(relay);
     assert!(!socket.exists());
     assert!(!socket.parent().ok_or("socket parent")?.exists());
-    let closed = mcp(
-        &rig,
-        "fabric_mail",
-        json!({"op":"send","recipients":[actor],"kind":"note","body":"closed"}),
-    )?;
-    assert_eq!(closed["isError"], true);
+    let closed = rig.command(&[
+        "fabric",
+        "mail",
+        "send",
+        "--to",
+        recipient,
+        "--body",
+        "closed",
+        "--operation-id",
+        "lane-closed",
+        "--json",
+    ])?;
+    assert_ne!(code(&closed), 0);
     Ok(())
 }
 
@@ -235,23 +194,24 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
     host(&rig, &["fabric", "identity", "--json"])?;
     let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
     let (sent, received) = std::sync::mpsc::channel();
-    let relay = match provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+    let relay = match provenant_fabric_runtime::relay::HostRelay::start_with_graph(
         provenant_providers::LaneRuntime::fabric_socket(attempt),
         provenant_records::Limits::CONFIG,
         |_, _, _| {
-            Err(provenant_fabric_mcp::tools::ServiceError::Cli {
+            Err(provenant_fabric_runtime::relay::ServiceError::Cli {
                 code: "unexpected_coordination".into(),
                 message: "expected a graph frame".into(),
                 data: Value::Null,
             })
         },
         move |arguments, _, _| {
-            sent.send(arguments)
-                .map_err(|_| provenant_fabric_mcp::tools::ServiceError::Cli {
+            sent.send(arguments).map_err(|_| {
+                provenant_fabric_runtime::relay::ServiceError::Cli {
                     code: "fixture_closed".into(),
                     message: "fixture receiver closed".into(),
                     data: Value::Null,
-                })?;
+                }
+            })?;
             Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
         },
     ) {
@@ -272,10 +232,9 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
         &rig,
         &[
             "run",
-            "Inspect the child",
-            "--use",
             "explore",
-            "--tier",
+            "Inspect the child",
+            "--route",
             "junior",
             "--json",
         ],
@@ -293,10 +252,9 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
         &rig,
         &[
             "run",
-            "Inspect the child",
-            "--use",
             "explore",
-            "--tier",
+            "Inspect the child",
+            "--route",
             "junior",
             "--json",
         ],
@@ -311,9 +269,10 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
     // The legacy CLI recognised the parent marker on its own. Keep that
     // confinement boundary even when the other lane markers are absent.
     rig.env.retain(|(key, _)| {
-        key != provenant_core::RUN_STATE_DIRECTORY_ENV && key != provenant_run::LANE_DEPTH_ENV
+        key != provenant_core::RUN_STATE_DIRECTORY_ENV
+            && key != provenant_core::consumer_env::LANE_DEPTH
     });
-    let launched = host(&rig, &["run", "Parent marker only", "--json"])?;
+    let launched = host(&rig, &["run", "task", "Parent marker only", "--json"])?;
     assert_eq!(launched["data"]["parent_attempt"], attempt.to_string());
     let frame = received.recv_timeout(std::time::Duration::from_secs(2))?;
     let RelayOp::Add(child) = serde_json::from_value(frame)? else {
@@ -321,13 +280,13 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
     };
     assert_eq!(child.brief, "Parent marker only");
     assert_eq!(child.template, "task");
-    let stopped = host(&rig, &["stop", "parent--child", "--json"])?;
+    let stopped = host(&rig, &["stop", "lane-graph/parent--child", "--json"])?;
     assert_eq!(stopped["data"]["parent_attempt"], attempt.to_string());
     let frame = received.recv_timeout(std::time::Duration::from_secs(2))?;
     let RelayOp::Stop { node } = serde_json::from_value(frame)? else {
         return Err("expected subtree stop through parent relay".into());
     };
-    assert_eq!(node, "parent--child");
+    assert_eq!(node, "lane-graph/parent--child");
     // Relay admission and control must not write a second run store in the lane.
     let child_store = rig.state.join("children").join(attempt.to_string());
     assert_eq!(std::fs::read_dir(child_store)?.count(), 0);
@@ -342,7 +301,7 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
         FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
     };
     let mut rig = TestRig::new()?;
-    let explanation = host(&rig, &["run", "Initial", "--explain", "--json"])?;
+    let explanation = host(&rig, &["run", "task", "Initial", "--explain", "--json"])?;
     let document: GraphDocument = serde_json::from_value(explanation["data"]["document"].clone())?;
     let graph_id = document.graph_id.clone();
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
@@ -352,9 +311,9 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
     let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
     let reference = format!("{}/{attempt}", context.identity.host);
     let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-        "schema_version":1,"graph_id":graph_id,"plan_digest":"test",
+        "schema_version":support::GRAPH_CHECKPOINT_SCHEMA_VERSION,"graph_id":graph_id,"plan_digest":"test",
         "nodes":[{"id":"task","worktree":null,"state":"running","attempts":[{
-            "key":{"graph_id":graph_id,"node_id":"task","route_index":0},
+            "key":{"graph_id":graph_id,"node_id":"task","route_index":0, "attempt": 1},
             "launched":true,"route":{"alias":"senior"},"state":"running",
             "attempt_ref":reference,"launch_actor":"actor"
         }]}]
@@ -371,17 +330,19 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
         &clock,
     )?;
     journal.bind(GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
+        bases: None,
         directory: rig.project.clone(),
         document,
-        review_base: None,
-        integration_base: None,
     })?;
     journal.save(&checkpoint)?;
     drop(journal);
     let state = context.roots.state.clone();
     let project = context.identity.project;
-    let patch = json!({"schema_version":1,"expected_revision":0,"idempotency_key":"direct-edit","nodes":[{"id":"direct","use":"task","brief":"Direct"}]});
+    let patch = json!({"schema_version":1,"expected_revision":0,"idempotency_key":"direct-edit","nodes":[{"id":"direct","use":"task","prompt":"Direct"}]});
     let request = json!({"op":"edit","id":graph_id,"patch":patch});
     let result = provenant_cli::fabric::graph_relay::serve(
         &context,
@@ -410,18 +371,18 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
             .iter()
             .any(|event| event.kind == provenant_fabric_runtime::graph::GraphEventKind::Patch)
     );
-    let relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+    let relay = provenant_fabric_runtime::relay::HostRelay::start_with_graph(
         provenant_providers::LaneRuntime::fabric_socket(attempt),
         provenant_records::Limits::CONFIG,
         |_, _, _| {
-            Err(provenant_fabric_mcp::tools::ServiceError::Cli {
+            Err(provenant_fabric_runtime::relay::ServiceError::Cli {
                 code: "unexpected".into(),
                 message: "unexpected coordination".into(),
                 data: Value::Null,
             })
         },
         move |arguments, cancel, within| {
-            let budget = provenant_fabric_mcp::lane::host_budget(&clock, within)?;
+            let budget = provenant_fabric_runtime::relay::host_budget(&clock, within)?;
             provenant_cli::fabric::graph_relay::serve(
                 &context,
                 &attempt.to_string(),
@@ -447,7 +408,7 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
     std::fs::write(
         &path,
         serde_json::to_vec(
-            &json!({"schema_version":1,"expected_revision":1,"idempotency_key":"live-edit","nodes":[{"id":"next","use":"task","brief":"Next"}]}),
+            &json!({"schema_version":1,"expected_revision":1,"idempotency_key":"live-edit","nodes":[{"id":"next","use":"task","prompt":"Next"}]}),
         )?,
     )?;
     let path = path.to_str().ok_or("patch path")?;
@@ -469,7 +430,7 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
 }
 
 #[test]
-fn lane_cli_and_mcp_compile_rich_child_launches_without_local_submission() -> Result {
+fn lane_cli_compiles_rich_child_launches_without_local_submission() -> Result {
     let mut rig = TestRig::new()?;
     host(&rig, &["fabric", "identity", "--json"])?;
     host(&rig, &["fabric", "events", "read", "--json"])?;
@@ -478,9 +439,8 @@ fn lane_cli_and_mcp_compile_rich_child_launches_without_local_submission() -> Re
         &rig,
         &[
             "run",
-            "Fix ${item}",
-            "--use",
             "implement",
+            "Fix ${item}",
             "--over",
             "one,two",
             "--detached",
@@ -498,23 +458,11 @@ fn lane_cli_and_mcp_compile_rich_child_launches_without_local_submission() -> Re
             .iter()
             .all(|child| child["access"] == "worktree_write")
     );
-    let arguments = json!({"op":"run", "document":{
-        "parameters":{"subject":{"type":"string"}},
-        "brief":"Inspect ${subject}", "tier":"junior", "access":"read_only",
-        "detached":true, "idempotency_key":"rich-mcp-preview"
-    }, "set":{"subject":"compiled MCP"}, "explain":true});
-    let preview = mcp(&rig, "fabric_run", arguments.clone())?;
-    assert_ne!(preview["isError"], true, "{preview}");
-    let value = &preview["structuredContent"];
-    assert_eq!(value["launch"]["node"]["prompt"], "Inspect compiled MCP");
-    assert_eq!(value["detached"], true);
-    let repeated = mcp(&rig, "fabric_run", arguments)?;
-    assert_eq!(repeated["structuredContent"], *value);
     Ok(())
 }
 
 #[test]
-fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
+fn lane_run_receipt_carries_no_observation_even_when_observation_fails() -> Result {
     use provenant_fabric_runtime::graph::relay::RelayOp;
     use std::sync::{
         Arc,
@@ -525,11 +473,11 @@ fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
     let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
     let fail_observation = Arc::new(AtomicBool::new(false));
     let failure = Arc::clone(&fail_observation);
-    let _relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+    let _relay = provenant_fabric_runtime::relay::HostRelay::start_with_graph(
         provenant_providers::LaneRuntime::fabric_socket(attempt),
         provenant_records::Limits::CONFIG,
         |_, _, _| {
-            Err(provenant_fabric_mcp::tools::ServiceError::Cli {
+            Err(provenant_fabric_runtime::relay::ServiceError::Cli {
                 code: "unexpected_coordination".into(),
                 message: "expected graph request".into(),
                 data: Value::Null,
@@ -557,7 +505,7 @@ fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
             }
             RelayOp::Wait { .. } => Ok(json!({"waiting":true})),
             RelayOp::Children if failure.load(Ordering::SeqCst) => {
-                Err(provenant_fabric_mcp::tools::ServiceError::Cli {
+                Err(provenant_fabric_runtime::relay::ServiceError::Cli {
                     code: "observation_fixture".into(),
                     message: "scripted observation failure".into(),
                     data: Value::Null,
@@ -568,90 +516,58 @@ fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
         },
     )?;
     lane_environment(&mut rig, attempt)?;
-    let zero_wait = mcp(
-        &rig,
-        "fabric_run",
-        json!({"op":"run","brief":"Observe child","wait_seconds":0}),
-    )?;
-    assert_eq!(zero_wait["isError"], true, "{zero_wait}");
-    assert_eq!(zero_wait["structuredContent"]["code"], "invalid_input");
-    assert_eq!(
-        zero_wait["structuredContent"]["path"],
-        "arguments.wait_seconds"
-    );
     for (brief, fail) in [
         ("Observe child", false),
         ("Observe child", true),
         ("Delayed child", false),
     ] {
         fail_observation.store(fail, Ordering::SeqCst);
-        let cli = host(&rig, &["run", brief, "--wait=1s", "--json"])?;
-        let mcp = mcp(
-            &rig,
-            "fabric_run",
-            json!({"op":"run","brief":brief,"wait_seconds":1}),
-        )?;
-        assert_ne!(mcp["isError"], true, "{mcp}");
-        let value = &cli["data"];
-        assert_eq!(*value, mcp["structuredContent"]);
-        assert_eq!(value["receipt"]["revision"], 2);
-        if brief == "Delayed child" {
-            assert_eq!(value["observation_error"], "child wait timed out");
-            assert!(value.get("children").is_none());
-        } else if fail {
-            assert!(
-                value["observation_error"]
-                    .as_str()
-                    .ok_or("observation diagnostic")?
-                    .contains("observation_fixture")
-            );
-            assert!(value.get("children").is_none());
-        } else {
-            assert_eq!(value["children"]["children"][0]["settled"], true);
-            assert!(value.get("observation_error").is_none());
-        }
+        // The CLI launches and returns the receipt; waiting is `wait`.
+        let cli = host(&rig, &["run", "task", brief, "--json"])?;
+        assert_eq!(cli["data"]["revision"], 2, "{cli}");
+        assert!(cli["data"].get("children").is_none(), "{cli}");
+        assert!(cli["data"].get("observation_error").is_none(), "{cli}");
     }
     Ok(())
 }
 
 #[test]
-fn child_relay_honours_launch_allowance_longer_than_fifty_five_seconds() -> Result {
+fn child_relay_preserves_a_configured_allowance_above_default() -> Result {
     use provenant_fabric_runtime::graph::relay::RelayOp;
     let mut rig = TestRig::new()?;
     host(&rig, &["fabric", "events", "read", "--json"])?;
+    let default_allowance =
+        provenant_fabric_runtime::config::GraphConfig::default().launch_wait_seconds;
+    let configured_allowance = default_allowance + 1;
     std::fs::write(
         rig.state.join("config.toml"),
-        "schema_version=1\n[domains.fabric.graph]\nwriter_launch_seconds=60\n",
+        format!(
+            "schema_version=1\n[domains.fabric.graph]\nlaunch_wait_seconds={configured_allowance}\n"
+        ),
     )?;
     let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
-    let relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+    let relay = provenant_fabric_runtime::relay::HostRelay::start_with_graph(
         provenant_providers::LaneRuntime::fabric_socket(attempt),
         provenant_records::Limits::CONFIG,
         |_, _, _| unreachable!("expected graph request"),
-        move |arguments, _, within| {
-            match serde_json::from_value::<RelayOp>(arguments)? {
-                RelayOp::Add(child) if child.brief == "Delayed child" => {
-                    assert!(within > std::time::Duration::from_secs(59), "{within:?}");
-                    // Model registry contention beyond the former socket ceiling.
-                    let clock = SystemClock;
-                    clock
-                        .wait_until(
-                            clock
-                                .mono_now()
-                                .checked_add(DurationMicros::from_micros(56_000_000))
-                                .unwrap(),
-                        )
-                        .unwrap();
-                    Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
-                }
-                RelayOp::Add(_) => {
-                    assert!(within > std::time::Duration::from_secs(59), "{within:?}");
-                    Err(provenant_fabric_mcp::tools::ServiceError::Facade(
-                        provenant_fabric_mcp::tools::FacadeError::WriterLockBusy,
-                    ))
-                }
-                _ => unreachable!("unexpected graph operation"),
+        move |arguments, _, within| match serde_json::from_value::<RelayOp>(arguments)? {
+            RelayOp::Add(child) if child.brief == "Delayed child" => {
+                assert!(
+                    within > std::time::Duration::from_secs(default_allowance),
+                    "{within:?}"
+                );
+                Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
             }
+            RelayOp::Add(_) => {
+                assert!(
+                    within > std::time::Duration::from_secs(default_allowance),
+                    "{within:?}"
+                );
+                Err(provenant_fabric_runtime::relay::ServiceError::Facade(
+                    provenant_fabric_runtime::relay::FacadeError::WriterLockBusy,
+                ))
+            }
+            _ => unreachable!("unexpected graph operation"),
         },
     );
     let _relay = match relay {
@@ -665,11 +581,13 @@ fn child_relay_honours_launch_allowance_longer_than_fifty_five_seconds() -> Resu
         Err(error) => return Err(error.into()),
     };
     lane_environment(&mut rig, attempt)?;
-    let output = rig.command(&["run", "Delayed child", "--wait=1s", "--json"])?;
+    // Admission outlasting the former 55-second socket ceiling still yields
+    // the receipt.
+    let output = rig.command(&["run", "task", "Delayed child", "--json"])?;
     let receipt: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(receipt["data"]["receipt"]["revision"], 2, "{receipt}");
-    assert_eq!(receipt["data"]["observation_error"], "child wait timed out");
-    let output = rig.command(&["run", "Refused child", "--wait=1s", "--json"])?;
+    assert_eq!(code(&output), 0, "{receipt}");
+    assert_eq!(receipt["data"]["revision"], 2, "{receipt}");
+    let output = rig.command(&["run", "task", "Refused child", "--json"])?;
     let refused: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(refused["error"]["code"], "writer_lock_busy", "{refused}");
     assert!(

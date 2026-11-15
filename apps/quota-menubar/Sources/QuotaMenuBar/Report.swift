@@ -10,6 +10,7 @@ struct QuotaReport {
         case stale
         case unknown
         case authRequired = "auth_required"
+        case refreshPending = "refresh_pending"
         case keychainUnavailable = "keychain_unavailable"
         case unsupported
 
@@ -194,6 +195,7 @@ struct QuotaReport {
         case .stale: "Stale"
         case .unknown: "Unknown"
         case .authRequired: "Authentication required"
+        case .refreshPending: "Refresh pending"
         case .keychainUnavailable: "Keychain unavailable"
         case .unsupported: "Unsupported"
         }

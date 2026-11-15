@@ -35,6 +35,8 @@ Modeling = "Modeling"
 "concurency" = "concurency"
 # Foundation's String.capitalized, used by the Swift console.
 "capitalized" = "capitalized"
+# GitHub's pull_request `unlabeled` event type.
+"unlabeled" = "unlabeled"
 # Foundation's localized* string APIs and AppKit's Window menu (performMiniaturize, "Minimize").
 "localized" = "localized"
 "Miniaturize" = "Miniaturize"

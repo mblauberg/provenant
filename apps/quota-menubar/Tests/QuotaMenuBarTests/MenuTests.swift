@@ -140,11 +140,11 @@ final class MenuTests: XCTestCase {
         let json = """
         {"schema_version":1,"command":"console overview","status":"ok","data":{
           "needs_you":[
-            {"id":"1","title":"First","project_label":"Project","task_label":null},
+            {"id":"1","title":"First","project_label":"Project","task_label":null,"created_at":"2026-01-01T00:00:00Z"},
             {"id":"2","title":"Second","project_label":null,"task_label":null},
             {"id":"3","title":"Third","project_label":"Other","task_label":null},
             {"id":"4","title":"Fourth","project_label":null,"task_label":null}],
-          "lanes":[{"task_label":"Build menu","project_label":"Project","state":"running","attention":false},
+          "lanes":[{"task_label":"Build menu","project_label":"Project","state":"running","attention":false,"attempt_id":"abc","queued_at":"2026-01-01T00:00:00Z"},
                    {"task_label":null,"project_label":null,"state":"terminal","attention":true}],
           "counts":{"needs_you":4,"running":1,"attention":1},
           "coverage":{"scope":"local","inbox":"partial","runs":"complete","nested_runs":"unavailable"}}}
@@ -156,12 +156,16 @@ final class MenuTests: XCTestCase {
         XCTAssertTrue(menu.contains(.header("At least 4 needs you")))
         let rows = items(menu)
         XCTAssertEqual(Array(rows.prefix(3).map(\.title)), ["First", "Second", "Third"])
-        XCTAssertEqual(rows[0].subtitle, "Project")
+        XCTAssertTrue(rows[0].subtitle?.hasPrefix("Project · ") == true)
+        XCTAssertEqual(rows[0].action, .open(try XCTUnwrap(URL(string: "provenant-console://request/1"))))
+        XCTAssertEqual(rows.first { $0.title == "Build menu" }?.action, .open(try XCTUnwrap(URL(string: "provenant-console://attempt/abc"))))
         XCTAssertNil(rows[1].subtitle)
-        XCTAssertEqual(rows.first { $0.title == "Build menu" }?.subtitle, "Project · Running")
+        XCTAssertTrue(rows.first { $0.title == "Build menu" }?.subtitle?.hasPrefix("Project · Running · ") == true)
         XCTAssertEqual(rows.first { $0.title == "Untitled task" }?.subtitle, "Needs attention")
         XCTAssertTrue(menu.contains(.note("1 more · use provenant inbox", nil)))
         XCTAssertTrue(menu.contains(.note("Local inbox: partial", .orange)))
+        let failed = QuotaMenu.overviewEntries(overview, error: "offline", updatedAt: report.generatedAt, now: report.generatedAt)
+        XCTAssertFalse(items(failed).contains { $0.title == "First" })
         XCTAssertLessThan(try XCTUnwrap(rows.firstIndex { $0.title == "First" }),
                           try XCTUnwrap(rows.firstIndex { $0.title == "Claude" }))
     }
@@ -204,7 +208,7 @@ final class MenuTests: XCTestCase {
             coverage: .init(scope: "local", inbox: "complete", runs: "complete", nestedRuns: "unavailable"))
         let menu = QuotaMenu.overviewEntries(overview, error: "read failed", updatedAt: Date(timeIntervalSince1970: 0),
                                              now: Date(timeIntervalSince1970: 60), observationError: "Watch limit reached")
-        XCTAssertTrue(menu.contains(.header("0 needs you")))
+        XCTAssertFalse(menu.contains(.header("0 needs you")))
         XCTAssertNotNil(items(menu).first { $0.title == "Overview unavailable" })
         XCTAssertEqual(items(menu).first { $0.title == "Overview observation limited" }?.subtitle, "Watch limit reached")
     }

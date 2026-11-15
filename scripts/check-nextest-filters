@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.machinery
 import importlib.util
 import json
@@ -27,6 +28,9 @@ def native_inventory():
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--test-list", type=Path, help="Reuse a saved nextest JSON listing")
+    args = parser.parse_args()
     selectors: dict[str, list[Path]] = {}
     for path in FILTER_FILES:
         for name in TEST_SELECTOR.findall(path.read_text()):
@@ -48,12 +52,16 @@ def main() -> int:
         "--message-format",
         "json",
     ]
-    listed = subprocess.run(command, cwd=ROOT / "tools/front-door", capture_output=True, text=True)
-    if listed.returncode:
-        print(listed.stderr, file=sys.stderr, end="")
-        return listed.returncode
+    if args.test_list:
+        listing = json.loads(args.test_list.read_text())
+    else:
+        listed = subprocess.run(command, cwd=ROOT / "tools/front-door", capture_output=True, text=True)
+        if listed.returncode:
+            print(listed.stderr, file=sys.stderr, end="")
+            return listed.returncode
+        listing = json.loads(listed.stdout)
     # nextest keys each suite's test cases by test name.
-    suites = json.loads(listed.stdout)["rust-suites"].values()
+    suites = listing["rust-suites"].values()
     test_names = {name for suite in suites for name in suite["testcases"]}
     unlisted = sorted(name for name in selectors if name not in test_names)
     # A platform-gated test is absent from this runner's list but still defined.

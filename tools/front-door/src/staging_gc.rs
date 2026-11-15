@@ -2,7 +2,7 @@
 use provenant_os::fs::{Directory, FileKind, FsError, LockMode, PayloadTree};
 use std::{
     ffi::{OsStr, OsString},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 fn clear(tree: &PayloadTree, depth: usize) -> Result<(), FsError> {
@@ -23,7 +23,7 @@ fn clear(tree: &PayloadTree, depth: usize) -> Result<(), FsError> {
     Ok(())
 }
 
-pub(crate) fn collect(state: &Path, before: i128, dry_run: bool) -> Result<(), FsError> {
+pub(crate) fn collect(state: &Path, before: i128, dry_run: bool) -> Result<Vec<PathBuf>, FsError> {
     let root = Directory::open_anchor(state)?;
     let ingest = root
         .try_lock_existing(OsStr::new("ingest.lock"), LockMode::Exclusive)
@@ -50,13 +50,17 @@ fn collect_entries(
     dry_run: bool,
     ingest_locked: bool,
     install_locked: bool,
-) -> Result<(), FsError> {
+) -> Result<Vec<PathBuf>, FsError> {
+    let mut busy = Vec::new();
     for name in entries {
         let name = name?;
         let Some(text) = name.to_str() else { continue };
         let is_ingest = text.starts_with(".ingest-") && ingest_locked;
         let is_staging = text.starts_with(".provenant-staging.") && install_locked;
         if !is_ingest && !is_staging {
+            if text.starts_with(".ingest-") || text.starts_with(".provenant-staging.") {
+                busy.push(PathBuf::from(name));
+            }
             continue;
         }
         let metadata = match root.metadata_at(&name, false) {
@@ -79,7 +83,7 @@ fn collect_entries(
             }
         }
     }
-    Ok(())
+    Ok(busy)
 }
 
 #[cfg(test)]
@@ -143,7 +147,8 @@ mod tests {
         std::fs::write(&ingest, b"data").unwrap();
         collect(temp.path(), i128::MAX, true).unwrap();
         assert!(ingest.exists() && stage.exists());
-        collect(temp.path(), i128::MAX, false).unwrap();
+        let busy = collect(temp.path(), i128::MAX, false).unwrap();
+        assert_eq!(busy, vec![PathBuf::from(".provenant-staging.old")]);
         assert!(!ingest.exists() && stage.exists());
         drop(lock);
         collect(temp.path(), 0, false).unwrap();

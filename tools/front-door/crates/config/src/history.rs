@@ -1,5 +1,5 @@
 //! Bounded, append-only configuration history: one JSON line per applied
-//! edit in `<state>/config-history.jsonl`, written under the config lock.
+//! edit in `<state>/config-history.jsonl`, published by atomic replacement.
 //! Values that look like secrets are never recorded.
 use crate::ConfigError;
 use jiff::Timestamp;
@@ -19,6 +19,8 @@ pub struct FieldChange {
     pub path: String,
     pub before: Option<Value>,
     pub after: Option<Value>,
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -30,6 +32,8 @@ pub struct HistoryEntry {
     pub changes: Vec<FieldChange>,
     pub before_revision: String,
     pub after_revision: String,
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 /// Retention by age, count and size; the registry knobs `config.history_*`.
@@ -77,6 +81,7 @@ pub(crate) fn changes(before: &str, after: &str) -> Vec<FieldChange> {
                 path: path.clone(),
                 before: was.map(|v| record(path, v)),
                 after: is.map(|v| record(path, v)),
+                extra: Default::default(),
             });
         }
         if out.len() == MAX_CHANGES {
@@ -173,7 +178,7 @@ pub(crate) fn prune(lines: Vec<String>, limits: HistoryLimits, now: Timestamp) -
     let mut kept: Vec<String> = lines
         .into_iter()
         .filter(|line| {
-            serde_json::from_str::<HistoryEntry>(line)
+            decode_entry(line)
                 .ok()
                 .and_then(|entry| entry.time.parse::<Timestamp>().ok())
                 .is_some_and(|time| time.as_second() >= cutoff)
@@ -203,8 +208,7 @@ fn read_lines(state: &Directory) -> Result<Vec<String>, ConfigError> {
     }
 }
 
-/// Append one entry and prune, rewriting the bounded file atomically. Called
-/// with the config lock held.
+/// Append one entry and prune, rewriting the bounded file atomically.
 pub(crate) fn append(
     state: &Directory,
     entry: &HistoryEntry,
@@ -212,7 +216,10 @@ pub(crate) fn append(
     now: Timestamp,
 ) -> Result<(), ConfigError> {
     let mut lines = read_lines(state)?;
-    lines.push(serde_json::to_string(entry).map_err(|_| ConfigError::Edit {
+    let encoded = provenant_records::encode(entry).map_err(|_| ConfigError::Edit {
+        reason: "history entry encoding",
+    })?;
+    lines.push(String::from_utf8(encoded).map_err(|_| ConfigError::Edit {
         reason: "history entry encoding",
     })?);
     let mut text = prune(lines, limits, now).join("\n");
@@ -243,7 +250,7 @@ pub fn history(
     Ok(read_lines(&state)?
         .iter()
         .rev()
-        .filter_map(|line| serde_json::from_str::<HistoryEntry>(line).ok())
+        .filter_map(|line| decode_entry(line).ok())
         .filter(|entry| {
             since.is_none_or(|since| entry.time.parse::<Timestamp>().is_ok_and(|t| t >= since))
         })
@@ -251,19 +258,27 @@ pub fn history(
         .collect())
 }
 
+fn decode_entry(line: &str) -> Result<HistoryEntry, provenant_records::DecodeError> {
+    provenant_records::decode(line.as_bytes(), provenant_records::Limits::CONFIG)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn entry(time: &str) -> String {
-        serde_json::to_string(&HistoryEntry {
-            time: time.into(),
-            actor: "a".into(),
-            channel: "cli".into(),
-            changes: Vec::new(),
-            before_revision: "x".into(),
-            after_revision: "y".into(),
-        })
+        String::from_utf8(
+            provenant_records::encode(&HistoryEntry {
+                time: time.into(),
+                actor: "a".into(),
+                channel: "cli".into(),
+                changes: Vec::new(),
+                before_revision: "x".into(),
+                after_revision: "y".into(),
+                extra: Default::default(),
+            })
+            .unwrap(),
+        )
         .unwrap()
     }
     fn limits(age: u64, entries: usize, bytes: usize) -> HistoryLimits {
@@ -302,32 +317,73 @@ mod tests {
 
     #[test]
     fn secret_looking_values_are_redacted() {
-        let found = changes(
-            "schema_version = 1\n",
-            "schema_version = 1\n[x]\napi_token = \"abc\"\nnote = \"ghp_0123456789abcdef\"\nplain = \"fine\"\nlist = [\"sk-live\"]\n",
-        );
-        let by_path: BTreeMap<_, _> = found.iter().map(|c| (c.path.as_str(), c)).collect();
-        for path in ["x.api_token", "x.note", "x.list"] {
-            let after = by_path[path].after.clone().unwrap();
-            assert!(after == REDACTED, "{path}: {after}");
+        for (after, paths, secrets, plain_path) in [
+            (
+                "schema_version = 1\n[x]\napi_token = \"abc\"\nnote = \"ghp_0123456789abcdef\"\nplain = \"fine\"\nlist = [\"sk-live\"]\n",
+                &["x.api_token", "x.note", "x.list"][..],
+                &["ghp_", "sk-live"][..],
+                Some("x.plain"),
+            ),
+            (
+                "schema_version = 1\n[domains.routing.review.shapes.deep]\nreviewers = [{ pool = \"junior\", lenses = [\"ghp_fake1234567890\"] }, { token = \"plain\" }]\n",
+                &["domains.routing.review.shapes.deep.reviewers"][..],
+                &["ghp_", "plain"][..],
+                None,
+            ),
+        ] {
+            let found = changes("schema_version = 1\n", after);
+            let by_path: BTreeMap<_, _> = found
+                .iter()
+                .map(|change| (change.path.as_str(), change))
+                .collect();
+            for path in paths {
+                assert_eq!(by_path[*path].after, Some(Value::from(REDACTED)), "{path}");
+            }
+            let encoded = serde_json::to_string(&found).unwrap();
+            for secret in secrets {
+                assert!(!encoded.contains(secret));
+            }
+            if let Some(path) = plain_path {
+                assert_eq!(by_path[path].after, Some(Value::from("fine")));
+            }
         }
-        assert_eq!(by_path["x.plain"].after, Some(Value::from("fine")));
-        assert!(!serde_json::to_string(&found).unwrap().contains("ghp_"));
     }
 
     #[test]
-    fn secrets_inside_object_arrays_are_redacted() {
-        let found = changes(
-            "schema_version = 1\n",
-            "schema_version = 1\n[domains.routing.review.shapes.deep]\nreviewers = [{ pool = \"junior\", lenses = [\"ghp_fake1234567890\"] }, { token = \"plain\" }]\n",
+    fn stored_history_shapes_preserve_unknown_fields_through_bounded_decode() {
+        let entry_key = format!("future_{}", "entry");
+        let change_key = format!("future_{}", "change");
+        let entry_value = serde_json::json!({"nested": [true, 7]});
+        let change_value = serde_json::json!({"nested": {"active": true}});
+        let mut payload = serde_json::json!({
+            "time": "2026-01-01T00:00:00Z",
+            "actor": "test",
+            "channel": "cli",
+            "changes": [{"path": "field", "before": null, "after": null}],
+            "before_revision": "before",
+            "after_revision": "after",
+        });
+        let object = payload.as_object_mut().unwrap();
+        object.insert(entry_key.clone(), entry_value.clone());
+        object["changes"][0]
+            .as_object_mut()
+            .unwrap()
+            .insert(change_key.clone(), change_value.clone());
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let decoded: HistoryEntry =
+            provenant_records::decode(bytes.as_slice(), provenant_records::Limits::CONFIG).unwrap();
+        assert_eq!(decoded.extra.get(&entry_key), Some(&entry_value));
+        assert_eq!(
+            decoded.changes[0].extra.get(&change_key),
+            Some(&change_value)
         );
-        let by_path: BTreeMap<_, _> = found.iter().map(|c| (c.path.as_str(), c)).collect();
-        let after = by_path["domains.routing.review.shapes.deep.reviewers"]
-            .after
-            .clone()
-            .unwrap();
-        assert_eq!(after, REDACTED);
-        assert!(!serde_json::to_string(&found).unwrap().contains("ghp_"));
-        assert!(!serde_json::to_string(&found).unwrap().contains("plain"));
+
+        let encoded = provenant_records::encode(&decoded).unwrap();
+        let round_trip = decode_entry(std::str::from_utf8(&encoded).unwrap()).unwrap();
+        assert_eq!(round_trip.extra.get(&entry_key), Some(&entry_value));
+        assert_eq!(
+            round_trip.changes[0].extra.get(&change_key),
+            Some(&change_value)
+        );
     }
 }

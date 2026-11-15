@@ -362,45 +362,92 @@ mod tests {
 
     #[test]
     fn shim_selects_the_toolchain_and_keeps_swiftpm_inside_the_lane() {
+        use std::os::unix::fs::PermissionsExt;
+
         let root = tempfile::tempdir().unwrap();
-        let toolchain = fake(
-            &std::fs::canonicalize(root.path()).unwrap(),
-            "Toolchains/XcodeDefault.xctoolchain/usr/bin/swift",
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let toolchain = fake(&root, "Toolchains/XcodeDefault.xctoolchain/usr/bin/swift");
+        std::fs::write(
+            &toolchain.swift,
+            "#!/bin/sh\nprintf '%s\\0' \"${DEVELOPER_DIR-}\" \"${CLANG_MODULE_CACHE_PATH-}\" \"${SDKROOT-}\" \"${TMPDIR-}\" \"$@\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&toolchain.swift, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cache = root.join("lane/cache/swift");
+        let scratch = root.join("lane/scratch");
+        let developer_path = toolchain.developer.to_string_lossy().into_owned();
+        let module_cache = cache.join("clang-modules").to_string_lossy().into_owned();
+        let package_cache = cache.join("cache").to_string_lossy().into_owned();
+        let configuration = cache.join("configuration").to_string_lossy().into_owned();
+        let security = cache.join("security").to_string_lossy().into_owned();
+        let scratch_build = scratch.join("swift-build").to_string_lossy().into_owned();
+        let scratch_tmp = scratch
+            .join("swift-build/tmp")
+            .to_string_lossy()
+            .into_owned();
+        let shim_path = root.join("swift-shim");
+        let invoke = |read_only: bool| {
+            std::fs::write(
+                &shim_path,
+                toolchain.shim(&cache, &scratch, read_only).unwrap(),
+            )
+            .unwrap();
+            std::fs::set_permissions(&shim_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the test runs the generated shim"
+            )]
+            let output = std::process::Command::new(&shim_path)
+                .args(["build", "--custom"])
+                .current_dir(&root)
+                .env("SDKROOT", "/host/sdk")
+                .env("TMPDIR", "/host/tmp")
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            // Fields are NUL-terminated; empty fields (an unset SDKROOT) are
+            // positional and must survive.
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            stdout
+                .strip_suffix('\0')
+                .unwrap()
+                .split('\0')
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let has_pair = |args: &[String], key: &str, value: &str| {
+            args.windows(2)
+                .any(|pair| pair[0] == key && pair[1] == value)
+        };
+        let readonly = invoke(true);
+        assert_eq!(readonly[0], developer_path);
+        assert_eq!(readonly[1], module_cache);
+        assert!(readonly[2].is_empty());
+        assert_eq!(readonly[3], scratch_tmp);
+        let readonly_args = &readonly[4..];
+        assert_eq!(readonly_args.first().map(String::as_str), Some("build"));
+        assert!(readonly_args.iter().any(|arg| arg == "--disable-sandbox"));
+        assert!(has_pair(readonly_args, "--cache-path", &package_cache));
+        assert!(has_pair(readonly_args, "--config-path", &configuration));
+        assert!(has_pair(readonly_args, "--security-path", &security));
+        assert!(has_pair(readonly_args, "--scratch-path", &scratch_build));
+        assert!(
+            readonly_args
+                .iter()
+                .any(|arg| arg == "--build-system=native")
         );
-        let text = String::from_utf8(
-            toolchain
-                .shim(
-                    Path::new("/lane/cache/swift"),
-                    Path::new("/lane/scratch"),
-                    true,
-                )
-                .unwrap(),
-        )
-        .unwrap();
-        for needle in [
-            "unset SDKROOT",
-            "DEVELOPER_DIR='",
-            "CLANG_MODULE_CACHE_PATH='/lane/cache/swift/clang-modules'",
-            "--disable-sandbox",
-            "--cache-path '/lane/cache/swift/cache'",
-            "--scratch-path '/lane/scratch/swift-build'",
-            "TMPDIR='/lane/scratch/swift-build/tmp'",
-            "--build-system=native",
-        ] {
-            assert!(text.contains(needle), "{needle} missing from {text}");
-        }
-        let writer_text = String::from_utf8(
-            toolchain
-                .shim(
-                    Path::new("/lane/cache/swift"),
-                    Path::new("/lane/scratch"),
-                    false,
-                )
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(!writer_text.contains("--scratch-path"), "{writer_text}");
-        assert!(!writer_text.contains("TMPDIR="), "{writer_text}");
+        assert_eq!(readonly_args.last().map(String::as_str), Some("--custom"));
+
+        let writer = invoke(false);
+        assert_eq!(writer[0], developer_path);
+        assert_eq!(writer[1], module_cache);
+        assert!(writer[2].is_empty());
+        assert_eq!(writer[3], "/host/tmp");
+        let writer_args = &writer[4..];
+        assert!(has_pair(writer_args, "--cache-path", &package_cache));
+        assert!(has_pair(writer_args, "--config-path", &configuration));
+        assert!(has_pair(writer_args, "--security-path", &security));
+        assert!(!writer_args.iter().any(|arg| arg == "--scratch-path"));
     }
 
     #[test]

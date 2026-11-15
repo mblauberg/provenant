@@ -1,11 +1,11 @@
 //! `pr open`: the repository's template filled from the attempts' receipts.
 use super::git::{Git, plain_ref};
-use super::{Refused, Result, code_of, execute_with, successful};
+use super::{Refused, Result, code_of, successful};
 use crate::{emit, fail, roots};
 use provenant_cli::{
-    Attempt, Globals, PrOpen, Target,
+    Globals, PrOpen,
     pr_body::{self, Body},
-    run::{AttemptFacts, Edge, attempt_facts},
+    run::{AttemptFacts, Edge, attempt_facts, review_attempt_facts},
 };
 use provenant_core::GitOid;
 use provenant_records::{CommandResult, Outcome};
@@ -45,7 +45,7 @@ struct Plan {
     remote: String,
 }
 
-fn default_branch(project: &Path) -> Result<String> {
+fn default_branch(state: &Path, project: &Path) -> Result<String> {
     #[derive(Deserialize)]
     struct Repository {
         #[serde(rename = "defaultBranchRef")]
@@ -55,9 +55,13 @@ fn default_branch(project: &Path) -> Result<String> {
     struct Named {
         name: String,
     }
-    let bytes = successful(super::execute(
+    let bytes = successful(super::forge_execute(
+        state,
         project,
         &["gh", "repo", "view", "--json", "defaultBranchRef"],
+        &provenant_config::ports::Request::within(Duration::from_secs(60)),
+        false,
+        None,
     )?)?;
     Ok(serde_json::from_slice::<Repository>(&bytes)?.branch.name)
 }
@@ -103,26 +107,14 @@ fn plan(
         )
         .into());
     }
-    let reviews: Vec<Attempt> = if command.review.is_empty() {
-        author
-            .reviews
-            .iter()
-            .map(|id| {
-                Attempt(Target {
-                    selection: None,
-                    run: None,
-                    task: None,
-                    attempt: Some(*id),
-                })
-            })
-            .collect()
-    } else {
-        command.review.clone()
-    };
-    let reviews: Vec<AttemptFacts> = if reviews.is_empty() {
+    // Reviews named on the command resolve as targets; the receipt's own
+    // reviews are already attempt ids.
+    let reviews: Vec<AttemptFacts> = if !command.review.is_empty() {
+        attempt_facts(&edge, &command.review).map_err(fail)?
+    } else if author.reviews.is_empty() {
         Vec::new()
     } else {
-        attempt_facts(&edge, &reviews).map_err(fail)?
+        review_attempt_facts(&edge, &author.reviews).map_err(fail)?
     };
     let branch = command
         .branch
@@ -134,12 +126,12 @@ fn plan(
         .ok_or("the attempt recorded no head, so there is nothing to open")?;
     let base = match &command.base {
         Some(base) => base.clone(),
-        None => default_branch(project)?,
+        None => default_branch(resolved.roots.state.as_path(), project)?,
     };
     if !plain_ref(&branch) || !plain_ref(&base) {
         return Err("branch names must be plain Git names".into());
     }
-    let git = Git::new()?;
+    let git = Git::new(resolved.roots.state.as_path())?;
     let remote = git.remote_of(project, &base)?;
     let base_sha = base_commit(&git, project, &remote, &base)?;
     if !command.dry_run {
@@ -222,30 +214,28 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
             true,
         );
     }
-    let mut argv = vec![
-        "gh",
-        "pr",
-        "create",
-        "--base",
-        &plan.base,
-        "--head",
-        &plan.branch,
-        "--title",
-        &plan.title,
-        "--body-file",
-        "-",
-    ];
-    if command.draft {
-        argv.push("--draft");
-    }
-    let created = execute_with(
-        &project,
-        &argv,
-        CREATE_TIMEOUT,
-        false,
-        Some(plan.body.as_bytes()),
-    )
-    .and_then(successful);
+    let created = (|| -> Result<Vec<u8>> {
+        let ports =
+            provenant_config::PortTable::read_for(Some(&project), resolved.roots.state.as_path())?;
+        let mut forge = provenant_config::ForgePort::new(
+            ports.forge,
+            "forge",
+            &project,
+            resolved.roots.state.as_path(),
+        )?;
+        Ok(forge
+            .request(
+                provenant_config::ForgeOperation::Open {
+                    base: plan.base.clone(),
+                    head: plan.branch.clone(),
+                    title: plan.title.clone(),
+                    body: plan.body.as_bytes().to_vec(),
+                    draft: command.draft,
+                },
+                CREATE_TIMEOUT,
+            )?
+            .body)
+    })();
     match created {
         Ok(bytes) => {
             let text = String::from_utf8_lossy(&bytes);
@@ -291,7 +281,9 @@ mod tests {
     #[test]
     fn base_commit_uses_bounded_repository_facts() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let git = Git::new()?;
+        let state = temp.path().join("state");
+        std::fs::create_dir(&state)?;
+        let git = Git::new(&state)?;
         let project = temp.path().join("project");
         std::fs::create_dir_all(&project)?;
         provenant_os::fixture::run_git(&project, &["init", "-q"])?;

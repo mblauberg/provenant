@@ -9,6 +9,12 @@ use std::collections::BTreeMap;
 pub struct Settings {
     pub max_parallel: u64,
     pub wall_budget_seconds: u64,
+    /// Independent CLI refresh deadline, in seconds.
+    #[serde(default = "default_refresh_budget_seconds")]
+    pub refresh_budget_seconds: u64,
+    /// Minimum independent refresh budget remaining before the CLI may start.
+    #[serde(default = "default_refresh_min_budget_seconds")]
+    pub refresh_min_budget_seconds: u64,
     /// Timer and open-panel polling overrides, keyed by adapter.
     #[serde(default)]
     pub polling_intervals: BTreeMap<String, PollingIntervals>,
@@ -48,9 +54,17 @@ impl Settings {
 fn default_history_max_bytes() -> u64 {
     crate::DEFAULT_HISTORY_MAX_BYTES
 }
-pub const DEFAULT_LOGIN_WARNING_SECONDS: u64 = 3600;
+pub const DEFAULT_LOGIN_WARNING_SECONDS: u64 = 10 * 24 * 60 * 60;
 fn default_login_warning_seconds() -> u64 {
     DEFAULT_LOGIN_WARNING_SECONDS
+}
+pub const DEFAULT_REFRESH_BUDGET_SECONDS: u64 = 120;
+fn default_refresh_budget_seconds() -> u64 {
+    DEFAULT_REFRESH_BUDGET_SECONDS
+}
+pub const DEFAULT_REFRESH_MIN_BUDGET_SECONDS: u64 = 60;
+fn default_refresh_min_budget_seconds() -> u64 {
+    DEFAULT_REFRESH_MIN_BUDGET_SECONDS
 }
 /// Most accounts a single quota probe tick may run at once.
 pub const MAX_PARALLEL: u64 = 16;
@@ -76,6 +90,7 @@ pub struct Display {
     pub icon: String,
 }
 pub const MOST_CONSTRAINED: &str = "most_constrained";
+pub const MAX_DISPLAY_ICON_BYTES: usize = 128;
 impl Default for Display {
     fn default() -> Self {
         Self {
@@ -88,7 +103,7 @@ impl Default for Display {
 pub fn valid_icon(icon: &str) -> bool {
     icon == MOST_CONSTRAINED
         || (!icon.is_empty()
-            && icon.len() <= 128
+            && icon.len() <= MAX_DISPLAY_ICON_BYTES
             && icon
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)))
@@ -100,6 +115,8 @@ impl Default for Settings {
         Self {
             max_parallel: 3,
             wall_budget_seconds: DEFAULT_WALL_BUDGET_SECONDS,
+            refresh_budget_seconds: default_refresh_budget_seconds(),
+            refresh_min_budget_seconds: default_refresh_min_budget_seconds(),
             polling_intervals: BTreeMap::new(),
             display: Display::default(),
             calibration: BTreeMap::new(),
@@ -118,6 +135,15 @@ impl DomainConfig for Settings {
             (
                 "wall_budget_seconds",
                 (1..=MAX_WALL_BUDGET_SECONDS).contains(&self.wall_budget_seconds),
+            ),
+            (
+                "refresh_budget_seconds",
+                (1..=MAX_WALL_BUDGET_SECONDS).contains(&self.refresh_budget_seconds),
+            ),
+            (
+                "refresh_min_budget_seconds",
+                (1..=MAX_WALL_BUDGET_SECONDS).contains(&self.refresh_min_budget_seconds)
+                    && self.refresh_min_budget_seconds <= self.refresh_budget_seconds,
             ),
         ]
         .into_iter()
@@ -183,6 +209,12 @@ impl DomainConfig for Settings {
 pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("max_parallel", 1, MAX_PARALLEL as i64),
     FieldMetadata::int("wall_budget_seconds", 1, MAX_WALL_BUDGET_SECONDS as i64),
+    FieldMetadata::int("refresh_budget_seconds", 1, MAX_WALL_BUDGET_SECONDS as i64),
+    FieldMetadata::int(
+        "refresh_min_budget_seconds",
+        1,
+        MAX_WALL_BUDGET_SECONDS as i64,
+    ),
     FieldMetadata::int("login_expiry_warning_seconds", 0, i64::MAX),
     FieldMetadata::int(
         "history_max_bytes",
@@ -199,7 +231,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
 ];
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "quota",
-    |_| "max_parallel = 3\nwall_budget_seconds = 55\nhistory_max_bytes = 4194304\nlogin_expiry_warning_seconds = 3600\n\n[display]\nheadline = \"auto\"\nicon = \"most_constrained\"\n",
+    |_| "max_parallel = 3\nwall_budget_seconds = 55\nrefresh_budget_seconds = 120\nrefresh_min_budget_seconds = 60\nhistory_max_bytes = 4194304\nlogin_expiry_warning_seconds = 864000\n\n[display]\nheadline = \"auto\"\nicon = \"most_constrained\"\n",
 )
 .with_boundary_check(|error| error.code == "ceiling")
 .with_fields(FIELD_METADATA);
@@ -214,12 +246,34 @@ mod tests {
     #[test]
     fn login_warning_defaults_and_overrides() {
         let defaults = parse(BASE).unwrap();
-        assert_eq!(defaults.login_expiry_warning_seconds, 3600);
+        assert_eq!(defaults.login_expiry_warning_seconds, 864_000);
+        assert_eq!(defaults.refresh_budget_seconds, 120);
+        assert_eq!(defaults.refresh_min_budget_seconds, 60);
         for seconds in [0, 900, 86_400] {
             let settings =
                 parse(&format!("{BASE}login_expiry_warning_seconds = {seconds}\n")).unwrap();
             assert_eq!(settings.login_expiry_warning_seconds, seconds);
             assert!(settings.validate().is_empty());
+        }
+    }
+    #[test]
+    fn refresh_budgets_have_safe_defaults_and_bounded_overrides() {
+        let defaults = parse(BASE).unwrap();
+        assert_eq!(defaults.refresh_budget_seconds, 120);
+        assert_eq!(defaults.refresh_min_budget_seconds, 60);
+        for (budget, minimum) in [(60, 1), (120, 60), (600, 600)] {
+            let settings = parse(&format!(
+                "{BASE}refresh_budget_seconds = {budget}\nrefresh_min_budget_seconds = {minimum}\n"
+            ))
+            .unwrap();
+            assert!(settings.validate().is_empty());
+        }
+        for (budget, minimum) in [(0, 1), (60, 0), (60, 61), (601, 1)] {
+            let settings = parse(&format!(
+                "{BASE}refresh_budget_seconds = {budget}\nrefresh_min_budget_seconds = {minimum}\n"
+            ))
+            .unwrap();
+            assert!(!settings.validate().is_empty());
         }
     }
     #[test]
@@ -237,21 +291,29 @@ mod tests {
         let configured = parse(&format!("{BASE}[polling_intervals.claude]\ntimer_seconds = 17\npanel_seconds = 11\n[polling_intervals.agy]\ntimer_seconds = 2000\n")).unwrap();
         assert!(configured.validate().is_empty());
         configured.apply_polling_intervals(&mut policies);
+        let claude = policies
+            .iter()
+            .find(|policy| policy.adapter == "claude")
+            .unwrap();
+        let agy = policies
+            .iter()
+            .find(|policy| policy.adapter == "agy")
+            .unwrap();
+        let opencode = policies
+            .iter()
+            .find(|policy| policy.adapter == "opencode")
+            .unwrap();
         assert_eq!(
             interval(&policies, "claude", Trigger::Timer, Power::Ac),
             Some(17)
         );
         assert_eq!(
             interval(&policies, "claude", Trigger::Panel, Power::Battery),
-            Some(22)
+            Some(claude.panel_seconds * 2)
         );
         assert_eq!(
             interval(&policies, "claude", Trigger::Timer, Power::Low),
-            Some(68)
-        );
-        assert_eq!(
-            interval(&policies, "claude", Trigger::Manual, Power::Ac),
-            Some(30)
+            Some(claude.timer_seconds * 4)
         );
         assert_eq!(
             interval(&policies, "agy", Trigger::Timer, Power::Ac),
@@ -259,14 +321,15 @@ mod tests {
         );
         assert_eq!(
             interval(&policies, "agy", Trigger::Panel, Power::Ac),
-            Some(900)
+            Some(agy.panel_seconds)
         );
         assert_eq!(interval(&policies, "agy", Trigger::Timer, Power::Low), None);
         assert_eq!(
             interval(&policies, "opencode", Trigger::Timer, Power::Ac),
-            Some(300)
+            Some(opencode.timer_seconds)
         );
         let mut record = crate::AccountRecord::empty(crate::AccountScope {
+            extra: Default::default(),
             adapter: "claude".into(),
             account_key: "work".into(),
             label: "work".into(),
@@ -274,7 +337,11 @@ mod tests {
         record.last_attempt_unix_seconds = Some(100);
         assert_eq!(
             next_due(&policies, &record, Trigger::Timer, Power::Ac).unwrap(),
-            Some(117)
+            Some(100 + interval(&policies, "claude", Trigger::Timer, Power::Ac).unwrap() as i64)
+        );
+        assert_eq!(
+            interval(&policies, "claude", Trigger::Manual, Power::Ac),
+            interval(&original, "claude", Trigger::Manual, Power::Ac)
         );
         for (before, after) in original.iter().zip(&policies) {
             assert_eq!(before.probe_seconds, after.probe_seconds);
@@ -344,23 +411,29 @@ mod tests {
         assert!(raised.validate().is_empty());
         for (text, field) in [
             (
-                "max_parallel = 0\nwall_budget_seconds = 55\n",
+                "max_parallel = 0\nwall_budget_seconds = 55\n".to_owned(),
                 "max_parallel",
             ),
             (
-                "max_parallel = 3\nwall_budget_seconds = 0\n",
+                "max_parallel = 3\nwall_budget_seconds = 0\n".to_owned(),
                 "wall_budget_seconds",
             ),
             (
-                "max_parallel = 17\nwall_budget_seconds = 55\n",
+                format!(
+                    "max_parallel = {}\nwall_budget_seconds = 55\n",
+                    MAX_PARALLEL + 1
+                ),
                 "max_parallel",
             ),
             (
-                "max_parallel = 3\nwall_budget_seconds = 601\n",
+                format!(
+                    "max_parallel = 3\nwall_budget_seconds = {}\n",
+                    MAX_WALL_BUDGET_SECONDS + 1
+                ),
                 "wall_budget_seconds",
             ),
         ] {
-            let invalid = parse(text).unwrap();
+            let invalid = parse(&text).unwrap();
             assert!(
                 invalid.validate().iter().any(|error| error.field == field),
                 "{text}"
@@ -373,7 +446,7 @@ mod tests {
         assert_eq!(s.display, Display::default());
         assert!(s.validate().is_empty());
         let d = parse(&format!(
-            "{BASE}[display]\nheadline = \"5h\"\nicon = \"claude-michael\"\n"
+            "{BASE}[display]\nheadline = \"5h\"\nicon = \"account-one\"\n"
         ))
         .unwrap();
         assert_eq!(d.display.headline, Headline::FiveHour);
@@ -393,7 +466,7 @@ mod tests {
             let s = parse(&format!("{BASE}[display]\nicon = \"{icon}\"\n")).unwrap();
             assert_eq!(s.validate()[0].code, "icon", "{icon:?}");
         }
-        let long = "a".repeat(129);
+        let long = "a".repeat(MAX_DISPLAY_ICON_BYTES + 1);
         let s = parse(&format!("{BASE}[display]\nicon = \"{long}\"\n")).unwrap();
         assert!(!s.validate().is_empty());
     }

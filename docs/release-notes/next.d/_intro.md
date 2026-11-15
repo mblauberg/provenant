@@ -1,1 +1,1 @@
-This patch release stops idle `provenant status --wait` calls from using CPU, and fixes `provenant pr watch` after a push.
+Provenant 2.0 moves execution to graphs and introduces a new state root. Before upgrading, drain 1.x work and update integrations for the changed command surface.

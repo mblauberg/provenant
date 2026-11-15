@@ -92,51 +92,81 @@ fn retry(mut call: impl FnMut() -> i32) -> io::Result<i32> {
         }
     }
 }
+pub(crate) const CREATE_OPEN_ATTEMPTS: usize = 5;
+
+/// Retry transient ENOENT from concurrent O_CREAT calls, bounded so a removed
+/// parent or genuinely absent path remains an error.
+pub(crate) fn retry_create_open<T>(mut open: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut attempt = 1;
+    loop {
+        match open() {
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound && attempt < CREATE_OPEN_ATTEMPTS =>
+            {
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
 fn open_at(directory: i32, path: &OsStr, flags: i32, mode: u32) -> io::Result<File> {
     let path = string(path)?;
-    // SAFETY: path is live and NUL-terminated; directory is a borrowed File's
-    // descriptor or AT_FDCWD, valid through the call. openat retains no pointers
-    // and atomically sets CLOEXEC. Each successful fd has one owner below;
-    // concurrent calls are independent, failures are read from thread-local errno.
-    let fd = retry(|| unsafe {
-        libc::openat(
-            directory,
-            path.as_ptr(),
-            flags | libc::O_CLOEXEC,
-            mode as libc::c_uint,
-        )
-    })
-    .map_err(|error| {
-        // Linux reports ENOTDIR for O_DIRECTORY|O_NOFOLLOW on a link, Darwin
-        // ELOOP. Inspect the final entry without following it and canonicalise
-        // only a positively identified symlink. Classification grants no access
-        // and the entry may still change after this observation.
-        if flags & libc::O_NOFOLLOW != 0
-            && matches!(error.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP))
-        {
-            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-            // SAFETY: live directory/name and correctly aligned output. Read the
-            // output only after success; no ownership or pointers escape.
-            if unsafe {
-                libc::fstatat(
+    // On macOS/APFS, concurrent openat(O_CREAT) calls for one new name can
+    // return ENOENT to a loser after another caller has created the entry.
+    // Retry that transient result at the shared creation boundary; a missing
+    // parent still returns ENOENT after the bounded attempts.
+    let mut open = || {
+        retry(|| {
+            // SAFETY: the borrowed directory descriptor and NUL-terminated path
+            // stay live through openat, which retains neither pointer.
+            unsafe {
+                libc::openat(
                     directory,
                     path.as_ptr(),
-                    stat.as_mut_ptr(),
-                    libc::AT_SYMLINK_NOFOLLOW,
+                    flags | libc::O_CLOEXEC,
+                    mode as libc::c_uint,
                 )
-            } == 0
-            {
-                // SAFETY: successful fstatat initialised stat.
-                if unsafe { stat.assume_init() }.st_mode & libc::S_IFMT == libc::S_IFLNK {
-                    return io::Error::from_raw_os_error(libc::ELOOP);
-                }
             }
-        }
-        error
-    })?;
-    // SAFETY: the successful openat transferred exactly one fresh fd to us.
+        })
+    };
+    let fd = if flags & libc::O_CREAT != 0 {
+        retry_create_open(&mut open)
+    } else {
+        open()
+    }
+    .map_err(|error| classify_open_error(directory, &path, flags, error))?;
+    // SAFETY: the loop exits only after openat successfully returned a fresh fd.
     // No other owner exists; File closes it once on Drop.
     Ok(unsafe { File::from_raw_fd(fd) })
+}
+fn classify_open_error(directory: i32, path: &CString, flags: i32, error: io::Error) -> io::Error {
+    // Linux reports ENOTDIR for O_DIRECTORY|O_NOFOLLOW on a link, Darwin
+    // ELOOP. Inspect the final entry without following it and canonicalise
+    // only a positively identified symlink. Classification grants no access
+    // and the entry may still change after this observation.
+    if flags & libc::O_NOFOLLOW != 0
+        && matches!(error.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP))
+    {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: live directory/name and correctly aligned output. Read the
+        // output only after success; no ownership or pointers escape.
+        if unsafe {
+            libc::fstatat(
+                directory,
+                path.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } == 0
+        {
+            // SAFETY: successful fstatat initialised stat.
+            if unsafe { stat.assume_init() }.st_mode & libc::S_IFMT == libc::S_IFLNK {
+                return io::Error::from_raw_os_error(libc::ELOOP);
+            }
+        }
+    }
+    error
 }
 pub fn open_anchor(path: &Path) -> io::Result<File> {
     // Trailing / asks the kernel to follow a symlink as a directory even with

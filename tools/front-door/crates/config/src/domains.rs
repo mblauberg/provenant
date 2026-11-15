@@ -152,14 +152,28 @@ fn validate<T: DomainConfig>(table: &Table) -> Vec<SectionError> {
 /// needed in config. Each domain's name must be unique and a simple identifier.
 pub struct DomainSections<T> {
     pub entries: &'static [DomainSection],
+    /// User overrides read by this consumer. All registered compiled defaults
+    /// remain available to the typed aggregate, with their compiled origins.
+    pub selected: Option<&'static [&'static str]>,
     marker: PhantomData<fn() -> T>,
 }
 impl<T> DomainSections<T> {
     pub const fn new(entries: &'static [DomainSection]) -> Self {
         Self {
             entries,
+            selected: None,
             marker: PhantomData,
         }
+    }
+    pub const fn scoped(&self, names: &'static [&'static str]) -> Self {
+        Self {
+            entries: self.entries,
+            selected: Some(names),
+            marker: PhantomData,
+        }
+    }
+    pub fn reads(&self, name: &str) -> bool {
+        self.selected.is_none_or(|names| names.contains(&name))
     }
 }
 pub(crate) const NO_DOMAINS: DomainSections<NoDomains> = DomainSections::new(&[]);

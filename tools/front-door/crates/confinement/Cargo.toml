@@ -1,6 +1,6 @@
 [package]
 name = "provenant-confinement"
-version = "1.11.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -20,11 +20,20 @@ thiserror = { workspace = true }
 toml_edit = { workspace = true }
 
 [features]
+fixture = [
+    "snapshot",
+    "provenant-os/fixture",
+    "provenant-core/fixture",
+    "provenant-config/fixture",
+    "provenant-records/fixture",
+    "provenant-supervisor/fixture",
+]
 # Exposes the pure Seatbelt rendering path to the provider snapshot tests.
 snapshot = []
 
 [dev-dependencies]
-provenant-test-support = { path = "../test-support" }
+provenant-test-support = { path = "../test-support", features = ["fixture"] }
+provenant-fabric-store = { path = "../fabric-store", features = ["fixture"] }
 provenant-os = { workspace = true, features = ["fixture"] }
 provenant-supervisor = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }

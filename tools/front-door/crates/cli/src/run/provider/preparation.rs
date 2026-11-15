@@ -137,6 +137,21 @@ pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Opt
     })
 }
 
+/// Warn when an ignore file the routed adapter declares, in the writer's
+/// checkout, hides the writer's worktree from that adapter's agent.
+pub(super) fn ignore_file_warnings(
+    adapter: &str,
+    task: &run::TaskRequest,
+    state: &Path,
+) -> Vec<String> {
+    match (&task.writer, AdapterSpec::get(adapter)) {
+        (Some(writer), Some(spec)) => {
+            crate::ignore_files::launch_warnings(&writer.project, &writer.worktree, spec, state)
+        }
+        _ => Vec::new(),
+    }
+}
+
 pub(super) fn violates_account_pin(
     selected_key: Option<&str>,
     selected_adapter: Option<&str>,
@@ -157,7 +172,6 @@ pub(super) fn provider_preparation_fallback(
     use provenant_providers::ProviderError;
     match error {
         ProviderError::LoginRequired
-        | ProviderError::CredentialUnavailable
         | ProviderError::CredentialNotFound
         | ProviderError::CredentialExpired => provenant_routing::FallbackOutcome::AuthRequired,
         _ => provenant_routing::FallbackOutcome::Other,
@@ -173,7 +187,17 @@ pub(super) fn credential_failure_skip(
     directory: &Path,
 ) -> SkippedRoute {
     use provenant_providers::ProviderError;
-    let mut skipped = skip(route, SkipKind::AuthRequired, "credential refresh failed");
+    let kind = if matches!(
+        error,
+        ProviderError::LoginRequired
+            | ProviderError::CredentialNotFound
+            | ProviderError::CredentialExpired
+    ) {
+        SkipKind::AuthRequired
+    } else {
+        SkipKind::Refused
+    };
+    let mut skipped = skip(route, kind, "credential refresh failed");
     let cause = match error {
         ProviderError::CredentialNotFound => provenant_records::RouteExclusionReason::AuthRequired,
         ProviderError::CredentialExpired => provenant_records::RouteExclusionReason::LoginExpired,
@@ -299,20 +323,29 @@ pub(super) fn dependency_preparation_event(
     result: Result<serde_json::Value, String>,
     enabled: bool,
     profile: &provenant_records::run::HarnessProfile,
-) -> serde_json::Value {
+    policy: &provenant_records::policy::Policy,
+) -> Option<serde_json::Value> {
     match result {
-        Ok(event) => event,
+        Ok(event) => Some(event),
         Err(error) => {
             let warning = provenant_confinement::redact::bounded_line(
                 &dependency_preparation_warning(error, enabled, profile),
                 4096,
             );
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
-            serde_json::json!({
-                "command": "pnpm install --frozen-lockfile",
-                "outcome": "warning",
-                "reason": warning,
-            })
+            match policy.check(
+                "PREPARATION_DEPENDENCY_PREPARATION_EVENT_NONE",
+                provenant_records::policy::Facts::violation(
+                    "dependency preparation event records an advisory install failure",
+                ),
+            ) {
+                provenant_records::policy::Effect::Warn(_) => Some(serde_json::json!({
+                    "command": "pnpm install --frozen-lockfile",
+                    "outcome": "warning",
+                    "reason": warning,
+                })),
+                provenant_records::policy::Effect::Proceed
+                | provenant_records::policy::Effect::Refuse(_) => None,
+            }
         }
     }
 }
@@ -320,24 +353,35 @@ pub(super) fn dependency_preparation_event(
 #[test]
 fn dependency_setup_failure_warns_and_retains_redacted_reason() {
     let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let policy = provenant_records::policy::Policy::default();
     let event = dependency_preparation_event(
         Err(format!("missing pnpm {secret}")),
         true,
         &provenant_records::run::HarnessProfile::default(),
-    );
+        &policy,
+    )
+    .expect("warning policy retains the event");
     assert_eq!(event["outcome"], "warning");
     let reason = event["reason"].as_str().unwrap();
-    assert!(reason.contains("missing pnpm"));
-    assert!(reason.contains("lanes.prepare_deps"));
     assert!(!reason.contains(secret));
     let success = serde_json::json!({"outcome": "installed"});
     assert_eq!(
         dependency_preparation_event(
             Ok(success.clone()),
             true,
-            &provenant_records::run::HarnessProfile::default()
+            &provenant_records::run::HarnessProfile::default(),
+            &policy
         ),
-        success
+        Some(success)
+    );
+    let rule = policy.rule("PREPARATION_DEPENDENCY_PREPARATION_EVENT_NONE");
+    assert_eq!(
+        rule.rule.code,
+        "PREPARATION_DEPENDENCY_PREPARATION_EVENT_NONE"
+    );
+    assert_eq!(
+        rule.rule.strength,
+        provenant_records::policy::Strength::Warn
     );
 }
 
@@ -434,6 +478,31 @@ pub(super) fn prepare_writer_dependencies(
     }))
 }
 
+fn prepare_writer_dependencies_with_policy(
+    worktree: &Path,
+    enabled: bool,
+    search_path: &dyn Fn() -> Result<(std::ffi::OsString, &'static str), String>,
+    cancel: &provenant_core::CancelToken,
+    profile: &provenant_records::run::HarnessProfile,
+    policy: &provenant_records::policy::Policy,
+) -> Result<serde_json::Value, String> {
+    let result = prepare_writer_dependencies(worktree, enabled, search_path, cancel);
+    if let Err(error) = &result {
+        let detail = provenant_confinement::redact::bounded_line(
+            &dependency_preparation_warning(error.clone(), enabled, profile),
+            4096,
+        );
+        if let provenant_records::policy::Effect::Warn(message) = policy.check(
+            "PREPARATION_PREPARE_WRITER_DEPENDENCIES_NONE",
+            provenant_records::policy::Facts::violation(detail),
+        ) {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+        }
+    }
+    result
+}
+
 pub(crate) fn prepare(
     registry: &Registry<'_>,
     task: &run::TaskRequest,
@@ -441,7 +510,7 @@ pub(crate) fn prepare(
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
     wait: Option<u64>,
-) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
+) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
     prepare_with_wait(
         registry,
         task,
@@ -539,6 +608,10 @@ pub(super) enum PrepareError {
     #[error(transparent)]
     Run(#[from] run::RunError),
     #[error(transparent)]
+    Provider(#[from] provenant_providers::ProviderError),
+    #[error(transparent)]
+    Receipt(#[from] serde_json::Error),
+    #[error(transparent)]
     ReadOnly(#[from] ReadOnlyPlanError),
     #[error("write grants overlap a host index")]
     HostIndexOverlap,
@@ -547,7 +620,9 @@ pub(super) enum PrepareError {
     #[error("{0}")]
     GraphInputsAuthority(String),
     #[error("{0}")]
-    SourceAuthority(String),
+    SourceProfileIsolated(String),
+    #[error("{0}")]
+    SourceViewReadOnly(String),
     #[error(transparent)]
     SourceRoots(#[from] super::source_tree::SourceRootOverlap),
     #[error("{0}")]
@@ -575,8 +650,59 @@ pub(super) enum PrepareError {
     #[error("{0}")]
     Other(String),
 }
+
+fn candidate_refusal_message(
+    skipped_routes: &[SkippedRoute],
+    fallback_outcome: Option<provenant_records::run::PreparationFailure>,
+) -> Option<String> {
+    if skipped_routes.is_empty() {
+        return None;
+    }
+    let mut reasons = skipped_routes
+        .iter()
+        .map(SkippedRoute::describe)
+        .collect::<Vec<_>>();
+    if fallback_outcome == Some(provenant_records::run::PreparationFailure::AuthRequired) {
+        reasons.push("no eligible fallback remains".into());
+    }
+    Some(reasons.join("; "))
+}
+
+fn policy_code_for_boundary(
+    class: provenant_records::diagnostic::BoundaryClass,
+) -> Option<&'static str> {
+    use provenant_records::diagnostic::BoundaryClass as B;
+    match class {
+        B::Credentials => Some("PREPARATION_PREPARE_WITH_CREDENTIALS"),
+        B::LaneGit => Some("VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"),
+        B::Integrity => Some("PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"),
+        B::Authority => Some("PREPARATION_PREPARE_CANDIDATES_AUTHORITY"),
+        B::None => None,
+    }
+}
+
+fn provider_policy_code(error: &provenant_providers::ProviderError) -> Option<String> {
+    error.policy_code().map(str::to_owned).or_else(|| {
+        matches!(
+            error,
+            provenant_providers::ProviderError::PromptTooLarge { .. }
+        )
+        .then(|| "ARGV_PROMPT".to_owned())
+    })
+}
+
+fn policy_code_for_resource(
+    resource: Option<provenant_records::diagnostic::ResourceFact>,
+) -> Option<String> {
+    match resource {
+        Some(provenant_records::diagnostic::ResourceFact::ArgvPromptLimit { .. }) => {
+            Some("ARGV_PROMPT".into())
+        }
+        _ => None,
+    }
+}
 impl PrepareError {
-    pub(super) fn into_refusal(self) -> run::PrepareRefusal {
+    pub(super) fn into_refusal(self) -> Box<run::PrepareRefusal> {
         match self {
             Self::RouteResolution { error, checks } => {
                 let mut refusal = route_resolution_refusal(error).into_refusal();
@@ -589,10 +715,11 @@ impl PrepareError {
                 message,
                 cause,
                 note,
-            } => run::PrepareRefusal {
+            } => Box::new(run::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                policy_code: None,
                 resource: None,
-                terminal_cause: Some(cause),
+                terminal_cause: cause,
                 terminal_note: note,
                 message,
                 skipped_routes: Vec::new(),
@@ -603,7 +730,7 @@ impl PrepareError {
                         | provenant_records::run::TerminalCause::HostNativeUnconfigured
                 )
                 .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable),
-            },
+            }),
             Self::Candidates {
                 message,
                 skipped_routes,
@@ -631,41 +758,78 @@ impl PrepareError {
                 } else {
                     provenant_records::diagnostic::BoundaryClass::None
                 };
-                run::PrepareRefusal {
+                let policy_code = policy_code_for_boundary(boundary_class)
+                    .map(str::to_owned)
+                    .or_else(|| policy_code_for_resource(candidate_resource));
+                let message =
+                    candidate_refusal_message(&skipped_routes, fallback_outcome).unwrap_or(message);
+                let mut refusal = Box::new(run::PrepareRefusal {
                     boundary_class,
+                    policy_code,
                     resource: candidate_resource,
-                    terminal_cause: None,
+                    terminal_cause: provenant_records::run::TerminalCause::RouteResolutionRefused,
                     terminal_note: None,
                     message,
                     skipped_routes,
                     fallback_outcome,
+                });
+                if refusal.auth_required() {
+                    refusal.terminal_cause =
+                        provenant_records::run::TerminalCause::AccountLoginRequired;
                 }
+                refusal
             }
             Self::SourceRoots(error) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some("SOURCE_TREE_ENSURE_SOURCE_ROOTS_AUTHORITY".into());
                 refusal.terminal_note = Some(error.to_string());
                 refusal
             }
             Self::SourceCwd(error) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = error.boundary_class();
+                refusal.policy_code = if refusal.boundary_class
+                    == provenant_records::diagnostic::BoundaryClass::Authority
+                {
+                    Some("CONFINEMENT_SOURCE_CWD_AUTHORITY".into())
+                } else {
+                    policy_code_for_boundary(refusal.boundary_class).map(str::to_owned)
+                };
                 refusal
             }
             Self::Permission(error) => PlanCheckError::Permission(error).into_refusal(),
             Self::Unsupported(error) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some("PREPARATION_PREPARE_CANDIDATES_AUTHORITY".into());
                 refusal
             }
             Self::ContinuationRequest(error) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some("CONTRACT_CONTINUATION_VALIDATE_AUTHORITY".into());
                 refusal
             }
             Self::SourceHead(error) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some("CONFINEMENT_REQUIRE_SOURCE_HEAD_AUTHORITY".into());
                 refusal
             }
             Self::ReadOnly(error) => PlanCheckError::ReadOnly(error).into_refusal(),
@@ -675,37 +839,111 @@ impl PrepareError {
             Self::Run(run::RunError::Plan(error)) => PlanCheckError::Plan(error).into_refusal(),
             Self::Run(error) => {
                 let boundary_class = error.boundary_class();
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::HandoffRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = boundary_class;
+                refusal.policy_code = policy_code_for_boundary(boundary_class).map(str::to_owned);
+                refusal
+            }
+            Self::Provider(error) => {
+                let policy_code = provider_policy_code(&error);
+                let boundary_class = if policy_code.is_some() {
+                    provenant_records::diagnostic::BoundaryClass::None
+                } else {
+                    error.boundary_class()
+                };
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::HandoffRefused,
+                    error.to_string(),
+                );
+                refusal.boundary_class = boundary_class;
+                refusal.policy_code = policy_code
+                    .or_else(|| policy_code_for_boundary(boundary_class).map(str::to_owned));
+                refusal.resource = error.resource_fact();
                 refusal
             }
             Self::Prompt(error) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
-                refusal.boundary_class = match &error {
-                    LaunchPromptError::TooLarge => {
-                        provenant_records::diagnostic::BoundaryClass::Integrity
-                    }
-                    LaunchPromptError::NestedArgvTooLarge { .. } => {
-                        provenant_records::diagnostic::BoundaryClass::Authority
-                    }
-                    _ => provenant_records::diagnostic::BoundaryClass::None,
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::StoredPromptUnreadable,
+                    error.to_string(),
+                );
+                let policy_code = match &error {
+                    LaunchPromptError::Provider(error) => provider_policy_code(error),
+                    _ => None,
                 };
+                if let Some(policy_code) = policy_code {
+                    refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::None;
+                    refusal.policy_code = Some(policy_code);
+                    refusal.terminal_cause =
+                        provenant_records::run::TerminalCause::AccessPolicyRefused;
+                } else {
+                    refusal.boundary_class = match &error {
+                        LaunchPromptError::TooLarge => {
+                            provenant_records::diagnostic::BoundaryClass::Integrity
+                        }
+                        _ => provenant_records::diagnostic::BoundaryClass::None,
+                    };
+                    refusal.policy_code =
+                        policy_code_for_boundary(refusal.boundary_class).map(str::to_owned);
+                }
                 refusal.resource = error.resource_fact();
                 refusal
             }
             error @ (Self::HostIndexOverlap | Self::TargetSeedOverlap) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Integrity;
+                refusal.policy_code = Some(
+                    match &error {
+                        Self::HostIndexOverlap => {
+                            "CONFINEMENT_HOST_INDEXES_PROTECTED_DATA_INTEGRITY"
+                        }
+                        Self::TargetSeedOverlap => {
+                            "CONFINEMENT_TARGET_SEEDS_PROTECTED_DATA_INTEGRITY"
+                        }
+                        _ => return refusal,
+                    }
+                    .into(),
+                );
                 refusal
             }
             error @ (Self::GraphInputsAuthority(_)
-            | Self::SourceAuthority(_)
+            | Self::SourceProfileIsolated(_)
+            | Self::SourceViewReadOnly(_)
             | Self::WriterContinuation(_)) => {
-                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    error.to_string(),
+                );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some(
+                    match &error {
+                        Self::GraphInputsAuthority(_) => {
+                            "PREPARATION_CHECK_GRAPH_INPUTS_ROOT_AUTHORITY"
+                        }
+                        Self::SourceProfileIsolated(_) => {
+                            "SOURCE_TREE_ENSURE_PROFILE_ISOLATED_AUTHORITY"
+                        }
+                        Self::SourceViewReadOnly(_) => {
+                            "SOURCE_TREE_ENSURE_VIEW_READ_ONLY_AUTHORITY"
+                        }
+                        Self::WriterContinuation(_) => {
+                            "CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY"
+                        }
+                        _ => return refusal,
+                    }
+                    .into(),
+                );
                 refusal
             }
-            other => other.to_string().into(),
+            other => run::PrepareRefusal::boxed(
+                provenant_records::run::TerminalCause::HandoffRefused,
+                other.to_string(),
+            ),
         }
     }
 }
@@ -725,20 +963,23 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     .into_refusal();
     assert_eq!(permission.boundary_class, BoundaryClass::LaneGit);
     assert_eq!(
-        permission.skipped_routes[0].extra["plan_error"],
-        "permission"
+        permission.skipped_routes[0].plan_error,
+        Some(provenant_records::diagnostic::PlanFailure::Permission)
     );
     assert_eq!(
-        permission.skipped_routes[0].extra["guard_boundary"],
-        "lane_git"
+        permission.skipped_routes[0].guard_boundary,
+        Some(BoundaryClass::LaneGit)
     );
     assert!(permission.terminal_note.is_some());
-    let prompt = PrepareError::Prompt(LaunchPromptError::NestedArgvTooLarge {
-        limit: 32,
-        origin: "shipped default",
-    })
+    let prompt = PrepareError::Prompt(LaunchPromptError::Provider(
+        provenant_providers::ProviderError::PromptTooLarge {
+            limit: 32,
+            origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+        },
+    ))
     .into_refusal();
-    assert_eq!(prompt.boundary_class, BoundaryClass::Authority);
+    assert_eq!(prompt.boundary_class, BoundaryClass::None);
+    assert_eq!(prompt.policy_code.as_deref(), Some("ARGV_PROMPT"));
     assert_eq!(
         PrepareError::Prompt(LaunchPromptError::TooLarge)
             .into_refusal()
@@ -787,7 +1028,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     assert_eq!(other.boundary_class, BoundaryClass::None);
     for error in [
         PrepareError::GraphInputsAuthority("invalid graph inputs root".into()),
-        PrepareError::SourceAuthority("source grant overlaps".into()),
+        PrepareError::SourceProfileIsolated("source grant overlaps".into()),
         PrepareError::WriterContinuation("uncommitted predecessor edits".into()),
     ] {
         assert_eq!(
@@ -921,7 +1162,7 @@ fn mixed_candidate_guard_facts_survive_fallback_without_source_text()
     .into_iter()
     .collect();
     attach_candidate_guard_facts(&mut reasons, &boundaries, &resources)?;
-    assert_eq!(reasons[0].extra["guard_boundary"], "credentials");
+    assert_eq!(reasons[0].guard_boundary, Some(BoundaryClass::Credentials));
     assert!(
         reasons[0]
             .diagnostic()
@@ -964,6 +1205,62 @@ impl PlanCheckError {
         }
     }
 
+    fn policy_code(&self) -> Option<&'static str> {
+        use provenant_confinement::{PlanError, permissions::PermissionError};
+        let permission = match self {
+            Self::Permission(error) | Self::Plan(PlanError::Permission(error)) => Some(error),
+            _ => None,
+        };
+        if let Some(permission) = permission {
+            fn root(error: &PermissionError) -> &PermissionError {
+                match error {
+                    PermissionError::ConfigOrigin { source, .. } => root(source),
+                    other => other,
+                }
+            }
+            return Some(match root(permission) {
+                PermissionError::CredentialRoot
+                | PermissionError::CredentialRootAt { .. }
+                | PermissionError::CredentialGrant { .. }
+                | PermissionError::CredentialStore { .. } => {
+                    "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS"
+                }
+                PermissionError::AnchorMismatch | PermissionError::AnchorMismatchAt { .. } => {
+                    "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS_2"
+                }
+                PermissionError::InvalidPath(_) | PermissionError::InvalidReadOnlyPolicy => {
+                    "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_AUTHORITY_2"
+                }
+                _ => match permission.boundary_class() {
+                    provenant_records::diagnostic::BoundaryClass::Credentials => {
+                        "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS"
+                    }
+                    provenant_records::diagnostic::BoundaryClass::LaneGit => {
+                        "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"
+                    }
+                    provenant_records::diagnostic::BoundaryClass::Integrity => {
+                        "PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"
+                    }
+                    provenant_records::diagnostic::BoundaryClass::Authority => {
+                        "PREPARATION_PREPARE_CANDIDATES_AUTHORITY"
+                    }
+                    provenant_records::diagnostic::BoundaryClass::None => {
+                        return None;
+                    }
+                },
+            });
+        }
+        Some(match self {
+            Self::ReadOnly(_) => "CONFINEMENT_READ_ONLY_PLAN_AUTHORITY",
+            Self::SourceHead(_) => "CONFINEMENT_REQUIRE_SOURCE_HEAD_AUTHORITY",
+            Self::Plan(
+                PlanError::InvalidRoots | PlanError::UnconfinedExtensions | PlanError::Home(_),
+            ) => "VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_AUTHORITY_2",
+            Self::Plan(_) => "PREPARATION_PREPARE_CANDIDATES_AUTHORITY",
+            Self::Permission(_) => return None,
+        })
+    }
+
     fn skipped(&self, route: &str) -> SkippedRoute {
         use provenant_confinement::{PlanError, permissions::PermissionError};
         use provenant_records::diagnostic::PlanFailure;
@@ -978,7 +1275,8 @@ impl PlanCheckError {
                 PermissionError::InvalidPath(_) => PlanFailure::InvalidPath,
                 PermissionError::CredentialRoot
                 | PermissionError::CredentialRootAt { .. }
-                | PermissionError::CredentialGrant { .. } => PlanFailure::CredentialRoot,
+                | PermissionError::CredentialGrant { .. }
+                | PermissionError::CredentialStore { .. } => PlanFailure::CredentialRoot,
                 PermissionError::AnchorMismatch | PermissionError::AnchorMismatchAt { .. } => {
                     PlanFailure::AnchorMismatch
                 }
@@ -997,35 +1295,24 @@ impl PlanCheckError {
             Self::SourceHead(_) => PlanFailure::SourceHead,
         };
         let mut skipped = skip(route, SkipKind::Refused, failure.detail());
-        skipped
-            .extra
-            .insert("plan_error".into(), serde_json::json!(failure));
-        skipped.extra.insert(
-            "guard_boundary".into(),
-            serde_json::json!(self.boundary_class()),
-        );
-        if let Some(fact) = permission.and_then(PermissionError::resource_fact) {
-            skipped
-                .extra
-                .insert("guard_resource".into(), serde_json::json!(fact));
-        }
-        skipped.extra.insert(
-            "confinement_guard".into(),
-            serde_json::json!(self.guard_fact()),
-        );
+        skipped.plan_error = Some(failure);
+        skipped.guard_boundary = Some(self.boundary_class());
+        skipped.guard_resource = permission.and_then(PermissionError::resource_fact);
+        skipped.confinement_guard = Some(self.guard_fact());
         skipped.set_cause(provenant_records::RouteExclusionReason::ConfinementUnavailable);
         skipped
     }
 
-    fn into_refusal(self) -> run::PrepareRefusal {
+    fn into_refusal(self) -> Box<run::PrepareRefusal> {
         let skipped = self.skipped("preparation");
-        let mut refusal = run::PrepareRefusal::from(skipped.detail.clone());
+        let mut refusal = run::PrepareRefusal::boxed(
+            provenant_records::run::TerminalCause::AccessPolicyRefused,
+            skipped.detail.clone(),
+        );
         refusal.boundary_class = self.boundary_class();
+        refusal.policy_code = self.policy_code().map(str::to_owned);
         refusal.terminal_note = Some(skipped.detail.clone());
-        refusal.resource = skipped
-            .extra
-            .get("guard_resource")
-            .and_then(|fact| serde_json::from_value(fact.clone()).ok());
+        refusal.resource = skipped.guard_resource;
         refusal.skipped_routes.push(skipped);
         refusal
     }
@@ -1043,7 +1330,8 @@ impl PlanCheckError {
                 PermissionError::BroadRoot => G::PermissionRootTooBroad,
                 PermissionError::CredentialRoot
                 | PermissionError::CredentialRootAt { .. }
-                | PermissionError::CredentialGrant { .. } => G::CredentialRootRefused,
+                | PermissionError::CredentialGrant { .. }
+                | PermissionError::CredentialStore { .. } => G::CredentialRootRefused,
                 PermissionError::ProtectedOverlap => G::ProtectedPathOverlap,
                 PermissionError::AnchorMismatch | PermissionError::AnchorMismatchAt { .. } => {
                     G::PathAnchorChanged
@@ -1165,8 +1453,8 @@ pub(super) fn prepare_with_wait(
                 ..Default::default()
             })?;
         let roots = registry.roots.ok_or("routing context is unavailable")?;
-        let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-            .map_err(|error| error.to_string())?;
+        let config =
+            crate::config_reads::read_for(roots, "run").map_err(|error| error.to_string())?;
         let native =
             config
                 .domains
@@ -1193,6 +1481,7 @@ pub(super) fn prepare_with_wait(
         let mut delegated = task.clone();
         delegated.route = run::RequestedRoute::Model {
             extra: Default::default(),
+            required_family: task.route.required_family().map(str::to_owned),
             provider: provider.into(),
             model: model.clone(),
             effort: effort.clone(),
@@ -1219,10 +1508,7 @@ pub(super) fn prepare_with_wait(
             name.into(),
         ]);
         launch.route.source = Some(format!("domains.fabric.host_native.{name}"));
-        launch
-            .route
-            .extra
-            .insert("host_native".into(), name.clone().into());
+        launch.route.host_native = Some(name.clone());
         return Ok(launch);
     }
     prepare_candidates(
@@ -1354,6 +1640,8 @@ mod stale_readiness_tests {
     #[test]
     fn model_outside_the_accounts_offered_list_is_refused_with_that_list() {
         let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
+            "selection_context":{"workload":"general","writes":false},
+            "diagnostics":serde_json::to_value(provenant_records::route_selection::RouteDiagnostics::default()).unwrap(),
             "adapter":"agy", "model":"gemini-3.8-pro", "effort":null,
             "catalogue_revision":"revision", "account_key":"account", "host":"local",
             "alternatives":[], "exclusions":[], "eligibility":"eligible",
@@ -1370,6 +1658,7 @@ mod stale_readiness_tests {
             fixture_ref: "installed/agy/version".into(),
             catalogue_revision: "revision".into(),
             account_key: Some("account".into()),
+            plan: None,
             observed_models: vec!["Gemini Flash".into(), "GPT-OSS 120B (Medium)".into()],
             observed_unix_seconds: 10,
             expires_unix_seconds: 400,
@@ -1385,6 +1674,7 @@ mod stale_readiness_tests {
             None
         );
         let unknown = provenant_providers::AvailabilityRecord {
+            plan: None,
             observed_models: vec![],
             ..record
         };
@@ -1394,6 +1684,8 @@ mod stale_readiness_tests {
     #[test]
     fn stale_selected_account_is_reprobed_once_without_changing_route() {
         let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
+            "selection_context":{"workload":"general","writes":false},
+            "diagnostics":serde_json::to_value(provenant_records::route_selection::RouteDiagnostics::default()).unwrap(),
             "adapter":"claude", "model":"model", "effort":null,
             "catalogue_revision":"revision", "account_key":"account", "host":"local",
             "alternatives":[], "exclusions":[], "eligibility":"eligible",
@@ -1410,6 +1702,7 @@ mod stale_readiness_tests {
             fixture_ref: "installed/claude/version".into(),
             catalogue_revision: "revision".into(),
             account_key: Some("account".into()),
+            plan: None,
             observed_models: vec![],
             observed_unix_seconds: 10,
             expires_unix_seconds: 20,
@@ -1438,6 +1731,7 @@ mod stale_readiness_tests {
                     serde_json::json!("must not replace original"),
                 );
                 ready.readiness = provenant_records::RouteReadiness::Ready {
+                    availability_warning: None,
                     extra: Default::default(),
                     availability_ref: "installed/claude/version".into(),
                     expires_unix_seconds: 330,
@@ -1467,6 +1761,7 @@ mod stale_readiness_tests {
                 let mut other = route.clone();
                 other.account_key = Some("other".into());
                 other.readiness = provenant_records::RouteReadiness::Ready {
+                    availability_warning: None,
                     extra: Default::default(),
                     availability_ref: "installed/claude/version".into(),
                     expires_unix_seconds: 330,
@@ -1499,6 +1794,7 @@ mod stale_readiness_tests {
         assert_eq!(records[0], stale);
         let mut ready = route.clone();
         ready.readiness = provenant_records::RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "installed/claude/version".into(),
             expires_unix_seconds: 330,
@@ -1559,6 +1855,7 @@ mod stale_readiness_tests {
             fixture_ref: "installed/codex/version".into(),
             catalogue_revision: catalogue.revision().into(),
             account_key: Some("work".into()),
+            plan: None,
             observed_models: vec![],
             observed_unix_seconds: 10,
             expires_unix_seconds: 20,
@@ -1577,6 +1874,7 @@ mod stale_readiness_tests {
                        access: &[AccessContext<'_>]| {
             let context = RoutingContext {
                 choice_context: None,
+                selection_evidence: None,
                 policy_account_hint: None,
                 catalogue: &catalogue,
                 config: &config,
@@ -1617,6 +1915,205 @@ mod stale_readiness_tests {
         ));
         assert!(same_selected_ready(&route, denied).is_none());
     }
+
+    #[test]
+    fn claude_lane_token_loss_reprobes_the_same_account_without_mutating_credentials()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::{
+            CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Fake {
+            account_directory: std::path::PathBuf,
+            signed_in: AtomicBool,
+        }
+        impl Executor for Fake {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                let output = if options.argv[1] == "auth" {
+                    assert_eq!(options.argv[2], "status");
+                    assert_eq!(options.argv[3], "--json");
+                    assert!(options.env.unwrap().iter().any(|(key, value)| {
+                        key == "CLAUDE_CONFIG_DIR" && value == self.account_directory.as_os_str()
+                    }));
+
+                    if self.signed_in.load(Ordering::Relaxed) {
+                        br#"{"loggedIn":true,"email":"account@example.test"}"#.as_slice()
+                    } else {
+                        br#"{"loggedIn":false}"#.as_slice()
+                    }
+                } else if options.argv[1] == "--version" {
+                    b"Claude 2.0\n".as_slice()
+                } else {
+                    panic!("unexpected account probe: {:?}", options.argv);
+                };
+                let stdout = CapturedStream {
+                    bytes: output.to_vec(),
+                    total_bytes: output.len() as u64,
+                    ..Default::default()
+                };
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(0),
+                    stdout,
+                    stderr: CapturedStream::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        let account_directory = home.join(".claude-work");
+        let state = root.join("state");
+        std::fs::create_dir_all(&account_directory)?;
+        std::fs::create_dir_all(&state)?;
+        let token_path = account_directory.join(provenant_providers::claude::LANE_TOKEN_FILE);
+        std::fs::write(&token_path, "registered-token-sentinel\n")?;
+        let token_before = std::fs::read(&token_path)?;
+        let key = provenant_providers::identity::fingerprint("account@example.test")
+            .ok_or("account fingerprint")?;
+        let entry: provenant_providers::accounts::Registration =
+            serde_json::from_value(serde_json::json!({
+                "adapter":"claude", "label":"work", "key":key.clone(),
+                "directory":account_directory
+            }))?;
+        let fake = Fake {
+            account_directory: entry.directory.clone(),
+            signed_in: AtomicBool::new(true),
+        };
+        let executor = provenant_providers::host::HostProbeExecutor::new(&fake, &state)?;
+        let probe = Probe {
+            roots: None,
+            executor: &executor,
+            home: &home,
+            user: std::ffi::OsStr::new("fixture"),
+            scratch: temp.path(),
+        };
+        let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
+            "selection_context":{"workload":"general","writes":false},
+            "diagnostics":serde_json::to_value(provenant_records::route_selection::RouteDiagnostics::default()).unwrap(),
+            "adapter":"claude", "model":"claude/example", "effort":null,
+            "catalogue_revision":"revision", "account_key":key.clone(), "host":"local",
+            "alternatives":[], "exclusions":[], "eligibility":"eligible",
+            "readiness":{"status":"unavailable","reason":"stale_availability"},
+            "confidentiality":{"evidence_ref":"evidence"}
+        }))?;
+        use provenant_run::Providers as _;
+        let prior_route = run::RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("claude/example".into()),
+            account_key: Some(entry.key.clone()),
+            ..Default::default()
+        };
+        let mut exit = crate::run::tests::clean_exit();
+        exit.termination = Some(Termination::Exit(1));
+        let prior = crate::run::Registry::default().decode_captures(
+            &prior_route,
+            include_bytes!(
+                "../../../../../tests/fixtures/providers/claude/live-auth-required.jsonl"
+            ),
+            b"",
+            &exit,
+            temp.path(),
+            None,
+        )?;
+        assert_eq!(
+            prior.terminal_cause,
+            Some(run::TerminalCause::LaneTokenLost)
+        );
+        let stale = provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "claude".into(),
+            executable: "/fixture/claude".into(),
+            version: "old".into(),
+            last_update: None,
+            fixture_ref: "installed/claude/version".into(),
+            catalogue_revision: "revision".into(),
+            account_key: Some(entry.key.clone()),
+            plan: None,
+            observed_models: vec![],
+            observed_unix_seconds: 10,
+            expires_unix_seconds: 20,
+        };
+
+        // This is the successor probe after the prior writer stopped with
+        // LaneTokenLost: a healthy account refreshes readiness on the same route.
+        let mut availability = vec![stale.clone()];
+        let selected = retry_stale_selected(
+            &mut availability,
+            &route,
+            30,
+            "revision",
+            || observe_account(&entry, Path::new("/fixture/claude"), &probe, "revision", 30),
+            |records| {
+                assert_eq!(records[0].account_key.as_deref(), Some(entry.key.as_str()));
+                let mut ready = route.clone();
+                ready.readiness = provenant_records::RouteReadiness::Ready {
+                    availability_warning: None,
+                    extra: Default::default(),
+                    availability_ref: records[0].fixture_ref.clone(),
+                    expires_unix_seconds: records[0].expires_unix_seconds,
+                };
+                Some(ready)
+            },
+        )?
+        .ok_or("healthy selected account was not reusable")?;
+        assert_eq!(selected.adapter, route.adapter);
+        assert_eq!(selected.account_key.as_deref(), Some(entry.key.as_str()));
+        assert_eq!(
+            availability[0].account_key.as_deref(),
+            Some(entry.key.as_str())
+        );
+
+        // If the account itself has since signed out, the next fresh observation
+        // becomes an account-login refusal rather than another lane-token stop.
+        assert_eq!(std::fs::read(&token_path)?, token_before);
+        fake.signed_in.store(false, Ordering::Relaxed);
+        let failed = observe_account(&entry, Path::new("/fixture/claude"), &probe, "revision", 31)
+            .expect_err("signed-out account must not be available");
+        let AccountObservationError::AuthRequired(detail) = failed else {
+            panic!("signed-out account lost its typed login outcome: {failed:?}");
+        };
+        let failures = std::collections::BTreeMap::from([(
+            (entry.adapter.clone(), entry.key.clone()),
+            detail.clone(),
+        )]);
+        let failed_route = unavailable_auth_detail(
+            &route,
+            Some(entry.key.as_str()),
+            std::slice::from_ref(&entry),
+            &failures,
+        )
+        .ok_or("selected account login failure was not retained")?;
+        let mut skipped = skip("claude/example", SkipKind::AuthRequired, failed_route);
+        skipped.set_cause(provenant_records::RouteExclusionReason::AuthRequired);
+        let refusal = PrepareError::Candidates {
+            message: detail,
+            plans: Vec::new(),
+            candidate_boundary: None,
+            candidate_resource: None,
+            skipped_routes: vec![skipped],
+            fallback_outcome: Some(provenant_records::run::PreparationFailure::AuthRequired),
+        }
+        .into_refusal();
+        assert!(refusal.auth_required());
+        assert_eq!(
+            refusal.terminal_cause,
+            provenant_records::run::TerminalCause::AccountLoginRequired
+        );
+        assert_eq!(
+            refusal.skipped_routes[0].cause,
+            Some(provenant_records::RouteExclusionReason::AuthRequired)
+        );
+
+        assert_eq!(std::fs::read(&token_path)?, token_before);
+        Ok(())
+    }
 }
 
 /// Name, by registered label only, each account an unpinned route passed over
@@ -1627,12 +2124,17 @@ fn name_skipped_accounts(
     route: &provenant_records::ResolvedRoute,
     entries: &[provenant_providers::accounts::Registration],
 ) -> SkippedRoute {
-    let provenant_records::RouteReadiness::Unavailable { extra, .. } = &route.readiness else {
+    let provenant_records::RouteReadiness::Unavailable {
+        skipped_accounts, ..
+    } = &route.readiness
+    else {
         return skipped;
     };
-    let accounts: Vec<_> = provenant_records::SkippedAccount::read(extra)
-        .into_iter()
+    let accounts: Vec<_> = skipped_accounts
+        .iter()
+        .cloned()
         .map(|account| provenant_records::SkippedAccount {
+            extra: Default::default(),
             account: entries
                 .iter()
                 .find(|entry| entry.adapter == route.adapter && entry.key == account.account)
@@ -1651,10 +2153,7 @@ fn name_skipped_accounts(
         skipped.detail,
         provenant_records::SkippedAccount::describe(&accounts)
     );
-    skipped.extra.insert(
-        provenant_records::SKIPPED_ACCOUNTS.into(),
-        serde_json::json!(accounts),
-    );
+    skipped.skipped_accounts = accounts;
     skipped
 }
 
@@ -1678,9 +2177,8 @@ fn record_admission_redraws(
             }
             rejected.push(model);
             let cause = redraw
-                .extra
-                .get("cause")
-                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .cause
+                .clone()
                 .unwrap_or(provenant_records::RouteExclusionReason::AdmissionRefused);
             let mut skipped = skip(&redraw.rejected_pick, SkipKind::Unavailable, &redraw.reason);
             skipped.set_cause(cause);
@@ -1711,7 +2209,6 @@ fn next_permitted_candidate(
             outcome,
             handoff: provenant_routing::FallbackHandoff::Local,
             custody_released: true,
-            read_only: false,
             budget_remaining: true,
             pinned,
         }
@@ -1787,22 +2284,26 @@ pub(super) fn prepare_candidates(
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
         return prepare_command(registry, task, paths, resume, locate, provider, name);
     }
+    let policy_project = task
+        .profile
+        .policy_project
+        .map(|project| project.to_string())
+        .or_else(|| registry.project_id.map(|project| project.to_string()))
+        .unwrap_or_default();
+    let launch_policy = registry
+        .roots
+        .map_or_else(provenant_records::policy::Policy::default, |roots| {
+            run::launch_policy(roots.state.as_path(), &policy_project, task)
+        });
     // This is the raw, recorded prompt. It must fit the same bound as the
     // validated prompt artifact, before any host preamble is added.
     if prompt_text.len() as u64 > super::PROMPT_LIMIT {
         return Err(PrepareError::Prompt(LaunchPromptError::TooLarge));
     }
     let default_limit = provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES;
-    check_launch_prompt(
-        prompt_text,
-        paths,
-        None,
-        default_limit,
-        provenant_records::diagnostic::SettingSource::ShippedDefault,
-    )?;
     let loaded_config = registry
         .roots
-        .map(|roots| provenant_config::read_with_domains(roots, &crate::domains::SECTIONS));
+        .map(|roots| crate::config_reads::read_for(roots, "run"));
     const ARGV_LIMIT_KEY: &str = "domains.run.argv_prompt_limit_bytes";
     let (argv_limit, argv_origin, argv_origin_record) = match &loaded_config {
         Some(Ok(config)) => {
@@ -1815,10 +2316,7 @@ pub(super) fn prepare_candidates(
             (
                 config.domains.run.argv_prompt_limit_bytes,
                 label,
-                origin.map_or_else(
-                    || serde_json::json!({"kind": "compiled"}),
-                    |value| serde_json::json!(value),
-                ),
+                origin_receipt(origin),
             )
         }
         Some(Err(error)) => {
@@ -1830,19 +2328,26 @@ pub(super) fn prepare_candidates(
             (
                 default_limit,
                 provenant_records::diagnostic::SettingSource::ShippedDefault,
-                serde_json::json!({"kind": "compiled"}),
+                origin_receipt(None),
             )
         }
         None => (
             default_limit,
             provenant_records::diagnostic::SettingSource::ShippedDefault,
-            serde_json::json!({"kind": "compiled"}),
+            origin_receipt(None),
         ),
     };
     if let run::RequestedRoute::Model { model, .. } = &task.route
         && let Some((adapter, _)) = model.split_once('/')
     {
-        check_launch_prompt(prompt_text, paths, Some(adapter), argv_limit, argv_origin)?;
+        check_launch_prompt(
+            prompt_text,
+            paths,
+            Some(adapter),
+            argv_limit,
+            argv_origin,
+            &launch_policy,
+        )?;
     }
     // Only fixture builds may stand a supplied token in for host authority.
     #[cfg(not(feature = "fixture"))]
@@ -1893,7 +2398,7 @@ pub(super) fn prepare_candidates(
     };
     let writer_context = writer
         .as_ref()
-        .map(|writer| writer_source_context(writer, task, &git))
+        .map(|writer| writer_source_context(writer, task, &git, &launch_policy))
         .transpose()?
         .flatten();
     // Let the host login lookup diagnose missing credentials, including relocated
@@ -1936,13 +2441,14 @@ pub(super) fn prepare_candidates(
     let executor =
         provenant_providers::host::HostProbeExecutor::new(&executor, roots.state.as_path())
             .map_err(|e| e.to_string())?;
-    let config = loaded_config
+    let mut config = loaded_config
         .ok_or("routing context is unavailable")?
         .map_err(|error| error.to_string())?;
+    config.domains.routing.launch_policy = launch_policy.clone();
     // Continue the applied decision rather than redrawing the named pool
     // using the new operation seed.
     let mut request = match resume {
-        Some(prior) => continuation_request(prior)?,
+        Some(prior) => continuation_request(prior, &launch_policy)?,
         None => route_request(task)?,
     };
     let task_request = route_request(task)?;
@@ -1981,11 +2487,10 @@ pub(super) fn prepare_candidates(
         available_provider_leases(roots.state.as_path(), &eligible, wait, &clock, cancel)
             .map_err(|error| error.to_string())?;
     let eligible = |name: &str| provider_leases.contains_key(name);
-    let settings = config.domains.accounts.with_derived_accounts();
+    let settings = config.domains.accounts.unique_accounts();
     let credential_roots = credential_roots(registry, &home, &settings)?;
     let github_roots = github_roots(registry);
     let protected_worktrees = protected_worktrees(registry, &source, &git)?;
-    let fabric_mcp = config.fabric_mcp_server();
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
     let mut default_failures = std::collections::BTreeMap::new();
@@ -2071,7 +2576,7 @@ pub(super) fn prepare_candidates(
             });
         }
     }
-    // Include a distinct Zen identity for an unregistered local OpenCode login.
+    // Enumerate only actual identities; never derive a second plan from a login.
     let settings = provenant_providers::accounts::Settings {
         entries: entries
             .into_iter()
@@ -2080,7 +2585,7 @@ pub(super) fn prepare_candidates(
             .collect(),
         ..Default::default()
     }
-    .with_derived_accounts();
+    .unique_accounts();
     let entries: Vec<_> = settings.entries.into_values().collect();
     let timestamp = clock.unix_seconds();
     let diagnostic_records = crate::quota::read_cache(roots).unwrap_or_default();
@@ -2110,6 +2615,7 @@ pub(super) fn prepare_candidates(
                     });
                 if strategy != provenant_records::LoginReprobe::None {
                     let scope = provenant_quota::ReadinessScope {
+                        extra: Default::default(),
                         host: provenant_quota::LOCAL_HOST.into(),
                         adapter: entry.adapter.clone(),
                         account_key: entry.key.clone(),
@@ -2126,6 +2632,17 @@ pub(super) fn prepare_candidates(
                                     == Some(provenant_quota::ProbeFailure::AccountMismatch)
                         });
                     let auth_failure = mismatch
+                        || diagnostic_records.iter().any(|record| {
+                            record.account.adapter == entry.adapter
+                                && record.account.account_key == entry.key
+                                && (record
+                                    .last_error
+                                    .is_some_and(provenant_quota::ProbeFailure::needs_login)
+                                    || record.snapshot.as_ref().is_some_and(|snapshot| {
+                                        snapshot.status
+                                            == provenant_quota::QuotaStatus::AuthRequired
+                                    }))
+                        })
                         || matches!(
                             recorded.reason,
                             Some(
@@ -2302,14 +2819,7 @@ pub(super) fn prepare_candidates(
         .to_string();
     let rules = crate::route::task_exclusion_rules(&task.profile, roots)
         .map_err(|error| error.to_string())?;
-    let required_family = match &task.route {
-        run::RequestedRoute::Adapter { extra, .. }
-        | run::RequestedRoute::Model { extra, .. }
-        | run::RequestedRoute::Named { extra, .. }
-        | run::RequestedRoute::Review { extra, .. } => extra
-            .get("required_family")
-            .and_then(serde_json::Value::as_str),
-    };
+    let required_family = task.route.required_family();
     let family_constraints = match &task.route {
         run::RequestedRoute::Review {
             excluded_families,
@@ -2324,6 +2834,14 @@ pub(super) fn prepare_candidates(
         )),
         _ => None,
     };
+    let routing_evidence = crate::route::selection_evidence(
+        roots,
+        &home,
+        &source,
+        task.context
+            .as_ref()
+            .and_then(|context| context.role.as_deref()),
+    );
     let resolve = |availability: &[provenant_providers::AvailabilityRecord],
                    rejected: &[provenant_routing::ModelId]| {
         crate::route::resolve_dispatch_rejecting_family(
@@ -2342,6 +2860,8 @@ pub(super) fn prepare_candidates(
                 Some((context.risk_tier.as_deref()?, context.task_kind.as_deref()?))
             }),
             required_family,
+            Some(&routing_evidence),
+            Some(&launch_policy),
         )
         .map(|mut resolved| {
             // The router cannot observe host fences. Preserve the known
@@ -2356,6 +2876,7 @@ pub(super) fn prepare_candidates(
                     {
                         candidate.readiness =
                             Some(provenant_records::RouteReadiness::Unavailable {
+                                skipped_accounts: Vec::new(),
                                 extra: Default::default(),
                                 reason: provenant_records::RouteExclusionReason::ProviderUpdating,
                             });
@@ -2387,7 +2908,11 @@ pub(super) fn prepare_candidates(
     let mut refused_accounts = std::collections::BTreeSet::<(String, String)>::new();
     let mut candidate = 0usize;
     // A login resolved for one route serves every later route and the reader path.
-    let mut gh_login: Option<std::ffi::OsString> = None;
+    let mut gh_login: super::gh_auth::LoginCache = None;
+    // Whether a workflow in this checkout runs on pull request label events;
+    // the gh wrapper then says a label change starts CI (#3270).
+    let label_ci_warning =
+        publishing_gh.is_some() && provenant_config::label_events_trigger_ci(&cwd);
     loop {
         if queue.is_empty() {
             let next = if named_pool {
@@ -2535,6 +3060,8 @@ pub(super) fn prepare_candidates(
                             Some((context.risk_tier.as_deref()?, context.task_kind.as_deref()?))
                         }),
                         required_family,
+                        Some(&routing_evidence),
+                        Some(&launch_policy),
                     )
                     .ok()
                 };
@@ -2714,13 +3241,12 @@ pub(super) fn prepare_candidates(
             if matches!(
                 reason,
                 provenant_records::RouteExclusionReason::PacingReserve
-            ) && let Some(fact) = route.extra.get("pacing_reserve_fact").and_then(|value| {
-                serde_json::from_value::<provenant_records::diagnostic::ResourceFact>(value.clone())
-                    .ok()
-            }) && matches!(
-                fact,
-                provenant_records::diagnostic::ResourceFact::PacingReserve { .. }
-            ) {
+            ) && let Some(fact) = route.diagnostics.pacing_reserve_fact
+                && matches!(
+                    fact,
+                    provenant_records::diagnostic::ResourceFact::PacingReserve { .. }
+                )
+            {
                 reason_resources.insert(
                     reasons.len(),
                     resolve_pacing_source(fact, &route.adapter, &config.origins),
@@ -2740,13 +3266,16 @@ pub(super) fn prepare_candidates(
             // Admission refuses an account whose allowance is spent. Another
             // account may still serve the same model, so move on to it once per
             // account, never past a pinned one.
-            let spent = error.contains("allowance exhausted");
+            let spent = matches!(
+                &error,
+                crate::route::EdgeError::Quota(provenant_quota::QuotaError::AllowanceExhausted)
+            );
             let refused_key = route
                 .account_key
                 .clone()
                 .filter(|_| spent && selected.is_none());
             let Some(key) = refused_key else {
-                reasons.push(skip(&label, SkipKind::Unavailable, error));
+                reasons.push(skip(&label, SkipKind::Unavailable, error.to_string()));
                 continue;
             };
             let name = entries
@@ -2857,23 +3386,16 @@ pub(super) fn prepare_candidates(
             continue;
         }
         let continuation = match resume {
-            Some(prior) => match continuation_for(
+            Some(prior) => match continuation_for_policy(
                 prior,
                 &route,
                 &task.authority_digest.to_string(),
                 state_root,
                 roots.state.as_path(),
                 &private_state,
+                &launch_policy,
             ) {
                 Ok(continuation) => Some(continuation),
-                Err(error)
-                    if task.extra.get("automatic_continuation")
-                        == Some(&serde_json::json!(true))
-                        && error.boundary_class()
-                            == provenant_records::diagnostic::BoundaryClass::None =>
-                {
-                    None
-                }
                 Err(error) => {
                     let class = error.boundary_class();
                     if class != provenant_records::diagnostic::BoundaryClass::None {
@@ -2959,12 +3481,28 @@ pub(super) fn prepare_candidates(
         };
         let handoff = private_state.join("handoff.json");
         let writable_handoff = handoff_writable(&request.permissions);
+        let limits = run::lane_limits(
+            task,
+            state_root,
+            &project_id.to_string(),
+            adapter.id(),
+            run::HostCaps {
+                runtime_seconds: config
+                    .providers
+                    .get(adapter.id())
+                    .and_then(|provider| provider.runtime_deadline_seconds),
+            },
+        );
         let text = format!(
             "{}\n{text}",
-            run::lane_preamble(
+            run::lane_preamble_with_policy(
                 &model_policy.guidance(),
-                writer.is_some(),
-                writable_handoff.then_some(handoff.as_path())
+                &limits,
+                writer
+                    .is_some()
+                    .then(|| run::ResolvedCiScope::resolve(&task.profile)),
+                writable_handoff.then_some(handoff.as_path()),
+                &launch_policy,
             )
         );
         let prompt = match launch_prompt(
@@ -2974,15 +3512,10 @@ pub(super) fn prepare_candidates(
             adapter.id(),
             argv_limit,
             argv_origin,
+            &launch_policy,
         ) {
             Ok(prompt) => prompt,
             Err(error) => {
-                if matches!(&error, LaunchPromptError::NestedArgvTooLarge { .. }) {
-                    reason_boundaries.insert(
-                        reasons.len(),
-                        provenant_records::diagnostic::BoundaryClass::Authority,
-                    );
-                }
                 if let Some(fact) = error.resource_fact() {
                     reason_resources.insert(reasons.len(), fact);
                 }
@@ -3052,6 +3585,7 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
+        let credential_roots = plan.permissions().credential_roots.clone();
         let adapter_spec = AdapterSpec::get(adapter.id());
         let refresh_token = adapter_spec.is_some_and(|spec| spec.launch_token_refresh);
         let refreshed = if refresh_token && fixture_token.is_none() {
@@ -3065,8 +3599,8 @@ pub(super) fn prepare_candidates(
             let authority = match credential_authority(roots.state.as_path(), paths, &login) {
                 Ok(authority) => authority,
                 Err(error) => {
-                    previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
-                    reasons.push(skip(&label, SkipKind::AuthRequired, error));
+                    previous_outcome = provenant_routing::FallbackOutcome::Other;
+                    reasons.push(skip(&label, SkipKind::Refused, error));
                     continue;
                 }
             };
@@ -3087,7 +3621,7 @@ pub(super) fn prepare_candidates(
             ) {
                 Ok(token) => Some(token),
                 Err(error) => {
-                    previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
+                    previous_outcome = provider_preparation_fallback(&error);
                     reasons.push(credential_failure_skip(
                         &label,
                         &error,
@@ -3119,14 +3653,21 @@ pub(super) fn prepare_candidates(
             .user_skills
             .unwrap_or_else(|| config.domains.lanes.user_skills_for(Some(&project_id_str)));
         let user_skills_origin = if model_policy.lane.user_skills.is_some() {
-            serde_json::json!({"route_policy": effective.sources})
+            provenant_records::run::UserSkillsSourceReceipt {
+                route_policy: Some(effective.sources.clone()),
+                ..Default::default()
+            }
         } else {
             let key = if project_override.is_some() {
                 project_key.as_str()
             } else {
                 "domains.lanes.user_skills"
             };
-            serde_json::json!({"key": key, "origin": config.origins.get(key)})
+            provenant_records::run::UserSkillsSourceReceipt {
+                key: Some(key.into()),
+                origin: Some(origin_receipt(config.origins.get(key))),
+                ..Default::default()
+            }
         };
         provider_route.set_user_skills(user_skills_mode.is_discover());
         let nonce = entropy_128().map_err(|error| error.to_string())?;
@@ -3139,7 +3680,9 @@ pub(super) fn prepare_candidates(
         );
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
+                credential_roots: credential_roots.clone(),
                 images: &task.access.attachments,
+                policy: &launch_policy,
                 command: None,
                 route: provider_route,
                 confined: &plan,
@@ -3150,7 +3693,7 @@ pub(super) fn prepare_candidates(
                 home: &home,
                 user: &user,
                 host_var: &|key| {
-                    if key == provenant_confinement::run_config::SANDBOX_ENV {
+                    if key == provenant_core::consumer_env::SANDBOX {
                         Some(sandbox.env_value().into())
                     } else {
                         host_provider_var(registry, key)
@@ -3170,7 +3713,6 @@ pub(super) fn prepare_candidates(
                     depth: paths.lane_depth,
                     attempt: paths.attempt_id,
                     assets,
-                    fabric_mcp,
                 },
             })
         };
@@ -3239,25 +3781,33 @@ pub(super) fn prepare_candidates(
             super::project_paths::Context {
                 cwd: &cwd,
                 home: &home,
+                credential_roots: &credential_roots,
                 common_git: common_git_path.as_deref(),
                 state_root: roots.state.as_path(),
                 worktree_gitdir: worktree_gitdir.as_deref(),
                 writer: writer.is_some(),
                 settings: config.domains.lanes.projects.get(&project_id_str),
                 project: &project_id_str,
+                policy: &launch_policy,
             },
-        );
+        )?;
         let process_tree_read = configure_process_tree(&mut spec, paths)?;
         let build_settings = config.domains.fabric.lanes.build_settings();
+        spec.configure_cargo_sources(
+            build_settings.cargo_source_writes,
+            plan.permissions().network,
+        );
         let coordination_reads = configure_build_slots(
             &mut spec,
             &build_settings,
+            &source,
             &home,
             scratch,
             &provenant_executable,
             roots.state.as_path(),
             &task.profile.knobs,
-        );
+            &launch_policy,
+        )?;
         if let Some(policy) = plan.policy_mut() {
             for root in std::iter::once(process_tree_read).chain(coordination_reads) {
                 policy.mandatory_mut().add_state_read(root)?;
@@ -3267,21 +3817,35 @@ pub(super) fn prepare_candidates(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
         ) {
-            return Err(PrepareError::HostIndexOverlap);
+            let effect = launch_policy.check(
+                "CONFINEMENT_HOST_INDEXES_PROTECTED_DATA_INTEGRITY",
+                provenant_records::policy::Facts::violation("write grants overlap host indexes"),
+            );
+            if effect.blocks() {
+                return Err(PrepareError::HostIndexOverlap);
+            }
         }
         if !target_seeds_protected(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
         ) {
-            return Err(PrepareError::TargetSeedOverlap);
-        }
-        if let Some(head) = &task.head {
-            spec.env.push(("PROVENANT_LANE_HEAD".into(), head.into()));
-            if let Some(base) = &task.base {
-                spec.env.push(("PROVENANT_LANE_BASE".into(), base.into()));
+            let effect = launch_policy.check(
+                "CONFINEMENT_TARGET_SEEDS_PROTECTED_DATA_INTEGRITY",
+                provenant_records::policy::Facts::violation("write grants overlap target seeds"),
+            );
+            if effect.blocks() {
+                return Err(PrepareError::TargetSeedOverlap);
             }
         }
-        if sandbox.sandboxed {
+        if let Some(head) = &task.head {
+            spec.env
+                .push((provenant_core::consumer_env::LANE_HEAD.into(), head.into()));
+            if let Some(base) = &task.base {
+                spec.env
+                    .push((provenant_core::consumer_env::LANE_BASE.into(), base.into()));
+            }
+        }
+        if sandbox.effective {
             set_cargo_profile(&mut spec.env, &build_settings);
         }
         spec.env.extend(
@@ -3290,7 +3854,7 @@ pub(super) fn prepare_candidates(
                 .into_iter()
                 .map(|(key, value)| (key.into(), value.into())),
         );
-        if sandbox.sandboxed {
+        if sandbox.effective {
             set_cargo_jobs(
                 &mut spec.env,
                 registry
@@ -3303,20 +3867,81 @@ pub(super) fn prepare_candidates(
             spec.configure_shell(scratch, adapter_spec);
         }
         let mut gh_attempted = false;
-        if publishing && !github_auth_permitted(&plan, &spec.profile.spec) {
+        // The one GitHub credential decision for this lane (gh_auth), with
+        // its delivery; the receipt records it below.
+        let mut gh_selection = super::gh_auth::Selection::new(
+            super::gh_auth::Delivery::None(
+                if publishing {
+                    "GitHub access not requested by this adapter"
+                } else {
+                    "publishing off or network closed"
+                }
+                .into(),
+            ),
+            false,
+        );
+        let gh_permitted = github_auth_permitted(&plan, &spec.profile.spec);
+        if publishing && !gh_permitted {
             let _ = writeln!(
                 std::io::stderr().lock(),
                 "warning: {label}: GitHub publishing credentials withheld by the access policy"
             );
+            gh_selection = super::gh_auth::Selection::new(
+                if sandbox.effective {
+                    super::gh_auth::Delivery::None("withheld by the access policy".into())
+                } else {
+                    // Nothing is injected, but an unsandboxed lane can still
+                    // read the user's login stores itself.
+                    super::gh_auth::Delivery::Ambient
+                },
+                false,
+            );
         }
+        let gh_policy = match publishing_gh
+            .as_ref()
+            .map(|_| provenant_config::GithubPolicy::read(&roots.state, project_id))
+        {
+            None => provenant_config::GithubPolicy::default(),
+            Some(Ok(policy)) => policy,
+            // Sandboxed publishing refuses an unreadable policy: its selected
+            // credential restrictions cannot be applied.
+            Some(Err(error)) if sandbox.effective => {
+                return Err(launch_policy.boundary_error(
+                    "PREPARATION_PREPARE_WITH_CREDENTIALS",
+                    provenant_records::policy::Facts::violation(error.to_string()),
+                    error.to_string().into(),
+                ));
+            }
+            Some(Err(error)) => {
+                if let Some(message) = launch_policy
+                    .check(
+                        "PREPARATION_GITHUB_POLICY_NONE",
+                        provenant_records::policy::Facts::violation(format!(
+                            "{label}: GitHub policy unreadable, the gh wrapper applies no deny list: {error}"
+                        )),
+                    )
+                    .message()
+                {
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                }
+                provenant_config::GithubPolicy::default()
+            }
+        };
+        let gh_budget = limits.gh_invocations.as_ref();
+        let gh_shim = provenant_providers::GhShim {
+            policy: &gh_policy,
+            budget: gh_budget.map_or(0, |limit| limit.value),
+            budget_source: gh_budget.map_or("default", |limit| limit.source.as_str()),
+            label_ci_warning,
+        };
         if let Some(gh) = publishing_gh
             .as_ref()
-            .filter(|_| sandbox.sandboxed && github_auth_permitted(&plan, &spec.profile.spec))
+            .filter(|_| sandbox.effective && gh_permitted)
         {
             // Resolve the login before composing gh's wrapper: token launches
             // use a private empty config directory, independent of host links.
             gh_attempted = true;
-            if let Some(warning) = super::gh_auth::inject(
+            let delivery = match super::gh_auth::inject(
                 &executor,
                 gh,
                 &home,
@@ -3325,11 +3950,13 @@ pub(super) fn prepare_candidates(
                 &mut gh_login,
                 &mut spec.env,
             ) {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
-            }
-            let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
-                .map_err(|error| error.to_string())?;
-            let publishing = spec.configure_publishing(scratch, &git, gh, &home, &policy);
+                Ok(origin) => super::gh_auth::Delivery::Injected(origin),
+                Err(warning) => {
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
+                    super::gh_auth::Delivery::None("login lookup failed".into())
+                }
+            };
+            let publishing = spec.configure_publishing(scratch, &git, gh, &home, &gh_shim);
             if let Err(error) = publishing {
                 let class = error.boundary_class();
                 if class != provenant_records::diagnostic::BoundaryClass::None {
@@ -3338,6 +3965,30 @@ pub(super) fn prepare_candidates(
                 reasons.push(setup_skip(&label, error.to_string()));
                 continue;
             }
+            gh_selection = super::gh_auth::Selection::new(delivery, true);
+        } else if let Some(gh) = publishing_gh.as_ref().filter(|_| !sandbox.effective) {
+            // An unsandboxed lane keeps the user's own gh login; the counting
+            // wrapper still fronts gh on its PATH. A wrapper that cannot be
+            // installed leaves gh unmediated, which the receipt says.
+            let mediated = match spec.configure_gh_shim(scratch, gh, &gh_shim) {
+                Ok(()) => true,
+                Err(error) => {
+                    if let Some(message) = launch_policy
+                        .check(
+                            "PREPARATION_GH_SHIM_NONE",
+                            provenant_records::policy::Facts::violation(format!(
+                                "{label}: gh wrapper unavailable, gh runs uncounted: {error}"
+                            )),
+                        )
+                        .message()
+                    {
+                        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                    }
+                    false
+                }
+            };
+            gh_selection =
+                super::gh_auth::Selection::new(super::gh_auth::Delivery::Ambient, mediated);
         }
         if git_context.is_some()
             && let Some(argument) = adapter_spec.and_then(|spec| spec.context_directory_arg)
@@ -3347,15 +3998,18 @@ pub(super) fn prepare_candidates(
             spec.argv
                 .splice(1..1, [argument.into(), scratch.as_os_str().to_owned()]);
         }
-        spec.complete_tool_requirements(&plan, &home, &cwd);
+        if writer.is_none() {
+            super::command::scratch_cargo_output(&mut spec.env, scratch);
+        }
+        spec.complete_tool_requirements(&plan, &cwd)?;
         if isolated {
             super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)
-                .map_err(PrepareError::SourceAuthority)?;
+                .map_err(PrepareError::SourceProfileIsolated)?;
             super::source_tree::ensure_view_read_only(
                 &cwd,
                 &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
             )
-            .map_err(PrepareError::SourceAuthority)?;
+            .map_err(PrepareError::SourceViewReadOnly)?;
         }
         let transcript_account = account
             .as_ref()
@@ -3386,7 +4040,7 @@ pub(super) fn prepare_candidates(
             reasons.push(setup_skip(&label, format!("setup failed: {error}")));
             continue;
         }
-        if !sandbox.sandboxed
+        if !sandbox.effective
             && let Some((environment, fallback)) = adapter_spec
                 .filter(|spec| {
                     spec.model_observation == provenant_records::ModelObservation::Rollout
@@ -3436,6 +4090,9 @@ pub(super) fn prepare_candidates(
         if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }
+        for warning in ignore_file_warnings(&route.adapter, task, roots.state.as_path()) {
+            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+        }
         if route.eligibility == provenant_records::RouteEligibility::UnverifiedModel {
             let _ = writeln!(
                 std::io::stderr().lock(),
@@ -3474,11 +4131,13 @@ pub(super) fn prepare_candidates(
                     .get("lanes.prepare_deps")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(true);
-                let result = prepare_writer_dependencies(
+                let result = prepare_writer_dependencies_with_policy(
                     writer.worktree.path(),
                     enabled,
                     &|| host_dependency_path(cancel),
                     cancel,
+                    &task.profile,
+                    &launch_policy,
                 );
                 // Cancellation remains terminal; dependency setup is otherwise
                 // advisory and the provider may install or repair it in the lane.
@@ -3487,7 +4146,7 @@ pub(super) fn prepare_candidates(
                         "dependency preparation cancelled".into(),
                     ));
                 }
-                Some(dependency_preparation_event(result, enabled, &task.profile))
+                dependency_preparation_event(result, enabled, &task.profile, &launch_policy)
             }
             None => None,
         };
@@ -3498,78 +4157,70 @@ pub(super) fn prepare_candidates(
             resume.is_some(),
             current_candidate > 0,
         );
-        if let Some(warning) = provider
-            .extra
-            .get("availability_warning")
-            .and_then(|v| v.as_str())
-        {
+        if let Some(warning) = provider.availability_warning.as_deref() {
             let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
         }
-        provider.extra.insert(
-            "account_source".into(),
-            account_source(resume.is_some(), task.account.is_some()).into(),
-        );
-        provider.extra.insert(
-            "max_continuations".into(),
-            serde_json::json!(model_policy.lane.max_continuations.unwrap_or(0)),
-        );
-        provider.extra.insert(
-            "resume_continuations".into(),
-            serde_json::json!(model_policy.lane.resume_continuations.unwrap_or(false)),
-        );
+        provider.account_source = Some(if resume.is_some() {
+            provenant_records::run::AccountSource::Continuation
+        } else if task.account.is_some() {
+            provenant_records::run::AccountSource::Pin
+        } else {
+            provenant_records::run::AccountSource::Automatic
+        });
         if refreshed
             .as_ref()
             .is_some_and(|token| token.is_lane_token())
         {
-            provider.extra.insert("lane_token".into(), true.into());
-            provider
-                .extra
-                .insert("registered_lane_token".into(), true.into());
+            provider.lane_token = Some(true);
+            provider.registered_lane_token = Some(true);
         }
-        provider.extra.insert("project_paths".into(), project_paths);
-        provider.extra.insert(
-            "argv_prompt_limit".into(),
-            serde_json::json!({
-                "value": argv_limit, "key": ARGV_LIMIT_KEY, "origin": argv_origin_record.clone(),
-            }),
-        );
+        provider.project_paths = Some(serde_json::from_value(project_paths)?);
+        provider.argv_prompt_limit = Some(provenant_records::run::ArgvPromptLimitReceipt {
+            value: argv_limit as u64,
+            key: ARGV_LIMIT_KEY.into(),
+            origin: argv_origin_record,
+            extra: Default::default(),
+        });
         if let Some(event) = &dependency_event {
-            provider
-                .extra
-                .insert("dependency_preparation".into(), event.clone());
+            provider.dependency_preparation = Some(serde_json::from_value(event.clone())?);
         }
         let mut skills =
             user_skills_exposure(user_skills_mode, user_skills_origin, &spec.user_skills);
-        skills["stage_max_bytes"] = serde_json::json!({
-            "value": config.domains.lanes.skill_stage_max_bytes,
-            "origin": config.origins.get("domains.lanes.skill_stage_max_bytes"),
-            "key": "domains.lanes.skill_stage_max_bytes",
+        skills.stage_max_bytes = Some(provenant_records::run::ArgvPromptLimitReceipt {
+            value: config.domains.lanes.skill_stage_max_bytes,
+            key: "domains.lanes.skill_stage_max_bytes".into(),
+            origin: origin_receipt(config.origins.get("domains.lanes.skill_stage_max_bytes")),
+            extra: Default::default(),
         });
-        provider.extra.insert("user_skills".into(), skills);
-        provider.extra.insert(
-            "tool_closure".into(),
-            serde_json::Value::Array(
-                spec.prepared_tools()
-                    .iter()
-                    .map(|tool| tool.receipt())
-                    .collect(),
-            ),
-        );
-        provider.extra.insert(
-            "applied_access".into(),
-            spec.applied_access().receipt(&home),
-        );
-        provider.extra.insert(
-            "discovery_warnings".into(),
-            serde_json::json!(discovery_warnings(&spec.omitted_discovery, &home, false)),
-        );
+        provider.user_skills = Some(skills);
+        provider.cargo_home = serde_json::from_value(spec.cargo_home_receipt())?;
+        provider.tool_closure = Some(serde_json::from_value(serde_json::Value::Array(
+            spec.prepared_tools()
+                .iter()
+                .map(|tool| tool.receipt())
+                .collect(),
+        ))?);
+        provider.applied_access = Some(serde_json::from_value(
+            spec.applied_access()
+                .receipt(&home, spec.credential_roots()),
+        )?);
+        provider.discovery_warnings = Some(discovery_warnings(
+            &spec.omitted_discovery,
+            &home,
+            spec.credential_roots(),
+            false,
+        ));
+        let cargo_home = spec
+            .cargo_home()
+            .cloned()
+            .ok_or_else(|| PrepareError::Other("host Cargo binding was not finalised".into()))?;
         let stdin = match spec.stdin {
             Stdin::Bytes(bytes) => bytes,
             Stdin::Null => Vec::new(),
         };
         // Resolve gh credentials on the host, where a keychain login is
         // available. The token travels only in the live launch environment.
-        let reader_gh = sandbox.sandboxed
+        let reader_gh = sandbox.effective
             && github_auth_permitted(&plan, &spec.profile.spec)
             && adapter_spec.is_some_and(|spec| spec.github_auth.is_some());
         if let Some(gh) = publishing_gh
@@ -3577,7 +4228,8 @@ pub(super) fn prepare_candidates(
             .or_else(|| reader_gh.then(|| locate("gh").ok()).flatten())
             && reader_gh
             && !gh_attempted
-            && let Some(warning) = super::gh_auth::inject(
+        {
+            let delivery = match super::gh_auth::inject(
                 &executor,
                 &gh,
                 &home,
@@ -3585,13 +4237,29 @@ pub(super) fn prepare_candidates(
                 cancel,
                 &mut gh_login,
                 &mut spec.env,
-            )
-        {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
+            ) {
+                Ok(origin) => super::gh_auth::Delivery::Injected(origin),
+                Err(warning) => {
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {label}: {warning}");
+                    super::gh_auth::Delivery::None("login lookup failed".into())
+                }
+            };
+            gh_selection = super::gh_auth::Selection::new(delivery, false);
         }
+        provider.github_credential = Some(serde_json::from_value(gh_selection.receipt())?);
+        if writer.is_some() {
+            let scope = run::ResolvedCiScope::resolve(&task.profile);
+            provider.ci_scope = Some(provenant_records::run::CiScopeReceipt {
+                value: scope.value.as_str().into(),
+                source: scope.source,
+                key: "lanes.ci_scope".into(),
+                extra: Default::default(),
+            });
+        }
+        gh_selection.finalise_environment(&mut spec.env);
         if adapter_spec.is_some_and(|spec| {
             spec.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)
-        }) && (!sandbox.sandboxed || spec.env.iter().any(|(key, _)| key == "GH_TOKEN"))
+        }) && (!sandbox.effective || spec.env.iter().any(|(key, _)| key == "GH_TOKEN"))
         {
             super::gh_auth::codex_shell_environment(&spec.env, &mut spec.argv);
         }
@@ -3611,9 +4279,9 @@ pub(super) fn prepare_candidates(
                 }
             }
         }
-        let sandboxed = sandbox.sandboxed;
-        apply_sandbox_mode(sandbox, &mut spec.env, &mut provider);
+        apply_sandbox_mode(task, sandbox.clone(), &mut spec.env, &mut provider);
         return Ok(run::PreparedLaunch {
+            limits,
             skipped_routes: reasons,
             argv: spec.argv,
             environment: spec.env,
@@ -3628,9 +4296,11 @@ pub(super) fn prepare_candidates(
                 profile: spec.profile,
                 writer,
                 home: home.clone(),
-                cargo_registry_seed: config.domains.fabric.lanes.cargo_seed.enabled,
+                cargo_home,
+                cargo_target_seed: config.domains.fabric.lanes.cargo_seed.enabled,
                 state_root: roots.state.as_path().to_path_buf(),
-                sandboxed,
+                sandbox,
+                backend: None,
             }),
         });
     }
@@ -3645,7 +4315,8 @@ pub(super) fn prepare_candidates(
             provenant_routing::FallbackOutcome::UsageLimited => {
                 Some(provenant_records::run::PreparationFailure::UsageLimited)
             }
-            provenant_routing::FallbackOutcome::AdapterUnavailable => {
+            provenant_routing::FallbackOutcome::AdapterUnavailable
+            | provenant_routing::FallbackOutcome::ModelUnavailable => {
                 Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
             }
             provenant_routing::FallbackOutcome::Other => None,
@@ -3701,14 +4372,12 @@ pub(super) fn check_graph_inputs_root(
     Ok(())
 }
 
-fn account_source(continuation: bool, pinned: bool) -> &'static str {
-    if continuation {
-        "continuation"
-    } else if pinned {
-        "pin"
-    } else {
-        "automatic"
-    }
+fn origin_receipt(
+    origin: Option<&provenant_config::Origin>,
+) -> provenant_records::run::OriginReceipt {
+    origin
+        .map(provenant_config::Origin::receipt)
+        .unwrap_or_default()
 }
 
 /// Preserve the resolver's decision at the launch boundary.
@@ -3731,13 +4400,10 @@ fn launch_route_record(
         "named_route"
     };
     let mut record = RouteRecord::from_resolved(route, account_label, source);
-    if let Some(warning) = route.extra.get("effort_warning") {
-        record
-            .extra
-            .insert("effort_warning".into(), warning.clone());
-    }
-    if let provenant_records::RouteReadiness::Ready { extra, .. } = &route.readiness
-        && let Some(state) = extra.get("availability_warning").and_then(|v| v.as_str())
+    if let provenant_records::RouteReadiness::Ready {
+        availability_warning: Some(state),
+        ..
+    } = &route.readiness
     {
         let warning = format!(
             "account {} availability is {state}; the provider will check it",
@@ -3745,9 +4411,7 @@ fn launch_route_record(
                 .or(route.account_key.as_deref())
                 .unwrap_or("unknown")
         );
-        record
-            .extra
-            .insert("availability_warning".into(), warning.into());
+        record.availability_warning = Some(warning);
     }
     record
 }
@@ -3762,9 +4426,6 @@ mod receipt_tests {
 
     #[test]
     fn alias_effort_reaches_launch_record() -> Result<(), Box<dyn std::error::Error>> {
-        assert_eq!(account_source(true, true), "continuation");
-        assert_eq!(account_source(false, true), "pin");
-        assert_eq!(account_source(false, false), "automatic");
         let catalogue = Catalogue::bundled()?;
         let mut config = RoutingConfig::default();
         config.routes.insert(
@@ -3777,6 +4438,7 @@ mod receipt_tests {
         let context = RoutingContext {
             policy_account_hint: None,
             choice_context: None,
+            selection_evidence: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,
@@ -3800,6 +4462,7 @@ mod receipt_tests {
         let resolved = provenant_routing::resolve(&request, &context)?;
         let requested = run::RequestedRoute::Named {
             extra: Default::default(),
+            required_family: None,
             name: "fixture".into(),
             effort: None,
         };
@@ -3811,20 +4474,21 @@ mod receipt_tests {
         assert_eq!(wire["source"], "named_route");
         let mut uncertain = resolved.clone();
         uncertain.readiness = provenant_records::RouteReadiness::Ready {
-            extra: [("availability_warning".into(), serde_json::json!("Stale"))]
-                .into_iter()
-                .collect(),
+            availability_warning: Some("Stale".into()),
+            extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 99,
         };
         let warned = launch_route_record(&uncertain, Some("work"), &requested, false, false);
         assert!(
-            warned.extra["availability_warning"]
-                .as_str()
+            warned
+                .availability_warning
+                .as_deref()
                 .is_some_and(|warning| warning.contains("work") && warning.contains("Stale"))
         );
         let pinned = run::RequestedRoute::Model {
             extra: Default::default(),
+            required_family: None,
             provider: "codex".into(),
             model: "codex/gpt-6.1-sol".into(),
             effort: Some("high".into()),
@@ -3848,7 +4512,11 @@ mod receipt_tests {
 }
 
 /// One warning line for an omitted grant, shown relative to the home directory.
-pub(super) fn omission_warning(entry: &provenant_providers::OmittedGrant, home: &Path) -> String {
+pub(super) fn omission_warning(
+    entry: &provenant_providers::OmittedGrant,
+    home: &Path,
+    credential_roots: &provenant_core::CredentialRoots,
+) -> String {
     let display = if entry
         .path
         .to_str()
@@ -3867,12 +4535,14 @@ pub(super) fn omission_warning(entry: &provenant_providers::OmittedGrant, home: 
             "omitted shared provider package grant {display}; using the executable only"
         );
     }
-    let guard = if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) {
-        "credential root guard"
+    let guard = if let Some(root) =
+        credential_roots.refusal(&entry.path, provenant_core::CredentialScope::Subtree, true)
+    {
+        format!("credential root guard (source: {})", root.source)
     } else if !provenant_confinement::permissions::profile_path_representable(&entry.path) {
-        "path cannot be represented in the sandbox profile"
+        "path cannot be represented in the sandbox profile".to_owned()
     } else {
-        "protected root guard"
+        "protected root guard".to_owned()
     };
     format!("omitted discovered grant {display}: {guard}")
 }
@@ -3883,12 +4553,13 @@ pub(super) fn omission_warning(entry: &provenant_providers::OmittedGrant, home: 
 pub(super) fn discovery_warnings(
     omitted: &[provenant_providers::OmittedGrant],
     home: &Path,
+    credential_roots: &provenant_core::CredentialRoots,
     skills: bool,
 ) -> Vec<String> {
     omitted
         .iter()
         .filter(|entry| (entry.source == provenant_providers::OmissionSource::UserSkill) == skills)
-        .map(|entry| omission_warning(entry, home))
+        .map(|entry| omission_warning(entry, home, credential_roots))
         .collect()
 }
 
@@ -3914,26 +4585,29 @@ fn materialise_user_skills(
 
 fn user_skills_exposure(
     mode: provenant_records::UserSkillsMode,
-    origin: serde_json::Value,
+    source: provenant_records::run::UserSkillsSourceReceipt,
     staged: &provenant_providers::StagedUserSkills,
-) -> serde_json::Value {
+) -> provenant_records::run::UserSkillsReceipt {
     let warnings: Vec<_> = staged
         .warnings
         .iter()
-        .map(|warning| {
-            serde_json::json!({
-                "code": "user_skill_skipped", "reason": warning.reason, "path": warning.path.to_string_lossy(),
-            })
+        .map(|warning| provenant_records::run::UserSkillWarningReceipt {
+            code: "user_skill_skipped".into(),
+            reason: warning.reason.into(),
+            path: warning.path.to_string_lossy().into_owned(),
+            extra: Default::default(),
         })
         .collect();
-    serde_json::json!({
-        "mode": mode,
-        "exposed": staged.root.is_some(),
-        "directory": staged.source,
-        "staged_file_count": staged.file_count,
-        "warnings": warnings,
-        "source": origin,
-    })
+    provenant_records::run::UserSkillsReceipt {
+        mode,
+        exposed: staged.root.is_some(),
+        directory: staged.source.clone(),
+        staged_file_count: staged.file_count,
+        warnings,
+        source,
+        stage_max_bytes: None,
+        extra: Default::default(),
+    }
 }
 
 #[cfg(test)]
@@ -3988,6 +4662,7 @@ mod user_skills_tests {
                 extensions: ExtensionPolicy::Deny,
                 agy_state: None,
                 permissions: PlanPermissions {
+                    credential_roots: provenant_core::CredentialRoots::for_home(&home),
                     policy: None,
                     mode: AccessMode::ReadOnly,
                     read_only: None,
@@ -4004,6 +4679,9 @@ mod user_skills_tests {
                 },
             })?;
             let mut route = ResolvedRoute {
+                selection_context: Default::default(),
+                diagnostics: Default::default(),
+                user_skills: true,
                 extra: Default::default(),
                 adapter: adapter.name.into(),
                 model: "fixture".into(),
@@ -4015,6 +4693,7 @@ mod user_skills_tests {
                 exclusions: vec![],
                 eligibility: RouteEligibility::Eligible,
                 readiness: RouteReadiness::Ready {
+                    availability_warning: None,
                     extra: Default::default(),
                     availability_ref: "fixture".into(),
                     expires_unix_seconds: 100,
@@ -4054,8 +4733,11 @@ mod user_skills_tests {
                         std::fs::write(skills.join("SKILL.md"), b"fixture")?;
                     }
                     route.set_user_skills(state != "off");
+                    let launch_policy = provenant_records::policy::Policy::default();
                     let input = PrepareInput {
+                        credential_roots: provenant_core::CredentialRoots::for_home(&home),
                         route: &route,
+                        policy: &launch_policy,
                         confined: &plan,
                         prompt: &prompt,
                         images: &[],
@@ -4080,7 +4762,6 @@ mod user_skills_tests {
                             depth: 1,
                             attempt: AttemptId::from_bytes([7; 16]),
                             assets: &root,
-                            fabric_mcp: true,
                         },
                     };
                     let spec = provider.prepare(input)?;
@@ -4089,8 +4770,11 @@ mod user_skills_tests {
                     } else {
                         UserSkillsMode::Discover
                     };
-                    let receipt =
-                        user_skills_exposure(mode, serde_json::Value::Null, &spec.user_skills);
+                    let receipt = serde_json::to_value(user_skills_exposure(
+                        mode,
+                        Default::default(),
+                        &spec.user_skills,
+                    ))?;
                     assert_eq!(
                         receipt["exposed"],
                         state == "discover",
@@ -4133,7 +4817,8 @@ mod user_skills_tests {
             path: PathBuf::from("/usr/local"),
             source: provenant_providers::OmissionSource::ProviderPackage,
         };
-        let warnings = discovery_warnings(&[entry], Path::new("/fixture/home"), false);
+        let roots = provenant_core::CredentialRoots::for_home(Path::new("/fixture/home"));
+        let warnings = discovery_warnings(&[entry], Path::new("/fixture/home"), &roots, false);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("executable only"));
     }
@@ -4145,14 +4830,16 @@ mod user_skills_tests {
             path: PathBuf::from(std::ffi::OsString::from_vec(b"/fixture/tool-\xff".to_vec())),
             source: provenant_providers::OmissionSource::Toolchain,
         };
-        let warnings = discovery_warnings(&[entry], Path::new("/fixture/home"), false);
+        let roots = provenant_core::CredentialRoots::for_home(Path::new("/fixture/home"));
+        let warnings = discovery_warnings(&[entry], Path::new("/fixture/home"), &roots, false);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("cannot be represented"));
         let control = provenant_providers::OmittedGrant {
             path: PathBuf::from("/fixture/home/tool-\u{1}"),
             source: provenant_providers::OmissionSource::Toolchain,
         };
-        let warning = omission_warning(&control, Path::new("/fixture/home"));
+        let roots = provenant_core::CredentialRoots::for_home(Path::new("/fixture/home"));
+        let warning = omission_warning(&control, Path::new("/fixture/home"), &roots);
         assert!(warning.contains("unrepresentable path"));
         assert!(!warning.contains('\u{1}'));
     }
@@ -4175,11 +4862,12 @@ mod user_skills_tests {
                 .iter()
                 .any(|warning| warning.reason == "staging_failed")
         );
-        let record = user_skills_exposure(
+        let record = serde_json::to_value(user_skills_exposure(
             provenant_records::UserSkillsMode::Discover,
-            serde_json::Value::Null,
+            Default::default(),
             &staged,
-        );
+        ))
+        .unwrap();
         assert_eq!(record["exposed"], false);
         assert_eq!(record["warnings"][0]["reason"], "staging_failed");
     }
@@ -4206,11 +4894,12 @@ mod user_skills_tests {
                 reason,
             });
         }
-        let receipt = user_skills_exposure(
+        let receipt = serde_json::to_value(user_skills_exposure(
             provenant_records::UserSkillsMode::Discover,
-            serde_json::Value::Null,
+            Default::default(),
             &staged,
-        );
+        ))
+        .unwrap();
         assert_eq!(receipt["exposed"], true);
         for (warning, reason) in receipt["warnings"]
             .as_array()
@@ -4226,20 +4915,29 @@ mod user_skills_tests {
     #[test]
     fn receipt_uses_prepared_skill_facts() {
         let staged = provenant_providers::StagedUserSkills::default();
-        let origin = serde_json::json!({"key": "domains.lanes.user_skills", "origin": "compiled"});
-        let record = user_skills_exposure(
+        let origin = provenant_records::run::UserSkillsSourceReceipt {
+            key: Some("domains.lanes.user_skills".into()),
+            origin: Some(provenant_records::run::OriginReceipt::Compiled {
+                profile: None,
+                extra: Default::default(),
+            }),
+            ..Default::default()
+        };
+        let record = serde_json::to_value(user_skills_exposure(
             provenant_records::UserSkillsMode::Discover,
             origin.clone(),
             &staged,
-        );
+        ))
+        .unwrap();
         assert_eq!(record["exposed"], false);
         assert_eq!(record["staged_file_count"], 0);
-        assert_eq!(record["source"], origin);
-        let off = user_skills_exposure(
+        assert_eq!(record["source"], serde_json::to_value(&origin).unwrap());
+        let off = serde_json::to_value(user_skills_exposure(
             provenant_records::UserSkillsMode::Off,
-            serde_json::Value::Null,
+            Default::default(),
             &staged,
-        );
+        ))
+        .unwrap();
         assert_eq!(off["exposed"], false);
         assert_eq!(off["staged_file_count"], 0);
     }
@@ -4274,7 +4972,7 @@ mod refusal_cause_tests {
         let refusal = route_resolution_refusal(error).into_refusal();
         assert_eq!(
             refusal.terminal_cause,
-            Some(provenant_records::run::TerminalCause::RouteResolutionRefused)
+            provenant_records::run::TerminalCause::RouteResolutionRefused
         );
         assert_eq!(
             refusal.terminal_note.as_deref(),
@@ -4291,8 +4989,9 @@ mod refusal_cause_tests {
 }
 
 #[test]
-fn argv_spill_refusal_preserves_setting_and_source() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_records::diagnostic::{Diagnostic, ResourceFact, SettingSource};
+fn oversized_argv_prompt_spills_to_private_attempt_state() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_records::diagnostic::SettingSource;
     let temp = tempfile::tempdir()?;
     let root = std::fs::canonicalize(temp.path())?;
     let paths = run::LaunchPaths {
@@ -4300,41 +4999,28 @@ fn argv_spill_refusal_preserves_setting_and_source() -> Result<(), Box<dyn std::
         operation_id: provenant_core::OperationId::parse("spill-limit")?,
         task_index: 0,
         lane_depth: 1,
-        run_id: provenant_core::RunId::from_bytes([2; 16]),
         deadline_unix_ms: u64::MAX,
         scratch: root.join("scratch"),
         provider_state: root.join("provider-state"),
         temporary: root.join("tmp"),
         temporary_alias: None,
     };
-    let error = launch_prompt(
-        "PROMPT_SECRET_SENTINEL",
+    let policy = provenant_records::policy::Policy::default();
+    let text = "PROMPT_SECRET_SENTINEL";
+    let prompt = launch_prompt(
+        text,
         &paths,
         &root,
         "cursor",
         1,
         SettingSource::Configuration,
-    )
-    .err()
-    .ok_or("spill instruction exceeded configured argv budget")?;
-    let refusal = PrepareError::Prompt(error).into_refusal();
-    assert_eq!(
-        refusal.resource,
-        Some(ResourceFact::ArgvPromptLimit {
-            limit: 1,
-            origin: SettingSource::Configuration
-        })
-    );
-    let diagnostic = refusal
-        .resource
-        .unwrap()
-        .project(Diagnostic::new("INVALID"));
-    let encoded = serde_json::to_string(&diagnostic)?;
-    assert!(encoded.contains("domains.run.argv_prompt_limit_bytes"));
-    assert!(encoded.contains("host configuration"));
-    assert!(diagnostic.next.is_some());
-    assert!(!encoded.contains("PROMPT_SECRET_SENTINEL"));
-    assert!(!encoded.contains(root.to_str().unwrap()));
+        &policy,
+    )?;
+    let file = prompt
+        .file()
+        .ok_or("oversized argv prompt was not spilled")?;
+    assert_eq!(std::fs::read_to_string(file)?, text);
+    assert!(!prompt.text().contains(text));
     Ok(())
 }
 
@@ -4348,6 +5034,9 @@ mod candidate_walk_regressions {
 
     fn route(model: &str, account: &str) -> ResolvedRoute {
         ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
             extra: Default::default(),
             adapter: "cursor".into(),
             model: model.into(),
@@ -4403,6 +5092,7 @@ mod candidate_walk_regressions {
             fixture_ref: "fixture".into(),
             catalogue_revision: "fixture".into(),
             account_key: Some(key.into()),
+            plan: None,
             observed_models: vec![],
             observed_unix_seconds: 0,
             expires_unix_seconds: 1,
@@ -4421,6 +5111,17 @@ mod candidate_walk_regressions {
     fn redraw_receipt_and_admission_error_survive_candidate_walk() -> Result<(), PrepareError> {
         let mut stale = route("stale", "pinned");
         stale.pool_selection = Some(RouteSelectionReceipt {
+            selection_rule: provenant_records::route_selection::SelectionRule::WeightedDraw,
+            considered_exclusions: Vec::new(),
+            exploration: provenant_records::route_selection::Exploration {
+                extra: Default::default(),
+                selected: false,
+                percent: 0,
+                enabled: false,
+                source: "fixture".into(),
+            },
+            weight_source: provenant_records::route_selection::WeightSource::Catalogue,
+            account_load: None,
             extra: Default::default(),
             pool: "fixture".into(),
             candidates: vec![],
@@ -4429,7 +5130,8 @@ mod candidate_walk_regressions {
             pick: "cursor/stale".into(),
             reason: None,
             redraws: vec![RouteSelectionRedraw {
-                extra: [("cause".into(), serde_json::json!("exhausted"))].into(),
+                cause: Some(provenant_records::RouteExclusionReason::Exhausted),
+                extra: Default::default(),
                 rejected_pick: "cursor/spent".into(),
                 roll: 0,
                 total_weight: 1,
@@ -4454,11 +5156,11 @@ mod candidate_walk_regressions {
         );
         assert!(!reasons[0].detail.contains("private detail"));
         let error = crate::route::DispatchError::from(crate::route::EdgeError::Quota(
-            provenant_quota::QuotaError::Refused("allowance exhausted"),
+            provenant_quota::QuotaError::AllowanceExhausted,
         ));
         let refusal = redraw_candidates(Err(error), &mut reasons, &mut rejected).unwrap_err();
         assert!(
-            matches!(refusal, PrepareError::RouteResolution { error: crate::route::DispatchError::Edge(error), checks } if matches!(*error, crate::route::EdgeError::Quota(provenant_quota::QuotaError::Refused(_))) && checks.len() == 1)
+            matches!(refusal, PrepareError::RouteResolution { error: crate::route::DispatchError::Edge(error), checks } if matches!(*error, crate::route::EdgeError::Quota(provenant_quota::QuotaError::AllowanceExhausted)) && checks.iter().any(|check| check.route == "cursor/spent" && check.cause == Some(provenant_records::RouteExclusionReason::Exhausted)))
         );
         Ok(())
     }

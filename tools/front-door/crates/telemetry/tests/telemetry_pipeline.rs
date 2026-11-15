@@ -1,11 +1,37 @@
 use std::{ffi::OsString, path::Path, time::Duration};
 
 use provenant_telemetry::{
-    outcome::{self, Attributed, CiRun, Evidence, Outcomes, Signals},
+    outcome::{
+        self, Attributed, CiRun, Evidence, GitRunner, OutcomeError, Outcomes, Signals,
+        SystemGitRunner,
+    },
     suggest,
 };
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+#[derive(Clone, Copy)]
+enum TruncatedCommand {
+    History,
+    MergeBody,
+}
+
+struct TruncatingGit(TruncatedCommand);
+impl GitRunner for TruncatingGit {
+    fn run(&self, repo: &Path, args: &[&str]) -> std::result::Result<String, OutcomeError> {
+        let history = args.first() == Some(&"log")
+            && args.contains(&"--first-parent")
+            && args.contains(&"--reverse");
+        let merge_body =
+            args.first() == Some(&"show") && args.contains(&"-s") && args.contains(&"--format=%b");
+        if matches!(self.0, TruncatedCommand::History) && history
+            || matches!(self.0, TruncatedCommand::MergeBody) && merge_body
+        {
+            return Err(OutcomeError::OutputLimit);
+        }
+        SystemGitRunner.run(repo, args)
+    }
+}
 
 fn git(repo: &Path, args: &[&str], day: u32) -> Result<String> {
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
@@ -583,33 +609,8 @@ fn follow_up_on_a_branch_that_predates_merge_is_not_attributed() -> Result {
     Ok(())
 }
 
-#[cfg(unix)]
 #[test]
 fn truncated_history_and_merge_body_degrade_without_aborting() -> Result {
-    use std::os::unix::fs::PermissionsExt;
-    if let Ok(mode) = std::env::var("TELEMETRY_TRUNCATION_CASE") {
-        let repo = std::env::var("TELEMETRY_TRUNCATION_REPO")?;
-        let now: jiff::Timestamp = "2026-02-01T00:00:00Z".parse()?;
-        let mut issue = evidence("issue");
-        issue.pr = None;
-        issue.issue = Some(7);
-        let report = outcome::attribute(
-            Path::new(&repo),
-            "main",
-            vec![evidence("pr"), issue],
-            None,
-            14,
-            now.as_second(),
-        )?;
-        assert_eq!(report.rows[1].stratum, "unmeasured");
-        assert!(report.rows[1].signals.unmeasured);
-        if mode == "history" {
-            assert_eq!(report.rows[0].stratum, "unmeasured");
-        } else {
-            assert_eq!(report.rows[0].stratum, "attributed");
-        }
-        return Ok(());
-    }
     let root = tempfile::tempdir()?;
     let repo = root.path();
     git(repo, &["init", "-q", "-b", "main"], 1)?;
@@ -628,57 +629,31 @@ fn truncated_history_and_merge_body_degrade_without_aborting() -> Result {
         ],
         2,
     )?;
-    let real_git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let quoted_git = real_git.to_string_lossy().replace('\'', "'\\''");
-    let wrapper = repo.join("git-wrapper");
-    std::fs::write(
-        &wrapper,
-        format!(
-            "#!/bin/sh\ncase \"$TELEMETRY_TRUNCATION_CASE:$*\" in\n  history:*' log --first-parent '*) python3 -c 'import sys; sys.stdout.write(\"x\" * 67108865)'; exit 0;;\n  body:*' show -s --format=%b '*) python3 -c 'import sys; sys.stdout.write(\"x\" * 67108865)'; exit 0;;\nesac\nexec '{quoted_git}' \"$@\"\n"
-        ),
-    )?;
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))?;
-    for mode in ["history", "body"] {
-        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
-        let argv: Vec<OsString> = vec![
-            std::env::current_exe()?.into_os_string(),
-            "--exact".into(),
-            "truncated_history_and_merge_body_degrade_without_aborting".into(),
-            "--nocapture".into(),
-        ];
-        let mut env: Vec<_> = std::env::vars_os()
-            .filter(|(key, _)| {
-                !key.to_string_lossy().starts_with("GIT_")
-                    && key != "PROVENANT_GIT"
-                    && !key.to_string_lossy().starts_with("TELEMETRY_TRUNCATION_")
-            })
-            .collect();
-        env.extend([
-            (
-                OsString::from("TELEMETRY_TRUNCATION_CASE"),
-                OsString::from(mode),
-            ),
-            (
-                OsString::from("TELEMETRY_TRUNCATION_REPO"),
-                repo.as_os_str().to_owned(),
-            ),
-            (
-                OsString::from("PROVENANT_GIT"),
-                wrapper.as_os_str().to_owned(),
-            ),
-        ]);
-        let mut options = ExecOptions::new(&argv, repo, Duration::from_secs(30));
-        options.env = Some(&env);
-        let output = SystemExecutor::new(1)?.execute(options)?;
-        assert!(
-            output.termination == Termination::Exit(0)
-                && !output.timed_out
-                && !output.stdout.truncated
-                && !output.drain_truncated,
-            "{mode}: {} {}",
-            String::from_utf8_lossy(&output.stdout.bytes),
-            String::from_utf8_lossy(&output.stderr.bytes)
-        );
+    let now: jiff::Timestamp = "2026-02-01T00:00:00Z".parse()?;
+    let mut issue = evidence("issue");
+    issue.pr = None;
+    issue.issue = Some(7);
+
+    for (command, pr_stratum) in [
+        (TruncatedCommand::History, "unmeasured"),
+        (TruncatedCommand::MergeBody, "attributed"),
+    ] {
+        let runner = TruncatingGit(command);
+        let report = outcome::attribute_with_runner(
+            &runner,
+            repo,
+            "main",
+            vec![evidence("pr"), issue.clone()],
+            None,
+            14,
+            now.as_second(),
+        )?;
+        assert_eq!(report.rows[0].stratum, pr_stratum);
+        assert_eq!(report.rows[1].stratum, "unmeasured");
+        assert!(report.rows[1].signals.unmeasured);
+        if matches!(command, TruncatedCommand::History) {
+            assert!(report.rows.iter().all(|row| row.signals.unmeasured));
+        }
     }
     Ok(())
 }

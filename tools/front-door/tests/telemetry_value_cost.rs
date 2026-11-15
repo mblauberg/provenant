@@ -2,7 +2,8 @@
 #![allow(clippy::disallowed_methods)]
 mod support;
 use provenant_core::{ProjectId, WallTime};
-use provenant_telemetry::ledger::{self, Cost, Labels, Row, Source, Tokens};
+use provenant_records::AccountIdentity;
+use provenant_telemetry::ledger::{self, Cost, Row, Source, Tokens};
 use serde_json::{Value, json};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -35,7 +36,7 @@ fn reading(provider: &str, label: &str, at: i64, used: u64) -> Value {
 fn row(
     attempt: &str,
     provider: &str,
-    account: Option<&str>,
+    account_key: Option<&str>,
     cost: Option<(u64, bool)>,
     finished: i64,
 ) -> Result<Row> {
@@ -44,14 +45,17 @@ fn row(
         format: ledger::FORMAT.into(),
         source: Source::Settlement,
         project: ProjectId::from_bytes([3; 16]),
-        graph: None,
-        node: None,
+        // Each attempt is the only one of its own one-node graph, so a cost
+        // target names it as `graph-X` (its first id letter).
+        graph: format!("graph-{}", &attempt[..1]),
+        node: "task".into(),
         attempt: attempt.into(),
-        labels: Labels::default(),
         provider: Some(provider.into()),
         model: Some("m".into()),
         effort: None,
-        account: account.map(str::to_owned),
+        identity: account_key.map_or_else(AccountIdentity::no_provider_account, |key| {
+            AccountIdentity::known(provider, key, "fixture-epoch")
+        }),
         outcome: "succeeded".into(),
         started: None,
         finished: WallTime::from_micros(finished * 1_000_000)?,
@@ -62,14 +66,17 @@ fn row(
             cache_write_1h: None,
             output_excluding_reasoning: some,
             reasoning: some,
+            extra: Default::default(),
         },
         cost: cost.map(|(picodollars, complete)| Cost {
             picodollars,
             complete,
             subscription: false,
             prices: "fixture".into(),
+            extra: Default::default(),
         }),
         context_band: None,
+        extra: Default::default(),
     })
 }
 
@@ -148,7 +155,7 @@ fn data(rig: &TestRig, args: &[&str]) -> Result<Value> {
 #[test]
 fn cost_for_one_attempt_is_small_and_works_inside_a_lane() -> Result {
     let rig = fixture()?;
-    let output = rig.command(&["telemetry", "cost", "aaaaaaaa", "--json"])?;
+    let output = rig.command(&["telemetry", "cost", "graph-a", "--json"])?;
     assert_eq!(code(&output), 0, "{output:?}");
     assert!(
         output.stdout.bytes.len() < 1024,
@@ -156,12 +163,12 @@ fn cost_for_one_attempt_is_small_and_works_inside_a_lane() -> Result {
         output.stdout.bytes.len()
     );
     let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(report["data"]["totals"]["usd"], "2.000000");
+    assert_eq!(report["data"]["totals"]["microdollars"], 2_000_000);
     assert_eq!(report["data"]["totals"]["attempts"], 1);
-    let human = rig.command(&["telemetry", "cost", "aaaaaaaa"])?;
+    let human = rig.command(&["telemetry", "cost", "graph-a/task"])?;
     assert_eq!(code(&human), 0);
     assert!(human.stdout.bytes.len() < 1024);
-    let missing = rig.command(&["telemetry", "cost", "ffffffff"])?;
+    let missing = rig.command(&["telemetry", "cost", "graph-f"])?;
     assert_ne!(code(&missing), 0);
     Ok(())
 }
@@ -171,7 +178,7 @@ fn cost_reports_unpriced_and_unattributed_attempts_without_zero_filling() -> Res
     let rig = fixture()?;
     let report = data(&rig, &["telemetry", "cost", "--by", "account", "--json"])?;
     let totals = &report["totals"];
-    assert_eq!(totals["usd"], "6.000000");
+    assert_eq!(totals["microdollars"], 6_000_000);
     assert_eq!(totals["unpriced_attempts"], 1);
     assert_eq!(totals["complete"], false);
     let group = |key: &str| {
@@ -179,14 +186,16 @@ fn cost_reports_unpriced_and_unattributed_attempts_without_zero_filling() -> Res
             .as_array()
             .and_then(|groups| groups.iter().find(|g| g["key"] == key))
     };
-    let work = group("work").ok_or("work group")?;
-    assert_eq!(work["usd"], "2.000000");
+    let work = group("claude/work").ok_or("claude/work group")?;
+    assert_eq!(work["microdollars"], 2_000_000);
     assert_eq!(work["unpriced_attempts"], 1);
+    let play = group("codex/play").ok_or("codex/play group")?;
+    assert_eq!(play["microdollars"], 3_000_000);
     let gap = group("unattributed").ok_or("gap group")?;
     assert_eq!(gap["unattributed_attempts"], 1);
     // An unpriced attempt on its own has no cost, not a zero one.
-    let alone = data(&rig, &["telemetry", "cost", "bbbbbbbb", "--json"])?;
-    assert!(alone["totals"]["usd"].is_null(), "{alone}");
+    let alone = data(&rig, &["telemetry", "cost", "graph-b", "--json"])?;
+    assert!(alone["totals"]["microdollars"].is_null(), "{alone}");
     assert_eq!(alone["totals"]["unpriced_attempts"], 1);
     Ok(())
 }
@@ -200,14 +209,14 @@ fn value_has_a_row_per_account_with_readings_and_states_coverage() -> Result {
     let account = |name: &str| accounts.iter().find(|a| a["account"] == name);
     let work = account("work").ok_or("work")?;
     assert_eq!(work["provider"], "claude");
-    assert_eq!(work["usage"]["usd"], "2.000000");
+    assert_eq!(work["usage"]["microdollars"], 2_000_000);
     assert_eq!(work["coverage"]["attempts"], 2);
     assert_eq!(work["coverage"]["unpriced_attempts"], 1);
     assert_eq!(work["quota_windows"][0]["used_basis_points"], 2_500);
     assert_eq!(work["monthly_price"]["amount"], 20.0);
     let play = account("play").ok_or("play")?;
     assert_eq!(play["provider"], "codex");
-    assert_eq!(play["usage"]["usd"], "3.000000");
+    assert_eq!(play["usage"]["microdollars"], 3_000_000);
     assert_eq!(play["usage"]["complete"], true);
     // The attempt with no account is stated, not folded into another row.
     assert_eq!(report["unattributed"]["attempts"], 1);

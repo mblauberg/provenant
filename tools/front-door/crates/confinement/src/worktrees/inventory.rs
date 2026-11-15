@@ -432,7 +432,7 @@ impl RepoFacts {
         )?;
         match exit_code(&bare)? {
             0 => {
-                let roots = utility.lane_roots(repo);
+                let roots = utility.lane_roots(repo)?;
                 let lane_files = crate::utility::lane_configuration_files(
                     executor, repo, utility, budget, cancel,
                 )?;

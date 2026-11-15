@@ -5,8 +5,9 @@ use regex::Regex;
 use std::path::Path;
 
 fn findings(source: &str) -> Result<Vec<usize>, regex::Error> {
-    // Production clock reads before the test module do not implicate fixtures.
-    let tests = Regex::new(r"(?m)^\s*#\[(?:cfg\(test\)|test)\]")?
+    // Production clock reads before the first test or test module do not
+    // implicate fixtures; a `cfg(test)` on a lone item does not start one.
+    let tests = Regex::new(r"(?m)^\s*#\[test\]|^\s*#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\b")?
         .find(source)
         .map(|matched| matched.start());
     let Some(start) = tests else {
@@ -38,6 +39,11 @@ fn date_guard_distinguishes_live_and_injected_clocks() -> Result<(), Box<dyn std
         "now(); let date = \"2040-01-01\"; }" // timebomb: allow intentional date scanner fixture
     ); // timebomb: allow scanner fixture for a deliberate fixed date
     assert_eq!(findings(live)?.len(), 1);
+    let module = format!("#[cfg(test)]\n#[allow(dead_code)]\nmod tests {{ {live} }}");
+    assert_eq!(findings(&module)?.len(), 1);
+    let lone = "#[cfg(test)]\nuse a::b;\nfn now() { jiff::Timestamp::now(); }\nconst D: &str = \"2040-01-01\"; // timebomb: allow scanner fixture";
+    let lone = lone.replace("// timebomb: allow scanner fixture", "");
+    assert!(findings(&lone)?.is_empty());
     let injected = live.replace("Timestamp::now()", "fixture_clock.now()");
     assert!(findings(&injected)?.is_empty());
     assert!(

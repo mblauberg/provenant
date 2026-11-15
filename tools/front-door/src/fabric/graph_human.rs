@@ -112,7 +112,10 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
         .collect();
     action.sort_by_key(|(_, state, _)| rank(state));
     let mut rows: Vec<String> = Vec::new();
-    if let Some(reason) = text(checkpoint, "pause_reason") {
+    if let Some(reason) = checkpoint
+        .get("pause")
+        .and_then(|pause| text(pause, "reason"))
+    {
         rows.push(format!("paused: {}", bounded_reason(&reason)));
     }
     if let Some(error) = text(run, "advance_error") {
@@ -197,19 +200,12 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
                                     .reason
                                     .as_deref()
                                     .or_else(|| finding
-                                        .extra
-                                        .get("triage")
-                                        .and_then(|triage| triage.get("reason"))
-                                        .and_then(serde_json::Value::as_str))
+                                        .triage
+                                        .as_ref()
+                                        .map(|triage| triage.reason.as_str()))
                                     .unwrap_or("unavailable")
                             ),
-                            bounded_reason(
-                                finding
-                                    .extra
-                                    .get("evidence")
-                                    .and_then(serde_json::Value::as_str)
-                                    .unwrap_or("unavailable")
-                            )
+                            bounded_reason(finding.evidence.as_deref().unwrap_or("unavailable"))
                         ));
                     }
                 }
@@ -287,18 +283,18 @@ mod test_presentation {
             .flat_map(|node| node.children.iter())
             .collect();
         let mut human = format!("Graph {}: {:?}\n", run.checkpoint.graph_id, run.status);
-        if full
-            && (run.checkpoint.bound_review_base.is_some()
-                || run.checkpoint.bound_integration_base.is_some())
-        {
+        if full && run.checkpoint.bases.is_some() {
+            let bases = run.checkpoint.bases.unwrap_or_default();
             human.push_str(&format!(
                 "Graph bases: review={} integration={}\n",
-                run.checkpoint
-                    .bound_review_base
+                bases
+                    .review
+                    .map(|base| base.to_string())
                     .as_deref()
                     .unwrap_or("unavailable"),
-                run.checkpoint
-                    .bound_integration_base
+                bases
+                    .integration
+                    .map(|base| base.to_string())
                     .as_deref()
                     .unwrap_or("unavailable")
             ));
@@ -307,7 +303,7 @@ mod test_presentation {
             human.push_str(&format!("Outcome: {outcome:?}\n"));
         }
         if run.status == provenant_fabric_runtime::graph::GraphStatus::Paused
-            && let Some(reason) = &run.checkpoint.pause_reason
+            && let Some(reason) = run.checkpoint.pause_reason()
         {
             human.push_str(&format!("Pause reason: {}\n", bounded_reason(reason)));
         }
@@ -355,11 +351,10 @@ mod test_presentation {
                 human.push_str(&format!(" ({})", bounded_reason(error)));
             }
             if full {
-                if let Some(retry) = node.extra.get("retry") {
+                if let Some(retry) = &node.retry {
                     human.push_str(&format!(
                         " settlement_retries={} origin={}",
-                        retry["retries"],
-                        retry["origin"].as_str().unwrap_or("unknown")
+                        retry.retries, retry.origin
                     ));
                 }
                 if let Some(attempt) = node.attempts.last() {
@@ -507,22 +502,39 @@ mod test_presentation {
 
 #[cfg(test)]
 mod spec_chair_tests {
+    // Spec: docs/specs/fabric.md#typed-node-outputs
     #[test]
     fn rejected_boundary_findings_reach_chair_summary() {
-        let summary = super::graph_summary(&serde_json::json!({
-            "status":"complete", "checkpoint":{"graph_id":"g","nodes":[
-                {"id":"review", "state":"succeeded", "outputs":{"findings":[{
-                    "id":"F1", "severity":"high", "file":"a.rs", "status":"open",
-                    "summary":"boundary violation", "class":"boundary", "disposition":"rejected",
-                    "reason":"synthesis disagrees", "evidence":"reachable credential write"
-                }]}}
-            ]}
-        }));
-        let summary = summary.lines.join("\n");
-        assert!(summary.contains("1 rejected boundary or data-loss findings for chair judgement"));
-        assert!(summary.contains(
-            "boundary violation; reason: synthesis disagrees; evidence: reachable credential write"
-        ));
+        for (class, direct_reason, blocking_class, escalated) in [
+            (Some("boundary"), Some("direct reason"), "none", true),
+            (None, None, "data_loss", true),
+            (None, None, "none", false),
+        ] {
+            let summary = super::graph_summary(&serde_json::json!({
+                "status":"complete", "checkpoint":{"graph_id":"g","nodes":[
+                    {"id":"review", "state":"succeeded", "outputs":{"findings":[{
+                        "id":"F1", "severity":"high", "file":"a.rs", "status":"open",
+                        "summary":"checked finding", "class":class, "disposition":"rejected",
+                        "reason":direct_reason, "evidence":"checked evidence",
+                        "triage":{"decision":"rejected", "reason":"triage reason",
+                            "worth_fixing":false, "root_cause":"checked cause",
+                            "blocking_class":blocking_class}
+                    }]}}
+                ]}
+            }));
+            let text = summary.lines.join("\n");
+            assert_eq!(text.contains("checked finding"), escalated, "{text}");
+            if escalated {
+                assert!(
+                    text.contains("F1") && text.contains("checked evidence"),
+                    "{text}"
+                );
+                assert!(
+                    text.contains(direct_reason.unwrap_or("triage reason")),
+                    "{text}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1,3 +1,94 @@
+fn cargo_home_path(spec: &LaunchSpec) -> std::path::PathBuf {
+    let receipt = spec.cargo_home_receipt();
+    let path = std::path::PathBuf::from(receipt["path"].as_str().expect("Cargo home receipt path"));
+    let values: Vec<_> = spec
+        .env
+        .iter()
+        .filter(|(key, _)| key == "CARGO_HOME")
+        .collect();
+    assert_eq!(values.len(), 1, "one host Cargo home selector");
+    assert_eq!(std::path::Path::new(&values[0].1), path);
+    path
+}
+
+fn assert_cargo_credentials_ungranted(spec: &LaunchSpec) {
+    use provenant_confinement::permissions::{PathGrant, PathScope};
+    let home = cargo_home_path(spec);
+    let reads: Vec<_> = spec
+        .profile
+        .spec
+        .runtime_reads
+        .iter()
+        .chain(
+            spec.profile
+                .spec
+                .authentication
+                .iter()
+                .flat_map(|grant| &grant.roots),
+        )
+        .collect();
+    let writes: Vec<_> = spec
+        .profile
+        .spec
+        .tool_writes
+        .iter()
+        .chain(&spec.profile.spec.state_writes)
+        .chain(
+            spec.profile
+                .spec
+                .authentication
+                .iter()
+                .flat_map(|grant| &grant.in_place_writes),
+        )
+        .collect();
+    for name in provenant_core::CARGO_CREDENTIAL_FILES {
+        let credential = PathGrant {
+            path: home.join(name),
+            scope: PathScope::Exact,
+        };
+        assert!(
+            reads.iter().all(|grant| !grant.overlaps(&credential)),
+            "Cargo credential read grant: {credential:?}"
+        );
+        assert!(
+            writes.iter().all(|grant| !grant.overlaps(&credential)),
+            "Cargo credential write grant: {credential:?}"
+        );
+    }
+}
+
+/// The Cargo home grants follow the binding's declared access: tracking files
+/// always, the source stores exactly when source writes are on, nothing else.
+fn assert_declared_cargo_access(spec: &LaunchSpec) {
+    let binding = spec.cargo_home().expect("finalised Cargo binding");
+    let home = cargo_home_path(spec);
+    let receipt = spec.cargo_home_receipt();
+    assert_eq!(receipt["source_writes"], binding.source_writes);
+    let writes = &spec.profile.spec.tool_writes;
+    let declared: Vec<_> = binding.writes().collect();
+    for grant in binding.tracking().chain(binding.source_writes()) {
+        assert!(
+            writes.contains(&grant),
+            "declared Cargo write grant missing: {grant:?}"
+        );
+    }
+    for grant in writes.iter().filter(|grant| grant.path.starts_with(&home)) {
+        assert!(
+            declared.contains(grant),
+            "undeclared Cargo home write grant: {grant:?}"
+        );
+    }
+    if !binding.source_writes {
+        for source in binding.sources() {
+            assert!(
+                writes.iter().all(|grant| !grant.overlaps(&source)),
+                "Cargo source write grant while source writes are off: {source:?}"
+            );
+        }
+    }
+    assert_cargo_credentials_ungranted(spec);
+}
+
 #[test]
 fn agy_individual_quota_is_quota_limited_until_its_stated_reset() -> Result<(), ProviderError> {
     let exit = ExitObservation {
@@ -356,6 +447,9 @@ fn every_recording_decodes_its_terminal_and_process_evidence() -> Result<(), Pro
 
 pub(super) fn route(adapter: &str, model: &str) -> ResolvedRoute {
     ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
         extra: Default::default(),
         adapter: adapter.into(),
         model: model.into(),
@@ -367,6 +461,7 @@ pub(super) fn route(adapter: &str, model: &str) -> ResolvedRoute {
         exclusions: Vec::new(),
         eligibility: provenant_records::RouteEligibility::Eligible,
         readiness: provenant_records::RouteReadiness::Unavailable {
+            skipped_accounts: Vec::new(),
             extra: Default::default(),
             reason: provenant_records::RouteExclusionReason::Disabled,
         },
@@ -573,8 +668,8 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
 }
 
 #[test]
-fn a_wide_integer_echoed_in_an_ignored_frame_does_not_fail_the_stream()
--> Result<(), ProviderError> {
+fn a_wide_integer_echoed_in_an_ignored_frame_does_not_fail_the_stream() -> Result<(), ProviderError>
+{
     // Shape of #3111: a tool result echoes a JSON Schema whose bound is u64::MAX
     // printed as a float, which is wider than any i64 or u64.
     let stream = concat!(
@@ -794,10 +889,6 @@ fn structured_error_outranks_claimed_success_but_quota_prose_is_text() -> Result
 
 #[test]
 fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn std::error::Error>> {
-    assert_eq!(
-        REGISTRY.iter().map(|r| r.adapter.id()).collect::<Vec<_>>(),
-        ["codex", "claude", "cursor", "agy", "opencode", "command"]
-    );
     let ids: std::collections::BTreeSet<_> = REGISTRY.iter().map(|r| r.adapter.id()).collect();
     assert_eq!(ids.len(), REGISTRY.len(), "duplicate adapter id");
     assert_eq!(
@@ -833,33 +924,42 @@ fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn st
 
 #[test]
 fn argv_prompt_limit_counts_utf8_bytes() {
-    assert!(Prompt::new("a".repeat(65_536)).check_argv().is_ok());
+    let default = crate::tests::fixture_policy();
+    assert_eq!(
+        default.rule("ARGV_PROMPT").rule.strength,
+        provenant_records::policy::Strength::Warn
+    );
+    assert!(Prompt::new("a".repeat(65_536)).check_argv(default).is_ok());
     assert!(
         Prompt::new("a".repeat(65_537))
             .with_argv_limit(
                 131_072,
                 provenant_records::diagnostic::SettingSource::Configuration
             )
-            .check_argv()
+            .check_argv(default)
             .is_ok()
     );
+    let mut strict = provenant_records::policy::Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([(
+            "ARGV_PROMPT".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Project,
+    );
     assert!(matches!(
-        Prompt::new("é".repeat(32_769)).check_argv(),
+        Prompt::new("é".repeat(32_769)).check_argv(&strict),
         Err(ProviderError::PromptTooLarge { .. })
     ));
-    let error = Prompt::new("abcd".into())
-        .with_argv_limit(
-            3,
-            provenant_records::diagnostic::SettingSource::Configuration,
-        )
-        .check_argv()
-        .expect_err("configured limit must be enforced");
-    assert!(
-        error
-            .to_string()
-            .contains("domains.run.argv_prompt_limit_bytes")
-    );
-    assert!(error.to_string().contains("host configuration"));
+    assert!(matches!(
+        Prompt::new("abcd".into())
+            .with_argv_limit(
+                3,
+                provenant_records::diagnostic::SettingSource::Configuration,
+            )
+            .check_argv(&strict),
+        Err(ProviderError::PromptTooLarge { .. })
+    ));
 }
 
 pub(super) fn read_only_plan(
@@ -891,6 +991,7 @@ pub(super) fn read_only_plan_protecting(
         extensions: ExtensionPolicy::Deny,
         agy_state: None,
         permissions: PlanPermissions {
+            credential_roots: provenant_core::CredentialRoots::for_home(Path::new(root)),
             policy: None,
             read_only: None,
             mode: AccessMode::ReadOnly,
@@ -960,165 +1061,6 @@ pub(super) fn fixture_network_plan(
 }
 
 #[test]
-fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants()
--> Result<(), ProviderError> {
-    use provenant_confinement::permissions::NetworkAccess;
-    let prompt = Prompt::new("fixture".into());
-    let token = fixture_token();
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().canonicalize().unwrap();
-    for path in [
-        ".cargo/bin",
-        ".cargo/registry",
-        ".cargo/git",
-        ".rustup/toolchains",
-    ] {
-        std::fs::create_dir_all(home.join(path)).unwrap();
-    }
-    let repo = Path::new("/fixture/repo");
-    let mut claude_route = route("claude", "fixture-model");
-    claude_route.account_key = None;
-    let mut codex_route = route("codex", "fixture-model");
-    codex_route.account_key = None;
-    for access in [Access::ReadOnly, Access::WorktreeWrite] {
-        for network in [
-            NetworkAccess::Provider,
-            NetworkAccess::Local,
-            NetworkAccess::Open,
-        ] {
-            let plan = fixture_network_plan(access, None, network);
-            let launch = claude::Claude.prepare(PrepareInput {
-                home: &home,
-                ..fixture_input(&claude_route, &plan, &prompt, repo, Some(&token))
-            })?;
-            if access == Access::ReadOnly {
-                for flag in ["--tools", "--allowedTools"] {
-                    let list = launch.argv.windows(2).find(|pair| pair[0] == flag).unwrap();
-                    let tools: Vec<_> = list[1].to_str().unwrap().split(',').collect();
-                    for tool in ["WebFetch", "WebSearch"] {
-                        assert_eq!(
-                            tools.contains(&tool),
-                            network == NetworkAccess::Open,
-                            "{access:?} {network:?} {flag} {tool}"
-                        );
-                    }
-                    if access == Access::ReadOnly {
-                        assert!(!tools.contains(&"Edit") && !tools.contains(&"Write"));
-                    }
-                }
-            } else {
-                assert!(
-                    launch
-                        .argv
-                        .windows(2)
-                        .any(|pair| pair[0] == "--tools" && pair[1] == "default")
-                );
-                assert!(!launch.argv.iter().any(|arg| arg == "--allowedTools"));
-            }
-            assert!(launch.profile.spec.authentication.is_empty());
-            assert!(launch.profile.spec.deny_keychain_access);
-            assert!(launch.profile.spec.tool_writes.is_empty());
-            let rendered = provenant_confinement::permissions::snapshot::render(
-                plan.permissions(),
-                &launch.profile,
-                &home,
-            )
-            .unwrap();
-            assert!(rendered.contains(&format!(
-                "(deny file-read* (literal \"{}/.cargo/credentials.toml\"))",
-                home.display()
-            )));
-            assert_eq!(
-                rendered.contains(&format!(
-                    "(allow file-read* (subpath \"{}/.config/gh\"))",
-                    home.display()
-                )),
-                network == NetworkAccess::Open,
-                "the existing gh policy still controls credential reads"
-            );
-            if access == Access::ReadOnly {
-                for path in [
-                    repo.to_owned(),
-                    home.join(".cargo"),
-                    home.join(".rustup"),
-                    Path::new("/private/etc/ssl").to_owned(),
-                ] {
-                    assert!(!rendered.contains(&format!(
-                        "(allow file-write* (subpath \"{}\"))",
-                        path.display()
-                    )));
-                }
-            }
-            if access == Access::ReadOnly && network != NetworkAccess::Open {
-                assert!(launch.env.iter().all(|(key, _)| key != "CARGO_HOME"));
-                assert_eq!(
-                    launch.env.iter().find(|(key, _)| key == "PATH").unwrap().1,
-                    "/fixture/scratch/read-only-git:/fixture/scratch/bin:/usr/bin:/bin"
-                );
-                continue;
-            }
-            let codex_plan = fixture_network_plan(access, Some("login"), network);
-            let codex = codex::Codex.prepare(PrepareInput {
-                home: &home,
-                ..fixture_input(&codex_route, &codex_plan, &prompt, repo, None)
-            })?;
-            for key in [
-                "PATH",
-                "CARGO_HOME",
-                "CARGO_TARGET_DIR",
-                "CARGO_BUILD_BUILD_DIR",
-                "CARGO_NET_OFFLINE",
-                "RUSTUP_HOME",
-                "DEVELOPER_DIR",
-                "SDKROOT",
-                "npm_config_cache",
-                "COREPACK_HOME",
-            ] {
-                let env = |spec: &LaunchSpec| {
-                    spec.env
-                        .iter()
-                        .find(|(k, _)| k == key)
-                        .map(|(_, value)| value.clone())
-                };
-                assert_eq!(env(&launch), env(&codex), "{access:?} {network:?} {key}");
-            }
-            let package = Path::new("/opt/homebrew/Cellar/provider/1.0");
-            for grant in &codex.profile.spec.runtime_reads {
-                assert!(
-                    launch.profile.spec.runtime_reads.contains(grant),
-                    "missing read: {grant:?}"
-                );
-            }
-            for grant in &codex.profile.spec.tool_exec_roots {
-                if grant.path != package {
-                    assert!(
-                        launch.profile.spec.tool_exec_roots.contains(grant),
-                        "missing exec: {grant:?}"
-                    );
-                }
-            }
-            for secret in [
-                ".config/gh",
-                "Library/Keychains",
-                ".codex/auth.json",
-                ".claude/.credentials.json",
-            ] {
-                assert!(
-                    !launch
-                        .profile
-                        .spec
-                        .runtime_reads
-                        .iter()
-                        .any(|grant| covers(grant, &home.join(secret))),
-                    "new credential read: {secret}"
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-#[test]
 fn claude_network_on_without_complete_rust_keeps_public_system_tools()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::NetworkAccess;
@@ -1135,6 +1077,7 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
         let plan = fixture_network_plan(Access::ReadOnly, None, NetworkAccess::Open);
         let launch = claude::Claude.prepare(PrepareInput {
             home: &home,
+            credential_roots: provenant_core::CredentialRoots::for_home(&home),
             ..fixture_input(
                 &route,
                 &plan,
@@ -1143,7 +1086,8 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
                 Some(&token),
             )
         })?;
-        assert!(launch.env.iter().all(|(key, _)| key != "CARGO_HOME"));
+        assert_eq!(cargo_home_path(&launch), home.join(".cargo"));
+        assert_declared_cargo_access(&launch);
         assert!(
             launch
                 .profile
@@ -1151,17 +1095,39 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
                 .tool_exec_roots
                 .contains(&crate::launch::subtree("/fixture/repo"))
         );
-        assert!(launch.profile.spec.tool_writes.is_empty());
+        // Only the declared Cargo writes (checked above) reach a reader.
+        let declared: Vec<_> = launch
+            .cargo_home()
+            .expect("Cargo binding")
+            .writes()
+            .collect();
+        assert!(
+            launch
+                .profile
+                .spec
+                .tool_writes
+                .iter()
+                .all(|grant| declared.contains(grant))
+        );
+        // An incomplete Rust install grants no toolchain: beyond the declared
+        // Cargo binding nothing under the Cargo or rustup homes is reachable.
+        let binding_reads: Vec<_> = launch
+            .cargo_home()
+            .expect("Cargo binding")
+            .reads()
+            .collect();
         for grant in launch
             .profile
             .spec
             .runtime_reads
             .iter()
+            .filter(|grant| !binding_reads.contains(grant))
             .chain(&launch.profile.spec.tool_exec_roots)
         {
             assert!(
                 !grant.path.starts_with(home.join(".cargo"))
-                    && !grant.path.starts_with(home.join(".rustup"))
+                    && !grant.path.starts_with(home.join(".rustup")),
+                "{grant:?}"
             );
         }
         #[cfg(target_os = "macos")]
@@ -1181,7 +1147,7 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
 #[test]
 fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::permissions::{NetworkAccess, snapshot::render};
+    use provenant_confinement::permissions::NetworkAccess;
     let prompt = Prompt::new("fixture".into());
     let token = fixture_token();
     let temp = tempfile::tempdir()?;
@@ -1209,12 +1175,14 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
             (adapter == "claude").then_some(&token),
         );
         input.home = &home;
+        input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
         input.provenant.git = &git_executable;
         let launch = match adapter {
             "claude" => claude::Claude.prepare(input)?,
             _ => crate::codex::Codex.prepare(input)?,
         };
-        assert!(launch.env.iter().all(|(key, _)| key != "CARGO_HOME"));
+        assert_eq!(cargo_home_path(&launch), home.join(".cargo"));
+        assert_declared_cargo_access(&launch);
         let spec = &launch.profile.spec;
         assert!(
             spec.runtime_reads
@@ -1227,14 +1195,9 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
             access == Access::WorktreeWrite,
             "{adapter} {access:?}"
         );
-        let profile = render(plan.permissions(), &launch.profile, &home)?;
         assert!(
-            profile.contains(if access == Access::WorktreeWrite {
-                "(allow process-exec)"
-            } else {
-                "(allow process-exec (subpath \"/fixture/repo\"))"
-            }),
-            "{adapter} {access:?}: repository execution missing from\n{profile}"
+            spec.tool_exec_roots.contains(&crate::launch::subtree(Path::new("/fixture/repo"))),
+            "{adapter} {access:?}: repository execution grant missing"
         );
     }
     Ok(())

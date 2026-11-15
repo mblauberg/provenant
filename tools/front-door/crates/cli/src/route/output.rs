@@ -37,6 +37,7 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
         "local-preview",
         &[],
         false,
+        None,
         |context, records, policies, _| {
             let request = resolve_request(&query, context)?;
             let rules = effective_exclusion_rules(exclude, roots)?;
@@ -87,14 +88,12 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
                     let mut probe = route.clone();
                     probe.account_key = Some(record.account.account_key.clone());
                     probe.readiness = RouteReadiness::Ready {
+                        availability_warning: None,
                         extra: Default::default(),
                         availability_ref: "preview".into(),
                         expires_unix_seconds: now + 60,
                     };
-                    match admission.check_with_partial_headroom(
-                        &probe,
-                        context.config.allow_unknown_partial_headroom,
-                    ) {
+                    match admission.check(&probe) {
                         Ok(()) if !spent(record, now) => return Ok(None),
                         Ok(()) => member.push("allowance exhausted".to_owned()),
                         Err(error) => member.push(error.to_string()),
@@ -205,12 +204,28 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
                 let details = receipt
                     .candidates
                     .iter()
-                    .flat_map(|candidate| {
-                        candidate
+                    .map(|candidate| {
+                        let prior = candidate.ranking.outcome_prior.as_ref();
+                        let evidence = prior.and_then(|prior| prior.evidence.as_ref());
+                        let evidence_count = prior.map_or(0, |prior| prior.evidence_count);
+                        let factor = prior.map_or(10_000, |prior| prior.factor_basis_points);
+                        let successes = evidence.map_or(0, |evidence| evidence.successes);
+                        let failures = evidence.map_or(0, |evidence| evidence.failures);
+                        let source = prior.map_or("unavailable", |prior| prior.source.as_str());
+                        let capability = candidate.ranking.capability_preference.as_ref();
+                        let capability_weight = capability.map_or(1, |preference| preference.weight);
+                        let capability_source = capability.map_or("unavailable", |preference| preference.source.as_str());
+                        let ranking = format!(
+                            "\n  {}: prior={factor}/10000 successes={successes} failures={failures} evidence_count={evidence_count} source={source} capability_weight={capability_weight} capability_source={capability_source}",
+                            candidate.model
+                        );
+                        let diagnostics = candidate
                             .exclusion
                             .iter()
                             .chain(candidate.pacing_detail.iter())
                             .map(|detail| format!("\n  {}: {detail}", candidate.model))
+                            .collect::<String>();
+                        format!("{ranking}{diagnostics}")
                     })
                     .collect::<String>();
                 format!(
@@ -220,6 +235,12 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             }),
         diagnostics
     );
+    if let Some(warning) = route.diagnostics.effort_warning.as_ref() {
+        text.push_str(&format!(
+            "warning: effort {} for {} dropped; source={}\n",
+            warning.requested, warning.model, warning.source
+        ));
+    }
     for record in &preview.recorded_readiness {
         text.push_str(&format!(
             "recorded readiness {} [{}] for {}: {}\n",

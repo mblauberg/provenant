@@ -22,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: github.event_name == 'pull_request' && github.event.action != 'labeled'
+    outputs:
+      has_changed_tests: ${{ steps.changed.outputs.has_changed_tests }}
     permissions:
       contents: read
     steps:
@@ -30,6 +32,18 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Select changed Rust tests
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          filter="$(scripts/find-changed-tests --base "$BASE_SHA" --head "$HEAD_SHA" --format nextest-expr)"
+          if [ -n "$filter" ]; then
+            echo 'has_changed_tests=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'has_changed_tests=false' >> "$GITHUB_OUTPUT"
+          fi
       - name: Run script tests
         run: |
           scripts/test-assertion-diff
@@ -46,7 +60,13 @@ jobs:
     name: Changed-test stress signals
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: github.event_name == 'pull_request' && github.event.action != 'labeled'
+    needs: assertion-diff
+    # A failed selector leaves an empty output and runs stress conservatively.
+    if: >-
+      always() && github.event_name == 'pull_request' && github.event.action != 'labeled' &&
+      needs.assertion-diff.outputs.has_changed_tests != 'false'
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     permissions:
       contents: read
     steps:
@@ -65,7 +85,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: front-door-ci
+          shared-key: front-door-ci-test-recording
           add-job-id-key: false
           save-if: false
       - name: Install nextest
@@ -106,7 +126,11 @@ jobs:
         # Confinement is mandatory only where Seatbelt exists; the variable is
         # checked for presence, so it must be absent on Linux.
         run: |
-          if [ "$RUNNER_OS" = macOS ]; then export PROVENANT_CONFINEMENT_REQUIRED=1; fi
+          if [ "$RUNNER_OS" = macOS ]; then
+            export PROVENANT_CONFINEMENT_REQUIRED=1
+          else
+            export RUSTFLAGS="-C link-arg=-fuse-ld=lld"
+          fi
           cargo nextest run --profile ci --ignore-default-filter --workspace --locked \
             --features provenant-providers/recording --stress-count 5 --retries 0 \
             -E 'binary(=worktrees) | binary(=custody) | binary(=graph_provider) |
@@ -120,6 +144,8 @@ jobs:
       github.event_name != 'pull_request' ||
       (contains(github.event.pull_request.labels.*.name, 'mutants') &&
       (github.event.action != 'labeled' || github.event.label.name == 'mutants'))
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     permissions:
       contents: read
     steps:
@@ -138,7 +164,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: front-door-ci
+          shared-key: front-door-ci-test-recording
           add-job-id-key: false
           save-if: false
       - name: Install nextest

@@ -139,6 +139,13 @@ pub struct TemplateUse {
 pub struct PatchRecord {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    /// Receipt saved with the admission for idempotent child replay.
+    #[serde(
+        default,
+        rename = "relay_child_receipt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub child_receipt: Option<super::relay::StoredChildReceipt>,
     /// Revision the graph reached by admitting this patch.
     pub revision: u64,
     pub digest: String,
@@ -156,10 +163,33 @@ pub struct PatchRecord {
     /// unjournaled record (a planner fragment) is journaled at save instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub journaled: bool,
+    /// Present when the host restarted a stopped node: the stop it answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<Restart>,
 }
 
-/// The node field naming the parent node whose patch added a node.
-pub const PARENT_NODE_FIELD: &str = "parent_node";
+/// The stop a host restart answered and the step it took. Restarts count
+/// against the graph-wide `limits.continuations`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Restart {
+    pub node: String,
+    pub cause: provenant_records::StopCause,
+    #[serde(flatten)]
+    pub step: provenant_records::NextStep,
+    /// The routing ladder's choice, when a depleted stop was handed off by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ladder: Option<LadderChoice>,
+}
+
+/// The rung, target and tier the depletion ladder chose for a restart.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LadderChoice {
+    pub rung: provenant_routing::Rung,
+    /// `adapter/model` with its account, or `host-native/name`.
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -225,6 +255,8 @@ pub struct PatchContext<'a> {
     /// before the admission is committed, so a failed write admits nothing.
     pub journal: Option<&'a PatchJournal<'a>>,
     pub limits: &'a crate::config::GraphLimits,
+    /// The project's declared worktree layout used for generated child paths.
+    pub worktree_layout: provenant_config::WorktreeLayoutPort,
 }
 
 /// The confinement secret scan, as submission applies it.
@@ -273,9 +305,7 @@ fn admit_patch_for_retry(
 ) -> Result<Admitted, PatchError> {
     // Initial nodes live in the immutable source, rather than being copied
     // into an expansion. They still enter through the same admission gate.
-    if parent.is_none()
-        && graph.document.extra.get("submission_patch") == serde_json::to_value(patch).ok().as_ref()
-    {
+    if parent.is_none() && graph.document.submission_patch.as_ref() == Some(patch) {
         let digest = patch.digest()?;
         if let Some(record) = graph
             .checkpoint
@@ -298,11 +328,13 @@ fn admit_patch_for_retry(
             };
         }
         if revision(graph.checkpoint) != 0
-            || graph
-                .checkpoint
-                .nodes
-                .iter()
-                .any(|node| node.state != NodeState::Pending || !node.attempts.is_empty())
+            || graph.checkpoint.nodes.iter().any(|node| {
+                // A row a `when` condition skipped at submission has not started.
+                let skipped_at_submission =
+                    node.state == NodeState::Skipped && node.skip_reason.is_some();
+                (node.state != NodeState::Pending && !skipped_at_submission)
+                    || !node.attempts.is_empty()
+            })
         {
             return Err(PatchError::new(
                 "started",
@@ -343,6 +375,7 @@ fn admit_patch_for_retry(
             .collect();
         let mut record = PatchRecord {
             extra: Default::default(),
+            child_receipt: None,
             revision: 1,
             digest,
             key: patch.idempotency_key.clone(),
@@ -351,6 +384,7 @@ fn admit_patch_for_retry(
             skipped: Vec::new(),
             replaced: Vec::new(),
             journaled: false,
+            restart: None,
         };
         if let Some(journal) = context.journal {
             journal(&record).map_err(|reason| PatchError::new("journal", reason))?;
@@ -358,8 +392,12 @@ fn admit_patch_for_retry(
         }
         graph.checkpoint.expansions.push(Expansion {
             extra: Default::default(),
+            retired: None,
+            retry_generation: None,
+            final_result: false,
+            final_fragment: false,
+            floor_warnings: Vec::new(),
             source: String::new(),
-            continuation: false,
             nodes: Vec::new(),
             uses,
             patch: Some(record),
@@ -415,8 +453,7 @@ fn admit_patch_for_retry(
             } = *admission;
             if let Some(parent) = parent {
                 for node in &mut expansion.nodes {
-                    node.extra
-                        .insert(PARENT_NODE_FIELD.into(), Value::String(parent.id.clone()));
+                    node.parent_node = Some(parent.id.clone());
                 }
             }
             if let (Some(journal), Some(record)) = (context.journal, expansion.patch.as_mut()) {
@@ -456,34 +493,27 @@ pub fn retry_node(
     retry_node_scope(graph, id, brief, context, false, None, None)
 }
 
-/// Host continuation uses the same checked, journalled reset as an explicit retry.
-pub(super) fn continue_no_work(
+/// A host restart after a stop uses the same checked, journalled reset as an
+/// explicit retry, and records the stop it answered.
+pub(super) fn restart_stopped(
     graph: &mut LiveGraph<'_>,
     id: &str,
-    brief: &str,
+    brief: Option<&str>,
     routes: &[GraphRoute],
+    restart: Restart,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
+    let reason = format!("restart node {id} after a {} stop", restart.cause);
+    debug_assert_eq!(restart.node, id);
     retry_node_scope(
         graph,
         id,
-        Some(brief),
+        brief,
         context,
         false,
-        Some(&no_work_reason(id)),
+        Some((&reason, Some(restart))),
         Some(routes),
     )
-}
-
-pub(super) fn no_work_reason(id: &str) -> String {
-    format!("continue node {id} after stop with no work")
-}
-
-pub(super) fn is_no_work_continuation(record: &PatchRecord) -> bool {
-    record
-        .replaced
-        .iter()
-        .any(|node| record.reason.as_deref() == Some(no_work_reason(&node.id).as_str()))
 }
 
 fn retry_node_scope(
@@ -492,7 +522,7 @@ fn retry_node_scope(
     brief: Option<&str>,
     context: &PatchContext<'_>,
     dependants: bool,
-    reason: Option<&str>,
+    reason: Option<(&str, Option<Restart>)>,
     replacement_routes: Option<&[GraphRoute]>,
 ) -> Result<Admitted, PatchError> {
     let expanded = plans::expand(
@@ -627,26 +657,17 @@ fn retry_node_scope(
             && affected.contains(&consumer.id)
             && consumer.state.settled()
         {
-            let snapshots = consumer
-                .extra
-                .entry("settled_dependency_snapshots".into())
-                .or_insert_with(|| serde_json::json!({}))
-                .as_object_mut()
-                .ok_or_else(|| PatchError::invalid("invalid dependency snapshots"))?;
+            let snapshots = &mut consumer.settled_dependency_snapshots;
             for prior in graph
                 .checkpoint
                 .nodes
                 .iter()
                 .filter(|node| reset_ids.contains(&node.id) && node.state.settled())
             {
-                let mut value =
-                    serde_json::to_value(prior).map_err(|e| PatchError::invalid(e.to_string()))?;
-                let fields = value
-                    .as_object_mut()
-                    .ok_or_else(|| PatchError::invalid("node snapshot must be an object"))?;
-                fields.remove("settled_dependency_snapshots");
-                fields.remove("previous_attempts");
-                snapshots.entry(prior.id.clone()).or_insert(value);
+                let mut snapshot = prior.clone();
+                snapshot.settled_dependency_snapshots.clear();
+                snapshot.previous_attempts.clear();
+                snapshots.entry(prior.id.clone()).or_insert(snapshot);
             }
         }
     }
@@ -716,7 +737,8 @@ fn retry_node_scope(
         expected_revision: Some(revision(graph.checkpoint)),
         reason: Some(
             reason
-                .map(str::to_owned)
+                .as_ref()
+                .map(|(reason, _)| (*reason).to_owned())
                 .unwrap_or_else(|| format!("retry node {id}")),
         ),
         replace: vec![serde_json::to_value(node).map_err(|e| PatchError::invalid(e.to_string()))?],
@@ -732,6 +754,14 @@ fn retry_node_scope(
         context,
         Some(id),
     )?;
+    if let Some((_, Some(restart))) = reason
+        && let Some(record) = candidate
+            .expansions
+            .last_mut()
+            .and_then(|expansion| expansion.patch.as_mut())
+    {
+        record.restart = Some(restart);
+    }
     asks::refresh_wake(&mut candidate);
     *graph.checkpoint = candidate;
     Ok(admitted)
@@ -788,11 +818,7 @@ fn refused_before_launch(progress: &NodeProgress) -> bool {
             .iter()
             .filter(|attempt| attempt.state != AttemptState::Terminal)
             .all(|attempt| {
-                attempt
-                    .extra
-                    .get(PRELAUNCH_REFUSAL_PROOF)
-                    .and_then(Value::as_bool)
-                    == Some(true)
+                attempt.host_refused_before_acceptance
                     && attempt.attempt_ref.is_none()
                     && attempt.state == AttemptState::Starting
             })
@@ -800,10 +826,8 @@ fn refused_before_launch(progress: &NodeProgress) -> bool {
 
 fn reset_progress(old: &NodeProgress, container: bool) -> Result<NodeProgress, PatchError> {
     let generation = old
-        .extra
-        .get("retry_generation")
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
+        .retry_generation
+        .unwrap_or_default()
         .checked_add(1)
         .ok_or_else(|| PatchError::invalid("retry generation exhausted"))?;
     let mut previous = old.previous_attempts.clone();
@@ -844,11 +868,10 @@ pub fn submission(
     document: &mut GraphDocument,
     key: &str,
     limits: &crate::config::GraphLimits,
+    worktree_layout: provenant_config::WorktreeLayoutPort,
 ) -> Result<(), PatchError> {
     for node in &mut document.nodes {
-        node.extra
-            .entry("template".into())
-            .or_insert_with(|| Value::String("raw".into()));
+        node.template.get_or_insert_with(|| "raw".into());
     }
     let mut patch = Patch {
         schema_version: PATCH_SCHEMA_VERSION,
@@ -858,18 +881,18 @@ pub fn submission(
         ..Default::default()
     };
     let parameters = document
-        .extra
-        .get("provenance")
-        .and_then(|value| value.get("parameters"))
-        .and_then(Value::as_object)
-        .cloned()
+        .provenance
+        .as_ref()
+        .map(|provenance| provenance.parameters.clone())
         .unwrap_or_default();
     for (index, node) in document.nodes.iter().enumerate() {
         let mut raw = serde_json::to_value(node).map_err(|e| PatchError::invalid(e.to_string()))?;
-        // Snapshot compiled nodes without inheriting dotted template behaviour
-        // a second time. Explicit extensions retain their provenance.
+        // Snapshot compiled nodes without inheriting template behaviour a
+        // second time. Bare implement also inserts a sizing plan, which must
+        // not run again after the original brief has already been compiled.
+        // Explicit extensions retain their provenance.
         let original = raw.get("template").and_then(Value::as_str).unwrap_or("raw");
-        let name = if original.contains('.') {
+        let name = if original == "implement" || original.contains('.') {
             format!("submission-node-{index}")
         } else {
             original.to_owned()
@@ -917,6 +940,7 @@ pub fn submission(
         scan: &scan_for_secrets,
         journal: None,
         limits,
+        worktree_layout,
     };
     let compiled = submit(
         &document.graph_id,
@@ -927,10 +951,7 @@ pub fn submission(
     if compiled.nodes != document.nodes {
         return Err(PatchError::invalid("submission differs from bound nodes"));
     }
-    document.extra.insert(
-        "submission_patch".into(),
-        serde_json::to_value(patch).map_err(|e| PatchError::invalid(e.to_string()))?,
-    );
+    document.submission_patch = Some(patch.clone());
     Ok(())
 }
 
@@ -994,8 +1015,23 @@ pub fn submit(
         return Err(PatchError::invalid("patch adds no nodes"));
     }
     let mut document = GraphDocument {
+        review: None,
+        review_subject_missing: false,
+        exclude: Vec::new(),
+        network: None,
+        capability: Vec::new(),
+        no_capability: Vec::new(),
+        provenance: None,
+
         review_base: None,
         context: None,
+        replay_digest: None,
+        submission_patch: None,
+        template_library: library.snapshot(),
+        template_layers: library.snapshot_layers(),
+        template_resolvers: context.resolvers.clone(),
+        peer_origin_work_key: None,
+        review_tier_override: None,
         extra: Default::default(),
         limits: None,
         integration_branch: integration_branch.map(str::to_owned),
@@ -1005,18 +1041,7 @@ pub fn submit(
         graph_id: graph_id.to_owned(),
         nodes,
     };
-    document.extra.insert(
-        "template_layers".into(),
-        serde_json::json!(library.snapshot_layers()),
-    );
-    document.extra.insert(
-        "template_library".into(),
-        serde_json::json!(library.snapshot()),
-    );
-    document.extra.insert(
-        "template_resolvers".into(),
-        serde_json::json!(context.resolvers),
-    );
+
     document.schema_version = u64::from(minimum_schema_version(&document));
     document.admit(context.limits).map_err(|error| {
         let mut refusal = classify(error.to_string());
@@ -1147,13 +1172,31 @@ pub(super) fn prepare(
         .with(Layer::Repository, &catalogue)
         .and_then(|library| library.with(Layer::Inline, &patch.templates))
         .map_err(PatchError::invalid)?;
+    let mut resolvers = context.resolvers.clone();
+    if matches!(mode, Preparation::FinalFragment)
+        && parent.is_some_and(|node| {
+            node.plan.is_some()
+                || node
+                    .template
+                    .as_deref()
+                    .is_some_and(|name| name == "plan" || name.starts_with("plan."))
+        })
+    {
+        resolvers.insert(template::BOUNDED_IMPLEMENTATION.into(), vec!["true".into()]);
+    }
     let compiler = Compiler {
         library: &library,
-        resolvers: context.resolvers,
+        resolvers: &resolvers,
+    };
+    let scoped = compiler.scoped_plan_sources(&patch.nodes);
+    let compiler = Compiler {
+        resolvers: &scoped,
+        ..compiler
     };
     let mut local = Vec::with_capacity(patch.nodes.len());
     let mut uses = Vec::new();
-    for raw in &patch.nodes {
+    let authored = compiler.bounded_plan_consumers(&patch.nodes);
+    for raw in &authored {
         let mut node = compiler.compile(raw)?;
         let used = raw.get("use").and_then(Value::as_str);
         let trusted = used.is_some_and(|name| {
@@ -1229,6 +1272,7 @@ pub(super) fn prepare(
             planner.map(|(_, spec)| spec),
             expanded,
             checkpoint,
+            &context.worktree_layout,
         )
         .map_err(classify)?
     };
@@ -1260,11 +1304,7 @@ pub(super) fn prepare(
     let unstarted = |id: &str| -> Result<(), PatchError> {
         if let Some(parent) = parent
             && parent.plan.is_none()
-            && parent
-                .extra
-                .get(template::TEMPLATE_FIELD)
-                .and_then(Value::as_str)
-                != Some("plan")
+            && parent.template.as_deref() != Some("plan")
             && id != parent.id
             && !id.starts_with(&format!("{}--", parent.id))
         {
@@ -1354,12 +1394,17 @@ pub(super) fn prepare(
     let revision = current + 1;
     let mut expansion = Expansion {
         extra: Default::default(),
+        retired: None,
+        retry_generation: None,
+        final_result: false,
+        final_fragment: false,
+        floor_warnings: Vec::new(),
         source: parent.map(|node| node.id.clone()).unwrap_or_default(),
-        continuation: false,
         nodes: std::mem::take(&mut nodes),
         uses,
         patch: Some(PatchRecord {
             extra: Default::default(),
+            child_receipt: None,
             revision,
             digest,
             key: patch.idempotency_key.clone(),
@@ -1368,10 +1413,11 @@ pub(super) fn prepare(
             skipped: patch.skip.clone(),
             replaced,
             journaled: false,
+            restart: None,
         }),
     };
     if matches!(mode, Preparation::FinalFragment) {
-        expansion.extra.insert("final_result".into(), true.into());
+        expansion.final_fragment = true;
     }
     let mut preview = expanded.clone();
     plans::append(&mut preview, &expansion);
@@ -1492,7 +1538,7 @@ pub(super) fn correct_review_verdict(
         Some(brief),
         context,
         false,
-        Some(&format!("correct review verdict {id}")),
+        Some((&format!("correct review verdict {id}"), None)),
         None,
     )
 }

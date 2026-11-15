@@ -1,27 +1,8 @@
-//! The single fixture-backed hook catalogue supplied to config by composition.
-use crate::{ClaudeHook, GitHook, Hook};
-use provenant_config::HookRegistration;
-use provenant_records::Harness;
+//! Provider hook commands resolved from the adapter capability declaration.
+use crate::{GitHook, Hook};
+use provenant_records::{ADAPTER_SPECS, Harness, HookAction, HookEvent, HookProtocol};
 
 pub const PRE_TOOL_USE: &str = "pre-tool-use";
-
-/// Composed delivery capabilities. Records owns the Fabric mail fallback;
-/// provider hook support belongs to this catalogue beside its registration.
-pub fn delivery_capabilities() -> Vec<provenant_records::inbox::DeliveryCapability> {
-    let mut capabilities = provenant_records::inbox::delivery_capabilities();
-    for capability in &mut capabilities {
-        // Library readiness only; live injection requires the hook adapter.
-        capability.local_offer_reader = capability.provider.spec().local_offer_reader;
-    }
-    capabilities.push(provenant_records::inbox::DeliveryCapability {
-        provider: Harness::Claude,
-        transport: provenant_records::inbox::AnswerTransport::ClaudeHook,
-        live_injection: true,
-        local_offer_reader: true,
-    });
-    capabilities
-}
-
 pub const PRE_COMPACT: &str = "pre-compact";
 pub const COMPACT: &str = "compact";
 pub const CHAIR_PROMPT: &str = "chair-prompt";
@@ -32,6 +13,36 @@ pub const STOP: &str = "stop";
 pub const WORKTREE_CREATE: &str = "worktree-create";
 pub const WORKTREE_REMOVE: &str = "worktree-remove";
 pub const PRE_PUSH: &str = "pre-push";
+
+/// Composed delivery capabilities. The provider hook transport is available
+/// only when the adapter declaration supports the current guard response.
+pub fn delivery_capabilities() -> Vec<provenant_records::inbox::DeliveryCapability> {
+    use provenant_records::inbox::{AnswerTransport, DeliveryCapability};
+
+    let mut capabilities = provenant_records::inbox::delivery_capabilities();
+    for capability in &mut capabilities {
+        capability.local_offer_reader = capability
+            .provider
+            .spec()
+            .install
+            .is_some_and(|install| install.answer_delivery.is_supported());
+    }
+    for spec in ADAPTER_SPECS {
+        let Some(install) = spec.install else {
+            continue;
+        };
+        if install.answer_delivery.is_supported() {
+            capabilities.push(DeliveryCapability {
+                provider: spec.id,
+                transport: AnswerTransport::ProviderHook,
+                live_injection: true,
+                local_offer_reader: true,
+            });
+        }
+    }
+    capabilities
+}
+
 #[derive(Clone, Copy)]
 pub enum Handler {
     Guard,
@@ -46,163 +57,162 @@ pub enum Handler {
     WorktreeCreate,
     WorktreeRemove,
 }
-pub struct HookSpec {
-    pub registration: HookRegistration,
+
+#[derive(Clone, Copy)]
+pub struct ResolvedHook {
     pub handler: Handler,
-    pub fixture: Option<&'static str>,
+    pub client: Option<Harness>,
+    pub action: Option<HookAction>,
+    pub event: &'static str,
+    pub protocol: Option<HookProtocol>,
 }
-pub static HOOK_SPECS: &[HookSpec] = &[
-    HookSpec {
-        registration: provenant_config::CLAUDE_HOOKS[0],
-        handler: Handler::Guard,
-        fixture: Some("pre-tool-use.json"),
-    },
-    HookSpec {
-        registration: provenant_config::CLAUDE_HOOKS[1],
-        handler: Handler::PreCompact,
-        fixture: Some("pre-compact.json"),
-    },
-    HookSpec {
-        registration: provenant_config::CLAUDE_HOOKS[2],
-        handler: Handler::Compact,
-        fixture: Some("compact.json"),
-    },
-    HookSpec {
-        registration: HookRegistration {
-            harness: None,
-            event: PRE_PUSH,
-            matcher: None,
-            timeout: None,
-            command: &["hook", "git", PRE_PUSH],
-        },
-        handler: Handler::PrePush,
-        fixture: None,
-    },
-    HookSpec {
-        registration: HookRegistration {
-            harness: Some(Harness::Claude),
-            event: "UserPromptSubmit",
-            matcher: None,
-            timeout: Some(10),
-            command: &["hook", "claude", CHAIR_PROMPT],
-        },
-        handler: Handler::ChairPrompt,
-        fixture: None,
-    },
-    HookSpec {
-        registration: HookRegistration {
-            harness: Some(Harness::Claude),
-            event: "SessionStart",
-            matcher: None,
-            timeout: Some(5),
-            command: &["hook", "claude", CHAIR_START],
-        },
-        handler: Handler::ChairStart,
-        fixture: None,
-    },
-    // Not in `CLAUDE_HOOKS`: confined lanes get only the guard and checkpoint
-    // hooks, and these act on the chair's own session and project.
-    HookSpec {
-        registration: HookRegistration {
-            harness: Some(Harness::Claude),
-            event: "SessionStart",
-            matcher: Some("startup|resume|clear"),
-            timeout: Some(5),
-            command: &["hook", "claude", SESSION_START],
-        },
-        handler: Handler::SessionStart,
-        fixture: None,
-    },
-    HookSpec {
-        registration: HookRegistration {
-            harness: Some(Harness::Claude),
-            event: "Stop",
-            matcher: None,
-            timeout: Some(5),
-            command: &["hook", "claude", STOP],
-        },
-        handler: Handler::Stop,
-        fixture: None,
-    },
-    HookSpec {
-        registration: HookRegistration {
-            harness: Some(Harness::Claude),
-            event: "WorktreeCreate",
-            matcher: None,
-            timeout: Some(60),
-            command: &["hook", "claude", WORKTREE_CREATE],
-        },
-        handler: Handler::WorktreeCreate,
-        fixture: None,
-    },
-    HookSpec {
-        registration: HookRegistration {
-            harness: Some(Harness::Claude),
-            event: "WorktreeRemove",
-            matcher: None,
-            timeout: Some(60),
-            command: &["hook", "claude", WORKTREE_REMOVE],
-        },
-        handler: Handler::WorktreeRemove,
-        fixture: None,
-    },
-    HookSpec {
-        registration: HookRegistration {
-            harness: Some(Harness::Claude),
-            event: "Stop",
-            matcher: None,
-            timeout: Some(5),
-            command: &["hook", "claude", CHAIR_STOP],
-        },
-        handler: Handler::ChairStop,
-        fixture: None,
-    },
-];
+
+fn handler(action: HookAction) -> Handler {
+    match action {
+        HookAction::PreToolUse => Handler::Guard,
+        HookAction::PreCompact => Handler::PreCompact,
+        HookAction::Compact => Handler::Compact,
+        HookAction::ChairPrompt => Handler::ChairPrompt,
+        HookAction::ChairStart => Handler::ChairStart,
+        HookAction::ChairStop => Handler::ChairStop,
+        HookAction::SessionStart => Handler::SessionStart,
+        HookAction::Stop => Handler::Stop,
+        HookAction::WorktreeCreate => Handler::WorktreeCreate,
+        HookAction::WorktreeRemove => Handler::WorktreeRemove,
+    }
+}
+
+fn resolve_provider(name: &str, command: &str) -> Option<ResolvedHook> {
+    let spec = ADAPTER_SPECS.iter().find(|spec| spec.name == name)?;
+    let install = spec.install?;
+    let requested = HookAction::ALL
+        .iter()
+        .copied()
+        .find(|action| action.command() == command)?;
+    if requested == HookAction::PreToolUse && !install.answer_delivery.is_supported() {
+        return None;
+    }
+    let HookEvent::Supported { event, .. } = install.hook_events.iter().find(
+        |event| matches!(event, HookEvent::Supported { action, .. } if *action == requested),
+    )?
+    else {
+        return None;
+    };
+    Some(ResolvedHook {
+        handler: handler(requested),
+        client: Some(spec.id),
+        action: Some(requested),
+        event,
+        protocol: install.hook_protocol,
+    })
+}
+
 impl Hook {
-    pub fn spec(&self) -> &'static HookSpec {
-        let index = match self {
-            Self::Claude(ClaudeHook::PreToolUse) => 0,
-            Self::Claude(ClaudeHook::PreCompact) => 1,
-            Self::Claude(ClaudeHook::Compact) => 2,
-            Self::Git(GitHook::PrePush { .. }) => 3,
-            Self::Claude(ClaudeHook::ChairPrompt) => 4,
-            Self::Claude(ClaudeHook::ChairStart) => 5,
-            Self::Claude(ClaudeHook::ChairStop) => 10,
-            Self::Claude(ClaudeHook::SessionStart) => 6,
-            Self::Claude(ClaudeHook::Stop) => 7,
-            Self::Claude(ClaudeHook::WorktreeCreate) => 8,
-            Self::Claude(ClaudeHook::WorktreeRemove) => 9,
-        };
-        // These exhaustive grammar variants correspond to the static rows.
-        &HOOK_SPECS[index]
+    /// Resolve the CLI command against the same declaration used by config and
+    /// native hook rendering. Unrecognised values abstain at the process edge.
+    pub fn spec(&self) -> Option<ResolvedHook> {
+        match self {
+            Self::Git(GitHook::PrePush { .. }) => Some(ResolvedHook {
+                handler: Handler::PrePush,
+                client: None,
+                action: None,
+                event: PRE_PUSH,
+                protocol: None,
+            }),
+            Self::Provider(values) => {
+                let [adapter, action] = values.as_slice() else {
+                    return None;
+                };
+                resolve_provider(adapter.to_str()?, action.to_str()?)
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_records::{ADAPTER_SPECS, inbox::AnswerTransport};
+    use provenant_records::inbox::AnswerTransport;
+    use std::ffi::OsString;
 
     #[test]
-    fn composed_matrix_reports_claude_hook_readiness() {
+    fn delivery_matrix_projects_declared_answer_support() {
         let capabilities = delivery_capabilities();
         for spec in ADAPTER_SPECS {
+            let supported = spec
+                .install
+                .is_some_and(|install| install.answer_delivery.is_supported());
             let mail: Vec<_> = capabilities
                 .iter()
                 .filter(|cap| {
                     cap.provider == spec.id && cap.transport == AnswerTransport::FabricMail
                 })
                 .collect();
-            assert_eq!(mail.len(), 1, "{} Fabric-mail capability", spec.name);
-            assert_eq!(mail[0].local_offer_reader, spec.id == Harness::Claude);
+            assert_eq!(mail.len(), 1, "{} mail capability", spec.name);
+            assert_eq!(mail[0].local_offer_reader, supported);
             assert!(!mail[0].live_injection);
+
+            let hooks: Vec<_> = capabilities
+                .iter()
+                .filter(|cap| {
+                    cap.provider == spec.id && cap.transport == AnswerTransport::ProviderHook
+                })
+                .collect();
+            assert_eq!(
+                hooks.len(),
+                usize::from(supported),
+                "{} hook capability",
+                spec.name
+            );
+            for hook in hooks {
+                assert!(hook.local_offer_reader && hook.live_injection);
+            }
         }
-        let hooks: Vec<_> = capabilities
-            .iter()
-            .filter(|cap| cap.transport == AnswerTransport::ClaudeHook)
-            .collect();
-        assert_eq!(hooks.len(), 1);
-        assert_eq!(hooks[0].provider, Harness::Claude);
-        assert!(hooks[0].local_offer_reader && hooks[0].live_injection);
+    }
+
+    #[test]
+    fn provider_commands_resolve_to_the_declared_native_event() {
+        for spec in ADAPTER_SPECS {
+            let Some(install) = spec.install else {
+                continue;
+            };
+            for event in install.hook_events {
+                let HookEvent::Supported { action, event, .. } = event else {
+                    continue;
+                };
+                let hook = Hook::Provider(vec![
+                    OsString::from(spec.name),
+                    OsString::from(action.command()),
+                ])
+                .spec()
+                .expect("declared provider action resolves");
+                assert_eq!(hook.client, Some(spec.id));
+                assert_eq!(hook.action, Some(*action));
+                assert_eq!(hook.event, *event);
+                assert_eq!(hook.protocol, install.hook_protocol);
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_provider_and_unsupported_action_abstain() {
+        assert!(
+            Hook::Provider(vec![
+                OsString::from("unknown"),
+                OsString::from(PRE_TOOL_USE)
+            ])
+            .spec()
+            .is_none()
+        );
+        assert!(
+            Hook::Provider(vec![OsString::from("agy"), OsString::from(COMPACT)])
+                .spec()
+                .is_none()
+        );
+        assert!(
+            Hook::Provider(vec![OsString::from("codex")])
+                .spec()
+                .is_none()
+        );
     }
 }

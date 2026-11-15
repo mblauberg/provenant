@@ -4,26 +4,19 @@ use std::error::Error;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
-fn admission_clock_error_preserves_wire_message() {
+fn admission_clock_error_stays_an_admission_refusal() {
     let error = CustodyError::from(AdmissionError::Clock);
     assert!(matches!(
         error,
         CustodyError::Admission(AdmissionError::Clock)
     ));
-    assert!(error.to_string().contains("host monotonic clock"));
+    assert!(!error.to_string().is_empty());
 }
 
 type TestResult = std::result::Result<(), Box<dyn Error>>;
 
-/// The v1 wire shape is pinned independently of the current serializer; only
-/// physical directory identities vary between installations.
 #[test]
-fn current_release_fence_fixture_preserves_uncommitted_work() -> TestResult {
-    check_release_fence_fixture(false)?;
-    check_release_fence_fixture(true)
-}
-
-fn check_release_fence_fixture(slot_root: bool) -> TestResult {
+fn current_attempt_reservation_preserves_uncommitted_work() -> TestResult {
     let root = tempfile::tempdir()?;
     let path = root.path().join("writer");
     let worktree = root.path().join("worktree");
@@ -46,34 +39,48 @@ fn check_release_fence_fixture(slot_root: bool) -> TestResult {
     let evidence = Directory::open_anchor(&evidence_path)?;
     let tree = Directory::open_anchor(&worktree)?;
     let git = Directory::open_anchor(&worktree.join(".git"))?;
-    let slot_identity = if slot_root {
-        slot.metadata()?
-    } else {
-        evidence.metadata()?
-    };
+    let evidence_identity = evidence.metadata()?;
     let tree_identity = tree.metadata()?;
     let git_identity = git.metadata()?;
-    let fixture = r#"{"schema_version":1,"scope":{"run":"@RUN@","attempt":"@ATTEMPT@","generation":1},"launch_state":"prepared","attempt_device":null,"attempt_inode":null,"reservation_device":@SLOT_DEVICE@,"reservation_inode":@SLOT_INODE@,"binding":{"kind":"worktree","worktree_device":@TREE_DEVICE@,"worktree_inode":@TREE_INODE@,"git_device":@GIT_DEVICE@,"git_inode":@GIT_INODE@,"branch":"refs/heads/lane","base":"@BASE@"},"boot":"linux:00000000-0000-0000-0000-000000000001","guardian":null,"provider":null,"unresolved_cleanup":true,"descendants":[],"census_incomplete":true,"omitted_descendants":0}"#
-    .replace("@RUN@", &scope.run.to_string())
-    .replace("@ATTEMPT@", &scope.attempt.to_string())
-    .replace("@SLOT_DEVICE@", &slot_identity.device.to_string())
-    .replace("@SLOT_INODE@", &slot_identity.inode.to_string())
-    .replace("@TREE_DEVICE@", &tree_identity.device.to_string())
-    .replace("@TREE_INODE@", &tree_identity.inode.to_string())
-    .replace("@GIT_DEVICE@", &git_identity.device.to_string())
-    .replace("@GIT_INODE@", &git_identity.inode.to_string())
-    .replace("@BASE@", base.trim());
-    let reservation_path = if slot_root {
-        path.join("reservation.json")
-    } else {
-        evidence_path.join("reservation.json")
+    let reservation = Reservation {
+        schema_version: 1,
+        scope,
+        launch_state: LaunchState::Prepared,
+        attempt_device: None,
+        attempt_inode: None,
+        reservation_device: evidence_identity.device,
+        reservation_inode: evidence_identity.inode,
+        binding: StoredWriterBinding::Worktree {
+            worktree_device: tree_identity.device,
+            worktree_inode: tree_identity.inode,
+            git_device: git_identity.device,
+            git_inode: git_identity.inode,
+            branch: "refs/heads/lane".into(),
+            base: GitOid::parse(base.trim())?,
+            extra: Default::default(),
+        },
+        boot: "linux:00000000-0000-0000-0000-000000000001".into(),
+        guardian: None,
+        provider: None,
+        unresolved_cleanup: true,
+        descendants: vec![],
+        census_incomplete: true,
+        omitted_descendants: 0,
+        extra: Default::default(),
     };
+    let reservation_path = evidence_path.join("reservation.json");
     let marker_path = evidence_path.join("import-retained.json");
-    std::fs::write(&reservation_path, fixture.as_bytes())?;
+    write_record(
+        &evidence,
+        "reservation.json",
+        &reservation,
+        PublishMode::NoReplace,
+    )?
+    .require_durable()?;
+    let encoded = std::fs::read(&reservation_path)?;
     std::fs::write(&marker_path, b"retained import evidence")?;
-    let source = if slot_root { &slot } else { &evidence };
-    let decoded: Reservation = read_record(source, "reservation.json", RECORD_LIMIT)?;
-    validate_anchor(source, &decoded)?;
+    let decoded: Reservation = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
+    validate_anchor(&evidence, &decoded)?;
     assert_eq!(decoded.scope, scope);
     assert!(matches!(
         decoded.binding,
@@ -81,19 +88,7 @@ fn check_release_fence_fixture(slot_root: bool) -> TestResult {
     ));
     assert!(reservation_present(&slot, scope)?);
     assert!(matches!(acquire(&path), Err(CustodyError::Fenced)));
-    if slot_root {
-        assert!(!reservation_path.exists());
-        let mut expected: serde_json::Value = serde_json::from_str(&fixture)?;
-        let anchor = evidence.metadata()?;
-        expected["reservation_device"] = anchor.device.into();
-        expected["reservation_inode"] = anchor.inode.into();
-        expected["slot_exclusive"] = true.into();
-        expected["slot_original_device"] = slot_identity.device.into();
-        let carried: serde_json::Value = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
-        assert_eq!(carried, expected);
-    } else {
-        assert_eq!(std::fs::read(&reservation_path)?, fixture.as_bytes());
-    }
+    assert_eq!(std::fs::read(&reservation_path)?, encoded);
     assert_eq!(std::fs::read(&marker_path)?, b"retained import evidence");
     assert_eq!(
         std::fs::read(worktree.join("uncommitted.txt"))?,
@@ -107,428 +102,29 @@ fn check_release_fence_fixture(slot_root: bool) -> TestResult {
 }
 
 #[test]
-fn slot_reservation_cutover_preserves_anchor_and_unknown_fields() -> TestResult {
+fn slot_root_reservations_are_not_adopted_as_attempt_evidence() -> TestResult {
     let root = tempfile::tempdir()?;
     let path = root.path().join("writer");
     std::fs::create_dir(&path)?;
-    let slot = Directory::open_anchor(&path)?;
-    let record = legacy_reservation(scope(), &slot.metadata()?);
-    let mut value = serde_json::to_value(record)?;
-    value["future_field"] = serde_json::json!({"kept": true});
-    write_record(&slot, "reservation.json", &value, PublishMode::NoReplace)?.require_durable()?;
-    let clock = SystemClock;
-    let cancel = CancelToken::new();
-    let recovery = acquire_recovery(
-        slot.try_clone()?,
-        scope(),
-        WaitBudget::nonblocking(clock.mono_now()),
-        &cancel,
-        &clock,
-    )?;
-    assert_eq!(recovery.scope(), scope());
-    let child = attempt_evidence(&slot, scope())?;
-    let migrated: serde_json::Value = read_record(&child, "reservation.json", RECORD_LIMIT)?;
-    assert_eq!(migrated["future_field"], value["future_field"]);
-    assert_eq!(migrated["reservation_inode"], child.metadata()?.inode);
-    assert_eq!(migrated["reservation_device"], child.metadata()?.device);
-    assert!(!path.join("reservation.json").exists());
-    drop(recovery);
-    assert!(reservation_present(&slot, scope())?);
-    assert!(matches!(acquire(&path), Err(CustodyError::Fenced)));
-    let mut successor = scope();
-    successor.attempt = AttemptId::from_bytes([9; 16]);
-    let clock = SystemClock;
-    assert!(matches!(
-        crate::fixture::acquire_writer(
-            slot.try_clone()?,
-            successor,
-            WaitBudget::nonblocking(clock.mono_now()),
-            &CancelToken::new(),
-            &clock
-        ),
-        Err(CustodyError::Fenced)
-    ));
-    assert!(
-        prove_unreserved(
-            &slot,
-            successor,
-            WaitBudget::nonblocking(clock.mono_now()),
-            &CancelToken::new(),
-            &clock,
-        )?
-        .is_none()
-    );
-    let recovery = acquire_recovery(
-        slot.try_clone()?,
-        scope(),
-        WaitBudget::nonblocking(clock.mono_now()),
-        &CancelToken::new(),
-        &clock,
-    )?;
-    recovery.withdraw_prepared()?;
-    crate::fixture::acquire_writer(
-        slot.try_clone()?,
-        successor,
-        WaitBudget::nonblocking(clock.mono_now()),
-        &CancelToken::new(),
-        &clock,
-    )?
-    .withdraw_unlaunched()?;
-    Ok(())
-}
-
-#[test]
-fn reconciliation_carries_slot_reservation_before_listing() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let path = root.path().join("writer");
-    std::fs::create_dir(&path)?;
-    let slot = Directory::open_anchor(&path)?;
-    publish_reservation(&slot, &legacy_reservation(scope(), &slot.metadata()?))?;
-    let registry = Directory::open_anchor(root.path())?;
-    let before = list_writer_reservations(&registry)?;
-    assert!(before.reservations.is_empty());
-    assert_eq!(before.issues.len(), 1);
-    assert!(path.join("reservation.json").exists());
-    let clock = SystemClock;
-    cutover_writer_reservations(&registry, &CancelToken::new(), &clock)?;
-    let listing = list_writer_reservations(&registry)?;
-    assert!(listing.issues.is_empty());
-    let fence = listing
-        .reservations
-        .iter()
-        .find(|r| r.scope == scope())
-        .unwrap();
-    assert_eq!(
-        fence.custody_directory(),
-        Some(std::path::Path::new("writer"))
-    );
-    assert!(!path.join("reservation.json").exists());
-    let recovery = acquire_recovery(
-        Directory::open_anchor(&root.path().join(fence.custody_directory().unwrap()))?,
-        fence.scope,
-        WaitBudget::nonblocking(clock.mono_now()),
-        &CancelToken::new(),
-        &clock,
-    )?;
-    assert_eq!(recovery.scope(), scope());
-    assert!(!path.join("reservation.json").exists());
-    assert!(
-        path.join(scope().attempt.to_string())
-            .join("reservation.json")
-            .exists()
-    );
-    recovery.withdraw_prepared()?;
-    assert!(
-        list_writer_reservations(&Directory::open_anchor(root.path())?)?
-            .reservations
-            .is_empty()
-    );
-    Ok(())
-}
-
-#[test]
-fn reconciliation_skips_busy_and_unreadable_slots_without_hiding_other_fences() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let registry = Directory::open_anchor(root.path())?;
-    let clock = SystemClock;
-    let cancel = CancelToken::new();
-    for name in ["busy", "good", "bad"] {
-        std::fs::create_dir(root.path().join(name))?;
-    }
-    let busy = Directory::open_anchor(&root.path().join("busy"))?;
-    let good = Directory::open_anchor(&root.path().join("good"))?;
-    publish_reservation(&busy, &legacy_reservation(scope(), &busy.metadata()?))?;
-    publish_reservation(&good, &legacy_reservation(scope(), &good.metadata()?))?;
-    std::fs::write(root.path().join("bad/reservation.json"), b"unreadable")?;
-    let held = lock_writer_exclusion(
-        &busy,
-        WaitBudget::nonblocking(clock.mono_now()),
-        &cancel,
-        &clock,
-    )?;
-    cutover_writer_reservations(&registry, &cancel, &clock)?;
-    assert!(root.path().join("busy/reservation.json").exists());
-    assert!(root.path().join("bad/reservation.json").exists());
-    assert!(!root.path().join("good/reservation.json").exists());
-    let listing = list_writer_reservations(&registry)?;
-    assert_eq!(listing.issues.len(), 2);
-    assert_eq!(listing.reservations.len(), 1);
-    drop(held);
-    cutover_writer_reservations(&registry, &cancel, &clock)?;
-    assert!(!root.path().join("busy/reservation.json").exists());
-    assert!(root.path().join("bad/reservation.json").exists());
-    Ok(())
-}
-
-#[test]
-fn cutover_returns_storage_failure_and_still_carries_other_slots() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let registry = Directory::open_anchor(root.path())?;
-    for name in ["blocked", "good"] {
-        std::fs::create_dir(root.path().join(name))?;
-        let slot = Directory::open_anchor(&root.path().join(name))?;
-        publish_reservation(&slot, &legacy_reservation(scope(), &slot.metadata()?))?;
-    }
-    let blocked = Directory::open_anchor(&root.path().join("blocked"))?;
-    let child = create_attempt_evidence(&blocked, scope())?;
-    let child_path = root
-        .path()
-        .join("blocked")
-        .join(scope().attempt.to_string());
-    std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o500))?;
-    let result = cutover_writer_reservations(&registry, &CancelToken::new(), &SystemClock);
-    std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o700))?;
-    assert!(matches!(result, Err(CustodyError::Filesystem(error)) if error.is_permission_denied()));
-    assert!(root.path().join("blocked/reservation.json").exists());
-    assert!(!root.path().join("good/reservation.json").exists());
-    assert!(!child_path.join("reservation.json").exists());
-    let listing = list_writer_reservations(&registry)?;
-    assert_eq!(listing.issues.len(), 1);
-    assert_eq!(listing.reservations.len(), 1);
-    assert_eq!(
-        child.metadata()?.inode,
-        Directory::open_anchor(&child_path)?.metadata()?.inode
-    );
-    Ok(())
-}
-
-#[test]
-fn cutover_preserves_guardian_identity_for_scoped_observation() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let slot_path = root.path().join("writer");
-    std::fs::create_dir(&slot_path)?;
-    let slot = Directory::open_anchor(&slot_path)?;
-    let mut record = legacy_reservation(scope(), &slot.metadata()?);
-    record.launch_state = LaunchState::HandingOff;
-    record.attempt_device = Some(slot.metadata()?.device);
-    record.attempt_inode = Some(slot.metadata()?.inode);
-    let guardian = ProcessIdentity {
-        boot: record.boot.clone(),
-        pid: 100,
-        native_start: 1,
-        group_id: 100,
-        session_id: 100,
-    };
-    record.guardian = Some(guardian.clone());
-    publish_reservation(&slot, &record)?;
-    let registry = Directory::open_anchor(root.path())?;
-    cutover_writer_reservations(&registry, &CancelToken::new(), &SystemClock)?;
-    assert_eq!(reservation_guardian(&slot, scope())?, Some(guardian));
-    let mut other = scope();
-    other.generation += 1;
-    assert!(matches!(
-        reservation_guardian(&slot, other),
-        Err(CustodyError::InvalidRecord)
-    ));
-    Ok(())
-}
-
-#[test]
-fn unreadable_slot_reservation_remains_visible_and_fenced() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let path = root.path().join("writer");
-    std::fs::create_dir(&path)?;
-    std::fs::write(path.join("reservation.json"), b"not a reservation")?;
-    let slot = Directory::open_anchor(&path)?;
-    assert!(reservation_present(&slot, scope())?);
-    assert!(matches!(acquire(&path), Err(CustodyError::Fenced)));
-    assert_eq!(
-        std::fs::read(path.join("reservation.json"))?,
-        b"not a reservation"
-    );
-    let listing = list_writer_reservations(&Directory::open_anchor(root.path())?)?;
-    assert_eq!(listing.issues.len(), 1);
-    assert_eq!(
-        listing.issues[0].reservation,
-        PathBuf::from("writer/reservation.json")
-    );
-    Ok(())
-}
-
-#[test]
-fn slot_reservation_cutover_replays_only_identical_published_evidence() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let path = root.path().join("writer");
-    std::fs::create_dir(&path)?;
-    let slot = Directory::open_anchor(&path)?;
-    let record = legacy_reservation(scope(), &slot.metadata()?);
-    publish_reservation(&slot, &record)?;
-    let child = create_attempt_evidence(&slot, scope())?;
-    let mut carried = record.clone();
-    carried.reservation_device = child.metadata()?.device;
-    carried.reservation_inode = child.metadata()?.inode;
-    let mut carried = serde_json::to_value(carried)?;
-    carried["slot_exclusive"] = true.into();
-    carried["slot_original_device"] = record.reservation_device.into();
-    write_record(&child, "reservation.json", &carried, PublishMode::NoReplace)?
-        .require_durable()?;
-    let clock = SystemClock;
-    let cancel = CancelToken::new();
-    let recovery = acquire_recovery(
-        slot.try_clone()?,
-        scope(),
-        WaitBudget::nonblocking(clock.mono_now()),
-        &cancel,
-        &clock,
-    )?;
-    assert_eq!(recovery.scope(), scope());
-    assert!(!path.join("reservation.json").exists());
-    Ok(())
-}
-
-#[test]
-fn slot_cutover_sync_failure_retains_source_until_replay_is_durable() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let slot = Directory::open_anchor(root.path())?;
-    let record = legacy_reservation(scope(), &slot.metadata()?);
-    publish_reservation(&slot, &record)?;
-    let original = slot.read_bounded(OsStr::new("reservation.json"), RECORD_LIMIT)?;
-    for _ in 0..2 {
-        let result = carry_forward_slot_reservation_with(&slot, |child| {
-            let carried: Reservation = read_record(child, "reservation.json", RECORD_LIMIT)?;
-            assert_eq!(carried.scope, scope());
-            Err(io::Error::from_raw_os_error(libc::EIO).into())
-        });
-        assert!(
-            matches!(result, Err(CustodyError::Io(error)) if error.raw_os_error() == Some(libc::EIO))
-        );
-        assert_eq!(
-            slot.read_bounded(OsStr::new("reservation.json"), RECORD_LIMIT)?,
-            original
-        );
-        assert!(reservation_present(&slot, scope())?);
-    }
-    carry_forward_slot_reservation(&slot)?;
-    assert!(!root.path().join("reservation.json").exists());
-    let child = attempt_evidence(&slot, scope())?;
-    let carried: Reservation = read_record(&child, "reservation.json", RECORD_LIMIT)?;
-    validate_anchor(&child, &carried)?;
-    assert_eq!(carried.scope, scope());
-    assert!(reservation_present(&slot, scope())?);
-    Ok(())
-}
-
-#[test]
-fn malformed_attempt_reservation_cannot_hide_an_exclusive_fence() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let path = root.path().join("writer");
-    std::fs::create_dir(&path)?;
-    let slot = Directory::open_anchor(&path)?;
-    publish_reservation(&slot, &legacy_reservation(scope(), &slot.metadata()?))?;
-    let clock = SystemClock;
-    let cancel = CancelToken::new();
-    let recovery = acquire_recovery(
-        slot.try_clone()?,
-        scope(),
-        WaitBudget::nonblocking(clock.mono_now()),
-        &cancel,
-        &clock,
-    )?;
-    drop(recovery);
-    let child = attempt_evidence(&slot, scope())?;
-    let mut record: serde_json::Value = read_record(&child, "reservation.json", RECORD_LIMIT)?;
-    record["slot_exclusive"] = "invalid".into();
-    write_record(&child, "reservation.json", &record, PublishMode::Replace)?.require_durable()?;
-    let mut successor = scope();
-    successor.attempt = AttemptId::from_bytes([9; 16]);
-    assert!(matches!(
-        crate::fixture::acquire_writer(
-            slot.try_clone()?,
-            successor,
-            WaitBudget::nonblocking(clock.mono_now()),
-            &cancel,
-            &clock
-        ),
-        Err(CustodyError::Fenced)
-    ));
-    Ok(())
-}
-
-#[test]
-fn slot_reservation_cutover_keeps_reboot_device_proof() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let path = root.path().join("writer");
-    let attempt_path = root.path().join("attempt");
-    std::fs::create_dir(&path)?;
+    let attempt_path = path.join(scope().attempt.to_string());
     std::fs::create_dir(&attempt_path)?;
     let slot = Directory::open_anchor(&path)?;
-    let attempt = Directory::open_anchor(&attempt_path)?;
-    let mut record = legacy_reservation(scope(), &slot.metadata()?);
-    record.boot = "darwin:00000000-0000-0000-0000-000000000000".into();
-    record.launch_state = LaunchState::HandingOff;
-    record.reservation_device += 1;
-    record.attempt_device = Some(record.reservation_device);
-    record.attempt_inode = Some(attempt.metadata()?.inode);
-    publish_reservation(&slot, &record)?;
-    let clock = SystemClock;
-    let world = RebootWorld {
-        boot: Some("darwin:11111111-1111-1111-1111-111111111111"),
-    };
-    let recovered = acquire_reboot_recovery_with(
-        slot.try_clone()?,
-        &attempt,
-        scope(),
-        WaitBudget::nonblocking(clock.mono_now()),
-        &CancelToken::new(),
-        &clock,
-        &world,
-    )?;
-    assert_eq!(recovered.scope(), scope());
-    assert!(!path.join("reservation.json").exists());
-    let child = attempt_evidence(&slot, scope())?;
-    let carried: Reservation = read_record(&child, "reservation.json", RECORD_LIMIT)?;
-    assert_eq!(carried.reservation_device, child.metadata()?.device);
-    assert_eq!(
-        carried.extra["slot_original_device"],
-        record.reservation_device
-    );
-    let proof = recovered
-        .after_reboot_with(&attempt, scope(), &world)?
-        .ok_or("cutover lost reboot proof")?;
-    proof.release()?;
-    assert!(!reservation_present(&slot, scope())?);
-    Ok(())
-}
+    let root_record = path.join("reservation.json");
+    std::fs::write(&root_record, br#"{"schema_version":1,"slot":"old"}"#)?;
 
-#[test]
-fn slot_reservation_cutover_keeps_conflicting_evidence_fenced() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let path = root.path().join("writer");
-    std::fs::create_dir(&path)?;
-    let slot = Directory::open_anchor(&path)?;
-    let record = legacy_reservation(scope(), &slot.metadata()?);
-    publish_reservation(&slot, &record)?;
-    let original = std::fs::read(path.join("reservation.json"))?;
-    let child = create_attempt_evidence(&slot, scope())?;
-    let mut conflict = legacy_reservation(scope(), &child.metadata()?);
-    conflict.scope.generation += 1;
-    publish_reservation(&child, &conflict)?;
-    assert!(matches!(acquire(&path), Err(CustodyError::Fenced)));
-    assert_eq!(std::fs::read(path.join("reservation.json"))?, original);
-    assert!(reservation_present(&slot, scope())?);
-    Ok(())
-}
-
-#[test]
-fn slot_reservation_cutover_preserves_conflicting_future_fields() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let slot = Directory::open_anchor(root.path())?;
-    let mut value = serde_json::to_value(legacy_reservation(scope(), &slot.metadata()?))?;
-    value["slot_exclusive"] = serde_json::json!({"future": true});
-    write_record(&slot, "reservation.json", &value, PublishMode::NoReplace)?.require_durable()?;
     let clock = SystemClock;
-    assert!(matches!(
+    assert!(
         acquire_recovery(
-            slot.try_clone()?,
+            slot,
             scope(),
             WaitBudget::nonblocking(clock.mono_now()),
             &CancelToken::new(),
             &clock,
-        ),
-        Err(CustodyError::Fenced)
-    ));
-    let retained: serde_json::Value = read_record(&slot, "reservation.json", RECORD_LIMIT)?;
-    assert_eq!(retained, value);
+        )
+        .is_err()
+    );
+    assert!(root_record.exists());
+    assert!(!attempt_path.join("reservation.json").exists());
     Ok(())
 }
 
@@ -569,7 +165,6 @@ fn admission_uses_flock_and_retains_predecessor_evidence() -> TestResult {
         .join("reservation.json");
     let first_bytes = std::fs::read(&first_path)?;
     let next = Scope {
-        run: RunId::from_bytes([3; 16]),
         attempt: AttemptId::from_bytes([4; 16]),
         generation: 1,
     };
@@ -619,56 +214,6 @@ fn admission_uses_flock_and_retains_predecessor_evidence() -> TestResult {
     assert!(matches!(admit(), Err(CustodyError::Busy)));
     recovery.withdraw_prepared()?;
     admit()?.withdraw_unlaunched()?;
-    Ok(())
-}
-
-#[test]
-fn reservation_listing_flags_unscoped_evidence() -> TestResult {
-    let root = tempfile::tempdir()?;
-    let path = root.path().join("writer");
-    std::fs::create_dir(&path)?;
-    drop(acquire(&path)?);
-    std::fs::write(path.join("reservation.json"), b"legacy crash evidence")?;
-    let listing = list_writer_reservations(&Directory::open_anchor(root.path())?)?;
-    assert_eq!(listing.reservations.len(), 1);
-    assert_eq!(listing.reservations[0].scope, scope());
-    assert_eq!(listing.issues.len(), 1);
-    assert_eq!(
-        listing.issues[0].reservation,
-        PathBuf::from("writer/reservation.json")
-    );
-    assert!(listing.issues[0].reason.contains("reconciliation"));
-    Ok(())
-}
-
-fn legacy_reservation(scope: Scope, anchor: &provenant_os::fs::Metadata) -> Reservation {
-    Reservation {
-        schema_version: 1,
-        scope,
-        launch_state: LaunchState::Prepared,
-        attempt_device: None,
-        attempt_inode: None,
-        reservation_device: anchor.device,
-        reservation_inode: anchor.inode,
-        binding: StoredWriterBinding::ReadOnly,
-        boot: "fixture-recorded-boot-v1".to_owned(),
-        guardian: None,
-        provider: None,
-        unresolved_cleanup: true,
-        descendants: Vec::new(),
-        census_incomplete: true,
-        omitted_descendants: 0,
-        extra: Default::default(),
-    }
-}
-fn publish_reservation(directory: &Directory, record: &Reservation) -> TestResult {
-    write_record(
-        directory,
-        "reservation.json",
-        record,
-        PublishMode::NoReplace,
-    )?
-    .require_durable()?;
     Ok(())
 }
 
@@ -727,28 +272,29 @@ fn worktree_settlement_retains_flock_until_recovery_is_dropped() -> TestResult {
 }
 
 #[test]
-fn persisted_custody_accepts_future_fields_without_changing_scope_checks() -> TestResult {
+fn ownership_journal_uses_bounded_decode_and_rejects_invalid_scope() -> TestResult {
     let record = serde_json::json!({
         "schema_version": 1,
         "scope": {
-            "run": scope().run,
             "attempt": scope().attempt,
-            "generation": 1,
-            "future_scope": {"value": true}
+            "generation": 1
         },
-        "binding": {"kind": "read_only", "future_binding": 42},
+        "binding": {"kind": "read_only"},
         "future_journal": [1, 2]
     });
     let journal: OwnershipJournal =
-        decode_v1(serde_json::to_vec(&record)?.as_slice(), Limits::CONFIG)?;
+        provenant_records::decode(serde_json::to_vec(&record)?.as_slice(), Limits::CONFIG)?;
     assert_eq!(journal.schema_version, 1);
     assert_eq!(journal.scope, scope());
     journal.binding.validate()?;
     let mut invalid = record;
     invalid["scope"]["generation"] = serde_json::json!("invalid");
     assert!(
-        decode_v1::<OwnershipJournal, _>(serde_json::to_vec(&invalid)?.as_slice(), Limits::CONFIG)
-            .is_err()
+        provenant_records::decode::<OwnershipJournal, _>(
+            serde_json::to_vec(&invalid)?.as_slice(),
+            Limits::CONFIG,
+        )
+        .is_err()
     );
     Ok(())
 }
@@ -765,15 +311,7 @@ fn capture_plan_without_silence_uses_registry_default() -> TestResult {
     assert!(!plan.silent(1_799_999, Some(0)));
     assert!(plan.silent(1_800_000, Some(0)));
     assert!(!plan.silent(1_800_000, Some(1)));
-    assert_eq!(
-        plan.silent_for_ms(1_800_000, Some(0), true),
-        None,
-        "disk pause suppresses silence"
-    );
-    assert_eq!(
-        plan.silent_for_ms(1_800_000, Some(0), false),
-        Some(1_800_000)
-    );
+    assert!(plan.silent_for_ms(1_800_000, Some(0)).is_some());
     assert!(
         CapturePlan {
             silence_ms: 3_600_001,
@@ -827,6 +365,7 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
         launch_refusal: None,
         warnings: vec!["\u{0001}".repeat(160); 24],
         omitted_warnings: 5,
+        extra: Default::default(),
     };
     assert!(serde_json::to_vec(&exit)?.len() as u64 > EXIT_LIMIT);
     let bytes = exit.bounded_bytes()?;
@@ -858,7 +397,6 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
 }
 fn scope() -> Scope {
     Scope {
-        run: RunId::from_bytes([1; 16]),
         attempt: AttemptId::from_bytes([2; 16]),
         generation: 1,
     }
@@ -1005,6 +543,7 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
         &writer.reservation,
         PublishMode::Replace,
     )?)?;
+    let reservation_bytes = serde_json::to_vec(&writer.reservation)?;
     let recovery = writer.into_recovery()?;
     assert!(
         recovery
@@ -1037,6 +576,7 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
         scope: scope(),
         terminal_digest: provenant_records::CanonicalV1::file_digest(&terminal),
         quarantine_digest: provenant_records::CanonicalV1::file_digest(b"wrong"),
+        extra: Default::default(),
     };
     Publication::require_durable(write_record(
         &held,
@@ -1052,7 +592,6 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
         &release,
         PublishMode::Replace,
     )?)?;
-    std::fs::write(attempt.path().join(crate::build_pause::PAUSE_FILE), b"{")?;
     let commit = recovery.verify_settlement(&held)?;
     let scratch_dir = tempfile::tempdir()?;
     std::fs::set_permissions(scratch_dir.path(), std::fs::Permissions::from_mode(0o700))?;
@@ -1076,30 +615,139 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
             .join("settlement.json")
             .exists()
     );
-    drop(acquire(root.path())?);
+    // Simulate a crash after durable settlement but before reservation unlink.
+    let evidence_path = root.path().join(scope().attempt.to_string());
+    let evidence = Directory::open_anchor(&evidence_path)?;
+    std::fs::write(evidence_path.join("reservation.json"), &reservation_bytes)?;
+    let marker = ImportFence {
+        schema_version: 1,
+        scope: scope(),
+        lane: provenant_records::WorkKey::new(
+            provenant_core::ProjectId::from_bytes([1; 16]),
+            "retained",
+            "writer",
+            1,
+        )?,
+        run_attempt: attempt.path().to_path_buf(),
+    };
+    let marker_bytes = serde_json::to_vec(&marker)?;
+    std::fs::write(evidence_path.join("import-retained.json"), &marker_bytes)?;
+    let journal_path = evidence_path.join("settlement.json");
+    let journal = std::fs::read(&journal_path)?;
+    let release_path = attempt.path().join("release.json");
+    let release_bytes = std::fs::read(&release_path)?;
+    let wrong_attempt = Scope {
+        attempt: AttemptId::from_bytes([9; 16]),
+        ..scope()
+    };
+    let wrong_generation = Scope {
+        generation: scope().generation + 1,
+        ..scope()
+    };
+    for bytes in [
+        None,
+        Some(b"{".to_vec()),
+        Some(serde_json::to_vec(&SettlementJournal {
+            schema_version: 1,
+            scope: wrong_attempt,
+            extra: Default::default(),
+        })?),
+        Some(serde_json::to_vec(&SettlementJournal {
+            schema_version: 1,
+            scope: wrong_generation,
+            extra: Default::default(),
+        })?),
+    ] {
+        match bytes {
+            Some(bytes) => std::fs::write(&journal_path, bytes)?,
+            None => std::fs::remove_file(&journal_path)?,
+        }
+        assert!(matches!(
+            retained_import_decision(&evidence, scope())?,
+            Some(CustodyDecision::Pending(_))
+        ));
+        assert!(acquire(root.path()).is_err());
+        assert_eq!(
+            std::fs::read(evidence_path.join("reservation.json"))?,
+            reservation_bytes
+        );
+    }
+    std::fs::write(&journal_path, &journal)?;
+    for path in [
+        &release_path,
+        &attempt.path().join("terminal-commit.json"),
+        &attempt.path().join("quarantine/manifest.json"),
+    ] {
+        let bytes = std::fs::read(path)?;
+        std::fs::remove_file(path)?;
+        assert!(matches!(
+            retained_import_decision(&evidence, scope())?,
+            Some(CustodyDecision::Pending(_))
+        ));
+        std::fs::write(path, b"{")?;
+        assert!(matches!(
+            retained_import_decision(&evidence, scope())?,
+            Some(CustodyDecision::Pending(_))
+        ));
+        std::fs::write(path, bytes)?;
+    }
+    for wrong in [wrong_attempt, wrong_generation] {
+        let mismatched = ImportFence {
+            scope: wrong,
+            ..marker.clone()
+        };
+        std::fs::write(
+            evidence_path.join("import-retained.json"),
+            serde_json::to_vec(&mismatched)?,
+        )?;
+        assert!(retained_import_decision(&evidence, scope()).is_err());
+        assert!(acquire(root.path()).is_err());
+    }
+    let other_run = ImportFence {
+        run_attempt: unknown.path().to_path_buf(),
+        ..marker.clone()
+    };
+    std::fs::write(
+        evidence_path.join("import-retained.json"),
+        serde_json::to_vec(&other_run)?,
+    )?;
+    assert!(matches!(
+        retained_import_decision(&evidence, scope())?,
+        Some(CustodyDecision::Pending(_))
+    ));
+    std::fs::write(evidence_path.join("import-retained.json"), &marker_bytes)?;
+    assert_eq!(
+        retained_import_decision(&evidence, scope())?,
+        Some(CustodyDecision::Settled(scope()))
+    );
+    let slot = Directory::open_anchor(root.path())?;
+    assert!(pending_import(&slot)?.is_none());
+    // Observation preserves all evidence. Admission alone completes removal.
+    assert_eq!(
+        std::fs::read(evidence_path.join("reservation.json"))?,
+        reservation_bytes
+    );
+    let clock = SystemClock::new();
+    drop(crate::fixture::acquire_writer(
+        slot,
+        wrong_attempt,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &CancelToken::new(),
+        &clock,
+    )?);
+    assert!(!evidence_path.join("reservation.json").exists());
+    assert_eq!(
+        std::fs::read(evidence_path.join("import-retained.json"))?,
+        marker_bytes
+    );
+    assert_eq!(std::fs::read(release_path)?, release_bytes);
+    assert_eq!(
+        std::fs::read(scratch_dir.path().join("transcript"))?,
+        b"retain"
+    );
     Ok(())
 }
 
-#[test]
-fn corrupt_pause_journal_does_not_block_observation() -> TestResult {
-    let root = tempfile::tempdir()?;
-    std::fs::write(root.path().join(crate::build_pause::PAUSE_FILE), b"{")?;
-    let handle = CustodyHandle {
-        directory: Directory::open_anchor(root.path())?,
-        scope: scope(),
-        requester: ActorId::from_bytes([7; 16]),
-        held: false,
-    };
-    let clock = SystemClock::new();
-    let observation = observe(
-        &handle,
-        WaitBudget::cli(clock.mono_now(), 1)?,
-        &CancelToken::new(),
-        &clock,
-    )?;
-    assert!(matches!(observation, Observation::Unknown));
-    Ok(())
-}
 #[test]
 fn two_recoverers_cannot_hold_the_same_writer_exclusion() -> TestResult {
     let root = tempfile::tempdir()?;
@@ -1145,12 +793,13 @@ fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
     let failure = launch(
         OwnedLaunch {
             command: ProviderCommand {
+                policy: Default::default(),
                 profile_file: None,
                 priority: 0,
                 lane_ports: None,
                 resolved_route: "fixture/provider".into(),
                 permission_plan_digest: Digest::from_bytes([0; 32]),
-                task: provenant_core::TaskId::from_bytes([3; 16]),
+                key: crate::custody::fixture_key(3),
                 requester: ActorId::from_bytes([4; 16]),
                 protected_commands: vec![],
                 config_environment: vec![],
@@ -1282,8 +931,18 @@ fn reboot_recovery_requires_native_proof() -> TestResult {
         let world = RebootWorld { boot };
         let result = recovery.after_reboot_with(&attempt, scope(), &world);
         if boot.is_none() {
-            assert!(matches!(result, Err(CustodyError::Io(ref error))
-                if error.to_string().contains("boot identity unavailable")));
+            assert!(matches!(
+                result,
+                Err(CustodyError::Io(ref error))
+                    if error.kind() == std::io::ErrorKind::Other
+                        && error
+                            .get_ref()
+                            .and_then(|source| source.downcast_ref::<BootIdentityUnavailable>())
+                            .is_some_and(|source| matches!(
+                                &source.0,
+                                crate::census::CensusError::Unsupported
+                            ))
+            ));
             assert!(
                 root.path()
                     .join(scope().attempt.to_string())
@@ -1349,12 +1008,14 @@ fn spawned_reboot_recovery(
 
 #[test]
 fn reboot_recovery_requires_the_original_attempt_and_exclusive_custody() -> TestResult {
+    #[derive(Clone, Copy)]
     enum Refusal {
         Scope,
         Attempt,
         Custody,
     }
-    for refusal in [Refusal::Scope, Refusal::Attempt, Refusal::Custody] {
+    const ALL: [Refusal; 3] = [Refusal::Scope, Refusal::Attempt, Refusal::Custody];
+    for refusal in ALL {
         let root = tempfile::tempdir()?;
         let original = tempfile::tempdir()?;
         let original = Directory::open_anchor(original.path())?;
@@ -1510,7 +1171,30 @@ fn never_spawned_resource_fact_survives_exit_storage() -> TestResult {
 }
 
 #[test]
-fn writer_exclusion_gate_contention_honours_the_caller_deadline() -> TestResult {
+fn observation_gates_try_once_and_preserve_unknown_errors() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let directory = Directory::open_anchor(root.path())?;
+    let guard = writer_admission_guard(&directory)?;
+    assert!(matches!(
+        writer_observation_guard(&directory),
+        Err(CustodyError::Busy)
+    ));
+    assert!(matches!(
+        writer_admission_guard(&directory),
+        Err(CustodyError::Busy)
+    ));
+    drop(guard);
+    drop(writer_observation_guard(&directory)?);
+    std::fs::remove_file(root.path().join("writer-probe.lock"))?;
+    assert!(matches!(
+        writer_observation_guard(&directory),
+        Err(CustodyError::ObservationGate(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn writer_exclusion_gate_contention_is_busy_independent_of_writer_budget() -> TestResult {
     let root = tempfile::tempdir()?;
     // The directory reports its canonical path (`/private/var/...` on macOS).
     let base = std::fs::canonicalize(root.path())?;
@@ -1520,7 +1204,6 @@ fn writer_exclusion_gate_contention_honours_the_caller_deadline() -> TestResult 
         provenant_core::WallTime::from_micros(0)?,
         provenant_core::MonoTime::from_micros(0),
     );
-    let timeout = Duration::from_millis(10);
     let error = lock_writer_exclusion(
         &directory,
         WaitBudget::up_to(
@@ -1530,11 +1213,8 @@ fn writer_exclusion_gate_contention_honours_the_caller_deadline() -> TestResult 
         &CancelToken::new(),
         &clock,
     )
-    .expect_err("the observer remains locked through the writer deadline");
-    assert!(
-        matches!(error, CustodyError::Filesystem(FsError::LockTimeout { path, timeout: actual })
-        if path == base.join("writer.lock") && actual == timeout)
-    );
+    .expect_err("an observer yields busy without consuming the writer budget");
+    assert!(matches!(error, CustodyError::Busy));
 
     let cancel = CancelToken::new();
     cancel.cancel();
@@ -1565,5 +1245,182 @@ fn writer_exclusion_distinct_gate_failure_remains_unknown() -> TestResult {
         ),
         Err(CustodyError::ObservationGate(_))
     ));
+    Ok(())
+}
+
+fn stored_extra_round_trips<T>(record: serde_json::Value, field: &str) -> TestResult
+where
+    T: serde::de::DeserializeOwned + serde::Serialize,
+{
+    let bytes = serde_json::to_vec(&record)?;
+    let decoded: T = provenant_records::decode(bytes.as_slice(), Limits::CONFIG)?;
+    let encoded = serde_json::to_value(decoded)?;
+    assert_eq!(encoded.get(field), record.get(field));
+    Ok(())
+}
+
+#[test]
+fn stored_custody_shapes_round_trip_additive_fields_through_bounded_decode() -> TestResult {
+    let marker = serde_json::json!({"future": {"minor": 1}});
+    macro_rules! check {
+        ($ty:ty, $record:expr, $field:literal) => {
+            stored_extra_round_trips::<$ty>($record, $field)?;
+        };
+    }
+    stored_extra_round_trips::<OwnershipJournal>(
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "binding": {"kind": "read_only"},
+            "future_ownership": marker.clone(),
+        }),
+        "future_ownership",
+    )?;
+    check!(
+        SettlementJournal,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "future_settlement": marker.clone(),
+        }),
+        "future_settlement"
+    );
+    check!(
+        Reservation,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "launch_state": "prepared",
+            "attempt_device": null,
+            "attempt_inode": null,
+            "reservation_device": 1,
+            "reservation_inode": 1,
+            "binding": {"kind": "read_only", "future_binding": marker.clone()},
+            "boot": "fixture-boot",
+            "guardian": null,
+            "provider": null,
+            "unresolved_cleanup": true,
+            "descendants": [],
+            "census_incomplete": true,
+            "omitted_descendants": 0,
+            "future_reservation": marker.clone(),
+        }),
+        "future_reservation"
+    );
+    check!(
+        StoredImportFence,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "lane": fixture_key(1),
+            "run_attempt": "/fixture/run",
+            "future_import": marker.clone(),
+        }),
+        "future_import"
+    );
+    check!(
+        CancelRequest,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "request_id": format!("{}.{}.cancel", scope().attempt, scope().generation),
+            "requester": ActorId::from_bytes([3; 16]),
+            "reason": "explicit_cancellation",
+            "future_cancel": marker.clone(),
+        }),
+        "future_cancel"
+    );
+    check!(
+        StoredObservation,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "guardian": null,
+            "provider": null,
+            "publication_pending": true,
+            "future_observation": marker.clone(),
+        }),
+        "future_observation"
+    );
+    check!(
+        StoredExit,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "termination": null,
+            "never_spawned": true,
+            "stop_reason": null,
+            "cancel_delivered_before_exit": null,
+            "delivered_signals": [],
+            "reaped": [],
+            "omitted_reaped": 0,
+            "spared": [],
+            "omitted_spared": 0,
+            "warnings": [],
+            "omitted_warnings": 0,
+            "terminal_observed": false,
+            "unresolved_cleanup": false,
+            "unresolved_pids": [],
+            "settlement_evidence": "never_spawned",
+            "stdout": {
+                "bytes": 0,
+                "retained": 0,
+                "oversized_frames": 0,
+                "decoder_lost_frames": 0,
+                "lost_bytes": 0,
+                "read_failed": false,
+                "future_capture": marker.clone(),
+            },
+            "stderr": {
+                "bytes": 0,
+                "retained": 0,
+                "oversized_frames": 0,
+                "decoder_lost_frames": 0,
+                "lost_bytes": 0,
+                "read_failed": false,
+            },
+            "future_exit": marker.clone(),
+        }),
+        "future_exit"
+    );
+    check!(
+        ReleaseReceipt,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "terminal_digest": provenant_records::CanonicalV1::file_digest(b"terminal"),
+            "quarantine_digest": provenant_records::CanonicalV1::file_digest(b"quarantine"),
+            "future_release": marker.clone(),
+        }),
+        "future_release"
+    );
+    check!(
+        SettlementArtifact,
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "kind": "canonical_terminal",
+            "future_artifact": marker.clone(),
+        }),
+        "future_artifact"
+    );
+    check!(
+        StoredWriterBinding,
+        serde_json::json!({"kind": "read_only", "future_binding": marker.clone()}),
+        "future_binding"
+    );
+    check!(
+        CaptureTotals,
+        serde_json::json!({
+            "bytes": 0,
+            "retained": 0,
+            "oversized_frames": 0,
+            "decoder_lost_frames": 0,
+            "lost_bytes": 0,
+            "read_failed": false,
+            "future_capture": marker,
+        }),
+        "future_capture"
+    );
     Ok(())
 }

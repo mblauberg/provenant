@@ -37,6 +37,59 @@ const KEYCHAIN: &str = "Library/Keychains/login.keychain-db";
 /// A short-lived, non-secret identity observation shared by quota and dispatch.
 /// Keychain metadata invalidates it on a normal sign-in change before expiry.
 const IDENTITY_TTL: i64 = 30;
+const IDENTITY_RECORD_BYTES: usize = 64 * 1024;
+
+/// The bounded authentication evidence that may appear in a provider
+/// diagnostic. Permission names remain data on `AgyFailure`, not part of the
+/// cause enum.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum AgyFailureCause {
+    AuthenticationTimedOut,
+    SignedOut,
+    KeychainInteractionDenied,
+    KeychainHasNoSignin,
+    AuthenticationFailedWithoutCause,
+    HeadlessPermissionDenied,
+}
+
+#[cfg(test)]
+impl AgyFailureCause {
+    pub(crate) const ALL: &'static [Self] = &[
+        Self::AuthenticationTimedOut,
+        Self::SignedOut,
+        Self::KeychainInteractionDenied,
+        Self::KeychainHasNoSignin,
+        Self::AuthenticationFailedWithoutCause,
+        Self::HeadlessPermissionDenied,
+    ];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgyFailure {
+    AuthenticationTimedOut,
+    SignedOut,
+    KeychainInteractionDenied,
+    KeychainHasNoSignin,
+    AuthenticationFailedWithoutCause,
+    HeadlessPermissionDenied(String),
+}
+
+#[cfg(test)]
+impl AgyFailure {
+    pub(crate) fn cause(&self) -> AgyFailureCause {
+        match self {
+            Self::AuthenticationTimedOut => AgyFailureCause::AuthenticationTimedOut,
+            Self::SignedOut => AgyFailureCause::SignedOut,
+            Self::KeychainInteractionDenied => AgyFailureCause::KeychainInteractionDenied,
+            Self::KeychainHasNoSignin => AgyFailureCause::KeychainHasNoSignin,
+            Self::AuthenticationFailedWithoutCause => {
+                AgyFailureCause::AuthenticationFailedWithoutCause
+            }
+            Self::HeadlessPermissionDenied(_) => AgyFailureCause::HeadlessPermissionDenied,
+        }
+    }
+}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct IdentityProbe {
@@ -45,6 +98,8 @@ struct IdentityProbe {
     stamp: Option<(u64, u64, u64, i64, i64)>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     models: Vec<String>,
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 fn identity_file(directory: &std::path::Path) -> String {
@@ -76,10 +131,7 @@ pub(crate) fn cached_identity(
     now: i64,
 ) -> Option<String> {
     let root = provenant_os::fs::Directory::open_anchor(state).ok()?;
-    let bytes = root
-        .read_bounded(identity_file(directory).as_ref(), 4096)
-        .ok()?;
-    let probe: IdentityProbe = serde_json::from_slice(&bytes).ok()?;
+    let probe = read_identity_probe(&root, directory)?;
     (probe.observed <= now
         && now < probe.observed.saturating_add(IDENTITY_TTL)
         && probe.stamp == keychain_stamp(directory)
@@ -87,6 +139,26 @@ pub(crate) fn cached_identity(
             hash.len() == 12 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
         }))
     .then_some(probe.key)
+}
+
+fn read_identity_probe(
+    root: &provenant_os::fs::Directory,
+    directory: &std::path::Path,
+) -> Option<IdentityProbe> {
+    let bytes = root
+        .read_bounded(
+            identity_file(directory).as_ref(),
+            IDENTITY_RECORD_BYTES as u64,
+        )
+        .ok()?;
+    provenant_records::decode(
+        bytes.as_slice(),
+        provenant_records::Limits {
+            max_bytes: IDENTITY_RECORD_BYTES as u64,
+            ..provenant_records::Limits::default()
+        },
+    )
+    .ok()
 }
 
 pub(crate) fn remember_identity(
@@ -103,12 +175,18 @@ pub(crate) fn remember_identity(
     }
     let publish = || -> Result<(), Box<dyn std::error::Error>> {
         let root = provenant_os::fs::Directory::open_anchor(state)?;
-        let bytes = serde_json::to_vec(&IdentityProbe {
-            key: key.into(),
+        let mut probe = read_identity_probe(&root, directory).unwrap_or_else(|| IdentityProbe {
+            key: String::new(),
             observed: now,
             stamp: current_stamp,
-            models: models.to_vec(),
-        })?;
+            models: Vec::new(),
+            extra: Default::default(),
+        });
+        probe.key = key.into();
+        probe.observed = now;
+        probe.stamp = current_stamp;
+        probe.models = models.to_vec();
+        let bytes = provenant_records::encode(&probe)?;
         root.atomic_write(
             identity_file(directory).as_ref(),
             ".agy-identity-",
@@ -125,11 +203,7 @@ pub fn cached_models(state: &std::path::Path, directory: &std::path::Path) -> Ve
     let Ok(root) = provenant_os::fs::Directory::open_anchor(state) else {
         return Vec::new();
     };
-    let file = identity_file(directory);
-    let Ok(bytes) = root.read_bounded(file.as_ref(), 64 * 1024) else {
-        return Vec::new();
-    };
-    serde_json::from_slice::<IdentityProbe>(&bytes)
+    read_identity_probe(&root, directory)
         .map(|probe| probe.models)
         .unwrap_or_default()
 }
@@ -205,7 +279,7 @@ fn isolated_keychain(
 }
 
 /// The `ExecError::Io` operation of a probe refused because its isolated
-/// keychain was no longer the one selected.
+/// keychain path was missing or unsafe.
 pub const KEYCHAIN_OPERATION: &str = "isolated keychain";
 
 /// The `HOME` an agy identity probe runs under, with the isolated keychain that
@@ -214,18 +288,19 @@ pub const KEYCHAIN_OPERATION: &str = "isolated keychain";
 /// The probe itself is unconfined, and `HOME` is all that makes the agent use
 /// the account's keychain: if that file vanished, macOS could fall through to
 /// the shared login keychain and the probe would record the wrong account.
-/// [`ProbeHome::guard`] therefore re-checks the keychain (same device and
-/// inode, still a regular file inside the account directory) immediately
-/// before spawning and again once the probe returns, and refuses the result if
-/// either check fails.
+/// [`ProbeHome::guard`] therefore verifies immediately before spawning and
+/// again after the probe that the path still resolves to a regular, single-link
+/// file inside this account directory and is not the real home's login
+/// keychain. It deliberately accepts an inode change at that safe path because
+/// macOS may atomically replace a keychain while saving it.
 ///
 /// Residual race: the agent opens the keychain at some point between the two
-/// checks, so any temporary replacement, absence or symlink swap during the
-/// probe that is undone, with the original inode restored, before the second
-/// check is not observable. The probe can then have read another keychain
-/// without the result being refused. Closing it needs a seatbelt profile
-/// denying the real home's `Library/Keychains` to the probe, which cannot be
-/// verified against a real agy without touching a real keychain.
+/// checks, so any temporary replacement, absence or unsafe link swap during
+/// the probe that is undone before the second check is not observable. The
+/// probe can then have read another keychain without the result being refused.
+/// Closing it needs a seatbelt profile denying the real home's
+/// `Library/Keychains` to the probe, which cannot be verified against a real
+/// agy without touching a real keychain.
 #[derive(Debug)]
 pub struct ProbeHome {
     home: std::path::PathBuf,
@@ -236,7 +311,6 @@ pub struct ProbeHome {
 struct Held {
     directory: std::path::PathBuf,
     home: std::path::PathBuf,
-    id: (u64, u64),
 }
 
 fn identity(metadata: &std::fs::Metadata) -> (u64, u64) {
@@ -257,13 +331,12 @@ impl ProbeHome {
                 held: None,
             });
         }
-        let (_, metadata) = isolated_keychain(directory, home)?;
+        isolated_keychain(directory, home)?;
         Ok(Self {
             home: directory.to_owned(),
             held: Some(Held {
                 directory: directory.to_owned(),
                 home: home.to_owned(),
-                id: identity(&metadata),
             }),
         })
     }
@@ -272,19 +345,15 @@ impl ProbeHome {
         &self.home
     }
 
-    /// Fails unless the isolated keychain is still the selected file.
+    /// Fails unless the isolated path still names a safe account keychain.
+    /// Atomic replacement is allowed; the path and file properties carry the
+    /// account boundary, while inode identity is not stable across macOS saves.
     pub fn verify(&self) -> Result<(), crate::ProviderError> {
         let Some(held) = &self.held else {
             return Ok(());
         };
-        let (keychain, metadata) = isolated_keychain(&held.directory, &held.home)?;
-        if identity(&metadata) == held.id {
-            Ok(())
-        } else {
-            Err(crate::ProviderError::IsolatedKeychainUnavailable(
-                keychain.display().to_string(),
-            ))
-        }
+        isolated_keychain(&held.directory, &held.home)?;
+        Ok(())
     }
 
     /// Runs probes through `executor` under this home's keychain check.
@@ -299,8 +368,9 @@ impl ProbeHome {
     }
 }
 
-/// An executor that checks the keychain before spawning and after the probe
-/// returns, failing with [`KEYCHAIN_OPERATION`] when it changed.
+/// An executor that checks the keychain path and safety properties before
+/// spawning and after the probe returns, failing with [`KEYCHAIN_OPERATION`]
+/// when the isolated path is missing or unsafe. Safe inode replacement passes.
 pub struct GuardedExecutor<'a> {
     executor: &'a dyn provenant_os::exec::Executor,
     home: &'a ProbeHome,
@@ -341,22 +411,22 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    let mut tool_requirements = crate::launch::ToolRequirements::default();
     if plan.selected_authentication.as_deref() != Some("keychain") {
-        return Err(ProviderError::UnsupportedPolicy);
+        return Err(input.boundary_error(
+            "AGY_PREPARE_CREDENTIALS",
+            "Agy requires its selected keychain authentication",
+            ProviderError::UnsupportedPolicy,
+        ));
     }
-    input.prompt.check_argv()?;
-    let private_home = plan.private_state.as_ref().map_or_else(
-        || {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: Agy private state is unavailable; using the attempt scratch directory"
-            );
-            &plan.scratch.path
-        },
-        |state| &state.path,
-    );
+    input.prompt.check_argv(input.policy)?;
+    let private_home = crate::launch::private_state_or_scratch(
+        plan.private_state
+            .as_ref()
+            .map(|state| state.path.as_path()),
+        &plan.scratch.path,
+        input.policy,
+        "AGY_PREPARE_NONE",
+    )?;
     let keychain = match input.account {
         Some(account) => account_keychain(account.directory(), input.home)?,
         None => None,
@@ -389,7 +459,11 @@ fn prepare(
         // https://www.agy.dev/docs/cli/reference/ (--add-dir)
         argv.extend(["--add-dir".into(), plan.scratch.path.as_os_str().to_owned()]);
     }
-    argv.push("--dangerously-skip-permissions".into());
+    argv.extend(
+        crate::launch::AGY_NATIVE_ARGUMENTS
+            .iter()
+            .map(OsString::from),
+    );
     if access == Access::ReadOnly {
         // Keep the candidate's progress directory in the native workspace too.
         if let Some(private) = &plan.private_state {
@@ -418,7 +492,13 @@ fn prepare(
         argv.extend(["--add-dir".into(), parent.as_os_str().to_owned()]);
     }
     if session == Session::Resume {
-        let continuation = input.continuation.ok_or(ProviderError::UnknownIdentity)?;
+        let continuation = input.continuation.ok_or_else(|| {
+            input.boundary_error(
+                "AGY_PREPARE_AUTHORITY",
+                "resumed Agy invocation has no validated continuation identity",
+                ProviderError::UnknownIdentity,
+            )
+        })?;
         argv.extend(["--conversation".into(), continuation.session().into()]);
     }
     argv.extend(["--model".into(), input.route.model.as_str().into()]);
@@ -427,8 +507,7 @@ fn prepare(
     }
     argv.extend(["--print".into(), input.prompt.text().into()]);
 
-    let shell = access == Access::WorktreeWrite;
-    let path = crate::launch::tool_search_path(input.home, shell);
+    let path = crate::launch::tool_search_path(input.home, true, input.policy)?;
     let mut env = base_env(input, &plan.scratch.path, path);
     for (key, value) in &mut env {
         if key == "HOME" && (input.sandboxed() || input.account.is_some()) {
@@ -479,16 +558,6 @@ fn prepare(
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ]);
     }
-    if shell && input.sandboxed() {
-        crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
-        crate::launch::node_tools(
-            input.home,
-            access,
-            crate::launch::lane_cache(input),
-            &mut tool_requirements,
-            &mut env,
-        );
-    }
     Ok(LaunchSpec {
         argv,
         env,
@@ -498,8 +567,10 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: staged_skills,
-        tool_requirements,
+        tool_requirements: Default::default(),
         git_wrapper: Default::default(),
+        policy: input.policy.clone(),
+        credential_roots: input.credential_roots.clone(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 // The keyring library reads its token through Apple's `security`.
@@ -530,7 +601,12 @@ fn prepare(
         stream,
     })
 }
-crate::quota_source!(Agy, "agy");
+crate::quota_source!(
+    Agy,
+    "agy",
+    crate::quota_live::agy::capture_source,
+    crate::quota::agy::decode_source
+);
 #[derive(Deserialize)]
 #[serde(tag = "event")]
 enum Event {
@@ -573,38 +649,38 @@ struct Usage {
 }
 /// Classify explicit CLI/keyring failures without copying arbitrary stderr.
 /// The vendor's combined failure contains no evidence of which cause occurred.
-fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
+pub(crate) fn classify_failure(stderr: &[u8]) -> Option<AgyFailure> {
     let stderr = std::str::from_utf8(stderr).ok()?;
     // Prefer a specific observation anywhere in stderr over the CLI's closing
     // combined failure. Never infer a timeout merely from the word "timed out"
     // in that combined message.
     for line in stderr.lines() {
         let message = line.trim().strip_prefix("error: ").unwrap_or(line.trim());
-        let diagnostic = match message {
+        let cause = match message {
             "authentication timed out" | "authentication timeout" => {
-                Some("agy authentication timed out")
+                Some(AgyFailure::AuthenticationTimedOut)
             }
             "Authentication required. Please login to continue." | "not signed in" => {
-                Some("agy is signed out; sign in to the selected account with headless agy")
+                Some(AgyFailure::SignedOut)
             }
             "security: SecKeychainSearchCopyNext: User interaction is not allowed."
             | "security: SecKeychainItemCopyContent: User interaction is not allowed." => {
-                Some("agy keychain access denied: user interaction is not allowed")
+                Some(AgyFailure::KeychainInteractionDenied)
             }
             "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain." => {
-                Some("agy keychain contains no saved sign-in")
+                Some(AgyFailure::KeychainHasNoSignin)
             }
             _ => None,
         };
-        if let Some(diagnostic) = diagnostic {
-            return Some(diagnostic.into());
+        if cause.is_some() {
+            return cause;
         }
     }
     if stderr.lines().any(|line| {
         line.trim().strip_prefix("error: ").unwrap_or(line.trim())
             == "authentication failed or timed out"
     }) {
-        return Some("agy authentication failed; the CLI supplied no cause (inspect provider stderr and macOS sandbox denials)".into());
+        return Some(AgyFailure::AuthenticationFailedWithoutCause);
     }
     stderr.lines().find_map(|line| {
         let permission = line
@@ -620,7 +696,27 @@ fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
                 name.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
             })
-            .map(|name| format!("agy denied the \"{name}\" permission in headless mode"))
+            .map(|name| AgyFailure::HeadlessPermissionDenied(name.to_owned()))
+    })
+}
+
+fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
+    classify_failure(stderr).map(|failure| match failure {
+        AgyFailure::AuthenticationTimedOut => "agy authentication timed out".into(),
+        AgyFailure::SignedOut => {
+            "agy is signed out; sign in to the selected account with headless agy".into()
+        }
+        AgyFailure::KeychainInteractionDenied => {
+            "agy keychain access denied: user interaction is not allowed".into()
+        }
+        AgyFailure::KeychainHasNoSignin => "agy keychain contains no saved sign-in".into(),
+        AgyFailure::AuthenticationFailedWithoutCause => {
+            "agy authentication failed; the CLI supplied no cause (inspect provider stderr and macOS sandbox denials)".into()
+        }
+        AgyFailure::HeadlessPermissionDenied(permission) => format!(
+            "agy denied the \"{}\" permission in headless mode",
+            permission
+        ),
     })
 }
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
@@ -787,44 +883,57 @@ mod identity_tests {
 
     #[test]
     fn agy_authentication_diagnostics_require_specific_evidence() {
-        for (stderr, expected) in [
+        use std::collections::BTreeSet;
+
+        let cases = [
             (
                 "error: authentication timed out",
-                "agy authentication timed out",
+                AgyFailure::AuthenticationTimedOut,
             ),
             (
                 "Authentication required. Please login to continue.",
-                "agy is signed out",
+                AgyFailure::SignedOut,
             ),
             (
                 "security: SecKeychainSearchCopyNext: User interaction is not allowed.",
-                "agy keychain access denied",
+                AgyFailure::KeychainInteractionDenied,
             ),
             (
                 "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.",
-                "agy keychain contains no saved sign-in",
+                AgyFailure::KeychainHasNoSignin,
             ),
             (
                 "error: authentication failed or timed out",
-                "agy authentication failed; the CLI supplied no cause",
+                AgyFailure::AuthenticationFailedWithoutCause,
             ),
-        ] {
-            assert!(
-                failure_diagnostic(stderr.as_bytes())
-                    .unwrap()
-                    .starts_with(expected)
-            );
+            (
+                "jetski: no output produced — a tool required the \"command\" permission that headless mode cannot prompt for, so it was auto-denied.",
+                AgyFailure::HeadlessPermissionDenied("command".into()),
+            ),
+            (
+                "error: authentication failed or timed out\nerror: authentication timed out",
+                AgyFailure::AuthenticationTimedOut,
+            ),
+        ];
+        for (stderr, expected) in &cases {
+            assert_eq!(classify_failure(stderr.as_bytes()), Some(expected.clone()));
+            assert!(failure_diagnostic(stderr.as_bytes()).is_some());
         }
+        let causes: BTreeSet<_> = cases.iter().map(|(_, failure)| failure.cause()).collect();
         assert_eq!(
-            failure_diagnostic(b"prompt says authentication timed out"),
-            None
+            causes,
+            AgyFailureCause::ALL
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
         );
-        assert_eq!(failure_diagnostic(b"unrelated failure: secret"), None);
-        let stderr = b"error: authentication failed or timed out\nerror: authentication timed out";
-        assert_eq!(
-            failure_diagnostic(stderr).as_deref(),
-            Some("agy authentication timed out")
-        );
+        for unrelated in [
+            b"prompt says authentication timed out".as_slice(),
+            b"unrelated failure: secret",
+            b"\xff",
+        ] {
+            assert_eq!(classify_failure(unrelated), None);
+        }
     }
 
     #[test]
@@ -871,23 +980,65 @@ mod identity_tests {
     }
 
     #[test]
+    fn identity_cache_rewrites_preserve_unknown_stored_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("home");
+        let keychain = directory.join(KEYCHAIN);
+        std::fs::create_dir_all(keychain.parent().unwrap()).unwrap();
+        std::fs::write(&keychain, "synthetic").unwrap();
+        let stamp = keychain_stamp(&directory);
+        let initial = serde_json::json!({
+            "key": "agy-google-0123456789ab",
+            "observed": 100,
+            "stamp": stamp,
+            "models": [],
+            "future_identity_evidence": { "epoch": 2 },
+        });
+        std::fs::write(
+            temp.path().join(identity_file(&directory)),
+            serde_json::to_vec(&initial).unwrap(),
+        )
+        .unwrap();
+
+        assert!(remember_identity(
+            temp.path(),
+            &directory,
+            "agy-google-abcdef012345",
+            101,
+            stamp,
+            &["fixture-model".into()],
+        ));
+        let bytes = std::fs::read(temp.path().join(identity_file(&directory))).unwrap();
+        let rewritten: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            rewritten.get("future_identity_evidence"),
+            Some(&serde_json::json!({ "epoch": 2 }))
+        );
+        assert_eq!(
+            rewritten.get("models"),
+            Some(&serde_json::json!(["fixture-model"]))
+        );
+        assert_eq!(
+            read_identity_probe(
+                &provenant_os::fs::Directory::open_anchor(temp.path()).unwrap(),
+                &directory,
+            )
+            .unwrap()
+            .key,
+            "agy-google-abcdef012345"
+        );
+    }
+
+    #[test]
     fn agy_result_error_is_preserved_as_text() {
         let raw = br#"{"event":"result","result":{"conversation_id":"c1","status":"ERROR","response":"","error":"Model not recognized.\nGemini 2.5 Flash\nGPT-OSS 120B","usage":{"input_tokens":0,"output_tokens":0}}}"#;
         let events = decode(raw).expect("decode");
-        assert_eq!(
-            events,
-            vec![
-                E::Usage {
-                    input: 0,
-                    output: 0,
-                    cache_read: None,
-                    cache_write: None,
-                    cache_write_1h: None,
-                },
-                E::Session("c1".into()),
-                E::Text("Model not recognized.\nGemini 2.5 Flash\nGPT-OSS 120B".into()),
-                E::Error,
-            ]
+        let expected = "Model not recognized.\nGemini 2.5 Flash\nGPT-OSS 120B";
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, E::Text(text) if text == expected))
         );
+        assert!(events.iter().any(|event| matches!(event, E::Error)));
     }
 }

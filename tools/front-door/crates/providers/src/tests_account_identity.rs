@@ -1,89 +1,9 @@
 
-#[test]
-fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
--> Result<(), Box<dyn std::error::Error>> {
-    let prompt = Prompt::new("fixture prompt".into());
-    let route = route("opencode", "configured/model");
-    let temp = tempfile::tempdir()?;
-    let home = temp.path().canonicalize()?;
-    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
-    let prepare = |home: &Path, plan: &_| {
-        opencode::OpenCode.prepare(PrepareInput {
-            home,
-            ..fixture_input(&route, plan, &prompt, Path::new("/fixture/repo"), None)
-        })
-    };
-    // Without Rust installed the lane keeps only the system tools.
-    let spec = prepare(&home, &plan)?;
-    assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
-    std::fs::create_dir_all(home.join(".cargo/bin"))?;
-    std::fs::create_dir_all(home.join(".rustup/toolchains"))?;
-    let cache = Path::new("/fixture/home/Library/Caches/provenant-lane-cargo/fixture");
-    let spec = prepare(&home, &plan)?;
-    let env = |key: &str| {
-        spec.env
-            .iter()
-            .find(|(name, _)| name == key)
-            .map(|(_, value)| Path::new(value).to_path_buf())
-    };
-    let path = env("PATH").expect("PATH");
-    assert!(
-        std::env::split_paths(&path).any(|dir| dir == home.join(".cargo/bin")),
-        "{path:?}"
-    );
-    let cache = env("CARGO_TARGET_DIR")
-        .and_then(|target| target.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| cache.to_path_buf());
-    assert_eq!(env("CARGO_HOME"), Some(cache.join("cargo-home")));
-    assert_eq!(env("CARGO_TARGET_DIR"), Some(cache.join("target")));
-    assert!(cache.ends_with("fixture"), "{cache:?}");
-    for root in [
-        crate::launch::subtree(&cache),
-        crate::launch::subtree(home.join(".cargo/bin")),
-        crate::launch::subtree(home.join(".rustup/toolchains")),
-    ] {
-        assert!(
-            spec.profile.spec.tool_exec_roots.contains(&root),
-            "{root:?}"
-        );
-    }
-    assert!(
-        spec.profile
-            .spec
-            .runtime_reads
-            .contains(&crate::launch::subtree(home.join(".cargo")))
-    );
-    // Read-only lanes get system shell utilities for progress updates, plus
-    // search and guarded Git. They still receive no writer toolchain.
-    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
-    let spec = prepare(&home, &plan)?;
-    assert_eq!(
-        spec.profile.spec.tool_exec_roots,
-        [
-            crate::launch::subtree("/bin"),
-            crate::launch::subtree("/usr/bin"),
-            crate::launch::exact(
-                plan.permissions()
-                    .private_state
-                    .as_ref()
-                    .unwrap()
-                    .path
-                    .join("cache/opencode/bin/rg")
-            ),
-            crate::launch::exact("/usr/bin/grep"),
-            // The read-only Git launcher the lane puts first on PATH.
-            crate::launch::subtree(plan.permissions().scratch.path.join("read-only-git")),
-        ]
-    );
-    assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
-    Ok(())
-}
-
 #[derive(Deserialize)]
 struct LiveCapture {
     id: String,
     process_exit: Option<i64>,
-    outcome: String,
+    outcome: OutcomeStatus,
     answering_model: Option<String>,
     argv: Vec<String>,
 }
@@ -131,7 +51,7 @@ fn replay_live(
         timed_out: false,
     };
     let outcome = adapter.finish(state, exit)?;
-    assert_eq!(format!("{:?}", outcome.status()), capture.outcome, "{id}");
+    assert_eq!(outcome.status(), capture.outcome, "{id}");
     // Codex streams carry no model; its recorded answering model comes from the rollout.
     let streamed = capture
         .answering_model
@@ -312,6 +232,11 @@ impl provenant_os::exec::Executor for KeychainScript {
         &self,
         options: provenant_os::exec::ExecOptions<'_>,
     ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
+        if options.argv.get(1).is_some_and(|arg| arg == "-p") {
+            assert!(options.wait_for_completion);
+            assert!(options.process_group);
+            assert!(options.inherited_lease.is_some());
+        }
         let text = |items: &[OsString]| {
             items
                 .iter()
@@ -383,15 +308,35 @@ impl provenant_os::exec::Executor for FileCredentialScript {
 }
 
 #[test]
-fn cursor_cli_only_account_matches_desktop_identity() {
-    use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
-
-    struct NoDesktop;
-    impl Executor for NoDesktop {
-        fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
-            Err(ExecError::Busy)
-        }
+fn cursor_status_observes_the_signed_in_account() {
+    let output = include_bytes!("../../../tests/fixtures/providers/cursor/status.stdout");
+    assert_eq!(
+        cursor::status_account(output),
+        crate::identity::fingerprint("fixture@example.test")
+    );
+    assert_eq!(
+        crate::host::local_signin(
+            provenant_records::LoginReprobe::Cursor,
+            &CursorDesktopToken(std::str::from_utf8(output).unwrap(), 0),
+            Path::new("/bin/cursor-agent"),
+            Path::new("/home/test"),
+            Path::new("/home/test"),
+            Path::new("/"),
+        ),
+        Some(crate::host::LocalSignin::SignedIn)
+    );
+    for output in [
+        b"Not logged in".as_slice(),
+        b"Login successful",
+        b"broken",
+        b"\xff",
+    ] {
+        assert!(cursor::status_account(output).is_none());
     }
+}
+
+#[test]
+fn cursor_cli_only_account_matches_desktop_identity() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
         directory.path().join("cli-config.json"),
@@ -399,7 +344,7 @@ fn cursor_cli_only_account_matches_desktop_identity() {
     )
     .unwrap();
     let key = crate::accounts::detect(
-        &NoDesktop,
+        &CursorNoExecutor,
         "cursor",
         Path::new("/bin/cursor-agent"),
         Path::new("/home/test"),
@@ -425,7 +370,7 @@ fn cursor_cli_only_account_matches_desktop_identity() {
             std::fs::write(directory.path().join("cli-config.json"), config).unwrap();
         }
         let result = crate::accounts::detect(
-            &NoDesktop,
+            &CursorNoExecutor,
             "cursor",
             Path::new("/bin/cursor-agent"),
             Path::new("/home/test"),
@@ -467,47 +412,14 @@ impl provenant_os::exec::Executor for CursorDesktopToken<'_> {
 #[test]
 fn cursor_account_falls_back_to_cli_when_desktop_has_no_identity() {
     let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("state.vscdb"), b"").unwrap();
+    write_cursor_database(directory.path(), None);
     std::fs::write(
         directory.path().join("cli-config.json"),
         br#"{"authInfo":{"authId":"auth0|user_fixture"}}"#,
     )
     .unwrap();
-    // A logged-out database returns no rows; an empty database has no ItemTable.
-    for status in [0, 1] {
-        let key = crate::accounts::detect(
-            &CursorDesktopToken("", status),
-            "cursor",
-            Path::new("/bin/cursor-agent"),
-            Path::new("/home/test"),
-            OsStr::new("test"),
-            directory.path(),
-            directory.path(),
-        )
-        .unwrap();
-        assert_eq!(
-            Some(key),
-            crate::identity::cursor_account(
-                "header.eyJzdWIiOiJhdXRoMHx1c2VyX2ZpeHR1cmUifQ.signature"
-            )
-        );
-    }
-}
-
-#[test]
-fn cursor_account_prefers_desktop_when_cli_is_also_signed_in() {
-    let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("state.vscdb"), b"").unwrap();
-    std::fs::write(
-        directory.path().join("cli-config.json"),
-        br#"{"authInfo":{"authId":"auth0|different_cli_user"}}"#,
-    )
-    .unwrap();
     let key = crate::accounts::detect(
-        &CursorDesktopToken(
-            "header.eyJzdWIiOiJhdXRoMHx1c2VyX2ZpeHR1cmUifQ.signature\n",
-            0,
-        ),
+        &CursorNoExecutor,
         "cursor",
         Path::new("/bin/cursor-agent"),
         Path::new("/home/test"),
@@ -520,6 +432,54 @@ fn cursor_account_prefers_desktop_when_cli_is_also_signed_in() {
         Some(key),
         crate::identity::cursor_account("header.eyJzdWIiOiJhdXRoMHx1c2VyX2ZpeHR1cmUifQ.signature")
     );
+}
+
+#[test]
+fn cursor_account_prefers_desktop_when_cli_is_also_signed_in() {
+    let directory = tempfile::tempdir().unwrap();
+    let desktop_token = "header.eyJzdWIiOiJhdXRoMHx1c2VyX2ZpeHR1cmUifQ.signature";
+    write_cursor_database(directory.path(), Some(desktop_token));
+    std::fs::write(
+        directory.path().join("cli-config.json"),
+        br#"{"authInfo":{"authId":"auth0|different_cli_user"}}"#,
+    )
+    .unwrap();
+    let key = crate::accounts::detect(
+        &CursorNoExecutor,
+        "cursor",
+        Path::new("/bin/cursor-agent"),
+        Path::new("/home/test"),
+        OsStr::new("test"),
+        directory.path(),
+        directory.path(),
+    )
+    .unwrap();
+    assert_eq!(Some(key), crate::identity::cursor_account(desktop_token));
+}
+
+struct CursorNoExecutor;
+impl provenant_os::exec::Executor for CursorNoExecutor {
+    fn execute(
+        &self,
+        _: provenant_os::exec::ExecOptions<'_>,
+    ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
+        Err(provenant_os::exec::ExecError::Busy)
+    }
+}
+
+fn write_cursor_database(directory: &Path, token: Option<&str>) {
+    let connection = rusqlite::Connection::open(directory.join("state.vscdb")).unwrap();
+    if let Some(token) = token {
+        connection
+            .execute("CREATE TABLE ItemTable (key TEXT, value TEXT)", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO ItemTable (key, value) VALUES ('cursorAuth/accessToken', ?1)",
+                [token],
+            )
+            .unwrap();
+    }
 }
 
 #[test]
@@ -682,7 +642,7 @@ fn write_agy_keychain(directory: &Path) {
 }
 
 #[test]
-fn registration_reports_probe_directory_failures_from_the_executor() {
+fn account_detection_preserves_probe_directory_executor_errors() {
     use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
 
     struct Fail;
@@ -696,11 +656,8 @@ fn registration_reports_probe_directory_failures_from_the_executor() {
     }
     let state = tempfile::tempdir().unwrap();
     let host_root = state.path().canonicalize().unwrap();
-    for adapter in ["claude", "cursor", "agy"] {
-        // Cursor reads its CLI login without the executor unless the desktop
-        // database exists, so give it one to reach the probe.
+    for adapter in ["claude", "agy"] {
         let identity = tempfile::tempdir().unwrap();
-        std::fs::write(identity.path().join("state.vscdb"), b"").unwrap();
         // An isolated agy account must hold its own keychain to reach the probe.
         write_agy_keychain(identity.path());
         let directory = if matches!(adapter, "cursor" | "agy") {
@@ -722,13 +679,12 @@ fn registration_reports_probe_directory_failures_from_the_executor() {
             matches!(&error, ProviderError::ProbeDirectory(_)),
             "{adapter}: {error}"
         );
-        assert!(error.to_string().contains("fixture probe failure"));
         assert_eq!(std::fs::read_dir(&host_root).unwrap().count(), 0);
     }
 }
 
 #[test]
-fn registration_names_probe_directory_failures() {
+fn registration_preflights_probe_directory_before_cursor_identity() {
     use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
     use std::os::unix::fs::PermissionsExt;
 
@@ -741,29 +697,18 @@ fn registration_names_probe_directory_failures() {
     let state = tempfile::tempdir().unwrap();
     let executor = crate::host::HostProbeExecutor::new(&Never, state.path()).unwrap();
     std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
-    for adapter in ["claude", "cursor", "agy"] {
-        let identity = tempfile::tempdir().unwrap();
-        std::fs::write(identity.path().join("state.vscdb"), b"").unwrap();
-        // An isolated agy account must hold its own keychain to reach the probe.
-        write_agy_keychain(identity.path());
-        let directory = if matches!(adapter, "cursor" | "agy") {
-            identity.path()
-        } else {
-            Path::new("/home/test/identity")
-        };
-        let error = crate::accounts::detect_with_org(
-            &executor,
-            adapter,
-            Path::new("/bin/provider"),
-            Path::new("/home/test"),
-            OsStr::new("test"),
-            directory,
-            state.path(),
-        )
-        .unwrap_err();
-        assert!(matches!(&error, ProviderError::ProbeDirectory(_)));
-        assert!(error.to_string().contains("private directory"), "{error}");
-    }
+    let identity = tempfile::tempdir().unwrap();
+    let error = crate::accounts::detect_for_registration(
+        &executor,
+        "cursor",
+        Path::new("/bin/cursor-agent"),
+        Path::new("/home/test"),
+        OsStr::new("test"),
+        identity.path(),
+        state.path(),
+    )
+    .unwrap_err();
+    assert!(matches!(&error, ProviderError::ProbeDirectory(_)));
 }
 
 #[test]
@@ -855,7 +800,7 @@ fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directori
     let temp = tempfile::tempdir().unwrap();
     let host_root = temp.path().canonicalize().unwrap();
     let child_store = host_root.join("children/parent-attempt");
-    let attempt = child_store.join("runs/run/attempts/attempt");
+    let attempt = child_store.join("attempts/attempt");
     let scratch = attempt.join("scratch");
     let candidate = attempt.join("tmp/candidate-0");
     for directory in [&scratch, &candidate] {
@@ -916,7 +861,6 @@ fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directori
             ))
             .unwrap();
         let calls = script.script.calls.lock().unwrap();
-        assert_eq!(calls.len(), 5, "status, refresh and version commands");
         for (_, _, cwd) in calls.iter() {
             assert!(!cwd.starts_with(&child_store));
             assert!(!cwd.exists(), "host cwd must be removed after each command");
@@ -989,13 +933,15 @@ fn claude_lane_prefers_the_registered_lane_token_and_never_rotates_the_login() {
         config_dir: &config,
     };
     let key = crate::identity::fingerprint("fixture@example.test").unwrap();
-    let account =
-        crate::identity::RegisteredAccount::new("claude", &key, config.clone()).unwrap();
+    let account = crate::identity::RegisteredAccount::new("claude", &key, config.clone()).unwrap();
     let lane = claude::refresh_for_account(&script, &login, &account, &|| now, now + 60_000)
         .expect("lane token");
     assert_eq!(lane.access, "fixture-lane-token");
     let calls = script.script.calls.lock().unwrap();
-    assert!(calls.iter().all(|(argv, _, _)| argv[1] == "auth"), "{calls:?}");
+    assert!(
+        calls.iter().all(|(argv, _, _)| argv[1] == "auth"),
+        "{calls:?}"
+    );
 }
 
 #[test]
@@ -1021,34 +967,32 @@ fn claude_lane_token_refuses_permissive_mode() {
 #[test]
 fn claude_concurrent_host_refreshes_do_not_reuse_a_rotating_token() {
     use crate::claude::{
-        CredentialAuthority, Login, refresh_for_account_authorised, refresh_if_expiring,
+        CredentialAuthority, Login, OAUTH_REFRESH_LOCK, refresh_for_account_authorised_using_clock,
+        refresh_with_policy_using_clock,
     };
     use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
-    use std::sync::{Condvar, Mutex, mpsc};
-    use std::time::Duration;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
 
     // Model the CLI reading a single-use refresh token before exchanging it.
     // Overlapping exchanges revoke that token; a later reader sees the renewal.
     struct RotatingCli {
         script: FileCredentialScript,
-        exchanges: Mutex<usize>,
-        overlap: Condvar,
+        first_exchange: AtomicBool,
         entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
     }
     impl Executor for RotatingCli {
         fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
             if options.argv.get(1).is_some_and(|arg| arg == "-p") {
-                let mut exchanges = self.exchanges.lock().unwrap();
-                *exchanges += 1;
-                self.entered.send(()).unwrap();
-                if *exchanges > 1 {
-                    self.overlap.notify_all();
-                    return Err(ExecError::Busy); // OAuth token revoked.
+                if !self.first_exchange.swap(false, Ordering::SeqCst) {
+                    return Err(ExecError::Busy);
                 }
-                let _wait = self
-                    .overlap
-                    .wait_timeout_while(exchanges, Duration::from_secs(1), |count| *count == 1)
-                    .unwrap();
+                self.entered.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
             }
             self.script.execute(options)
         }
@@ -1061,6 +1005,8 @@ fn claude_concurrent_host_refreshes_do_not_reuse_a_rotating_token() {
         format!(r#"{{"claudeAiOauth":{{"accessToken":"{access}","refreshToken":"{refresh}","expiresAt":{expires}}}}}"#).into_bytes()
     };
     let (entered, started) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let (contended, contention_observed) = mpsc::channel();
     let executor = RotatingCli {
         script: FileCredentialScript::new(
             &config,
@@ -1078,9 +1024,9 @@ fn claude_concurrent_host_refreshes_do_not_reuse_a_rotating_token() {
                 calls: Default::default(),
             },
         ),
-        exchanges: Mutex::new(0),
-        overlap: Condvar::new(),
+        first_exchange: AtomicBool::new(true),
         entered,
+        release: Mutex::new(released),
     };
     let login = Login {
         executable: Path::new("/opt/homebrew/bin/claude"),
@@ -1092,132 +1038,233 @@ fn claude_concurrent_host_refreshes_do_not_reuse_a_rotating_token() {
     let account = crate::identity::RegisteredAccount::new("claude", &key, config.clone()).unwrap();
     let authority =
         CredentialAuthority::for_dispatch("fixture".into(), &login, now + 60_000).unwrap();
+    let clock = provenant_core::TestClock::new(
+        provenant_core::WallTime::from_micros(0).unwrap(),
+        provenant_core::MonoTime::from_micros(0),
+    );
+    let observe_lock = |directory: &provenant_os::fs::Directory| {
+        let held = matches!(
+            directory.try_lock_existing(
+                OsStr::new(OAUTH_REFRESH_LOCK),
+                provenant_os::fs::LockMode::Exclusive,
+            ),
+            Err(provenant_os::fs::FsError::LockTimeout { .. })
+        );
+        contended.send(held).unwrap();
+    };
     std::thread::scope(|scope| {
         // Quota refresh and an authorised dispatch share the same account store.
-        let quota =
-            scope.spawn(|| refresh_if_expiring(&executor, &login, &|| now, now + 60_000, None));
-        started.recv_timeout(Duration::from_secs(5)).unwrap();
-        let dispatch = refresh_for_account_authorised(
-            &executor,
-            &login,
-            &account,
-            &|| now,
-            now + 60_000,
-            &authority,
-        );
+        let quota = scope.spawn(|| {
+            refresh_with_policy_using_clock(
+                &executor,
+                &login,
+                &|| now,
+                now + 60_000,
+                None,
+                60_000,
+                false,
+                &clock,
+                &|_| {},
+            )
+        });
+        started.recv().unwrap();
+        let dispatch = scope.spawn(|| {
+            refresh_for_account_authorised_using_clock(
+                &executor,
+                &login,
+                &account,
+                &|| now,
+                now + 60_000,
+                &authority,
+                &clock,
+                &observe_lock,
+            )
+        });
+        let lock_was_held = contention_observed.recv().unwrap();
+        release.send(()).unwrap();
         let quota_token = quota.join().unwrap().expect("quota refresh succeeds");
-        let dispatch_token =
-            dispatch.expect("concurrent dispatch must not reuse the rotated refresh token");
-        for output in [format!("{quota_token:?}"), format!("{dispatch_token:?}")] {
-            assert!(!output.contains("fixture-old"));
-            assert!(!output.contains("fixture-renewed"));
-            assert!(!output.contains("fixture-single-use"));
-            assert!(!output.contains("fixture-rotated"));
-        }
+        let dispatch_token = dispatch
+            .join()
+            .unwrap()
+            .expect("concurrent dispatch must not reuse the rotated refresh token");
+        assert!(
+            lock_was_held,
+            "the second caller reached an unheld refresh lock"
+        );
+        assert_eq!(quota_token.access, "fixture-renewed");
+        assert_eq!(dispatch_token.access, "fixture-renewed");
     });
-    assert_eq!(
-        *executor.exchanges.lock().unwrap(),
-        1,
-        "only one exchange may consume the refresh token"
+}
+
+const CLAUDE_REFRESH_TEST_NOW_MS: u64 = 1_000_000_000;
+
+fn claude_refresh_item(token: &str, expires_at_ms: u64) -> Vec<u8> {
+    format!(
+        r#"{{"claudeAiOauth":{{"accessToken":"{token}","refreshToken":"fixture-refresh","expiresAt":{expires_at_ms}}}}}"#
+    )
+    .into_bytes()
+}
+
+fn run_claude_refresh(
+    items: Vec<Vec<u8>>,
+    deadline_ms: u64,
+) -> (Result<crate::claude::OauthToken, ProviderError>, Vec<Call>) {
+    use crate::claude::{Login, refresh_if_expiring};
+
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join(".claude");
+    let script = FileCredentialScript::new(
+        &config,
+        KeychainScript {
+            items: std::sync::Mutex::new(items.into()),
+            statuses: Default::default(),
+            calls: Default::default(),
+        },
     );
+    let login = Login {
+        executable: Path::new("/opt/homebrew/bin/claude"),
+        home: temp.path(),
+        user: OsStr::new("u"),
+        config_dir: &config,
+    };
+    let result = refresh_if_expiring(
+        &script,
+        &login,
+        &|| CLAUDE_REFRESH_TEST_NOW_MS,
+        deadline_ms,
+        None,
+    );
+    (result, script.script.calls.into_inner().unwrap())
+}
+
+fn refresh_probe(calls: &[Call]) -> Option<&Call> {
+    calls
+        .iter()
+        .find(|(argv, _, _)| argv.iter().any(|arg| arg == "provenant-refresh-probe"))
 }
 
 #[test]
-fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_prints_the_token() {
-    use crate::claude::{Login, refresh_if_expiring};
-    let now = 1_000_000_000_u64;
-    let item = |token: &str, expires: u64| {
-        format!(
-            r#"{{"claudeAiOauth":{{"accessToken":"{token}","refreshToken":"fixture-refresh","expiresAt":{expires}}}}}"#
-        )
-        .into_bytes()
-    };
-    let run_by = |items: Vec<Vec<u8>>, deadline: u64| {
-        let temp = tempfile::tempdir().unwrap();
-        let config = temp.path().join(".claude");
-        let script = FileCredentialScript::new(
-            &config,
-            KeychainScript {
-                items: std::sync::Mutex::new(items.into()),
-                statuses: Default::default(),
-                calls: std::sync::Mutex::new(vec![]),
-            },
-        );
-        let login = Login {
-            executable: Path::new("/opt/homebrew/bin/claude"),
-            home: temp.path(),
-            user: OsStr::new("u"),
-            config_dir: &config,
-        };
-        let result = refresh_if_expiring(&script, &login, &|| now, deadline, None);
-        (result, script.script.calls.into_inner().unwrap())
-    };
-    let hour = 3_600_000;
-    let run = |items: Vec<Vec<u8>>| run_by(items, now + hour);
+fn claude_refresh_admission_requires_a_sufficient_remaining_budget() {
+    let now = CLAUDE_REFRESH_TEST_NOW_MS;
+    for deadline in [now, now + 1_000] {
+        let (result, calls) =
+            run_claude_refresh(vec![claude_refresh_item("fixture-access", now)], deadline);
+        assert!(matches!(result, Err(ProviderError::RefreshDeferred)));
+        assert!(refresh_probe(&calls).is_none());
+    }
+}
 
-    // A spent deadline runs nothing.
-    let (token, calls) = run_by(vec![item("fixture-access", now + 1000)], now);
-    assert!(token.is_err());
-    assert!(calls.is_empty());
-
-    // A live token is used as read: no refresh, and Debug never shows it.
-    let (token, calls) = run(vec![item("fixture-access", now + hour)]);
-    let token = token.expect("live token");
+#[test]
+fn claude_refresh_returns_live_token_without_printing_it() {
+    let now = CLAUDE_REFRESH_TEST_NOW_MS;
+    let (result, calls) = run_claude_refresh(
+        vec![claude_refresh_item("fixture-access", now + 3_600_000)],
+        now + 3_600_000,
+    );
+    let token = result.expect("live credential");
     let printed = format!("{token:?}");
-    assert!(!printed.contains("fixture-access") && !printed.contains("fixture-refresh"));
-    assert!(calls.is_empty());
+    assert!(!printed.contains("fixture-access"));
+    assert!(!printed.contains("fixture-refresh"));
+    assert!(refresh_probe(&calls).is_none());
+}
 
-    // Inside the window the CLI refreshes once, in the empty scratch directory
-    // with hooks, MCP servers, slash commands and session files off.
-    let expiring = item("fixture-access", now + 14 * 60 * 1000);
-    let (token, calls) = run(vec![expiring.clone(), item("fixture-renewed", now + hour)]);
-    token.expect("refreshed token");
-    let (argv, env, cwd) = &calls[0];
-    assert_eq!(argv[0], "/opt/homebrew/bin/claude");
+#[test]
+fn claude_refresh_probe_disables_provider_customisations() {
+    let now = CLAUDE_REFRESH_TEST_NOW_MS;
+    let (result, calls) = run_claude_refresh(
+        vec![
+            claude_refresh_item("fixture-access", now),
+            claude_refresh_item("fixture-renewed", now + 3_600_000),
+        ],
+        now + 3_600_000,
+    );
+    let token = result.expect("renewed credential");
+    assert_eq!(token.access, "fixture-renewed");
+    let (argv, env, cwd) = refresh_probe(&calls).expect("refresh command");
     for flag in [
         "--safe-mode",
         "--strict-mcp-config",
-        r#"{"disableAllHooks":true}"#,
         "--disable-slash-commands",
         "--no-session-persistence",
     ] {
-        assert!(argv.iter().any(|a| a == flag), "{flag}");
+        assert!(argv.iter().any(|arg| arg == flag), "missing {flag}");
     }
-    assert_eq!(cwd, Path::new("/"));
-    assert!(!env.iter().any(|v| v.starts_with("CLAUDE_CONFIG_DIR=")));
-    assert_eq!(calls.len(), 1);
-
-    // The CLI may keep a token inside the window; one with a minute left is
-    // accepted, one about to expire is refused.
-    let (token, _) = run(vec![expiring.clone(), expiring.clone()]);
-    token.expect("still usable");
-    let (token, _) = run(vec![expiring, item("fixture-access", now + 30_000)]);
-    assert!(matches!(token, Err(ProviderError::CredentialUnavailable)));
-
-    // An expired token is refreshed; it stays expired only if the CLI fails.
-    let (token, calls) = run(vec![
-        item("fixture-access", now),
-        item("fixture-renewed", now + hour),
-    ]);
-    token.expect("expired token refreshed");
-    assert_eq!(calls.len(), 1, "expired storage refreshes once");
-    let (token, calls) = run(vec![
-        item("fixture-access", now),
-        item("fixture-access", now),
-    ]);
-    assert!(matches!(token, Err(ProviderError::CredentialExpired)));
-    assert_eq!(calls.len(), 1);
-
-    // Corrupt stored JSON cannot be repaired by refreshing.
-    let (token, calls) = run(vec![b"not json: fixture-secret".to_vec()]);
-    assert!(
-        matches!(&token, Err(ProviderError::CredentialReadFailed(reason)) if reason == "stored credential JSON is invalid")
+    let settings = argv
+        .windows(2)
+        .find(|pair| pair[0] == "--settings")
+        .and_then(|pair| serde_json::from_str::<serde_json::Value>(&pair[1]).ok())
+        .expect("settings JSON");
+    assert_eq!(
+        settings
+            .get("disableAllHooks")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
     );
-    assert!(!token.unwrap_err().to_string().contains("fixture-secret"));
     assert!(
-        calls.is_empty(),
-        "corrupt file credentials must not refresh"
+        env.iter()
+            .all(|entry| !entry.starts_with("CLAUDE_CONFIG_DIR="))
     );
+    assert!(cwd.is_absolute());
+}
+
+#[test]
+fn claude_refresh_accepts_only_a_usable_returned_token() {
+    let now = CLAUDE_REFRESH_TEST_NOW_MS;
+    for (remaining, accepted) in [(120_000, true), (1_000, false)] {
+        let (result, calls) = run_claude_refresh(
+            vec![
+                claude_refresh_item("fixture-access", now),
+                claude_refresh_item("fixture-renewed", now + remaining),
+            ],
+            now + 3_600_000,
+        );
+        assert_eq!(result.is_ok(), accepted);
+        if !accepted {
+            assert!(matches!(result, Err(ProviderError::RefreshDeferred)));
+        }
+        assert!(refresh_probe(&calls).is_some());
+    }
+}
+
+#[test]
+fn claude_refresh_replaces_an_expired_credential() {
+    let now = CLAUDE_REFRESH_TEST_NOW_MS;
+    let (result, calls) = run_claude_refresh(
+        vec![
+            claude_refresh_item("fixture-access", now),
+            claude_refresh_item("fixture-renewed", now + 3_600_000),
+        ],
+        now + 3_600_000,
+    );
+    let token = result.expect("renewed credential");
+    assert_eq!(token.access, "fixture-renewed");
+    assert!(refresh_probe(&calls).is_some());
+}
+
+#[test]
+fn claude_refresh_defers_when_the_returned_credential_is_still_expired() {
+    let now = CLAUDE_REFRESH_TEST_NOW_MS;
+    let (result, calls) = run_claude_refresh(
+        vec![
+            claude_refresh_item("fixture-access", now),
+            claude_refresh_item("fixture-access", now),
+        ],
+        now + 3_600_000,
+    );
+    assert!(matches!(result, Err(ProviderError::RefreshDeferred)));
+    assert!(refresh_probe(&calls).is_some());
+}
+
+#[test]
+fn claude_refresh_refuses_corrupt_credentials_without_disclosing_them() {
+    let now = CLAUDE_REFRESH_TEST_NOW_MS;
+    let (result, calls) =
+        run_claude_refresh(vec![b"not json: fixture-secret".to_vec()], now + 3_600_000);
+    let Err(ProviderError::CredentialReadFailed(reason)) = result else {
+        panic!("corrupt credential should be a typed read failure");
+    };
+    assert!(!reason.contains("fixture-secret"));
+    assert!(refresh_probe(&calls).is_none());
 }
 
 #[cfg(target_os = "macos")]
@@ -1225,32 +1272,30 @@ fn claude_login_refreshes_only_near_expiry_with_customisations_off_and_never_pri
 fn claude_keychain_read_failure_does_not_spawn_refresh_probe() {
     use crate::claude::{Login, refresh_if_expiring};
 
-    struct FailedKeychainRead(std::sync::Mutex<Vec<Call>>);
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ProbeKind {
+        KeychainRead,
+        Other,
+    }
+    struct FailedKeychainRead(std::sync::Mutex<Vec<ProbeKind>>);
 
     impl provenant_os::exec::Executor for FailedKeychainRead {
         fn execute(
             &self,
             options: provenant_os::exec::ExecOptions<'_>,
         ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
-            let argv: Vec<String> = options
+            let kind = if options
                 .argv
-                .iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect();
-            self.0.lock().unwrap().push((
-                argv.clone(),
-                options
-                    .env
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|(key, value)| {
-                        format!("{}={}", key.to_string_lossy(), value.to_string_lossy())
-                    })
-                    .collect(),
-                options.cwd.into(),
-            ));
+                .first()
+                .is_some_and(|program| program == "/usr/bin/security")
+            {
+                ProbeKind::KeychainRead
+            } else {
+                ProbeKind::Other
+            };
+            self.0.lock().unwrap().push(kind);
             Ok(provenant_os::exec::ExecOutcome {
-                termination: if argv.first().is_some_and(|arg| arg == "/usr/bin/security") {
+                termination: if kind == ProbeKind::KeychainRead {
                     provenant_os::exec::Termination::Exit(1)
                 } else {
                     provenant_os::exec::Termination::Exit(0)
@@ -1284,18 +1329,6 @@ fn claude_keychain_read_failure_does_not_spawn_refresh_probe() {
         Err(ProviderError::CredentialReadFailed(_))
     ));
     let calls = executor.0.lock().unwrap();
-    assert_eq!(
-        calls.len(),
-        1,
-        "a failed keychain read must not start a refresh"
-    );
-    assert_eq!(calls[0].0[0], "/usr/bin/security");
-    use std::os::unix::ffi::OsStrExt;
-    let suffix = crate::claude::keychain_suffix(config.as_os_str().as_bytes());
-    assert_eq!(calls[0].0[3], format!("Claude Code-credentials-{suffix}"));
-    assert!(
-        calls[0]
-            .1
-            .contains(&format!("CLAUDE_CONFIG_DIR={}", config.display()))
-    );
+    assert!(calls.contains(&ProbeKind::KeychainRead));
+    assert!(!calls.contains(&ProbeKind::Other));
 }

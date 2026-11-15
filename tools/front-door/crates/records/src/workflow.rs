@@ -88,7 +88,6 @@ pub struct UserApproval {
 }
 /// A chair's recorded judgement; owner acceptance uses UserApproval separately.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ChairDowngrade {
     pub actor_id: ActorId,
     pub evidence: EvidenceRef,
@@ -641,7 +640,7 @@ pub enum ReviewVerdict {
     Inconclusive,
 }
 impl ReviewVerdict {
-    /// Review vocabulary, accepting the persisted verdict prefix and legacy aliases.
+    /// Current review vocabulary, accepting verdict tokens with an optional `VERDICT:` prefix.
     pub fn from_token(token: &str) -> Option<Self> {
         match token.strip_prefix("VERDICT: ").unwrap_or(token) {
             "APPROVE" | "PASS" => Some(Self::Approve),

@@ -10,6 +10,7 @@ pub enum GraphEventKind {
     NodeState,
     Attempt,
     Wait,
+    Warning,
     Gate,
     Join,
     Cancellation,
@@ -86,7 +87,7 @@ fn effect_identifier(kind: &str, value: Option<&str>) -> Option<Value> {
     Some(serde_json::json!({"effect":kind,"identifier":value}))
 }
 
-fn name(id: &str) -> OsString {
+pub(in crate::graph) fn name(id: &str) -> OsString {
     format!("{id}.events.jsonl").into()
 }
 
@@ -179,13 +180,14 @@ pub(super) fn append_changes(
                         "started"
                     },
                     &(
-                        attempt.key.route_index,
+                        &attempt.key,
                         &attempt.route,
                         &attempt.attempt_ref,
                         &attempt.outcome,
                     ),
                 )?;
                 observation.details = Some(serde_json::json!({
+                    "attempt": attempt.key.attempt,
                     "route_index": attempt.key.route_index,
                     "state": attempt.state,
                     "outcome": attempt.outcome,
@@ -208,8 +210,7 @@ pub(super) fn append_changes(
                 let template = expanded
                     .as_ref()
                     .and_then(|graph| graph.nodes.iter().find(|candidate| candidate.id == node.id))
-                    .and_then(|node| node.extra.get("template"))
-                    .and_then(Value::as_str)
+                    .and_then(|node| node.template.as_deref())
                     .unwrap_or("raw");
                 observation.attempt = identity.map(|identity| AttemptEvent {
                     identity,
@@ -245,16 +246,15 @@ pub(super) fn append_changes(
                 }
             }
         }
-        if old.and_then(|node| node.extra.get("slot_wait")) != node.extra.get("slot_wait") {
+        if old.and_then(|node| node.concurrency_warning.as_ref())
+            != node.concurrency_warning.as_ref()
+            && let Some(warning) = &node.concurrency_warning
+        {
             events.push(event(
-                GraphEventKind::Wait,
+                GraphEventKind::Warning,
                 &node.id,
-                if node.extra.contains_key("slot_wait") {
-                    "slot"
-                } else {
-                    "slot_acquired"
-                },
-                &node.state,
+                "concurrency_cap",
+                &serde_json::json!(warning),
             )?);
         }
         if super::relay::yields_slot(node) != old.is_some_and(super::relay::yields_slot) {
@@ -387,7 +387,7 @@ pub(super) fn append_changes(
         events.push(effect);
     }
     let mut saved = event(GraphEventKind::Checkpoint, id, "save", current)?;
-    saved.details = Some(serde_json::json!({"pause_code": current.pause_code,
+    saved.details = Some(serde_json::json!({"pause_cause": current.pause_cause(),
         "cancelled":current.cancelled,"outcome":current.outcome()}));
     events.push(saved);
     append(directory, id, events)
@@ -498,31 +498,25 @@ mod tests {
     }
 
     #[test]
-    fn trace_explains_failure_and_slot_wait_without_brief_text() {
+    fn trace_explains_failure_and_concurrency_warning_without_brief_text() {
         let temp = tempfile::tempdir().unwrap();
         let directory = Directory::open_anchor(temp.path()).unwrap();
         let before: GraphCheckpoint = serde_json::from_value(serde_json::json!({
             "schema_version":1,"graph_id":"g","plan_digest":"digest",
-            "nodes":[{"id":"build","state":"pending","worktree":null,"attempts":[],"slot_wait":true}]
-        })).unwrap();
+            "nodes":[{"id":"build","state":"pending","worktree":null,"attempts":[]}]
+        }))
+        .unwrap();
         append_changes(&directory, "g", None, &before, None).unwrap();
         let mut after = before.clone();
-        after.nodes[0].extra.remove("slot_wait");
+        after.nodes[0].concurrency_warning = Some("cap occupied".into());
         after.nodes[0].state = NodeState::Failed;
         after.nodes[0].advance_error_code = Some("required_input_unavailable".into());
         after.nodes[0].advance_error = Some("private brief or secret text".into());
         append_changes(&directory, "g", Some(&before), &after, None).unwrap();
         let records = read(&directory, "g").unwrap();
-        assert!(
-            records
-                .iter()
-                .any(|event| event.subject == "build" && event.code == "slot")
-        );
-        assert!(
-            records
-                .iter()
-                .any(|event| event.subject == "build" && event.code == "slot_acquired")
-        );
+        assert!(records.iter().any(|event| event.subject == "build"
+            && event.kind == GraphEventKind::Warning
+            && event.code == "concurrency_cap"));
         let failure = records.iter().find(|event| event.code == "failed").unwrap();
         assert_eq!(
             failure.details.as_ref().unwrap()["cause"],
@@ -542,7 +536,7 @@ mod tests {
         let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
             "schema_version":1,"graph_id":"g","plan_digest":"digest",
             "nodes":[{"id":"task","state":"running","worktree":null,"attempts":[{
-                "key":{"graph_id":"g","node_id":"task","route_index":0},
+                "key":{"graph_id":"g","node_id":"task","route_index":0, "attempt": 1},
                 "route":{"alias":"senior"},"state":"starting","launched":false,
                 "attempt_ref":null,"outcome":null,"launch_actor":"actor"
             }]}]
@@ -579,15 +573,14 @@ mod tests {
         use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
         let temp = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(temp.path()).unwrap();
-        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-        inputs.state_dir = Some(base.clone());
+        let inputs = provenant_test_support::root_inputs(&base).unwrap();
         let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
         let project = ProjectId::from_bytes([1; 16]);
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
         let mut fixture: StoredCheckpoint =
-            serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+            serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap();
         fixture.execution.directory = base;
         let mut journal =
             FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
@@ -622,12 +615,17 @@ mod tests {
         let mut after = before.clone();
         after.expansions.push(Expansion {
             extra: Default::default(),
+            retired: None,
+            retry_generation: None,
+            final_result: false,
+            final_fragment: false,
+            floor_warnings: Vec::new(),
             source: "planner".into(),
-            continuation: false,
             nodes: Vec::new(),
             uses: Vec::new(),
             patch: Some(super::super::patch::PatchRecord {
                 extra: Default::default(),
+                child_receipt: None,
                 revision: 2,
                 digest: "sha256:abc".into(),
                 key: Some("secret-key".into()),
@@ -636,6 +634,7 @@ mod tests {
                 skipped: Vec::new(),
                 replaced: Vec::new(),
                 journaled: false,
+                restart: None,
             }),
         });
         append_changes(&directory, "g", Some(&before), &after, None).unwrap();
@@ -656,6 +655,7 @@ mod tests {
         let directory = Directory::open_anchor(temp.path()).unwrap();
         let record = super::super::patch::PatchRecord {
             extra: Default::default(),
+            child_receipt: None,
             revision: 1,
             digest: "sha256:abc".into(),
             key: None,
@@ -664,6 +664,7 @@ mod tests {
             skipped: Vec::new(),
             replaced: Vec::new(),
             journaled: true,
+            restart: None,
         };
         append_patch(&directory, "g", &record).unwrap();
         let before: GraphCheckpoint = serde_json::from_value(serde_json::json!({
@@ -673,8 +674,12 @@ mod tests {
         let mut after = before.clone();
         after.expansions.push(Expansion {
             extra: Default::default(),
+            retired: None,
+            retry_generation: None,
+            final_result: false,
+            final_fragment: false,
+            floor_warnings: Vec::new(),
             source: "host".into(),
-            continuation: false,
             nodes: Vec::new(),
             uses: Vec::new(),
             patch: Some(record),

@@ -5,6 +5,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+/// One release-owned instruction asset shared by native harness files.
+pub const INSTRUCTION_ASSET: &str = "instructions/AGENTS.md";
+
 /// Latest command output retained by the guardian and adapter.
 pub const COMMAND_OUTPUT_TAIL_BYTES: usize = 65_536;
 
@@ -116,6 +119,405 @@ pub struct SkillLocation {
     pub suffix: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountQuota {
+    LocalLedger,
+    ObservedRefusals,
+}
+#[derive(Debug, Clone, Copy)]
+pub struct AccountModelPlan {
+    pub plan: &'static str,
+    pub model_prefix: &'static str,
+    pub quota: AccountQuota,
+}
+
+/// Provider integration support, including the evidence for a native limitation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilitySupport {
+    Supported,
+    Unsupported {
+        reason: &'static str,
+        source: &'static str,
+    },
+}
+
+/// Wire format used by a native harness hook registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookProtocol {
+    CommandGroups { timeout_unit: HookTimeoutUnit },
+    CursorCommands { timeout_unit: HookTimeoutUnit },
+    NamedGroups { timeout_unit: HookTimeoutUnit },
+    OpenCodePlugin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookTimeoutUnit {
+    Seconds,
+    Milliseconds,
+}
+
+// Keep semantic identities, CLI spellings and the invariant's domain in one
+// declaration: adding an action adds one row, not parallel enum/match lists.
+macro_rules! hook_actions {
+    ($( $action:ident => $command:literal ),+ $(,)?) => {
+        /// Provenant hook handler independent of a provider's wire event name.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum HookAction { $( $action, )+ }
+        impl HookAction {
+            pub const ALL: &'static [Self] = &[ $( Self::$action, )+ ];
+            pub const fn command(self) -> &'static str {
+                match self { $( Self::$action => $command, )+ }
+            }
+        }
+    };
+}
+hook_actions! {
+    PreToolUse => "pre-tool-use",
+    PreCompact => "pre-compact",
+    Compact => "compact",
+    ChairPrompt => "chair-prompt",
+    ChairStart => "chair-start",
+    ChairStop => "chair-stop",
+    SessionStart => "session-start",
+    Stop => "stop",
+    WorktreeCreate => "worktree-create",
+    WorktreeRemove => "worktree-remove",
+}
+
+/// Native mapping or a sourced provider limitation for one Provenant action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookEvent {
+    Supported {
+        action: HookAction,
+        event: &'static str,
+        matcher: Option<&'static str>,
+        timeout_seconds: Option<u64>,
+    },
+    Unsupported {
+        action: HookAction,
+        reason: &'static str,
+        source: &'static str,
+    },
+}
+impl CapabilitySupport {
+    pub const fn is_supported(self) -> bool {
+        matches!(self, Self::Supported)
+    }
+}
+
+/// Managed harness paths and native integration capabilities. Wire formats stay
+/// in config; this is the single declaration of which integrations exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HarnessInstall {
+    pub home: &'static str,
+    /// Environment variable and suffix that bind a provider launch to its
+    /// isolated native configuration home.
+    pub lane_home: (&'static str, &'static str),
+    pub config: &'static str,
+    /// Config relative to the user home when using the default harness home.
+    pub default_home_config: Option<&'static str>,
+    pub instruction: Option<&'static str>,
+    pub hook_file: Option<&'static str>,
+    /// Provider CLI option that loads a generated hook settings document.
+    pub hook_settings_arg: Option<&'static str>,
+    pub hooks: CapabilitySupport,
+    pub hook_protocol: Option<HookProtocol>,
+    pub hook_events: &'static [HookEvent],
+    pub answer_delivery: CapabilitySupport,
+    /// Whether a pre-compaction response reaches the model's context.
+    pub precompact_context: CapabilitySupport,
+    pub instructions: CapabilitySupport,
+    pub source: &'static str,
+}
+
+const CHAIR_HOOKS_NOT_APPLICABLE: &str =
+    "Provenant chair switching is enabled only for adapters declaring chair_switch";
+const CHAIR_HOOKS_SOURCE: &str = "AdapterSpec.chair_switch in crates/records/src/adapters.rs";
+const CLAUDE_HOOK_EVENTS: &[HookEvent] = &[
+    HookEvent::Supported {
+        action: HookAction::PreToolUse,
+        event: "PreToolUse",
+        matcher: None,
+        timeout_seconds: None,
+    },
+    HookEvent::Supported {
+        action: HookAction::PreCompact,
+        event: "PreCompact",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Compact,
+        event: "SessionStart",
+        matcher: Some("compact"),
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::ChairPrompt,
+        event: "UserPromptSubmit",
+        matcher: None,
+        timeout_seconds: Some(10),
+    },
+    HookEvent::Supported {
+        action: HookAction::ChairStart,
+        event: "SessionStart",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::ChairStop,
+        event: "Stop",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::SessionStart,
+        event: "SessionStart",
+        matcher: Some("startup|resume|clear"),
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Stop,
+        event: "Stop",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::WorktreeCreate,
+        event: "WorktreeCreate",
+        matcher: None,
+        timeout_seconds: Some(60),
+    },
+    HookEvent::Supported {
+        action: HookAction::WorktreeRemove,
+        event: "WorktreeRemove",
+        matcher: None,
+        timeout_seconds: Some(60),
+    },
+];
+const CODEX_HOOK_EVENTS: &[HookEvent] = &[
+    HookEvent::Supported {
+        action: HookAction::PreToolUse,
+        event: "PreToolUse",
+        matcher: None,
+        timeout_seconds: None,
+    },
+    HookEvent::Supported {
+        action: HookAction::PreCompact,
+        event: "PreCompact",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Compact,
+        event: "SessionStart",
+        matcher: Some("compact"),
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairPrompt,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStart,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStop,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Supported {
+        action: HookAction::SessionStart,
+        event: "SessionStart",
+        matcher: Some("startup|resume|clear|fork"),
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Stop,
+        event: "Stop",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeCreate,
+        reason: "Codex has no native worktree lifecycle hook event",
+        source: "https://learn.chatgpt.com/docs/hooks#where-codex-looks-for-hooks",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeRemove,
+        reason: "Codex has no native worktree lifecycle hook event",
+        source: "https://learn.chatgpt.com/docs/hooks#where-codex-looks-for-hooks",
+    },
+];
+const CURSOR_HOOK_EVENTS: &[HookEvent] = &[
+    HookEvent::Unsupported {
+        action: HookAction::PreToolUse,
+        reason: "Cursor preToolUse does not accept Provenant's additionalContext answer response",
+        source: "https://cursor.com/docs/hooks#pretooluse",
+    },
+    HookEvent::Supported {
+        action: HookAction::PreCompact,
+        event: "preCompact",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Unsupported {
+        action: HookAction::Compact,
+        reason: "Cursor exposes preCompact but no post-compaction event",
+        source: "https://cursor.com/docs/hooks#supported-hooks",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairPrompt,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStart,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStop,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Supported {
+        action: HookAction::SessionStart,
+        event: "sessionStart",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Stop,
+        event: "stop",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeCreate,
+        reason: "Cursor has no native worktree lifecycle hook event",
+        source: "https://cursor.com/docs/hooks#supported-hooks",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeRemove,
+        reason: "Cursor has no native worktree lifecycle hook event",
+        source: "https://cursor.com/docs/hooks#supported-hooks",
+    },
+];
+const AGY_HOOK_EVENTS: &[HookEvent] = &[
+    HookEvent::Unsupported {
+        action: HookAction::PreToolUse,
+        reason: "Antigravity PreToolUse returns a tool decision and argument overwrite, not Provenant's additionalContext answer response",
+        source: "https://antigravity.google/docs/hooks#input-and-output-contract",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::PreCompact,
+        reason: "Antigravity exposes no pre-compaction event",
+        source: "https://antigravity.google/docs/hooks#supported-events",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::Compact,
+        reason: "Antigravity exposes no post-compaction event",
+        source: "https://antigravity.google/docs/hooks#supported-events",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairPrompt,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStart,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStop,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Supported {
+        action: HookAction::SessionStart,
+        event: "SessionStart",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Stop,
+        event: "Stop",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeCreate,
+        reason: "Antigravity exposes no worktree lifecycle event",
+        source: "https://antigravity.google/docs/hooks#supported-events",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeRemove,
+        reason: "Antigravity exposes no worktree lifecycle event",
+        source: "https://antigravity.google/docs/hooks#supported-events",
+    },
+];
+const OPENCODE_HOOK_EVENTS: &[HookEvent] = &[
+    HookEvent::Unsupported {
+        action: HookAction::PreToolUse,
+        reason: "OpenCode tool.execute.before hooks cannot inject additional context into the active session",
+        source: "https://opencode.ai/docs/build/plugins/server#tool-execution",
+    },
+    HookEvent::Supported {
+        action: HookAction::PreCompact,
+        event: "session.compaction",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Compact,
+        event: "session.compaction.ended",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairPrompt,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStart,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStop,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Supported {
+        action: HookAction::SessionStart,
+        event: "session.context",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Stop,
+        event: "session.idle",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeCreate,
+        reason: "OpenCode exposes worktree strategy transforms but no generic worktree lifecycle callback",
+        source: "https://opencode.ai/docs/build/plugins/server#worktrees",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeRemove,
+        reason: "OpenCode exposes worktree strategy transforms but no generic worktree lifecycle callback",
+        source: "https://opencode.ai/docs/build/plugins/server#worktrees",
+    },
+];
+
 #[derive(Debug, Clone, Copy)]
 pub struct AdapterSpec {
     pub id: Harness,
@@ -123,12 +525,16 @@ pub struct AdapterSpec {
     /// Provider family used by declared route constraints.
     pub family: &'static str,
     pub binary: &'static str,
+    /// None for execution entries without a native managed harness.
+    pub install: Option<HarnessInstall>,
     pub skills: Option<SkillLocation>,
     /// Home-relative installation roots that can supply linked skills.
     /// They describe discovery provenance, not an eligibility allowlist.
     pub skill_install_roots: &'static [&'static str],
     /// Environment override and home-relative default for an implicitly discovered account.
     pub default_account_directory: Option<(&'static str, &'static str)>,
+    /// Credential policy of the declared default directory at its home-relative path.
+    pub default_account_root_kind: &'static provenant_core::CredentialKind,
     pub registered_account: bool,
     /// A registered account's directory is the client's configuration
     /// directory, which account settings sync keeps in step. False where it is
@@ -170,14 +576,23 @@ pub struct AdapterSpec {
     pub shell_prefix: Option<(&'static str, &'static str)>,
     /// Provider argument granting file tools access to captured Git context.
     pub context_directory_arg: Option<&'static str>,
+    /// Checkout-root files, in gitignore syntax, through which the provider
+    /// hides paths from its own agent, including the files of a parent
+    /// checkout that contains the lane's worktree. A lane worktree under a
+    /// listed pattern cannot be read or written by the lane, so doctor and
+    /// launch preparation warn (`provenant_cli::ignore_files`); they never
+    /// edit the file.
+    pub ignore_files: &'static [&'static str],
+    /// Checkout-root files through which the provider only skips paths when
+    /// indexing; they never hide a path from the lane's agent. The ignore-file
+    /// warning names them as the place to keep worktrees out of indexing.
+    pub indexing_ignore_files: &'static [&'static str],
     pub compaction_env: Option<&'static str>,
     pub allowance_prefix: Option<&'static str>,
     /// Local allowance windows governing models under allowance_prefix.
     pub allowance_windows: &'static [&'static str],
     pub namespaced_models: bool,
     pub chair_switch: bool,
-    /// The local hook can read pending answer offers for this adapter.
-    pub local_offer_reader: bool,
     /// The account reports the models it offers; a launch naming another model is refused.
     pub offered_models: bool,
     pub github_auth: Option<GithubAuth>,
@@ -197,8 +612,6 @@ pub struct AdapterSpec {
     pub stderr_quota: bool,
     /// Parse stdout error diagnostics for provider failure explanations.
     pub stdout_error_diagnostic: bool,
-    /// Drop unsupported reasoning-effort values with an effort warning instead of refusing the candidate.
-    pub drops_unsupported_effort: bool,
     /// Source of model identity after a run.
     pub model_observation: ModelObservation,
     /// Preparation mechanism for a model-less named entry.
@@ -216,9 +629,11 @@ pub struct AdapterSpec {
     pub peer_bootstrap: bool,
     /// A snapshot governs only this model prefix; None governs every model.
     pub quota_model_prefix: Option<&'static str>,
-    /// Account and model prefix served by the free allowance.
-    pub free_account: Option<(&'static str, &'static str)>,
+    /// Registered plans partition model namespaces independently of account keys.
+    pub account_model_plans: &'static [AccountModelPlan],
     pub free_pool: Option<&'static str>,
+    /// Drop a valid but unrecorded model effort with a route warning.
+    pub drop_unsupported_effort: bool,
     pub pacing_keys: Option<(&'static str, &'static str)>,
     /// What a launch may ask of this adapter. The one source for dispatch,
     /// `run`, resume and graph validation.
@@ -344,10 +759,21 @@ impl AdapterSpec {
             })
         })
     }
-    pub fn account_serves_model(&self, account: &str, model: &str) -> bool {
-        self.free_account.is_none_or(|(free_account, prefix)| {
-            (account == free_account) == model.starts_with(prefix)
-        })
+    pub fn account_plan(&self, plan: Option<&str>) -> Option<&AccountModelPlan> {
+        self.account_model_plans
+            .iter()
+            .find(|row| plan.is_some_and(|plan| row.plan.eq_ignore_ascii_case(plan.trim())))
+    }
+    pub fn is_free_plan(&self, plan: Option<&str>) -> bool {
+        self.account_plan(plan)
+            .is_some_and(|row| row.quota == AccountQuota::ObservedRefusals)
+    }
+    /// A registered plan narrows the models an account serves. A missing or
+    /// unrecognised plan narrows nothing: the provider decides, and quota stays
+    /// unknown.
+    pub fn account_serves_model(&self, plan: Option<&str>, model: &str) -> bool {
+        self.account_plan(plan)
+            .is_none_or(|row| model.starts_with(row.model_prefix))
     }
     /// Whether a quota window governs a model drawing on `model_pool`. Only
     /// adapters with grouped quota pools separate windows by their `group.`
@@ -366,7 +792,10 @@ impl AdapterSpec {
 
 // The installed Provenant release carries the common portfolio used by each
 // provider. Linked skill targets outside these roots remain eligible too.
-const SKILL_INSTALL_ROOTS: &[&str] = &[".local/share/provenant/v1/releases"];
+const SKILL_INSTALL_ROOTS: &[&str] = &[concat!(
+    provenant_core::default_state_suffix!(),
+    "/releases"
+)];
 
 // Keep the rows in Harness order. CLI installation also uses this order.
 adapter_specs! { $;
@@ -374,6 +803,22 @@ adapter_specs! { $;
         name: "claude",
         family: "anthropic",
         binary: "claude",
+        install: Some(HarnessInstall {
+            home: ".claude",
+            lane_home: ("CLAUDE_CONFIG_DIR", ""),
+            config: ".claude.json",
+            default_home_config: Some(".claude.json"),
+            instruction: Some("CLAUDE.md"),
+            hook_file: Some("settings.json"),
+            hook_settings_arg: Some("--settings"),
+            hooks: CapabilitySupport::Supported,
+            hook_protocol: Some(HookProtocol::CommandGroups { timeout_unit: HookTimeoutUnit::Seconds }),
+            hook_events: CLAUDE_HOOK_EVENTS,
+            answer_delivery: CapabilitySupport::Supported,
+            precompact_context: CapabilitySupport::Supported,
+            instructions: CapabilitySupport::Supported,
+            source: "https://docs.anthropic.com/en/docs/claude-code/settings; https://docs.anthropic.com/en/docs/claude-code/hooks",
+        }),
         skills: Some(SkillLocation {
             environment: None,
             fallback: ".claude",
@@ -381,6 +826,7 @@ adapter_specs! { $;
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
         default_account_directory: None,
+        default_account_root_kind: &provenant_core::CredentialKind::Store,
         registered_account: true,
         account_config_dir: true,
         account_directory_prefix: Some(".claude-"),
@@ -389,9 +835,9 @@ adapter_specs! { $;
         transcript_account_root: true,
         setup_root: SetupRoot::None,
         local_login: false,
-        login_reprobe: LoginReprobe::None,
-        login_observation: LoginObservation::AccountAvailability,
-        login_check_names_account: false,
+        login_reprobe: LoginReprobe::AccountIdentity,
+        login_observation: LoginObservation::Reprobe,
+        login_check_names_account: true,
         local_account: ("default", "local"),
         argv_prompt: false,
         authentication: None,
@@ -404,12 +850,13 @@ adapter_specs! { $;
         auth_markers: &["not logged in", "authentication_failed"],
         shell_prefix: Some(("bin/claude-shell", "CLAUDE_CODE_SHELL_PREFIX")),
         context_directory_arg: Some("--add-dir"),
+        ignore_files: &[],
+        indexing_ignore_files: &[],
         compaction_env: Some("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
         chair_switch: true,
-        local_offer_reader: true,
         offered_models: false,
         github_auth: Some(GithubAuth::Environment),
         session_handoff: true,
@@ -420,7 +867,6 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
-        drops_unsupported_effort: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -433,8 +879,9 @@ adapter_specs! { $;
         quota_identity_check: false,
         peer_bootstrap: true,
         quota_model_prefix: None,
-        free_account: None,
+        account_model_plans: &[],
         free_pool: None,
+        drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: true,
@@ -454,13 +901,33 @@ adapter_specs! { $;
         name: "codex",
         family: "openai",
         binary: "codex",
+        install: Some(HarnessInstall {
+            home: ".codex",
+            lane_home: ("CODEX_HOME", ""),
+            config: "config.toml",
+            default_home_config: None,
+            instruction: Some("AGENTS.md"),
+            hook_file: Some("hooks.json"),
+            hook_settings_arg: None,
+            hooks: CapabilitySupport::Supported,
+            hook_protocol: Some(HookProtocol::CommandGroups { timeout_unit: HookTimeoutUnit::Seconds }),
+            hook_events: CODEX_HOOK_EVENTS,
+            answer_delivery: CapabilitySupport::Supported,
+            precompact_context: CapabilitySupport::Unsupported {
+                reason: "Codex PreCompact accepts only a systemMessage UI notice, not model context",
+                source: "https://developers.openai.com/codex/hooks",
+            },
+            instructions: CapabilitySupport::Supported,
+            source: "https://learn.chatgpt.com/docs/hooks; https://developers.openai.com/codex/guides/agents-md",
+        }),
         skills: Some(SkillLocation {
             environment: None,
             fallback: ".agents",
             suffix: "skills",
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
-        default_account_directory: Some(("CODEX_HOME", ".codex")),
+        default_account_directory: Some(provenant_core::CODEX_ACCOUNT_DIRECTORY),
+        default_account_root_kind: &provenant_core::CredentialKind::CodexHome,
         registered_account: true,
         account_config_dir: true,
         account_directory_prefix: None,
@@ -488,12 +955,13 @@ adapter_specs! { $;
         ],
         shell_prefix: None,
         context_directory_arg: None,
+        ignore_files: &[],
+        indexing_ignore_files: &[],
         compaction_env: None,
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
         chair_switch: false,
-        local_offer_reader: false,
         offered_models: false,
         github_auth: Some(GithubAuth::ShellEnvironment),
         session_handoff: false,
@@ -504,7 +972,6 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
-        drops_unsupported_effort: false,
         model_observation: ModelObservation::Rollout,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -517,8 +984,9 @@ adapter_specs! { $;
         quota_identity_check: true,
         peer_bootstrap: true,
         quota_model_prefix: None,
-        free_account: None,
+        account_model_plans: &[],
         free_pool: None,
+        drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: true,
@@ -538,6 +1006,31 @@ adapter_specs! { $;
         name: "cursor",
         family: "cursor",
         binary: "cursor-agent",
+        install: Some(HarnessInstall {
+            home: ".cursor",
+            lane_home: ("HOME", ".cursor"),
+            config: "mcp.json",
+            default_home_config: None,
+            instruction: None,
+            hook_file: Some("hooks.json"),
+            hook_settings_arg: None,
+            hooks: CapabilitySupport::Supported,
+            hook_protocol: Some(HookProtocol::CursorCommands { timeout_unit: HookTimeoutUnit::Seconds }),
+            hook_events: CURSOR_HOOK_EVENTS,
+            answer_delivery: CapabilitySupport::Unsupported {
+                reason: "Cursor preToolUse does not accept the additionalContext response used by Provenant answer delivery",
+                source: "https://cursor.com/docs/hooks#pretooluse",
+            },
+            precompact_context: CapabilitySupport::Unsupported {
+                reason: "Cursor preCompact accepts only user_message output shown to the user, not model context",
+                source: "https://cursor.com/docs/hooks#precompact",
+            },
+            instructions: CapabilitySupport::Unsupported {
+                reason: "Cursor global instructions are settings-managed; AGENTS.md is project-root scoped",
+                source: "https://docs.cursor.com/context/rules-for-ai",
+            },
+            source: "https://docs.cursor.com/hooks; https://docs.cursor.com/context/rules-for-ai",
+        }),
         skills: Some(SkillLocation {
             environment: None,
             fallback: ".cursor",
@@ -545,6 +1038,7 @@ adapter_specs! { $;
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
         default_account_directory: None,
+        default_account_root_kind: &provenant_core::CredentialKind::Store,
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
@@ -571,12 +1065,13 @@ adapter_specs! { $;
         ],
         shell_prefix: None,
         context_directory_arg: None,
+        ignore_files: &[".cursorignore"],
+        indexing_ignore_files: &[".cursorindexingignore"],
         compaction_env: None,
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
         chair_switch: false,
-        local_offer_reader: false,
         offered_models: false,
         github_auth: None,
         session_handoff: false,
@@ -587,7 +1082,6 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
-        drops_unsupported_effort: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -600,8 +1094,9 @@ adapter_specs! { $;
         quota_identity_check: true,
         peer_bootstrap: false,
         quota_model_prefix: None,
-        free_account: None,
+        account_model_plans: &[],
         free_pool: None,
+        drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: true,
@@ -621,6 +1116,28 @@ adapter_specs! { $;
         name: "agy",
         family: "google",
         binary: "agy",
+        install: Some(HarnessInstall {
+            home: ".gemini",
+            lane_home: ("HOME", ".gemini"),
+            config: "config/mcp_config.json",
+            default_home_config: None,
+            instruction: Some("AGENTS.md"),
+            hook_file: Some("config/hooks.json"),
+            hook_settings_arg: None,
+            hooks: CapabilitySupport::Supported,
+            hook_protocol: Some(HookProtocol::NamedGroups { timeout_unit: HookTimeoutUnit::Seconds }),
+            hook_events: AGY_HOOK_EVENTS,
+            answer_delivery: CapabilitySupport::Unsupported {
+                reason: "Antigravity PreToolUse returns a tool decision and argument overwrite, not injected context",
+                source: "https://antigravity.google/docs/hooks#input-and-output-contract",
+            },
+            precompact_context: CapabilitySupport::Unsupported {
+                reason: "Antigravity exposes no PreCompact event",
+                source: "https://antigravity.google/docs/hooks#supported-events",
+            },
+            instructions: CapabilitySupport::Supported,
+            source: "https://antigravity.google/docs/hooks; https://antigravity.google/docs/customization-discovery",
+        }),
         skills: Some(SkillLocation {
             environment: None,
             fallback: ".gemini",
@@ -628,6 +1145,7 @@ adapter_specs! { $;
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
         default_account_directory: None,
+        default_account_root_kind: &provenant_core::CredentialKind::Store,
         registered_account: true,
         account_config_dir: false,
         account_directory_prefix: None,
@@ -658,12 +1176,13 @@ adapter_specs! { $;
         ],
         shell_prefix: None,
         context_directory_arg: None,
+        ignore_files: &[],
+        indexing_ignore_files: &[],
         compaction_env: None,
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
         chair_switch: false,
-        local_offer_reader: false,
         offered_models: true,
         github_auth: None,
         session_handoff: false,
@@ -674,7 +1193,6 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
-        drops_unsupported_effort: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -687,8 +1205,9 @@ adapter_specs! { $;
         quota_identity_check: false,
         peer_bootstrap: false,
         quota_model_prefix: None,
-        free_account: None,
+        account_model_plans: &[],
         free_pool: None,
+        drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: true,
@@ -708,6 +1227,25 @@ adapter_specs! { $;
         name: "opencode",
         family: "opencode",
         binary: "opencode",
+        install: Some(HarnessInstall {
+            home: ".config/opencode",
+            lane_home: ("XDG_CONFIG_HOME", "opencode"),
+            config: "opencode.jsonc",
+            default_home_config: None,
+            instruction: Some("AGENTS.md"),
+            hook_file: Some("plugins/provenant/index.ts"),
+            hook_settings_arg: None,
+            hooks: CapabilitySupport::Supported,
+            hook_protocol: Some(HookProtocol::OpenCodePlugin),
+            hook_events: OPENCODE_HOOK_EVENTS,
+            answer_delivery: CapabilitySupport::Unsupported {
+                reason: "OpenCode tool.execute.before hooks cannot inject additional context into the active session",
+                source: "https://opencode.ai/docs/build/plugins/server#tool-execution",
+            },
+            precompact_context: CapabilitySupport::Supported,
+            instructions: CapabilitySupport::Supported,
+            source: "https://opencode.ai/docs/build/plugins/; https://opencode.ai/docs/instructions",
+        }),
         skills: Some(SkillLocation {
             environment: Some("XDG_CONFIG_HOME"),
             fallback: ".config",
@@ -715,6 +1253,7 @@ adapter_specs! { $;
         }),
         skill_install_roots: SKILL_INSTALL_ROOTS,
         default_account_directory: None,
+        default_account_root_kind: &provenant_core::CredentialKind::Store,
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
@@ -743,12 +1282,13 @@ adapter_specs! { $;
         auth_markers: &["no api key found", "run opencode auth login"],
         shell_prefix: None,
         context_directory_arg: None,
+        ignore_files: &[],
+        indexing_ignore_files: &[],
         compaction_env: None,
         allowance_prefix: Some("opencode-go/"),
         allowance_windows: &["five_hour", "seven_day", "thirty_day"],
         namespaced_models: true,
         chair_switch: false,
-        local_offer_reader: false,
         offered_models: false,
         github_auth: None,
         session_handoff: false,
@@ -759,7 +1299,6 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: true,
         stdout_error_diagnostic: true,
-        drops_unsupported_effort: true,
         model_observation: ModelObservation::SessionDatabase,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -772,8 +1311,12 @@ adapter_specs! { $;
         quota_identity_check: false,
         peer_bootstrap: false,
         quota_model_prefix: Some("opencode-go/"),
-        free_account: Some(("zen", "opencode/")),
+        account_model_plans: &[
+            AccountModelPlan { plan: "go", model_prefix: "opencode-go/", quota: AccountQuota::LocalLedger },
+            AccountModelPlan { plan: "zen", model_prefix: "opencode/", quota: AccountQuota::ObservedRefusals },
+        ],
         free_pool: Some("opencode-free"),
+        drop_unsupported_effort: true,
         pacing_keys: Some(("opencode_free", "opencode_paid")),
         launch: LaunchCapabilities {
             model: true,
@@ -793,9 +1336,11 @@ adapter_specs! { $;
         name: "command",
         family: "command",
         binary: "",
+        install: None,
         skills: None,
         skill_install_roots: &[],
         default_account_directory: None,
+        default_account_root_kind: &provenant_core::CredentialKind::Store,
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
@@ -819,12 +1364,13 @@ adapter_specs! { $;
         auth_markers: &[],
         shell_prefix: None,
         context_directory_arg: None,
+        ignore_files: &[],
+        indexing_ignore_files: &[],
         compaction_env: None,
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
         chair_switch: false,
-        local_offer_reader: false,
         offered_models: false,
         github_auth: None,
         session_handoff: false,
@@ -835,7 +1381,6 @@ adapter_specs! { $;
         exit_route: true,
         stderr_quota: false,
         stdout_error_diagnostic: false,
-        drops_unsupported_effort: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::Command,
         user_sessions: false,
@@ -848,8 +1393,9 @@ adapter_specs! { $;
         quota_identity_check: false,
         peer_bootstrap: false,
         quota_model_prefix: None,
-        free_account: None,
+        account_model_plans: &[],
         free_pool: None,
+        drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: false,
@@ -871,9 +1417,11 @@ adapter_specs! { $;
         name: "host-native",
         family: "host-native",
         binary: "",
+        install: None,
         skills: None,
         skill_install_roots: &[],
         default_account_directory: None,
+        default_account_root_kind: &provenant_core::CredentialKind::Store,
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
@@ -897,12 +1445,13 @@ adapter_specs! { $;
         auth_markers: &[],
         shell_prefix: None,
         context_directory_arg: None,
+        ignore_files: &[],
+        indexing_ignore_files: &[],
         compaction_env: None,
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
         chair_switch: false,
-        local_offer_reader: false,
         offered_models: false,
         github_auth: None,
         session_handoff: false,
@@ -913,7 +1462,6 @@ adapter_specs! { $;
         exit_route: false,
         stderr_quota: false,
         stdout_error_diagnostic: false,
-        drops_unsupported_effort: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::DelegatedAgent,
         user_sessions: false,
@@ -926,8 +1474,9 @@ adapter_specs! { $;
         quota_identity_check: false,
         peer_bootstrap: false,
         quota_model_prefix: None,
-        free_account: None,
+        account_model_plans: &[],
         free_pool: None,
+        drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: false,
@@ -948,9 +1497,11 @@ adapter_specs! { $;
         name: "fixture-provider",
         family: "fixture",
         binary: "fixture-provider",
+        install: None,
         skills: None,
         skill_install_roots: &[],
         default_account_directory: None,
+        default_account_root_kind: &provenant_core::CredentialKind::Store,
         registered_account: false,
         account_config_dir: false,
         account_directory_prefix: None,
@@ -974,12 +1525,13 @@ adapter_specs! { $;
         auth_markers: &[],
         shell_prefix: None,
         context_directory_arg: None,
+        ignore_files: &[],
+        indexing_ignore_files: &[],
         compaction_env: None,
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
         chair_switch: false,
-        local_offer_reader: false,
         offered_models: false,
         github_auth: None,
         session_handoff: false,
@@ -990,7 +1542,6 @@ adapter_specs! { $;
         exit_route: true,
         stderr_quota: false,
         stdout_error_diagnostic: false,
-        drops_unsupported_effort: false,
         model_observation: ModelObservation::Stream,
         named_entry: NamedEntry::None,
         user_sessions: false,
@@ -1003,8 +1554,9 @@ adapter_specs! { $;
         quota_identity_check: false,
         peer_bootstrap: false,
         quota_model_prefix: None,
-        free_account: None,
+        account_model_plans: &[],
         free_pool: None,
+        drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: true,
@@ -1026,71 +1578,27 @@ adapter_specs! { $;
 mod tests {
     use super::*;
 
-    export_adapter_bindings!($; test_adapter_bindings; [];
-        [#[cfg(any())]] [disabled: 0]
-        [] [enabled: 1]
-        [] []
-    );
-
     #[test]
-    fn implementation_bindings_retain_conditional_guards() {
-        macro_rules! names {
-            ($( $(#[$cfg:meta])* $module:ident : $order:literal,)*) => {
-                &[ $( $(#[$cfg])* (stringify!($module), $order), )* ]
-            };
-        }
-        assert_eq!(test_adapter_bindings!(names), &[("enabled", 1)]);
-    }
-
-    #[test]
-    fn account_and_session_policies_preserve_adapter_behavior() {
+    fn account_and_session_facts_are_consistent() {
         for spec in ADAPTER_SPECS {
-            assert_eq!(
-                spec.transcript_account_root,
-                spec.id == Harness::Claude,
+            assert!(
+                !spec.transcript_account_root || spec.registered_account,
                 "{}",
                 spec.name
             );
-            assert_eq!(
-                spec.setup_root,
-                match spec.id {
-                    Harness::Cursor => SetupRoot::Home,
-                    Harness::Opencode => SetupRoot::XdgDataHome,
-                    _ => SetupRoot::None,
-                },
+            assert!(
+                spec.account_directory_prefix.is_none() || spec.registered_account,
                 "{}",
                 spec.name
             );
-            assert_eq!(
-                spec.isolated_login_keychain,
-                spec.id == Harness::Agy,
+            assert!(
+                !spec.shared_account_settings
+                    || (spec.registered_account && spec.account_config_dir),
                 "{}",
                 spec.name
             );
-            assert_eq!(
-                spec.shared_account_settings,
-                spec.id == Harness::Claude,
-                "{}",
-                spec.name
-            );
-            assert_eq!(
-                spec.account_directory_prefix,
-                (spec.id == Harness::Claude).then_some(".claude-"),
-                "{}",
-                spec.name
-            );
-            assert_eq!(
-                spec.copy_sessions_only,
-                spec.id == Harness::Codex,
-                "{}",
-                spec.name
-            );
-            assert_eq!(
-                spec.relocated_session_state,
-                matches!(
-                    spec.id,
-                    Harness::Claude | Harness::Cursor | Harness::Opencode
-                ),
+            assert!(
+                !spec.isolated_login_keychain || spec.local_login,
                 "{}",
                 spec.name
             );
@@ -1138,6 +1646,54 @@ mod tests {
     }
 
     #[test]
+    fn managed_harness_capabilities_are_sourced_and_coherent() {
+        for spec in ADAPTER_SPECS {
+            let Some(install) = spec.install else {
+                continue;
+            };
+            assert!(!install.home.is_empty(), "{}", spec.name);
+            assert!(!install.config.is_empty(), "{}", spec.name);
+            assert!(!install.source.is_empty(), "{}", spec.name);
+            assert_eq!(
+                install.hooks.is_supported(),
+                install.hook_file.is_some(),
+                "{}",
+                spec.name
+            );
+            assert_eq!(
+                install.instructions.is_supported(),
+                install.instruction.is_some(),
+                "{}",
+                spec.name
+            );
+            for support in [
+                install.hooks,
+                install.instructions,
+                install.answer_delivery,
+                install.precompact_context,
+            ] {
+                if let CapabilitySupport::Unsupported { reason, source } = support {
+                    assert!(!reason.trim().is_empty(), "{}", spec.name);
+                    assert!(!source.trim().is_empty(), "{}", spec.name);
+                }
+            }
+            assert_eq!(
+                spec.launch.default_network,
+                NetworkAccess::Open,
+                "{}",
+                spec.name
+            );
+            for network in ALL_NETWORK {
+                assert!(spec.launch.network.contains(network), "{}", spec.name);
+            }
+            assert!(
+                spec.launch.write,
+                "managed providers share worktree-write capability"
+            );
+        }
+    }
+
+    #[test]
     fn adapter_specs_are_unique_and_match_typed_identities() {
         for spec in ADAPTER_SPECS {
             assert_eq!(
@@ -1177,28 +1733,44 @@ mod account_tests {
     }
 
     #[test]
-    fn only_agy_has_an_unregistered_local_account() {
+    fn unregistered_local_accounts_follow_registered_local_login_facts() {
         for spec in ADAPTER_SPECS {
-            assert_eq!(
-                spec.is_unregistered_local("local"),
-                spec.name == "agy",
-                "{}",
-                spec.name
-            );
-            assert!(!spec.is_unregistered_local("agy-google-fixture"));
+            let has_local_account = spec.registered_account && spec.local_login;
+            for (key, expected) in [("local", has_local_account), ("fixture-account", false)] {
+                assert_eq!(
+                    spec.is_unregistered_local(key),
+                    expected,
+                    "{}: {key}",
+                    spec.name
+                );
+            }
         }
     }
 }
 
 #[cfg(test)]
-mod free_account_tests {
+mod account_plan_tests {
     #[test]
-    fn zen_account_does_not_serve_go_models() {
-        let spec = super::AdapterSpec::get("opencode").unwrap();
-        assert!(spec.account_serves_model("zen", "opencode/beam-free"));
-        assert!(!spec.account_serves_model("go", "opencode/beam-free"));
-        assert!(spec.account_serves_model("go", "opencode-go/mimo-v2.6-flash"));
-        assert!(!spec.account_serves_model("zen", "opencode-go/mimo-v2.6-flash"));
+    fn registered_plan_partitions_follow_the_adapter_declaration() {
+        for spec in super::ADAPTER_SPECS {
+            for plan in spec.account_model_plans {
+                let model = format!("{}fixture", plan.model_prefix);
+                assert!(spec.account_serves_model(Some(plan.plan), &model));
+                assert_eq!(
+                    spec.is_free_plan(Some(plan.plan)),
+                    plan.quota == super::AccountQuota::ObservedRefusals
+                );
+                assert!(spec.account_serves_model(None, &model));
+                assert!(spec.account_serves_model(Some("unrecognised"), &model));
+                for other in spec
+                    .account_model_plans
+                    .iter()
+                    .filter(|other| other.plan != plan.plan)
+                {
+                    assert!(!spec.account_serves_model(Some(other.plan), &model));
+                }
+            }
+        }
     }
 }
 
@@ -1248,18 +1820,6 @@ mod launch_tests {
     }
 
     #[test]
-    fn image_input_capability_matches_native_delivery() {
-        for spec in ADAPTER_SPECS {
-            assert_eq!(
-                spec.launch.image_input,
-                matches!(spec.name, "claude" | "codex"),
-                "{}",
-                spec.name
-            );
-        }
-    }
-
-    #[test]
     fn launch_table_is_checked_per_adapter() {
         // (adapter, effort, resume, network, write, refused field)
         let effort = Some("high");
@@ -1298,46 +1858,74 @@ mod launch_tests {
                 ..Default::default()
             })
             .unwrap_err();
-        assert_eq!(error.to_string(), "cursor does not support effort");
+        assert_eq!(error.adapter, "cursor");
+        assert_eq!(error.field, LaunchField::Effort);
     }
 
     #[test]
-    fn unsupported_modes_are_refused_by_field() {
-        let narrow = AdapterSpec {
-            launch: LaunchCapabilities {
-                model: true,
-                default_network: NetworkAccess::Open,
-                resume: false,
-                network: &[NetworkAccess::Provider],
-                write: false,
-                ..ADAPTER_SPECS[0].launch
-            },
-            ..ADAPTER_SPECS[0]
-        };
-        for (request, field) in [
-            (
-                LaunchRequest {
-                    resume: true,
-                    ..Default::default()
-                },
-                LaunchField::Resume,
-            ),
-            (
-                LaunchRequest {
-                    network: Some(NetworkAccess::Local),
-                    ..Default::default()
-                },
-                LaunchField::Network,
-            ),
-            (
-                LaunchRequest {
-                    write: true,
-                    ..Default::default()
-                },
-                LaunchField::Write,
-            ),
-        ] {
-            assert_eq!(narrow.check_launch(&request).unwrap_err().field, field);
+    fn declared_unsupported_modes_are_refused_by_field() {
+        for spec in ADAPTER_SPECS {
+            let capabilities = spec.launch;
+            let cases = [
+                (
+                    LaunchRequest {
+                        model: Some("fixture/model"),
+                        ..Default::default()
+                    },
+                    capabilities.model,
+                    LaunchField::Model,
+                ),
+                (
+                    LaunchRequest {
+                        effort: Some("high"),
+                        ..Default::default()
+                    },
+                    capabilities.effort,
+                    LaunchField::Effort,
+                ),
+                (
+                    LaunchRequest {
+                        resume: true,
+                        ..Default::default()
+                    },
+                    capabilities.resume,
+                    LaunchField::Resume,
+                ),
+                (
+                    LaunchRequest {
+                        write: true,
+                        ..Default::default()
+                    },
+                    capabilities.write,
+                    LaunchField::Write,
+                ),
+                (
+                    LaunchRequest {
+                        skill_location: true,
+                        ..Default::default()
+                    },
+                    spec.skills.is_some(),
+                    LaunchField::SkillLocation,
+                ),
+            ];
+            for (request, supported, field) in cases {
+                if !supported {
+                    assert_eq!(spec.check_launch(&request).unwrap_err().field, field);
+                }
+            }
+            for network in ALL_NETWORK {
+                if !capabilities.network.contains(network) {
+                    assert_eq!(
+                        spec.check_launch(&LaunchRequest {
+                            network: Some(*network),
+                            ..Default::default()
+                        })
+                        .unwrap_err()
+                        .field,
+                        LaunchField::Network
+                    );
+                }
+            }
         }
     }
 }

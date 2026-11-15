@@ -13,6 +13,9 @@ The `deliver` template runs a writer through CI, review, repair and landing;
 `implement` is one slice, `implement.fix` a known defect and `batch` disjoint
 slices into one integration branch. `orchestrate` holds the command shapes.
 
+Engineering stance: apply the [engineering stance](references/engineering.md)
+to design, review and tests, weighing alternatives and recording the reason.
+
 ## The brief
 
 The writer sees only the brief: the issue, the criteria, the files and owners
@@ -29,12 +32,13 @@ an unknown cause, the refactor rules below for restructuring.
   Report every changed or removed test with its reason.
 - Update the owned docs in the same pull request; a settled decision moves to
   its durable home (`engineering-docs`).
-- Keep compatibility only for published contracts. Otherwise change the
-  callers and delete the old path; persisted state changes ship a migration.
+- Move every caller and delete the old shape without compatibility code. Follow
+  the owning repository's format policy for persisted state changes.
 - Report checks that did not run as unverified, never as passing.
 - When the spec is wrong, cite the evidence in the handoff `decisions` and take
-  the smallest option inside write scope that serves the outcome. If none
-  exists, return the evidence to `scope`.
+  the best-evidenced option within write scope. Compare the structural option
+  with a smaller one and record the choice. If neither serves the outcome,
+  return the evidence to `scope`.
 
 ## Refactors
 
@@ -43,8 +47,8 @@ a reviewed codemod for uniform changes across many sites, a differential run or
 characterisation tests. Record the baseline so another agent can repeat it.
 Land a shared seam first, then the large change under the same oracle with
 disjoint write scopes. Delete the old path in the same change; no shims, legacy
-readers or fallbacks. A temporary strangler is for live traffic or persisted
-data on the move, with an expiry. Stop on an unexplained oracle failure or a
+readers or fallbacks. Move every caller and delete the old shape. Stop on an
+unexplained oracle failure or a
 discovered behaviour change. Report the ownership and dependency delta.
 
 ## Judging review findings

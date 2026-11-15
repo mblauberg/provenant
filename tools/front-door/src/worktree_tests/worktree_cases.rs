@@ -1,73 +1,159 @@
 use super::*;
 
-pub(super) fn project_setup_runs_once_and_failure_retains_the_worktree() -> Result {
+pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Result {
     let rig = repository()?;
-    let (roots, execution) = writer_context(&rig)?;
-    let config = rig.state.join("config.toml");
-    let marker_path = rig.state.join("setup-runs");
-    let setup = format!(
-        "pwd >> '{}'",
-        marker_path
-            .to_str()
-            .ok_or("marker path")?
-            .replace('\'', "'\"'\"'")
-    );
+    let (roots, _execution) = writer_context(&rig)?;
+    let marker_path = rig.state.join("post-create-runs");
+    let marker = marker_path.to_str().ok_or("marker path")?.to_owned();
+    let mut ports = provenant_config::PortTable::builtin();
+    ports.naming = provenant_config::Port {
+        source: provenant_records::PortSource::Project,
+        backend: provenant_config::PortBackend::Command {
+            command: provenant_records::PortCommand {
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    r#"printf 'derived-%s\n' "$1""#.into(),
+                    "--".into(),
+                ],
+                exit_codes: provenant_records::CommandExitCodes {
+                    success: vec![0],
+                    unknown: vec![],
+                    other: provenant_records::ExitDisposition::Refused,
+                },
+            },
+        },
+    };
+    ports.post_create = provenant_config::Port {
+        source: provenant_records::PortSource::Project,
+        backend: provenant_config::PortBackend::Command {
+            command: provenant_records::PortCommand {
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    r#"printf '%s\n' "$3" >> "$1""#.into(),
+                    "--".into(),
+                    marker.clone(),
+                ],
+                exit_codes: provenant_records::CommandExitCodes {
+                    success: vec![0],
+                    unknown: vec![],
+                    other: provenant_records::ExitDisposition::Refused,
+                },
+            },
+        },
+    };
+    fs::create_dir_all(rig.project.join(".provenant"))?;
     fs::write(
-        &config,
-        format!(
-            "schema_version = 1\n[worktrees]\nsetup = ['exit 42']\n[worktrees.projects.{}]\nsetup = [{}]\n",
-            execution.project_id,
-            serde_json::to_string(&setup)?
-        ),
+        rig.project.join(provenant_config::PORTS_CONFIG),
+        serde_json::to_vec(&ports)?,
     )?;
     let created = ok(
         &rig,
         &["worktree", "create", "setup", "--base", "HEAD", "--json"],
     )?;
-    let path = rig.project.join(".worktrees/setup");
-    let marker = fs::read(&marker_path)?;
+    let path = rig.project.join(".worktrees/derived-setup");
+    let marker_bytes = fs::read(&marker_path)?;
     assert_eq!(
-        fs::canonicalize(String::from_utf8(marker.clone())?.trim())?,
+        fs::canonicalize(String::from_utf8(marker_bytes.clone())?.trim())?,
         fs::canonicalize(&path)?
     );
     let context = provenant_cli::fabric::Context::open(roots, &rig.home, &rig.project)?;
     let clock = provenant_os::clock::SystemClock;
     let cancel = provenant_core::CancelToken::new();
-    // Writer provisioning reuses this checkout without executing setup again.
+    // Writer provisioning reuses this checkout without executing the hook again.
     provenant_cli::fabric::graph_relay::provision_writer(
         &context,
-        ".worktrees/setup",
-        "setup",
+        ".worktrees/derived-setup",
+        "derived-setup",
         created["data"]["head"].as_str().ok_or("created head")?,
         provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
         &cancel,
     )?;
-    assert_eq!(fs::read(&marker_path)?, marker);
+    assert_eq!(fs::read(&marker_path)?, marker_bytes);
+    let inventory = provenant_config::port_command_receipts(&rig.state)?;
+    assert!(inventory.complete, "{:?}", inventory.issues);
+    for (owner, phase) in [("naming", "derive"), ("post_create", "create")] {
+        let receipt = &inventory
+            .entries
+            .iter()
+            .find(|entry| entry.receipt.owner == owner && entry.receipt.phase == phase)
+            .ok_or("missing setup command receipt")?
+            .receipt;
+        assert_eq!(receipt.source, provenant_records::PortSource::Project);
+        assert_eq!(
+            receipt.backend,
+            provenant_records::PortCommandBackend::RepositoryCommand
+        );
+        assert_eq!(
+            receipt.lifetime,
+            provenant_records::PortReceiptLifetime::AgeDays {
+                days: provenant_config::DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS,
+            }
+        );
+    }
+
+    ports.naming.backend = provenant_config::PortBackend::Command {
+        command: provenant_records::PortCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'bad\\nbranch\\n'".into(),
+            ],
+            exit_codes: provenant_records::CommandExitCodes {
+                success: vec![0],
+                unknown: vec![],
+                other: provenant_records::ExitDisposition::Refused,
+            },
+        },
+    };
+    ports.post_create.backend = provenant_config::PortBackend::Command {
+        command: provenant_records::PortCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'port failure\n' >&2; exit 7".into(),
+            ],
+            exit_codes: provenant_records::CommandExitCodes {
+                success: vec![0],
+                unknown: vec![],
+                other: provenant_records::ExitDisposition::Refused,
+            },
+        },
+    };
     fs::write(
-        &config,
-        "schema_version = 1\n[worktrees]\nsetup = ['echo setup-tail >&2; exit 7', 'touch must-not-run']\n",
+        rig.project.join(provenant_config::PORTS_CONFIG),
+        serde_json::to_vec(&ports)?,
     )?;
-    let failed = ok(
+    // Omit --base to exercise the default-remote discovery re-entry.
+    let remote = rig
+        .project
+        .parent()
+        .ok_or("fixture parent")?
+        .join("naming-origin.git");
+    let remote_text = remote.to_str().ok_or("fixture remote path")?;
+    git(
         &rig,
-        &[
-            "worktree",
-            "create",
-            "setup-failure",
-            "--base",
-            "HEAD",
-            "--json",
-        ],
+        &["init", "--bare", "--initial-branch=main", remote_text],
     )?;
-    assert!(
-        failed["data"]["warnings"]
-            .as_array()
-            .is_some_and(|warnings| warnings.iter().any(|warning| warning
-                .as_str()
-                .is_some_and(|text| text.contains("setup-tail"))))
-    );
+    git(&rig, &["remote", "add", "origin", remote_text])?;
+    git(&rig, &["push", "-u", "origin", "main"])?;
+    let failed = ok(&rig, &["worktree", "create", "setup-failure", "--json"])?;
+    let warnings = failed["data"]["warnings"]
+        .as_array()
+        .ok_or("worktree warnings are not an array")?;
+    assert!(warnings.iter().any(|warning| {
+        warning
+            .as_str()
+            .is_some_and(|text| text.contains("naming hook returned an invalid derived branch"))
+    }));
+    assert!(warnings.iter().any(|warning| {
+        warning
+            .as_str()
+            .is_some_and(|text| text.contains("post-create command returned Refused"))
+    }));
     let retained = rig.project.join(".worktrees/setup-failure");
     assert!(retained.join(".git").is_file());
-    assert!(!retained.join("must-not-run").exists());
     assert!(
         !git(
             &rig,
@@ -207,7 +293,7 @@ pub(super) fn create_list_and_remove_a_managed_worktree() -> Result {
     );
     ok(&rig, &["gc", "--apply", "--json"])?;
     assert!(!orphan.exists(), "gc must still sweep orphaned caches");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 pub(super) fn existing_branch_with_base_names_the_repair_in_json_and_human_output() -> Result {
@@ -283,7 +369,7 @@ pub(super) fn merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees() -
         assert_eq!(code(&refused), 1);
         assert_eq!(json(&refused)?["status"], "refused");
         assert!(dirty.join("precious").is_file());
-        rig.assert_legacy_unchanged()?;
+        rig.assert_v1_root_untouched()?;
     }
     Ok(())
 }
@@ -330,7 +416,7 @@ pub(super) fn remove_by_name_deletes_a_branch_fully_contained_in_integration() -
         serde_json::json!(["behind"])
     );
     assert!(!has_branch(&rig, "behind")?);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 pub(super) fn remove_resolves_directory_names_and_remote_integration_refs() -> Result {
@@ -439,9 +525,10 @@ pub(super) fn remove_resolves_directory_names_and_remote_integration_refs() -> R
     assert_eq!(result["data"]["pruned_refs"], serde_json::json!(["swept"]));
     assert!(!has_branch(&rig, "swept")?);
     assert_eq!(git(&rig, &["rev-parse", "HEAD"])?, stale);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
+// Spec: docs/specs/supervisor.md#one-writer-removal-never-forces
 pub(super) fn remove_by_name_follows_the_branch_merge_state() -> Result {
     let rig = repository()?;
     let merged = branch_commit(&rig, "merged")?;
@@ -451,10 +538,7 @@ pub(super) fn remove_by_name_follows_the_branch_merge_state() -> Result {
     let dirty_head = git(&rig, &["rev-parse", "dirty"])?;
     fs::write(dirty.join("precious"), "uncommitted work")?;
 
-    let refused = command(
-        &rig,
-        &["worktree", "remove", "dirty", "--discard", "--json"],
-    )?;
+    let refused = command(&rig, &["worktree", "remove", "dirty", "--json"])?;
     assert_eq!(code(&refused), 1);
     assert_eq!(json(&refused)?["status"], "refused");
     assert!(has_branch(&rig, "dirty")?);
@@ -468,27 +552,34 @@ pub(super) fn remove_by_name_follows_the_branch_merge_state() -> Result {
     assert!(!merged.exists());
     assert!(!has_branch(&rig, "merged")?);
 
-    let kept = ok(&rig, &["worktree", "remove", "unmerged", "--json"])?;
-    assert!(
-        kept["data"]["pruned_refs"]
-            .as_array()
-            .is_some_and(Vec::is_empty)
-    );
-    assert_eq!(kept["data"]["retained"][0]["branch"], "unmerged");
-    assert_eq!(kept["data"]["retained"][0]["reason"], "not_merged");
-    assert!(!unmerged.exists());
+    // Work held only by its own branch is not proven preserved elsewhere, so
+    // removal without discard refuses and leaves the tree and branch intact.
+    let kept = command(&rig, &["worktree", "remove", "unmerged", "--json"])?;
+    assert_eq!(code(&kept), 1);
+    assert_eq!(json(&kept)?["status"], "refused");
+    assert!(unmerged.exists());
     assert!(has_branch(&rig, "unmerged")?);
 
-    fs::remove_file(dirty.join("precious"))?;
     let discarded = ok(
         &rig,
         &["worktree", "remove", "dirty", "--discard", "--json"],
     )?;
     assert_eq!(discarded["data"]["discarded"][0]["branch"], "dirty");
     assert_eq!(discarded["data"]["discarded"][0]["head"], dirty_head);
+    let archive = discarded["data"]["archives"]
+        .as_array()
+        .and_then(|archives| archives.iter().find(|archive| archive["tip"] == dirty_head))
+        .and_then(|archive| archive["path"].as_str())
+        .ok_or("discard must preserve the dirty work in an archive")?;
+    let untracked = fs::read(Path::new(archive).join("untracked.tar"))?;
+    assert!(
+        untracked
+            .windows(b"uncommitted work".len())
+            .any(|bytes| bytes == b"uncommitted work")
+    );
     assert!(!dirty.exists());
     assert!(!has_branch(&rig, "dirty")?);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 pub(super) fn merged_pruning_deletes_a_merged_branch_without_a_worktree() -> Result {
@@ -512,7 +603,7 @@ pub(super) fn merged_pruning_deletes_a_merged_branch_without_a_worktree() -> Res
     )?;
     assert_eq!(pruned["data"]["pruned_refs"], serde_json::json!(["stale"]));
     assert!(!has_branch(&rig, "stale")?);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 pub(super) fn dispatch_into_git_worktree_without_prior_state() -> Result {

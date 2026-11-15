@@ -168,23 +168,26 @@
         );
     }
     #[test]
-    fn override_references_resolve_and_registered_labels_precede_derived_accounts() {
+    fn override_references_resolve_only_registered_identities() {
         use provenant_providers::accounts::Settings;
         use provenant_routing::RoutingConfig;
         let settings: Settings = serde_json::from_value(serde_json::json!({"entries": {
             "one": {"adapter":"claude", "label":"office", "key":"shared", "directory":"/tmp/a"},
             "two": {"adapter":"codex", "label":"other", "key":"shared", "directory":"/tmp/b"},
-            "three": {"adapter":"opencode", "label":"zen", "key":"work", "directory":"/tmp/c"}
+            "three": {"adapter":"opencode", "label":"zen", "key":"work", "directory":"/tmp/c"},
+            "four": {"adapter":"opencode", "label":"go", "key":"go", "directory":"/tmp/d"}
         }}))
         .unwrap();
         assert_eq!(
             super::resolve_account_reference("zen", "test", &settings).unwrap(),
             "opencode/work"
         );
-        assert_eq!(
-            super::resolve_account_reference("opencode/zen", "test", &settings).unwrap(),
-            "opencode/zen"
-        );
+        assert!(matches!(super::resolve_account_reference("opencode/zen", "test", &settings),
+            Err(super::EdgeError::AccountProfile { kind: super::AccountProfileError::Unknown, .. })));
+        for entry in settings.entries.values() {
+            let reference = format!("{}/{}", entry.adapter, entry.key);
+            assert_eq!(super::resolve_account_reference(&reference, "test", &settings).unwrap(), reference);
+        }
         assert!(matches!(
             super::resolve_account_reference("shared", "test", &settings),
             Err(super::EdgeError::AccountProfile {
@@ -259,7 +262,7 @@
     }
 
     #[test]
-    fn go_floor_gates_explicit_pool_and_fallback_dispatch() -> Result<(), Box<dyn Error>> {
+    fn go_allowance_preference_never_refuses_a_ready_dispatch() -> Result<(), Box<dyn Error>> {
         use std::os::unix::fs::PermissionsExt;
         struct Resolver;
         impl provenant_core::PathResolver for Resolver {
@@ -296,6 +299,7 @@
             fixture_ref: "fixture".into(),
             catalogue_revision: catalogue.revision().into(),
             account_key: Some("go".into()),
+            plan: Some("go".into()),
             observed_models: vec![
                 "opencode-go/glm-5.3-flash".into(),
                 "opencode-go/deepseek-v4.1-flash".into(),
@@ -334,104 +338,25 @@
                 &[],
             )
         };
-        let preview = super::Route::Resolve(super::RouteResolve {
-            writes: false,
-            account: None,
-            name: None,
-            request: super::RouteRequest {
-                read_heavy: false,
-                model: Some(super::Model("opencode/opencode-go/glm-5.3-flash".into())),
-                route: None,
-                effort: None,
-                confidential: false,
-                fallback: vec![],
-                exclude: vec![],
-            },
-        });
-        match super::execute(&preview, &roots, provenant_core::WallTime::from_micros(0)?) {
-            Err(error) => assert!(error.to_string().contains("$60")),
-            Ok(_) => panic!("preview must refuse the model"),
+        for floor in [61, 1_000] {
+            std::fs::write(
+                &path,
+                format!(
+                    "schema_version=1\n[domains.routing.pools]\ntest=[{{model='opencode/opencode-go/glm-5.3-flash',weight=1}}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd={floor}\n"
+                ),
+            )?;
+            for query in [
+                request(Some("opencode/opencode-go/glm-5.3-flash"), None)?,
+                request(None, Some("test"))?,
+            ] {
+                let selected = resolve(&query)?;
+                assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
+                assert!(super::check_dispatch_candidate(&roots, &selected, super::REGISTRY).is_ok());
+                let warnings = &selected.diagnostics.account_load.as_ref().ok_or("load")?.warnings;
+                assert!(!warnings.is_empty());
+                assert!(warnings.iter().any(|warning| warning.contains("source=config")));
+            }
         }
-        let error =
-            resolve(&request(Some("opencode/opencode-go/glm-5.3-flash"), None)?).unwrap_err();
-        let error = error.to_string();
-        assert!(error.contains("glm-5.3-flash") && error.contains("$60"));
-        // Isolate catalogue eligibility from the independent allowance floor.
-        let floor_config = std::fs::read_to_string(&path)?;
-        std::fs::write(
-            &path,
-            floor_config.replace(
-                "min_monthly_allowance_usd=61",
-                "min_monthly_allowance_usd=0",
-            ),
-        )?;
-        for model in ["opencode-go/unlisted", "opencode-go/glm-5.2"] {
-            let resolved = resolve(&request(Some(&format!("opencode/{model}")), None)?)?;
-            assert_eq!(resolved.model, model);
-            assert_eq!(resolved.eligibility, RouteEligibility::UnverifiedModel);
-        }
-        std::fs::write(&path, floor_config)?;
-        let fallback = |model: Option<&str>, route: Option<&str>| -> Result<(), Box<dyn Error>> {
-            let request = super::RouteRequest {
-                read_heavy: false,
-                model: model.map(|m| super::Model(m.into())),
-                route: route.map(str::to_owned),
-                effort: None,
-                confidential: false,
-                fallback: vec![super::Model(
-                    "opencode/opencode-go/deepseek-v4.1-flash".into(),
-                )],
-                exclude: vec![],
-            };
-            let resolved = resolve(&request.to_domain()?)?;
-            assert!(super::check_dispatch_candidate(&roots, &resolved, super::REGISTRY).is_err());
-            assert_eq!(
-                resolved.alternatives.as_slice()[0].model,
-                "opencode-go/deepseek-v4.1-flash"
-            );
-            Ok(())
-        };
-        fallback(Some("opencode/opencode-go/glm-5.3-flash"), None)?;
-        std::fs::write(
-            &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/glm-5.3-flash',weight=1}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=61\n",
-        )?;
-        fallback(None, Some("test"))?;
-        std::fs::write(
-            &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/glm-5.3-flash',weight=1},{model='opencode/opencode-go/deepseek-v4.1-flash',weight=1}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=100\n",
-        )?;
-        let error = resolve(&request(None, Some("test"))?)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("glm-5.3-flash") && error.contains("deepseek-v4.1-flash"),
-            "{error}"
-        );
-        std::fs::write(
-            &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/glm-5.3-flash',weight=1},{model='opencode/opencode-go/deepseek-v4.1-flash',weight=0}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=61\n",
-        )?;
-        let selected = resolve(&request(None, Some("test"))?)?;
-        assert_eq!(selected.model, "opencode-go/deepseek-v4.1-flash");
-        assert!(
-            selected.pool_selection.as_ref().unwrap().redraws[0]
-                .reason
-                .contains("$60")
-        );
-        let mut candidate = selected.clone();
-        candidate.model = "opencode-go/unlisted".into();
-        assert!(
-            super::check_dispatch_candidate(&roots, &candidate, super::REGISTRY)
-                .unwrap_err()
-                .contains("unknown")
-        );
-        candidate.model = "opencode-go/glm-5.3-flash".into();
-        assert!(
-            super::check_dispatch_candidate(&roots, &candidate, super::REGISTRY)
-                .unwrap_err()
-                .contains("$60")
-        );
         Ok(())
     }
 
@@ -461,13 +386,13 @@
             ("fresh", QuotaStatus::Available),
             ("exhausted", QuotaStatus::Exhausted),
         ] {
-            let account = AccountScope {
+            let account = AccountScope { extra: Default::default(),
                 adapter: "codex".into(),
                 account_key: key.into(),
                 label: key.into(),
             };
             let mut record = AccountRecord::empty(account.clone());
-            record.snapshot = Some(QuotaSnapshot {
+            record.snapshot = Some(QuotaSnapshot { extra: Default::default(),
                 schema_version: 1,
                 account,
                 revision: 0,
@@ -496,6 +421,7 @@
                 fixture_ref: "fixture".into(),
                 catalogue_revision: catalogue.revision().into(),
                 account_key: Some(key.into()),
+                plan: None,
                 observed_models: Vec::new(),
                 observed_unix_seconds: now,
                 expires_unix_seconds: now + 300,
@@ -561,13 +487,13 @@
             ("exhausted", QuotaStatus::Exhausted),
             ("fresh", QuotaStatus::Available),
         ] {
-            let account = AccountScope {
+            let account = AccountScope { extra: Default::default(),
                 adapter: "codex".into(),
                 account_key: key.into(),
                 label: key.into(),
             };
             let mut record = AccountRecord::empty(account.clone());
-            record.snapshot = Some(QuotaSnapshot {
+            record.snapshot = Some(QuotaSnapshot { extra: Default::default(),
                 schema_version: 1,
                 account,
                 revision: 0,
@@ -596,6 +522,7 @@
                 fixture_ref: "fixture".into(),
                 catalogue_revision: catalogue.revision().into(),
                 account_key: Some(key.into()),
+                plan: None,
                 observed_models: Vec::new(),
                 observed_unix_seconds: now,
                 expires_unix_seconds: now + 300,
@@ -696,6 +623,7 @@
                 fixture_ref: "fixture".into(),
                 catalogue_revision: catalogue.revision().into(),
                 account_key: Some(key.into()),
+                plan: None,
                 observed_models: vec!["gpt-6-luna".into()],
                 observed_unix_seconds: now,
                 expires_unix_seconds: now + 300,
@@ -768,7 +696,7 @@
         assert!(preview.provider_refusals.iter().any(|reason| reason.contains(&spent) && reason.contains("scoped provider refusal")), "{:?}", preview.provider_refusals);
         // A refusal written after resolution still stops the launch.
         let error = super::check_dispatch_candidate(&roots, &drawn, super::REGISTRY).unwrap_err();
-        assert!(error.contains("scoped provider refusal"), "{error}");
+        assert!(matches!(error, super::EdgeError::Quota(provenant_quota::QuotaError::Refused(_))));
         let redrawn = resolve(None)?;
         assert!(super::check_dispatch_candidate(&roots, &redrawn, super::REGISTRY).is_ok());
         assert_eq!(redrawn.model, "gpt-6-luna");
@@ -795,13 +723,13 @@
     #[test]
     fn exhausted_go_plan_binds_only_go_models() -> Result<(), Box<dyn Error>> {
         use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus};
-        let account = AccountScope {
+        let account = AccountScope { extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             label: "go".into(),
         };
         let mut record = AccountRecord::empty(account.clone());
-        record.snapshot = Some(QuotaSnapshot {
+        record.snapshot = Some(QuotaSnapshot { extra: Default::default(),
             schema_version: 1,
             account,
             revision: 0,
@@ -809,7 +737,7 @@
             observed_unix_seconds: 100,
             source_ref: "fixture".into(),
             authority_ref: None,
-            details: None,
+            details: Some(provenant_quota::QuotaDetails { plan: Some("go".into()), ..Default::default() }),
             windows: Vec::new(),
         });
         let availability = [provenant_providers::AvailabilityRecord {
@@ -821,6 +749,7 @@
             fixture_ref: "fixture".into(),
             catalogue_revision: "fixture".into(),
             account_key: Some("go".into()),
+            plan: Some("go".into()),
             observed_models: vec![
                 "opencode-go/glm-5.1".into(),
                 "opencode/glm-5.3-flash-free".into(),
@@ -850,13 +779,13 @@
     #[test]
     fn observed_display_names_with_spaces_are_skipped() -> Result<(), Box<dyn Error>> {
         use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus};
-        let account = AccountScope {
+        let account = AccountScope { extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             label: "go".into(),
         };
         let mut record = AccountRecord::empty(account.clone());
-        record.snapshot = Some(QuotaSnapshot {
+        record.snapshot = Some(QuotaSnapshot { extra: Default::default(),
             schema_version: 1,
             account,
             revision: 0,
@@ -864,7 +793,7 @@
             observed_unix_seconds: 100,
             source_ref: "fixture".into(),
             authority_ref: None,
-            details: None,
+            details: Some(provenant_quota::QuotaDetails { plan: Some("go".into()), ..Default::default() }),
             windows: Vec::new(),
         });
         let availability = [provenant_providers::AvailabilityRecord {
@@ -876,6 +805,7 @@
             fixture_ref: "fixture".into(),
             catalogue_revision: "fixture".into(),
             account_key: Some("go".into()),
+            plan: Some("go".into()),
             observed_models: vec!["opencode-go/glm-5.1".into(), "opencode-go/GPT-OSS 120B (Medium)".into()],
             observed_unix_seconds: 100,
             expires_unix_seconds: 200,
@@ -892,11 +822,15 @@
 
     fn resolved(adapter: &str, model: &str, roll: u64) -> ResolvedRoute {
         let readiness = RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 200,
         };
         ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
             extra: Default::default(),
             adapter: adapter.into(),
             model: model.into(),
@@ -913,9 +847,16 @@
                 evidence_ref: "fixture".into(),
             },
             pool_selection: Some(RouteSelectionReceipt {
+                selection_rule: provenant_records::route_selection::SelectionRule::WeightedDraw,
+                considered_exclusions: Vec::new(),
+                exploration: provenant_records::route_selection::Exploration {
+    extra: Default::default(), selected: false, percent: 0, enabled: false, source: "fixture".into() },
+                weight_source: provenant_records::route_selection::WeightSource::Catalogue,
+                account_load: None,
                 extra: Default::default(),
                 pool: "junior".into(),
                 candidates: vec![RouteSelectionCandidate {
+                    ranking: Default::default(),
                     extra: Default::default(),
                     pacing_detail: None,
                     model: format!("{adapter}/{model}"),

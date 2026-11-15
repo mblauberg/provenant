@@ -1,8 +1,10 @@
 //! Composition of bounded, host-owned inbox pages.
 use provenant_core::{HostId, HumanRequestId};
-use provenant_fabric_runtime::inbox::InboxResult;
+use provenant_fabric_runtime::inbox::{
+    InboxPeerCoverage, InboxPeerState, InboxProject, InboxProjectPath, InboxResult,
+};
 use provenant_records::inbox::HumanRequest;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::BTreeSet;
 
 /// The result of a peer read, supplied by the transport adapter.
@@ -29,7 +31,7 @@ fn is_format(c: char) -> bool {
 /// A peer-supplied project label is display text only: a string, with control
 /// and Unicode format characters (such as bidi overrides) removed and at most
 /// 128 characters. Anything else is null.
-fn peer_label(value: &Value) -> Value {
+fn peer_label(value: &Value) -> Option<String> {
     let label: String = value
         .as_str()
         .map(|text| {
@@ -39,11 +41,7 @@ fn peer_label(value: &Value) -> Value {
                 .collect()
         })
         .unwrap_or_default();
-    if label.is_empty() {
-        Value::Null
-    } else {
-        Value::String(label)
-    }
+    (!label.is_empty()).then_some(label)
 }
 
 /// The configured host is authoritative for the identities in its reply.
@@ -64,11 +62,14 @@ pub fn compose_inbox(
     peers: Vec<PeerInbox>,
 ) -> Result<InboxResult, &'static str> {
     let InboxResult::Listed {
-        mut extra,
+        extra,
         mut items,
         next_cursor,
         truncated,
         coverage,
+        mut projects,
+        peers: mut report,
+        ..
     } = local
     else {
         return Err("invalid local inbox");
@@ -77,44 +78,56 @@ pub fn compose_inbox(
         .iter()
         .map(|item| (item.owner_host, item.id))
         .collect();
-    let mut projects = match extra.remove("projects") {
-        Some(Value::Object(projects)) => projects,
-        _ => Default::default(),
-    };
-    let mut report = Vec::new();
     let mut hosts = BTreeSet::new();
     for peer in peers {
         let (host, label) = (peer.host, peer.label);
-        let entry = |state: &str, counts: [usize; 3], truncated: bool, reason: Option<&str>| {
-            let mut entry = json!({"host":host,"label":label,"state":state,
-                "included":counts[0],"invalid_rows":counts[1],"duplicate_rows":counts[2],
-                "truncated":truncated});
-            if let Some(reason) = reason {
-                entry["reason"] = json!(reason);
-            }
-            entry
-        };
+        let entry =
+            |state, counts: [usize; 3], truncated: bool, reason: Option<&str>| InboxPeerCoverage {
+                host,
+                label: label.clone(),
+                state,
+                included: counts[0],
+                invalid_rows: counts[1],
+                duplicate_rows: counts[2],
+                truncated,
+                reason: reason.map(str::to_owned),
+            };
         if !hosts.insert(host) {
-            report.push(entry("partial", [0; 3], false, Some("duplicate_host")));
+            report.push(entry(
+                InboxPeerState::Partial,
+                [0; 3],
+                false,
+                Some("duplicate_host"),
+            ));
             continue;
         }
         let page = match peer.observation {
             InboxObservation::Refused(reason) => {
-                report.push(entry("partial", [0; 3], false, Some(reason)));
+                report.push(entry(InboxPeerState::Partial, [0; 3], false, Some(reason)));
                 continue;
             }
             InboxObservation::Unreachable(reason) => {
-                report.push(entry("unreachable", [0; 3], false, Some(reason)));
+                report.push(entry(
+                    InboxPeerState::Unreachable,
+                    [0; 3],
+                    false,
+                    Some(reason),
+                ));
                 continue;
             }
             InboxObservation::Unsupported => {
-                report.push(entry("unsupported", [0; 3], false, None));
+                report.push(entry(InboxPeerState::Unsupported, [0; 3], false, None));
                 continue;
             }
             InboxObservation::Page(page) => page,
         };
         let Some(rows) = page["items"].as_array() else {
-            report.push(entry("partial", [0; 3], false, Some("invalid_page")));
+            report.push(entry(
+                InboxPeerState::Partial,
+                [0; 3],
+                false,
+                Some("invalid_page"),
+            ));
             continue;
         };
         let (mut invalid, mut duplicates, mut included) = (0usize, 0usize, 0usize);
@@ -130,8 +143,13 @@ pub fn compose_inbox(
             } else {
                 projects.insert(
                     format!("{host}:{}", request.project_id),
-                    json!({"label":peer_label(&page["projects"][request.project_id.to_string()]["label"]),
-                        "host":host}),
+                    InboxProject {
+                        label: peer_label(
+                            &page["projects"][request.project_id.to_string()]["label"],
+                        ),
+                        path: InboxProjectPath::Omitted,
+                        host: Some(host),
+                    },
                 );
                 items.push(request);
                 included += 1;
@@ -140,20 +158,24 @@ pub fn compose_inbox(
         let peer_truncated = rows.len() > 100 || page["truncated"] != false;
         let incomplete = peer_truncated || invalid != 0 || duplicates != 0;
         report.push(entry(
-            if incomplete { "partial" } else { "complete" },
+            if incomplete {
+                InboxPeerState::Partial
+            } else {
+                InboxPeerState::Complete
+            },
             [included, invalid, duplicates],
             peer_truncated,
             None,
         ));
     }
-    extra.insert("projects".into(), projects.into());
-    extra.insert("peers".into(), report.into());
     Ok(InboxResult::Listed {
         extra,
         items,
         next_cursor,
         truncated,
         coverage,
+        projects,
+        peers: report,
     })
 }
 
@@ -161,6 +183,7 @@ pub fn compose_inbox(
 mod tests {
     use super::*;
     use provenant_core::ProjectId;
+    use serde_json::json;
 
     fn request(host: HostId, id: u8, key: Option<&str>) -> Value {
         json!({
@@ -182,6 +205,8 @@ mod tests {
             next_cursor: None,
             truncated: true,
             coverage: "local_only".into(),
+            projects: Default::default(),
+            peers: Default::default(),
         }
     }
     fn peer(host: HostId, observation: InboxObservation) -> PeerInbox {
@@ -290,6 +315,8 @@ mod tests {
             next_cursor: None,
             truncated: false,
             coverage: String::new(),
+            projects: Default::default(),
+            peers: Default::default(),
         };
         let item = compose_inbox(
             listed(),

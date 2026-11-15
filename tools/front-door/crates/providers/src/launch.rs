@@ -3,7 +3,10 @@
 use crate::{Continuation, Prompt, ProviderError, StreamState};
 use provenant_confinement::ConfinedPlan;
 use provenant_confinement::permissions::{AccessMode, PathGrant, PathScope, ProviderProfile};
-use provenant_records::ResolvedRoute;
+use provenant_records::{
+    ResolvedRoute,
+    policy::{Effect, Facts, Policy},
+};
 use serde::Deserialize;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -68,6 +71,7 @@ pub struct PreparedToolRequirement {
 /// applied once, after the adapter has assembled its required profile.
 #[derive(Debug, Default)]
 pub(crate) struct ToolRequirements {
+    pub(crate) cargo_home: Option<provenant_confinement::cargo::CargoHome>,
     pub(crate) reads: Vec<PathGrant>,
     pub(crate) exec: Vec<PathGrant>,
     pub(crate) writes: Vec<PathGrant>,
@@ -156,17 +160,24 @@ impl OmittedGrant {
 pub(crate) fn filter_optional_grants(
     grants: &mut Vec<PathGrant>,
     start: usize,
-    home: &Path,
+    credential_roots: &provenant_core::CredentialRoots,
+    policy: &Policy,
     source: OmissionSource,
     omitted: &mut Vec<OmittedGrant>,
-) {
+) -> Result<(), ProviderError> {
     let mut index = start;
+    let mut removed = 0usize;
     while index < grants.len() {
         let candidate = &grants[index].path;
         let target = std::fs::canonicalize(candidate).ok();
-        let omitted_path = target
+        let credential_path = target
             .as_ref()
-            .filter(|path| provenant_confinement::refuses_lane_root(path, true, Some(home)))
+            .filter(|path| provenant_confinement::refuses_lane_root(path, true, credential_roots))
+            .or_else(|| {
+                provenant_confinement::refuses_lane_root(candidate, true, credential_roots)
+                    .then_some(candidate)
+            });
+        let omitted_path = credential_path
             .or_else(|| {
                 (!provenant_confinement::permissions::profile_path_representable(candidate))
                     .then_some(candidate)
@@ -179,6 +190,7 @@ pub(crate) fn filter_optional_grants(
             .cloned();
         if let Some(path) = omitted_path {
             grants.remove(index);
+            removed += 1;
             if !omitted
                 .iter()
                 .any(|entry| entry.path == path && entry.source == source)
@@ -189,6 +201,14 @@ pub(crate) fn filter_optional_grants(
             index += 1;
         }
     }
+    if removed > 0 {
+        policy_warning(
+            policy,
+            "LAUNCH_FILTER_OPTIONAL_GRANTS_NONE",
+            format!("omitted {removed} optional grant(s) that could not be safely represented"),
+        )?;
+    }
+    Ok(())
 }
 
 /// A provider launch ready for confinement. The launcher performs `setup`,
@@ -210,6 +230,10 @@ pub struct LaunchSpec {
     pub user_skills: crate::StagedUserSkills,
     pub(crate) tool_requirements: ToolRequirements,
     pub(crate) git_wrapper: crate::lane::GitWrapper,
+    /// The immutable effective policy snapshot used to prepare this launch.
+    pub(crate) policy: Policy,
+    /// Declared host credential roots used to validate grants after preparation.
+    pub(crate) credential_roots: provenant_core::CredentialRoots,
     pub profile: ProviderProfile,
     /// Decoder state bound to any continuation identity.
     pub stream: StreamState,
@@ -227,7 +251,11 @@ pub struct AppliedAccess {
 impl AppliedAccess {
     /// Portable receipt projection; host paths outside HOME have no portable
     /// anchor, so only their final component is retained.
-    pub fn receipt(&self, home: &Path) -> serde_json::Value {
+    pub fn receipt(
+        &self,
+        home: &Path,
+        credential_roots: &provenant_core::CredentialRoots,
+    ) -> serde_json::Value {
         use sha2::{Digest, Sha256};
         use std::os::unix::ffi::OsStrExt;
         let display = |path: &Path| {
@@ -264,7 +292,10 @@ impl AppliedAccess {
             "toolchain_roots": self.toolchain_roots.iter().map(grant).collect::<Vec<_>>(),
             "omitted_grants": self.omitted_grants.iter().map(|entry| serde_json::json!({
                 "code": "discovered_grant_omitted",
-                "reason": if entry.source == OmissionSource::ProviderPackage { "shared_package_prefix" } else if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) { "credential_root" } else if !provenant_confinement::permissions::profile_path_representable(&entry.path) { "unrepresentable_path" } else { "protected_root" },
+                "reason": if entry.source == OmissionSource::ProviderPackage { "shared_package_prefix" } else if provenant_confinement::refuses_lane_root(&entry.path, true, credential_roots) { "credential_root" } else if !provenant_confinement::permissions::profile_path_representable(&entry.path) { "unrepresentable_path" } else { "protected_root" },
+                "credential_source": credential_roots.refusal(
+                    &entry.path, provenant_core::CredentialScope::Subtree, true,
+                ).map(|root| &root.source),
                 "path": display(&entry.path),
                 "path_id": path_id(&entry.path),
                 "source": match entry.source { OmissionSource::UserSkill => "user_skill", OmissionSource::Toolchain => "toolchain", OmissionSource::ProviderConfig => "provider_config", OmissionSource::ProviderPackage => "provider_package" },
@@ -329,6 +360,11 @@ impl LaunchSpec {
             omitted_grants: self.omitted_discovery.clone(),
         }
     }
+
+    /// Credential declarations used to decide which prepared grants were omitted.
+    pub fn credential_roots(&self) -> &provenant_core::CredentialRoots {
+        &self.credential_roots
+    }
 }
 
 /// Frozen confinement policy and launch facts, compiled before launch by the
@@ -343,10 +379,14 @@ pub struct PrepareInput<'a> {
     pub command: Option<crate::command::Invocation<'a>>,
     pub continuation: Option<&'a Continuation>,
     pub grant_digest: &'a str,
+    /// Resolved host/project/dispatch policy for this launch.
+    pub policy: &'a Policy,
     /// Canonical path of the provider CLI resolved at dispatch.
     pub executable: &'a Path,
     /// The user's home directory.
     pub home: &'a Path,
+    /// All declared host credential roots, including provider and account roots.
+    pub credential_roots: provenant_core::CredentialRoots,
     /// The user's login name.
     pub user: &'a OsStr,
     /// Reads one host environment variable. Production passes
@@ -367,10 +407,72 @@ pub struct PrepareInput<'a> {
     pub provenant: crate::LaneRuntime<'a>,
 }
 
+/// Apply a warning-only provider rule to a failed optional operation.
+///
+/// A configured Queue or Refuse effect cannot be fulfilled at these call
+/// sites. Treat an unexpected effect as an unsupported launch policy instead
+/// of silently dropping it; the policy asset constrains these rules to
+/// Warn/Off.
+pub(crate) fn policy_warning(
+    policy: &Policy,
+    code: &'static str,
+    detail: impl Into<String>,
+) -> Result<(), ProviderError> {
+    let report = |message: &str| {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+    };
+    match policy.check(code, Facts::violation(detail)) {
+        Effect::Proceed => Ok(()),
+        Effect::Warn(message) => {
+            report(&message);
+            Ok(())
+        }
+        Effect::Refuse(diagnostic) => {
+            report(
+                diagnostic
+                    .detail
+                    .as_deref()
+                    .unwrap_or("provider policy refused an operation"),
+            );
+            Err(ProviderError::PolicyActionUnsupported { code })
+        }
+    }
+}
+
+/// Use the attempt scratch directory when a provider's separate private state
+/// could not be represented. These optional rules are Warn/Off only, so the
+/// confined scratch directory remains the usable fallback for both actions.
+pub(crate) fn private_state_or_scratch<'a>(
+    private_state: Option<&'a Path>,
+    scratch: &'a Path,
+    policy: &Policy,
+    code: &'static str,
+) -> Result<&'a Path, ProviderError> {
+    if let Some(private_state) = private_state {
+        return Ok(private_state);
+    }
+    policy_warning(
+        policy,
+        code,
+        "separate private provider state is unavailable; using confined attempt scratch",
+    )?;
+    Ok(scratch)
+}
+
 impl PrepareInput<'_> {
+    pub(crate) fn boundary_error<E>(
+        &self,
+        code: &'static str,
+        detail: impl Into<String>,
+        typed_error: E,
+    ) -> E {
+        self.policy
+            .boundary_error(code, Facts::violation(detail), typed_error)
+    }
+
     pub(crate) fn sandboxed(&self) -> bool {
-        (self.host_var)(provenant_confinement::run_config::SANDBOX_ENV)
-            .is_none_or(|value| value != "off")
+        (self.host_var)(provenant_core::consumer_env::SANDBOX).is_none_or(|value| value != "off")
     }
 
     pub fn user_skills(&self) -> bool {
@@ -395,7 +497,13 @@ impl PrepareInput<'_> {
         let mut name = name.to_os_string();
         name.push(format!("-skills-{}", provenant_core::hex(&self.nonce)));
         let destination = scratch.with_file_name(name);
-        crate::skill_stage::capture(&source, &destination, self.home, self.skill_stage_max_bytes)
+        crate::skill_stage::capture(
+            &source,
+            &destination,
+            self.home,
+            &self.credential_roots,
+            self.skill_stage_max_bytes,
+        )
     }
 }
 
@@ -413,13 +521,46 @@ pub enum Session {
     Resume,
 }
 
+/// OpenCode's own prompt defaults. Path-specific entries still come from the
+/// launch plan and stay subject to the outer confinement profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OpenCodeNativePermissions {
+    pub(crate) default_key: &'static str,
+    pub(crate) default_value: &'static str,
+    pub(crate) external_directory_key: &'static str,
+    pub(crate) read_key: &'static str,
+    pub(crate) path_value: &'static str,
+}
+
+pub(crate) const CLAUDE_NATIVE_ARGUMENTS: &[&str] = &[
+    "--permission-mode",
+    "bypassPermissions",
+    "--tools",
+    "default",
+];
+pub(crate) const CODEX_NATIVE_ARGUMENTS: &[&str] = &["--dangerously-bypass-approvals-and-sandbox"];
+pub(crate) const AGY_NATIVE_ARGUMENTS: &[&str] = &["--dangerously-skip-permissions"];
+pub(crate) const CURSOR_NATIVE_ARGUMENTS: &[&str] = &["--force"];
+pub(crate) const OPENCODE_NATIVE_PERMISSIONS: OpenCodeNativePermissions =
+    OpenCodeNativePermissions {
+        default_key: "*",
+        default_value: "allow",
+        external_directory_key: "external_directory",
+        read_key: "read",
+        path_value: "allow",
+    };
+
 /// Checks shared by every adapter, returning its access and session mode.
 pub(crate) fn admit(
     adapter: &'static str,
     input: &PrepareInput<'_>,
 ) -> Result<(Access, Session), ProviderError> {
     if input.route.adapter != adapter {
-        return Err(ProviderError::IdentityMismatch);
+        return Err(input.policy.boundary_error(
+            "LAUNCH_ADMIT_AUTHORITY",
+            Facts::violation("the provider adapter does not match the resolved route"),
+            ProviderError::IdentityMismatch,
+        ));
     }
     if let Some(account) = input.account {
         account.validate_route(input.route)?;
@@ -431,14 +572,33 @@ pub(crate) fn admit(
                 .as_deref()
                 .is_some_and(|key| !spec.is_unregistered_local(key))
     }) {
-        return Err(ProviderError::UnknownIdentity);
+        return Err(input.policy.boundary_error(
+            "LAUNCH_ADMIT_AUTHORITY",
+            Facts::violation(
+                "the resolved route requires a registered account that was not supplied",
+            ),
+            ProviderError::UnknownIdentity,
+        ));
     }
     if let Some(continuation) = input.continuation {
         continuation.validate(input.route, input.grant_digest)?;
     }
-    for path in [input.executable, input.home, input.cwd] {
+    if !input.home.is_absolute() {
+        return Err(input.policy.boundary_error(
+            "LAUNCH_ADMIT_CREDENTIALS",
+            Facts::violation(
+                "the host home is not absolute, so credential exclusions cannot be evaluated",
+            ),
+            ProviderError::InvalidPath,
+        ));
+    }
+    for path in [input.executable, input.cwd] {
         if !path.is_absolute() {
-            return Err(ProviderError::InvalidPath);
+            return Err(input.policy.boundary_error(
+                "LAUNCH_ADMIT_AUTHORITY_2",
+                Facts::violation("the selected executable and working directory must be absolute"),
+                ProviderError::InvalidPath,
+            ));
         }
     }
     let access = match input.confined.permissions().mode {
@@ -453,7 +613,11 @@ pub(crate) fn admit(
             .iter()
             .any(|root| input.cwd.starts_with(&root.path))
     {
-        return Err(ProviderError::InvalidPath);
+        return Err(input.policy.boundary_error(
+            "LAUNCH_ADMIT_AUTHORITY",
+            Facts::violation("the read-only working directory is outside every granted read root"),
+            ProviderError::InvalidPath,
+        ));
     }
     let session = if input.continuation.is_some() {
         Session::Resume
@@ -464,7 +628,13 @@ pub(crate) fn admit(
 }
 
 /// Preserve native tool paths and omit an optional entry that PATH cannot encode.
-pub(crate) fn tool_search_path(home: &Path, include_cargo: bool) -> OsString {
+pub(crate) const SYSTEM_TOOL_SEARCH_PATH: &str = "/usr/bin:/bin";
+
+pub(crate) fn tool_search_path(
+    home: &Path,
+    include_cargo: bool,
+    policy: &Policy,
+) -> Result<OsString, ProviderError> {
     let cargo = home.join(".cargo/bin");
     let mut path = OsString::new();
     if include_cargo {
@@ -472,15 +642,15 @@ pub(crate) fn tool_search_path(home: &Path, include_cargo: bool) -> OsString {
             path.push(cargo);
             path.push(":");
         } else {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: cannot include the Cargo bin directory in PATH; continuing without it"
-            );
+            policy_warning(
+                policy,
+                "LAUNCH_TOOL_SEARCH_PATH_NONE",
+                "the optional Cargo bin directory cannot be encoded in PATH; it was omitted",
+            )?;
         }
     }
-    path.push("/usr/bin:/bin");
-    path
+    path.push(SYSTEM_TOOL_SEARCH_PATH);
+    Ok(path)
 }
 
 /// Native launches inherit the host environment in memory; provider selectors
@@ -499,19 +669,15 @@ pub(crate) fn base_env(
 ) -> Vec<(OsString, OsString)> {
     if !input.sandboxed() {
         let mut env: Vec<_> = std::env::vars_os()
-            .filter(|(name, _)| name != provenant_confinement::run_config::SANDBOX_ENV)
+            .filter(|(name, _)| name != provenant_core::consumer_env::SANDBOX && name != "HOME")
             .collect();
-        env.push((
-            provenant_confinement::run_config::SANDBOX_ENV.into(),
-            "off".into(),
-        ));
+        // Establish the host's selected home before an adapter may isolate it.
+        env.push(("HOME".into(), input.home.into()));
+        env.push((provenant_core::consumer_env::SANDBOX.into(), "off".into()));
         return env;
     }
     let mut env = vec![
-        (
-            provenant_confinement::run_config::SANDBOX_ENV.into(),
-            "on".into(),
-        ),
+        (provenant_core::consumer_env::SANDBOX.into(), "on".into()),
         ("HOME".into(), input.home.into()),
         ("USER".into(), input.user.into()),
         ("PATH".into(), path.as_ref().to_owned()),
@@ -549,9 +715,12 @@ pub(crate) fn private_git_objects(
             path: bin.join("git"),
             bytes: crate::lane::git_wrapper(git, &Default::default())?,
         });
-        spec.env.retain(|(key, _)| key != "PROVENANT_GIT");
         spec.env
-            .push(("PROVENANT_GIT".into(), bin.join("git").into()));
+            .retain(|(key, _)| key != provenant_core::consumer_env::GIT);
+        spec.env.push((
+            provenant_core::consumer_env::GIT.into(),
+            bin.join("git").into(),
+        ));
         grant_exec_path(git, spec);
         spec.profile.spec.tool_exec_roots.push(subtree(&bin));
         spec.profile
@@ -562,11 +731,11 @@ pub(crate) fn private_git_objects(
             match std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&*path))) {
                 Ok(value) => *path = value,
                 Err(_) => {
-                    use std::io::Write;
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "warning: the read-only Git launcher cannot be included in PATH; continuing without it"
-                    );
+                    policy_warning(
+                        input.policy,
+                        "LAUNCH_PRIVATE_GIT_OBJECTS_NONE",
+                        "the optional read-only Git launcher cannot be encoded in PATH; the selected Git remains explicitly granted",
+                    )?;
                 }
             }
         }
@@ -595,10 +764,26 @@ pub(crate) fn private_git_objects(
     for path in globals.iter().filter(|path| path.is_file()) {
         // Both Git's include and the exact sandbox grant must name the same
         // physical file: anchor validation rejects symlink spellings.
-        let path = std::fs::canonicalize(path).map_err(|_| ProviderError::InvalidPath)?;
-        let value = path.to_str().ok_or(ProviderError::InvalidPath)?;
+        let path = std::fs::canonicalize(path).map_err(|_| {
+            input.policy.boundary_error(
+                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                Facts::violation("the host Git configuration could not be bound into the private writer Git view"),
+                ProviderError::InvalidPath,
+            )
+        })?;
+        let value = path.to_str().ok_or_else(|| {
+            input.policy.boundary_error(
+                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                Facts::violation("the host Git configuration path cannot be represented for the private writer Git view"),
+                ProviderError::InvalidPath,
+            )
+        })?;
         if value.chars().any(char::is_control) {
-            return Err(ProviderError::InvalidPath);
+            return Err(input.policy.boundary_error(
+                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                Facts::violation("the host Git configuration path contains control characters"),
+                ProviderError::InvalidPath,
+            ));
         }
         config_text.push_str(&format!(
             "[include]\n\tpath = {}\n",
@@ -613,9 +798,19 @@ pub(crate) fn private_git_objects(
             Some("GIT_AUTHOR_EMAIL") => "email",
             _ => continue,
         };
-        let value = value.to_str().ok_or(ProviderError::InvalidPath)?;
+        let value = value.to_str().ok_or_else(|| {
+            input.policy.boundary_error(
+                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                Facts::violation("the selected Git identity cannot be represented in the private writer Git view"),
+                ProviderError::InvalidPath,
+            )
+        })?;
         if value.chars().any(char::is_control) {
-            return Err(ProviderError::InvalidPath);
+            return Err(input.policy.boundary_error(
+                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                Facts::violation("the selected Git identity contains control characters"),
+                ProviderError::InvalidPath,
+            ));
         }
         config_text.push_str(&format!("\t{name} = {}\n", git_config_quote(value)));
     }
@@ -625,7 +820,15 @@ pub(crate) fn private_git_objects(
     });
     if input.sandboxed() {
         spec.env.retain(|(key, _)| key != "GIT_CONFIG_NOSYSTEM");
-        crate::lane::install_token_config(&mut spec.env)?;
+        crate::lane::install_token_config(&mut spec.env).map_err(|error| {
+            input.policy.boundary_error(
+                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                Facts::violation(
+                    "Git credentials could not be isolated in the private writer Git environment",
+                ),
+                error,
+            )
+        })?;
     }
     if let Some((_, current)) = spec
         .env
@@ -683,9 +886,12 @@ pub(crate) fn private_git_objects(
     spec.git_wrapper.scrub = true;
     spec.write_git_wrapper(&scratch.join("bin"), input.provenant.git)?;
     // The generated wrapper embeds the real executable, so this cannot recurse.
-    spec.env.retain(|(key, _)| key != "PROVENANT_GIT");
     spec.env
-        .push(("PROVENANT_GIT".into(), scratch.join("bin/git").into()));
+        .retain(|(key, _)| key != provenant_core::consumer_env::GIT);
+    spec.env.push((
+        provenant_core::consumer_env::GIT.into(),
+        scratch.join("bin/git").into(),
+    ));
     grant_exec_path(input.provenant.git, spec);
     spec.profile
         .spec
@@ -757,23 +963,306 @@ fn grant_exec_path(git: &Path, spec: &mut LaunchSpec) {
 
 /// Resolve all exact executable requirements in the profile once, then use
 /// those same facts both to add exact read grants and to report preparation.
-pub(crate) fn prepare_tool_requirements(input: &PrepareInput<'_>, spec: &mut LaunchSpec) {
-    if input.sandboxed() {
-        spec.complete_tool_requirements(input.confined, input.home, input.cwd);
+fn extend_unique(grants: &mut Vec<PathGrant>, additions: Vec<PathGrant>) {
+    for grant in additions {
+        if !grants.contains(&grant) {
+            grants.push(grant);
+        }
     }
+}
+
+pub(crate) fn prepare_tool_requirements(
+    input: &PrepareInput<'_>,
+    spec: &mut LaunchSpec,
+) -> Result<(), ProviderError> {
+    spec.complete_tool_requirements(input.confined, input.cwd)?;
+    Ok(())
+}
+
+/// Every adapter finishes here, after provider-specific environment changes.
+/// Identity, temporary files and Cargo configuration are lane bindings even
+/// when the host environment is sparse or sandboxing is disabled.
+pub(crate) fn finalise_provider_env(
+    input: &PrepareInput<'_>,
+    spec: &mut LaunchSpec,
+) -> Result<(), ProviderError> {
+    let scratch = &input.confined.permissions().scratch.path;
+    let home = spec
+        .env
+        .iter()
+        .find(|(key, _)| key == "HOME")
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(|| input.home.into());
+    spec.env
+        .retain(|(key, _)| !matches!(key.to_str(), Some("HOME" | "TMPDIR" | "TMPPREFIX")));
+    spec.env.extend([
+        ("HOME".into(), home),
+        ("TMPDIR".into(), scratch.into()),
+        ("TMPPREFIX".into(), scratch.join("zsh").into()),
+    ]);
+    lane_instructions(input, spec)?;
+    let hooks = lane_hooks(input, spec)?;
+    let access = match input.confined.permissions().mode {
+        provenant_confinement::permissions::AccessMode::ReadOnly => Access::ReadOnly,
+        provenant_confinement::permissions::AccessMode::WorktreeWrite(_) => Access::WorktreeWrite,
+    };
+    let cache = lane_cache(input);
+    let binding = match spec.tool_requirements.cargo_home.take() {
+        Some(binding) => binding,
+        None => {
+            let binding =
+                provenant_confinement::cargo::CargoHome::resolve(input.home, input.host_var)
+                    .map_err(|_| ProviderError::InvalidPath)?;
+            if input.sandboxed() {
+                spec.tool_requirements.reads.extend(binding.reads());
+                spec.tool_requirements.writes.extend(binding.writes());
+                spec.tool_requirements.applied = false;
+            }
+            binding
+        }
+    };
+    cargo_environment(
+        &binding,
+        input.home,
+        cache,
+        access,
+        !input.sandboxed(),
+        &mut spec.env,
+    );
+    binding.source_environment(input.confined.permissions().network, &mut spec.env);
+    spec.tool_requirements.cargo_home = Some(binding);
+    if input.sandboxed() {
+        // Native shell tools are one lane capability. Adapters supply their
+        // private runtime roots; this common layer supplies shared toolchains
+        // and caches with identical access and network boundaries.
+        spec.tool_requirements.applied = false;
+        rust_tools(
+            input,
+            access,
+            &mut spec.tool_requirements,
+            &mut spec.env,
+            &mut spec.setup,
+        );
+        node_tools(
+            input.home,
+            access,
+            cache,
+            &mut spec.tool_requirements,
+            &mut spec.env,
+        );
+    }
+    input
+        .provenant
+        .grant(&mut spec.profile.spec, &mut spec.setup, hooks);
+    Ok(())
+}
+
+/// Project the instruction content bound into this product build into each
+/// sandboxed harness's private configuration home, using only its install data.
+fn lane_instructions(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<(), ProviderError> {
+    if !input.sandboxed() {
+        return Ok(());
+    }
+    let Some(install) = provenant_records::AdapterSpec::get(&input.route.adapter)
+        .and_then(|adapter| adapter.install)
+    else {
+        return Ok(());
+    };
+    if !install.instructions.is_supported() {
+        return Ok(());
+    }
+    let instruction = install.instruction.ok_or(ProviderError::InvalidPath)?;
+    let relative = Path::new(instruction);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(ProviderError::InvalidPath);
+    }
+    let (home_variable, suffix) = install.lane_home;
+    let home = spec
+        .env
+        .iter()
+        .find(|(key, _)| key == home_variable)
+        .map(|(_, value)| PathBuf::from(value))
+        .filter(|path| path.is_absolute())
+        .ok_or(ProviderError::InvalidPath)?;
+    let config_home = home.join(suffix);
+    let destination = config_home.join(relative);
+    let parent = destination.parent().ok_or(ProviderError::InvalidPath)?;
+    spec.setup.push(SetupStep::CreateDir(parent.to_owned()));
+    spec.setup.push(SetupStep::WriteFile {
+        path: destination,
+        bytes: provenant_records::INSTRUCTION_CONTENT.to_vec(),
+    });
+    Ok(())
+}
+
+/// Render Provenant's declared hooks into the isolated harness configuration.
+/// Native Claude uses its explicit settings file in scratch, and OpenCode
+/// always uses a private config home; other native harnesses keep their
+/// install-managed host configuration untouched.
+fn lane_hooks(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<bool, ProviderError> {
+    let Some(adapter) = provenant_records::AdapterSpec::get(&input.route.adapter) else {
+        return Ok(false);
+    };
+    let Some(install) = adapter.install else {
+        return Ok(false);
+    };
+    if !install.hooks.is_supported() {
+        return Ok(false);
+    }
+    let warn_skip = |detail| {
+        policy_warning(
+            input.policy,
+            "LANE_LANERUNTIME_HOOK_PROJECTION",
+            format!(
+                "{} {detail}; continuing without its lane hooks",
+                adapter.name
+            ),
+        )
+    };
+    let Some(protocol) = install.hook_protocol else {
+        warn_skip("hook protocol is not declared")?;
+        return Ok(false);
+    };
+    let Some(hook_file) = install.hook_file else {
+        warn_skip("hook file is not declared")?;
+        return Ok(false);
+    };
+    let relative = Path::new(hook_file);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        warn_skip("hook file path is invalid")?;
+        return Ok(false);
+    }
+
+    let config_home =
+        if input.sandboxed() || protocol == provenant_records::HookProtocol::OpenCodePlugin {
+            let (home_variable, suffix) = install.lane_home;
+            let Some(home) = spec
+                .env
+                .iter()
+                .find(|(key, _)| key == home_variable)
+                .map(|(_, value)| PathBuf::from(value))
+                .filter(|path| path.is_absolute())
+            else {
+                warn_skip("hook config home is unavailable")?;
+                return Ok(false);
+            };
+            home.join(suffix)
+        } else if install.hook_settings_arg.is_some() {
+            input.confined.permissions().scratch.path.clone()
+        } else {
+            // This native harness keeps its install-managed host hook file. The
+            // launcher must not create or rewrite a user configuration file.
+            return Ok(true);
+        };
+    let destination = config_home.join(relative);
+    let Some(parent) = destination.parent() else {
+        warn_skip("hook file has no parent directory")?;
+        return Ok(false);
+    };
+    let bytes = match protocol {
+        provenant_records::HookProtocol::OpenCodePlugin => {
+            provenant_config::hook_plugin_source(input.provenant.executable, input.provenant.state)
+        }
+        _ => provenant_config::lane_hook_settings(
+            adapter.id,
+            input.provenant.executable,
+            input.provenant.state,
+        )
+        .and_then(|mut settings| {
+            if install.hook_settings_arg.is_some() {
+                settings["attribution"] = serde_json::json!({"commit": "", "pr": ""});
+            }
+            serde_json::to_vec(&settings)
+                .map_err(|_| provenant_config::InstallError::InvalidConfig("hook settings"))
+        }),
+    };
+    let bytes = match bytes {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            warn_skip(
+                "hook settings cannot represent the selected Provenant executable or state path",
+            )?;
+            return Ok(false);
+        }
+    };
+    spec.setup.push(SetupStep::CreateDir(parent.to_owned()));
+    spec.setup.push(SetupStep::WriteFile {
+        path: destination.clone(),
+        bytes,
+    });
+    if let Some(argument) = install.hook_settings_arg {
+        spec.argv
+            .extend([argument.into(), destination.into_os_string()]);
+    }
+    Ok(true)
 }
 
 impl LaunchSpec {
     pub(crate) fn native_environment(&self) -> bool {
-        self.env.iter().any(|(name, value)| {
-            name == provenant_confinement::run_config::SANDBOX_ENV && value == "off"
-        })
+        self.env
+            .iter()
+            .any(|(name, value)| name == provenant_core::consumer_env::SANDBOX && value == "off")
+    }
+
+    /// The host Cargo binding, present once the host has finalised Cargo.
+    pub fn cargo_home(&self) -> Option<&provenant_confinement::cargo::CargoHome> {
+        self.tool_requirements.cargo_home.as_ref()
+    }
+
+    /// Effective host Cargo identity and source-write setting, for launch evidence.
+    pub fn cargo_home_receipt(&self) -> serde_json::Value {
+        serde_json::to_value(self.cargo_home()).unwrap_or_default()
+    }
+
+    pub fn configure_cargo_sources(
+        &mut self,
+        setting: Option<bool>,
+        network: provenant_confinement::permissions::NetworkAccess,
+    ) {
+        let Some(binding) = self.tool_requirements.cargo_home.as_mut() else {
+            return;
+        };
+        let sources: Vec<_> = {
+            let mut widened = binding.clone();
+            widened.configure_source_writes(Some(true));
+            widened.source_writes().collect()
+        };
+        self.tool_requirements
+            .writes
+            .retain(|grant| !sources.contains(grant));
+        self.profile
+            .spec
+            .tool_writes
+            .retain(|grant| !sources.contains(grant));
+        binding.configure_source_writes(setting);
+        let source_writes = binding.source_writes;
+        if !self.native_environment() && source_writes {
+            self.tool_requirements.writes.extend(sources.clone());
+            if self.tool_requirements.applied {
+                self.profile.spec.tool_writes.extend(sources);
+            }
+        }
+        if let Some(binding) = self.tool_requirements.cargo_home.as_ref() {
+            binding.source_environment(network, &mut self.env);
+        }
     }
 
     /// Resolve any additional exact executables added by launch configuration.
-    pub fn complete_tool_requirements(&mut self, plan: &ConfinedPlan, home: &Path, cwd: &Path) {
+    pub fn complete_tool_requirements(
+        &mut self,
+        plan: &ConfinedPlan,
+        cwd: &Path,
+    ) -> Result<(), ProviderError> {
         if self.native_environment() {
-            return;
+            return Ok(());
         }
         let spec = self;
         use provenant_confinement::permissions::PathScope;
@@ -786,10 +1275,11 @@ impl LaunchSpec {
             filter_optional_grants(
                 &mut reads,
                 0,
-                home,
+                &spec.credential_roots,
+                &spec.policy,
                 OmissionSource::Toolchain,
                 &mut spec.omitted_discovery,
-            );
+            )?;
             let required = &spec.tool_requirements.required_exec;
             for candidate in &spec.tool_requirements.exec {
                 let mut one = vec![candidate.clone()];
@@ -797,23 +1287,46 @@ impl LaunchSpec {
                     filter_optional_grants(
                         &mut one,
                         0,
-                        home,
+                        &spec.credential_roots,
+                        &spec.policy,
                         OmissionSource::Toolchain,
                         &mut spec.omitted_discovery,
-                    );
+                    )?;
                 }
                 exec.extend(one);
             }
+            let omitted_before_writes = spec.omitted_discovery.len();
             for candidate in &spec.tool_requirements.writes {
                 match std::fs::canonicalize(&candidate.path) {
                     Ok(path)
-                        if provenant_confinement::refuses_lane_root(&path, false, Some(home)) =>
+                        if provenant_confinement::refuses_lane_root(
+                            &path,
+                            false,
+                            &spec.credential_roots,
+                        ) =>
                     {
                         if !spec.omitted_discovery.iter().any(|entry| {
                             entry.path == path && entry.source == OmissionSource::Toolchain
                         }) {
                             spec.omitted_discovery.push(OmittedGrant {
                                 path,
+                                source: OmissionSource::Toolchain,
+                            });
+                        }
+                    }
+                    Err(_)
+                        if provenant_confinement::refuses_lane_root(
+                            &candidate.path,
+                            false,
+                            &spec.credential_roots,
+                        ) =>
+                    {
+                        if !spec.omitted_discovery.iter().any(|entry| {
+                            entry.path == candidate.path
+                                && entry.source == OmissionSource::Toolchain
+                        }) {
+                            spec.omitted_discovery.push(OmittedGrant {
+                                path: candidate.path.clone(),
                                 source: OmissionSource::Toolchain,
                             });
                         }
@@ -849,9 +1362,23 @@ impl LaunchSpec {
                     _ => writes.push(candidate.clone()),
                 }
             }
-            spec.profile.spec.runtime_reads.extend(reads);
-            spec.profile.spec.tool_exec_roots.extend(exec);
-            spec.profile.spec.tool_writes.extend(writes);
+            let omitted_writes = spec.omitted_discovery[omitted_before_writes..]
+                .iter()
+                .filter(|entry| entry.source == OmissionSource::Toolchain)
+                .count();
+            if omitted_writes > 0 {
+                policy_warning(
+                    &spec.policy,
+                    "LAUNCH_LAUNCHSPEC_COMPLETE_TOOL_REQUIREMENTS_NONE",
+                    format!("omitted {omitted_writes} optional tool write grant(s)"),
+                )?;
+            }
+            // Applying is idempotent: a later stage (host Cargo, private Git
+            // objects) reopens the requirements, and each grant lands once.
+            let profile = &mut spec.profile.spec;
+            extend_unique(&mut profile.runtime_reads, reads);
+            extend_unique(&mut profile.tool_exec_roots, exec);
+            extend_unique(&mut profile.tool_writes, writes);
             spec.tool_requirements.omitted = spec.omitted_discovery[omitted_before..].to_vec();
             spec.tool_requirements.applied = true;
         }
@@ -899,7 +1426,7 @@ impl LaunchSpec {
             }
             let closure = crate::dylib::dependency_closure(&executable, |path| {
                 use crate::dylib::LibraryAccess;
-                if provenant_confinement::refuses_lane_root(path, true, Some(home)) {
+                if provenant_confinement::refuses_lane_root(path, true, &spec.credential_roots) {
                     LibraryAccess::OmitCredential
                 } else if plan
                     .permissions()
@@ -924,6 +1451,15 @@ impl LaunchSpec {
                     LibraryAccess::Grant
                 }
             });
+            if closure.outcome != crate::dylib::ClosureOutcome::Complete
+                || !closure.omitted.is_empty()
+            {
+                policy_warning(
+                    &spec.policy,
+                    "LAUNCH_LAUNCHSPEC_COMPLETE_TOOL_REQUIREMENTS_NONE",
+                    "an optional tool dependency closure is incomplete; omitted dependencies are recorded",
+                )?;
+            }
             for path in &closure.omitted {
                 if !spec.omitted_discovery.iter().any(|omitted| {
                     omitted.path == *path && omitted.source == OmissionSource::Toolchain
@@ -949,6 +1485,7 @@ impl LaunchSpec {
                     dependency_closure: closure,
                 });
         }
+        Ok(())
     }
 }
 
@@ -995,7 +1532,8 @@ mod git_tests {
             toolchain_roots: Vec::new(),
             omitted_grants: Vec::new(),
         };
-        let receipt = applied.receipt(Path::new("/home/fixture"));
+        let roots = provenant_core::CredentialRoots::for_home(Path::new("/home/fixture"));
+        let receipt = applied.receipt(Path::new("/home/fixture"), &roots);
         assert_eq!(
             receipt["libraries"][0]["path"],
             receipt["libraries"][1]["path"]
@@ -1049,7 +1587,7 @@ mod git_tests {
 
 /// The lane's private, writable cache root: the writer's lane cache
 /// (`Library/Caches/provenant-lane-cargo/<sha256>`) or a read-only lane's
-/// scratch. Package-manager caches live here, never in shared host stores.
+/// scratch. Build output and mutable package-manager configuration live here.
 pub(crate) fn lane_cache<'a>(input: &'a PrepareInput<'_>) -> &'a Path {
     match &input.confined.permissions().mode {
         provenant_confinement::permissions::AccessMode::ReadOnly => {
@@ -1072,13 +1610,9 @@ pub(crate) fn add_existing_tool(executable: &Path, tool_exec_roots: &mut Vec<Pat
     }
 }
 
-/// Rust tools for every shell-capable lane. The user's `~/.cargo` is read-only
-/// (its `bin` proxies and the rustup toolchains stay executable); the host
-/// later builds from its registry and Git checkouts unconfined, so no lane
-/// may write them. Cargo gets a lane-private `CARGO_HOME` in the lane cache
-/// and downloads crates into its own registry. A missing toolchain fails
-/// clearly instead of installing. Build output stays in the lane's own cache.
-/// The compiler hard-denies Cargo credentials.
+/// Rust tools for every shell-capable lane. Installed toolchains and the host's
+/// Cargo sources stay read-only unless configured otherwise. Build output stays
+/// private. Native lanes use the same environment for target seed validation.
 pub(crate) fn rust_tools(
     input: &PrepareInput<'_>,
     access: Access,
@@ -1098,7 +1632,6 @@ pub(crate) fn rust_tools(
             access,
             &mut requirements.reads,
             &mut requirements.exec,
-            env,
             setup,
         );
     }
@@ -1134,7 +1667,6 @@ fn rust_toolchain(
     access: Access,
     runtime_reads: &mut Vec<PathGrant>,
     tool_exec_roots: &mut Vec<PathGrant>,
-    env: &mut Vec<(OsString, OsString)>,
     setup: &mut Vec<SetupStep>,
 ) {
     let cargo = input.home.join(".cargo");
@@ -1147,7 +1679,7 @@ fn rust_toolchain(
     // TMPDIR) for the doc-test binaries it compiles and runs. The lane can
     // already execute everything it builds and its read-only worktree.
     tool_exec_roots.push(subtree(cache));
-    runtime_reads.extend([subtree(&cargo), subtree(&rustup)]);
+    runtime_reads.extend([subtree(cargo.join("bin")), subtree(&rustup)]);
     tool_exec_roots.extend([
         subtree(cargo.join("bin")),
         subtree(rustup.join("toolchains")),
@@ -1155,47 +1687,47 @@ fn rust_toolchain(
     for name in ["cargo", "rustc", "rustfmt", "clippy-driver"] {
         add_existing_tool(&cargo.join("bin").join(name), tool_exec_roots);
     }
-    let cargo_home = cache.join("cargo-home");
     if access == Access::ReadOnly {
-        // Builds can use the already-extracted shared sources. The
-        // links point at stores the lane cannot write, so it cannot alter
-        // them; Cargo's lock files and downloads need writes, so it cannot
-        // fetch either.
-        setup.push(SetupStep::CreateDir(cargo_home.clone()));
-        setup.extend(["registry", "git"].map(|name| SetupStep::Symlink {
-            link: cargo_home.join(name),
-            target: cargo.join(name),
-        }));
+        setup.push(SetupStep::CreateDir(target));
     }
-    env.extend([
-        ("CARGO_HOME".into(), cargo_home.into_os_string()),
-        ("RUSTUP_HOME".into(), rustup.into_os_string()),
-        ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
-        ("CARGO_TARGET_DIR".into(), target.clone().into_os_string()),
-        // Override build.build-dir inherited from host or ancestor Cargo config.
-        (
-            "CARGO_BUILD_BUILD_DIR".into(),
-            target.clone().into_os_string(),
-        ),
-    ]);
+}
+
+/// One finalisation seam for all native adapters, including those that skip
+/// sandbox-only tool discovery. This must run before Run verifies target seeds.
+fn cargo_environment(
+    binding: &provenant_confinement::cargo::CargoHome,
+    home: &Path,
+    cache: &Path,
+    access: Access,
+    native: bool,
+    env: &mut Vec<(OsString, OsString)>,
+) {
+    env.retain(|(key, _)| key != provenant_core::consumer_env::LANE_CARGO_LINT_TARGET);
+    if native {
+        for (name, value) in [
+            (
+                "CARGO_BUILD_JOBS",
+                provenant_config::LaneBuildSettings::default()
+                    .jobs()
+                    .to_string(),
+            ),
+            ("CARGO_INCREMENTAL", "0".into()),
+            ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only".into()),
+        ] {
+            if !env.iter().any(|(key, _)| key == name) {
+                env.push((name.into(), value.into()));
+            }
+        }
+    }
+    binding.lane_cargo_environment(home, cache, env);
     if access == Access::WorktreeWrite {
         // Lint-only runs set both CARGO_TARGET_DIR and CARGO_BUILD_BUILD_DIR to
         // this sibling. Cargo locks the build directory, so they then do not
         // queue behind test and build runs in the lane's own target/.
         env.push((
-            "PROVENANT_LANE_CARGO_LINT_TARGET".into(),
+            provenant_core::consumer_env::LANE_CARGO_LINT_TARGET.into(),
             cache.join("target-lint").into_os_string(),
         ));
-    }
-    if access == Access::ReadOnly {
-        // Cache clean-up must not touch shared stores behind the links.
-        env.push(("CARGO_CACHE_AUTO_CLEAN_FREQUENCY".into(), "never".into()));
-        if input.confined.permissions().network
-            != provenant_confinement::permissions::NetworkAccess::Open
-        {
-            env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
-        }
-        setup.push(SetupStep::CreateDir(target));
     }
 }
 
@@ -1434,9 +1966,13 @@ pub(crate) fn package_root(executable: &Path) -> Result<&Path, ProviderError> {
 
 /// Keep shared installation prefixes out of the profile without refusing launch.
 /// The executable remains readable and executable; the omitted prefix is reported.
-pub(crate) fn package_grant(executable: &Path, omitted: &mut Vec<OmittedGrant>) -> PathGrant {
+pub(crate) fn package_grant(
+    executable: &Path,
+    omitted: &mut Vec<OmittedGrant>,
+    policy: &Policy,
+) -> Result<PathGrant, ProviderError> {
     match package_root(executable) {
-        Ok(root) => subtree(root),
+        Ok(root) => Ok(subtree(root)),
         Err(_) => {
             omitted.push(OmittedGrant {
                 path: package_candidate(executable)
@@ -1444,7 +1980,12 @@ pub(crate) fn package_grant(executable: &Path, omitted: &mut Vec<OmittedGrant>) 
                     .to_owned(),
                 source: OmissionSource::ProviderPackage,
             });
-            exact(executable)
+            policy_warning(
+                policy,
+                "LAUNCH_PACKAGE_GRANT_NONE",
+                "a shared provider package prefix was omitted; the executable keeps an exact grant",
+            )?;
+            Ok(exact(executable))
         }
     }
 }
@@ -1498,10 +2039,31 @@ pub(crate) fn uuid_v4(mut bytes: [u8; 16]) -> String {
 #[cfg(test)]
 mod git_config_quote_tests {
     #[test]
-    fn quote_preserves_git_metacharacters() {
-        assert_eq!(
-            super::git_config_quote("Ann \"Lee\""),
-            "\"Ann \\\"Lee\\\"\""
-        );
+    fn git_config_identity_round_trips_metacharacters() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("identity.gitconfig");
+        let identity = "Ann \"Lee\"; $HOME `git` \\ path\twith tab";
+        std::fs::write(
+            &config,
+            format!("[user]\n\tname = {}\n", super::git_config_quote(identity)),
+        )
+        .unwrap();
+        let output = provenant_os::fixture::git_command()
+            .args(["config", "--file"])
+            .arg(&config)
+            .args(["--get", "user.name"])
+            .env_remove("GIT_CONFIG_COUNT")
+            .env_remove("GIT_CONFIG_KEY_0")
+            .env_remove("GIT_CONFIG_KEY_1")
+            .env_remove("GIT_CONFIG_KEY_2")
+            .env_remove("GIT_CONFIG_KEY_3")
+            .env_remove("GIT_CONFIG_VALUE_0")
+            .env_remove("GIT_CONFIG_VALUE_1")
+            .env_remove("GIT_CONFIG_VALUE_2")
+            .env_remove("GIT_CONFIG_VALUE_3")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout.strip_suffix(b"\n"), Some(identity.as_bytes()));
     }
 }

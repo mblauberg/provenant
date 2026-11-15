@@ -12,7 +12,6 @@ mod messages;
 mod operations;
 
 pub use chairs::*;
-pub use claims::*;
 pub use db::{CURRENT_SCHEMA_VERSION, Request, Store};
 pub use events::*;
 pub use federation::*;
@@ -60,8 +59,6 @@ pub enum Error {
     NotFound,
     #[error("record conflicts with existing state")]
     Conflict,
-    #[error("claim overlaps active ownership {claim}")]
-    Overlap { claim: provenant_core::ClaimId },
     #[error("path cannot be represented as UTF-8")]
     PathEncoding,
     #[error("ownership fence is stale")]
@@ -70,10 +67,10 @@ pub enum Error {
     Busy,
     #[error("request cancelled")]
     Cancelled,
-    #[error("unsupported database version {0}")]
+    #[error(
+        "STATE_RESET_REQUIRED: database schema version {0} is not supported; move the store aside to start it fresh"
+    )]
     SchemaVersion(i64),
-    #[error("non-empty database has no schema version")]
-    UnversionedDatabase,
     #[error("SQLite refused WAL journal mode (returned {0})")]
     JournalMode(String),
     #[error("unsafe state component: {0}")]
@@ -86,23 +83,29 @@ pub enum Error {
     Time(#[from] provenant_core::TimeError),
 }
 
+impl From<provenant_sqlite::VersionError> for Error {
+    fn from(error: provenant_sqlite::VersionError) -> Self {
+        use provenant_sqlite::VersionError as E;
+        match error {
+            E::Refused { found, .. } => Self::SchemaVersion(found),
+            E::Sqlite(error) => error.into(),
+            E::MissingBaseTable { .. } => {
+                Self::Invalid("STATE_RESET_REQUIRED: missing known base table")
+            }
+            E::MissingStep { .. } => {
+                Self::Invalid("missing schema step; a writable open applies it")
+            }
+            E::InvalidStep { .. } => Self::Invalid("invalid additive schema step declaration"),
+        }
+    }
+}
+
 impl From<rusqlite::Error> for Error {
     fn from(error: rusqlite::Error) -> Self {
         if provenant_sqlite::is_busy(&error) {
             Self::Busy
         } else {
             Self::Sqlite(error)
-        }
-    }
-}
-
-impl From<provenant_sqlite::SnapshotError> for Error {
-    fn from(error: provenant_sqlite::SnapshotError) -> Self {
-        match error {
-            provenant_sqlite::SnapshotError::Filesystem(error) => error.into(),
-            provenant_sqlite::SnapshotError::Sqlite(error) => error.into(),
-            provenant_sqlite::SnapshotError::PathEncoding => Self::PathEncoding,
-            provenant_sqlite::SnapshotError::ExhaustedNames => Self::Conflict,
         }
     }
 }

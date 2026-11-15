@@ -1,5 +1,5 @@
 //! Configured commands share the provider launch and settlement machinery.
-use crate::launch::{Access, Session, base_env, exact, node_tools, rust_tools, subtree};
+use crate::launch::{Access, Session, base_env, exact, subtree};
 use crate::{LaunchSpec, PrepareInput, ProviderError, ProviderEvent, Stdin, StreamState};
 use provenant_confinement::permissions::{ProviderProfile, ProviderProfileSpec};
 
@@ -45,25 +45,48 @@ fn prepare(
     session: Session,
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
-    if access != Access::ReadOnly
-        || session != Session::Fresh
+    if access != Access::ReadOnly {
+        return Err(input.boundary_error(
+            "COMMAND_PREPARE_AUTHORITY_3",
+            "command adapter cannot enforce writer access",
+            ProviderError::UnsupportedPolicy,
+        ));
+    }
+    if session != Session::Fresh
         || !input.route.model.is_empty()
         || input.route.effort.is_some()
         || input.route.account_key.is_some()
-        || input
-            .confined
-            .permissions()
-            .selected_authentication
-            .is_some()
     {
-        return Err(ProviderError::UnsupportedPolicy);
+        return Err(input.boundary_error(
+            "COMMAND_PREPARE_AUTHORITY",
+            "command adapter cannot ignore the selected invocation identity",
+            ProviderError::UnsupportedPolicy,
+        ));
+    }
+    if input
+        .confined
+        .permissions()
+        .selected_authentication
+        .is_some()
+    {
+        return Err(input.boundary_error(
+            "COMMAND_PREPARE_CREDENTIALS",
+            "command adapter cannot accept a provider authentication grant",
+            ProviderError::UnsupportedPolicy,
+        ));
     }
     let command = input
         .command
         .filter(|command| {
             !command.argv.is_empty() && !command.argv[0].is_empty() && command.program.is_absolute()
         })
-        .ok_or(ProviderError::UnsupportedPolicy)?;
+        .ok_or_else(|| {
+            input.boundary_error(
+                "COMMAND_PREPARE_AUTHORITY_2",
+                "configured command needs non-empty argv and an absolute executable",
+                ProviderError::UnsupportedPolicy,
+            )
+        })?;
     // The fixed script merges stderr into the captured output. Positional
     // arguments stay literal; no configured argument is interpreted as shell text.
     let mut argv = vec![
@@ -78,7 +101,7 @@ fn prepare(
     let mut env = base_env(
         input,
         scratch,
-        crate::launch::tool_search_path(input.home, true),
+        crate::launch::tool_search_path(input.home, true, input.policy)?,
     );
     if input.sandboxed() {
         env.extend([
@@ -100,34 +123,8 @@ fn prepare(
     profile
         .tool_exec_roots
         .extend(command.runtimes.iter().map(exact));
-    let mut setup = Vec::new();
+    let setup = Vec::new();
     let omitted_discovery = Vec::new();
-    let mut tool_requirements = crate::launch::ToolRequirements::default();
-    if input.sandboxed() {
-        if [".cargo/bin", ".rustup/toolchains"]
-            .iter()
-            .all(|path| input.home.join(path).is_dir())
-        {
-            rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
-        } else {
-            crate::launch::system_tools(
-                access,
-                &mut tool_requirements.reads,
-                &mut tool_requirements.exec,
-                &mut env,
-            );
-            let cwd = subtree(input.cwd);
-            tool_requirements.exec.push(cwd.clone());
-            tool_requirements.required_exec.push(cwd);
-        }
-        node_tools(
-            input.home,
-            access,
-            scratch,
-            &mut tool_requirements,
-            &mut env,
-        );
-    }
     Ok(LaunchSpec {
         argv,
         env,
@@ -137,8 +134,10 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: Default::default(),
-        tool_requirements,
+        tool_requirements: Default::default(),
         git_wrapper: Default::default(),
+        policy: input.policy.clone(),
+        credential_roots: input.credential_roots.clone(),
         profile: ProviderProfile {
             spec: profile,
             observations: Default::default(),

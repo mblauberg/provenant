@@ -24,6 +24,7 @@ fn context<'a>(
     RoutingContext {
         policy_account_hint: None,
         choice_context: None,
+        selection_evidence: None,
         catalogue,
         config,
         registry: REGISTRY,
@@ -54,6 +55,7 @@ fn opencode_accounts() -> [AvailabilityRecord; 2] {
     ["zen", "go"].map(|key| AvailabilityRecord {
         adapter: "opencode".into(),
         account_key: Some(key.into()),
+        plan: Some(key.into()),
         ..availability()
     })
 }
@@ -89,6 +91,7 @@ fn availability() -> AvailabilityRecord {
         fixture_ref: "test".into(),
         catalogue_revision: Catalogue::bundled().unwrap().revision,
         account_key: Some("opaque-account".into()),
+        plan: None,
         observed_models: vec!["test".into()],
         observed_unix_seconds: 80,
         expires_unix_seconds: 120,
@@ -101,6 +104,14 @@ fn reason(route: &ResolvedRoute) -> Option<&RouteExclusionReason> {
         _ => None,
     }
 }
+/// Fixtures derive account plan metadata from the adapter's namespace declaration.
+fn fixture_plan(model: &ModelId) -> Option<String> {
+    provenant_records::AdapterSpec::get(model.adapter())?
+        .account_model_plans
+        .iter()
+        .find(|plan| model.model().starts_with(plan.model_prefix))
+        .map(|plan| plan.plan.into())
+}
 fn quota(
     model: &str,
     account: &str,
@@ -109,13 +120,17 @@ fn quota(
     observed: i64,
     expires: i64,
 ) -> Result<QuotaObservation, RoutingError> {
+    let model = ModelId::parse(model)?;
+    let plan = fixture_plan(&model);
     Ok(QuotaObservation {
-        model: ModelId::parse(model)?,
+        model: model.clone(),
         expires_unix_seconds: expires,
         snapshot: provenant_quota::QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: provenant_quota::AccountScope {
-                adapter: "codex".into(),
+                extra: Default::default(),
+                adapter: model.adapter().into(),
                 account_key: account.into(),
                 label: "test".into(),
             },
@@ -124,7 +139,11 @@ fn quota(
             observed_unix_seconds: observed,
             source_ref: "fixture".into(),
             authority_ref: None,
-            details: None,
+            details: plan.map(|plan| provenant_quota::QuotaDetails {
+                extra: Default::default(),
+                plan: Some(plan),
+                ..Default::default()
+            }),
             windows: vec![],
         },
     })
@@ -170,6 +189,7 @@ fn profile_preview_with_status(
     let mut record = availability();
     record.adapter = id.adapter().into();
     record.account_key = Some(account.into());
+    record.plan = fixture_plan(&id);
     let records = [record];
     let access = [AccessContext {
         adapter: id.adapter(),
@@ -227,19 +247,9 @@ fn load_routing(
     Box<dyn std::error::Error>,
 > {
     static ENTRIES: [provenant_config::DomainSection; 1] = [SECTION];
-    struct Resolver;
-    impl provenant_core::PathResolver for Resolver {
-        fn resolve_existing_ancestor(
-            &self,
-            path: &std::path::Path,
-        ) -> std::io::Result<std::path::PathBuf> {
-            Ok(path.into())
-        }
-    }
-    let mut inputs =
-        provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/assets".into());
-    inputs.state_dir = Some("/fixture/state".into());
-    let roots = inputs.resolve(&Resolver)?;
+    let temporary = tempfile::tempdir()?;
+    let inputs = provenant_test_support::test_roots(temporary.path())?;
+    let roots = inputs.resolve(&provenant_test_support::IdentityPathResolver)?;
     Ok(provenant_config::load_with_domains(
         &roots,
         Some(text.as_bytes()),
@@ -249,6 +259,7 @@ fn load_routing(
 
 fn account_scope(key: &str) -> provenant_quota::AccountScope {
     provenant_quota::AccountScope {
+        extra: Default::default(),
         adapter: "codex".into(),
         account_key: key.into(),
         label: "test".into(),
@@ -327,8 +338,10 @@ fn observation(
     window: (i64, i64),
 ) -> provenant_quota::RouteReadiness {
     provenant_quota::RouteReadiness {
+        extra: Default::default(),
         schema_version: 1,
         scope: provenant_quota::ReadinessScope {
+            extra: Default::default(),
             host: provenant_quota::LOCAL_HOST.into(),
             adapter: adapter.into(),
             account_key: account.into(),
@@ -350,6 +363,7 @@ fn readiness_over(
 ) -> impl Fn(&provenant_quota::ReadinessScope, i64) -> provenant_quota::ReadinessRead {
     move |scope, now| {
         provenant_quota::ReadinessFile {
+            extra: Default::default(),
             schema_version: 1,
             login: None,
             records: records
@@ -376,6 +390,7 @@ fn agy_account(key: &str) -> AvailabilityRecord {
     AvailabilityRecord {
         adapter: "agy".into(),
         account_key: Some(key.into()),
+        plan: Some(key.into()),
         ..availability()
     }
 }
@@ -545,6 +560,7 @@ fn go_alias_quota_case(
         AvailabilityRecord {
             adapter: "opencode".into(),
             account_key: Some("go".into()),
+            plan: Some("go".into()),
             ..availability()
         },
     ];
@@ -570,6 +586,7 @@ fn go_alias_quota_case(
     )?;
     q.snapshot.account.adapter = "opencode".into();
     q.snapshot.windows.push(provenant_quota::QuotaWindow {
+        extra: Default::default(),
         pool: "five_hour".into(),
         window_seconds: Some(18000),
         used_basis_points: 10000,
@@ -600,9 +617,12 @@ fn go_alias_quota_case(
 mod alternatives;
 mod availability;
 mod bare_model;
+mod depletion_age;
 mod exclusions;
+mod ladder;
 mod policies;
 mod preferences;
+mod quality;
 mod quotas;
 mod readiness;
 mod selection;

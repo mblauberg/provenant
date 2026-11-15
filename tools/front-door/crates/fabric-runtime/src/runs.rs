@@ -1,7 +1,8 @@
 //! Typed F3 run records and helpers consumed by the binary facade.
 
-use super::coordination::facade::{AttemptTarget, WaitCondition};
+use super::coordination::facade::{AttemptTarget, FacadeError, WaitCondition};
 use provenant_core::OperationId;
+use provenant_records::WorkKey;
 use provenant_records::run::{AttemptRecord, RunEvent};
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +10,8 @@ use serde::{Deserialize, Serialize};
 /// idempotency key; targets identify the attempts accepted by the owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmissionReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_graph: Option<provenant_records::run::PeerGraph>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     pub operation_id: OperationId,
@@ -32,10 +35,8 @@ pub struct PeerWorktree {
 pub struct AttemptSummary {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    pub key: WorkKey,
     pub attempt_id: provenant_core::AttemptId,
-    pub run_id: provenant_core::RunId,
-    pub task_id: provenant_core::TaskId,
-    pub operation_id: OperationId,
     pub state: String,
     pub reason: Option<String>,
     pub exit_code: Option<i64>,
@@ -59,12 +60,11 @@ impl From<AttemptRecord> for AttemptSummary {
             }
             _ => None,
         };
+        let extra = record.extra;
         Self {
-            extra: record.extra,
+            extra,
+            key: record.key,
             attempt_id: record.attempt_id,
-            run_id: record.run_id,
-            task_id: record.task_id,
-            operation_id: record.operation_id,
             state: projected.state,
             reason: projected.reason,
             exit_code: projected.exit_code,
@@ -109,12 +109,15 @@ pub enum RunResult {
     Status {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
+        lane_waits: Vec<provenant_records::run::LaneWait>,
         #[serde(with = "attempt_wire")]
         attempt: AttemptRecord,
     },
     Wait {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation: Option<String>,
         condition: WaitCondition,
         #[serde(with = "attempts_wire")]
         attempts: Vec<AttemptRecord>,
@@ -136,7 +139,7 @@ pub enum RunResult {
 }
 
 fn encode_attempt(record: &AttemptRecord) -> Result<serde_json::Value, serde_json::Error> {
-    let mut value = serde_json::to_value(record)?;
+    let mut value = provenant_records::run::public_attempt_value(record)?;
     let seconds = provenant_records::wire::provider_seconds(record.provider_ms);
     let object = value.as_object_mut().ok_or_else(|| {
         <serde_json::Error as serde::ser::Error>::custom("attempt record must be an object")
@@ -257,6 +260,30 @@ pub struct RunCapabilities {
     pub events: bool,
 }
 
+/// Finalise every wait return through the same snapshot rule. At expiry the
+/// owner may refresh local records; the callback must not start remote reads or
+/// grant another wait budget.
+pub fn finish_wait_snapshot(
+    condition: WaitCondition,
+    mut attempts: Vec<AttemptRecord>,
+    expired: bool,
+    observation: Option<String>,
+    refresh_local: impl FnOnce(&mut [AttemptRecord]) -> Result<(), FacadeError>,
+) -> Result<RunResult, FacadeError> {
+    if expired {
+        refresh_local(&mut attempts)?;
+    }
+    let satisfied = wait_satisfied(condition, attempts.iter().map(|record| &record.state));
+    Ok(RunResult::Wait {
+        extra: Default::default(),
+        observation,
+        condition,
+        attempts,
+        satisfied,
+        timed_out: expired && !satisfied,
+    })
+}
+
 /// Input-required wakes either condition; other outcomes remain result data.
 pub fn wait_satisfied<'a>(
     condition: WaitCondition,
@@ -287,7 +314,8 @@ pub fn wait_satisfied<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{AttemptId, Digest, ProjectId, RunId, TaskId, WallTime};
+    use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
+    use provenant_records::WorkKey;
     use provenant_records::{
         CanonicalV1,
         run::{AttemptState, Outcome},
@@ -297,9 +325,10 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "schema_version": 1,
             "attempt_id": AttemptId::from_bytes([1; 16]),
-            "run_id": RunId::from_bytes([2; 16]),
+            "run_id": "02020202020202020202020202020202",
+            "task_id": "04040404040404040404040404040404",
             "project_id": ProjectId::from_bytes([3; 16]),
-            "task_id": TaskId::from_bytes([4; 16]),
+            "key": WorkKey::new(ProjectId::from_bytes([3; 16]), "graph", "node", 1).unwrap(),
             "operation_id": "wire-silence",
             "attempt_number": 1,
             "revision": 1,
@@ -309,6 +338,8 @@ mod tests {
             "queued_at": WallTime::from_micros(1).unwrap(),
             "state": {"state":"running"},
             "usage": {},
+            "read_only_writable": [],
+            "protected_paths": [], "trace": {},
             "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"},"digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
         }))
         .unwrap()
@@ -321,7 +352,6 @@ mod tests {
         let mut other_read = record.clone();
         other_read.provider_silent_for_ms.0 = None;
         other_read.process_observation_valid.0 = true;
-        other_read.provider_silence_suppressed.0 = true;
         assert_eq!(record, other_read);
         assert!(
             serde_json::to_value(&record)
@@ -338,9 +368,113 @@ mod tests {
     }
 
     #[test]
+    fn public_detail_and_summary_hide_only_private_attempt_metadata() {
+        let mut record = attempt();
+        let command: provenant_records::PortCommand = serde_json::from_value(serde_json::json!({
+            "argv":["admission-check"],
+            "exit_codes":{"success":[0],"unknown":[],"other":"refused"}
+        }))
+        .unwrap();
+        let binding = provenant_records::run::RepositoryAdmissionBinding::new(
+            provenant_records::PortSource::Project,
+            &command,
+        );
+        record.repository_admission_binding = Some(binding.clone());
+        record.extra.insert(
+            "visible_extension".into(),
+            serde_json::json!({"kept": true}),
+        );
+
+        // The stored record keeps the private lifecycle binding.
+        assert_eq!(
+            serde_json::to_value(&record).unwrap()["repository_admission_binding"],
+            serde_json::to_value(&binding).unwrap()
+        );
+
+        let detail = encode_attempt(&record).unwrap();
+        assert!(detail.get("repository_admission_binding").is_none());
+        assert_eq!(
+            detail["visible_extension"],
+            serde_json::json!({"kept": true})
+        );
+
+        let summary =
+            serde_json::to_value(AttemptSummary::from(record)).expect("summary projection");
+        assert!(summary.get("repository_admission_binding").is_none());
+        assert_eq!(
+            summary["visible_extension"],
+            serde_json::json!({"kept": true})
+        );
+    }
+
+    #[test]
+    fn wait_observation_round_trips_and_rejects_wrong_types() {
+        for observation in [None, Some("event subscription".to_owned())] {
+            let result = finish_wait_snapshot(
+                WaitCondition::Any,
+                Vec::new(),
+                false,
+                observation.clone(),
+                |_| Ok(()),
+            )
+            .unwrap();
+            let mut value = serde_json::to_value(&result).unwrap();
+            value["future_observation"] = serde_json::json!({"source": "newer minor"});
+            let decoded: RunResult = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+            for malformed in [
+                serde_json::json!(false),
+                serde_json::json!(7),
+                serde_json::json!({}),
+            ] {
+                value["observation"] = malformed;
+                assert!(serde_json::from_value::<RunResult>(value.clone()).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn expired_wait_evaluates_the_final_local_snapshot_before_its_verdict() {
+        for condition in [WaitCondition::Any, WaitCondition::All] {
+            let pending = attempt();
+            let result = finish_wait_snapshot(
+                condition,
+                vec![pending],
+                true,
+                Default::default(),
+                |records| {
+                    records[0].state = AttemptState::Terminal {
+                        extra: Default::default(),
+                        terminal_cause: None,
+                        terminal_note: None,
+                        stop: None,
+                        outcome: Outcome::Succeeded,
+                        exit_code: Some(0),
+                        finished_at: WallTime::from_micros(2).unwrap(),
+                        reason: None,
+                    };
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(matches!(
+                result,
+                RunResult::Wait {
+                    satisfied: true,
+                    timed_out: false,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
     fn input_required_wakes_all_without_waiting_for_a_sibling() {
         let input = AttemptState::Terminal {
             extra: Default::default(),
+            terminal_cause: None,
+            terminal_note: None,
+            stop: None,
             outcome: Outcome::InputRequired,
             exit_code: None,
             finished_at: provenant_core::WallTime::from_micros(1).unwrap(),
@@ -349,6 +483,7 @@ mod tests {
         let states = [
             AttemptState::Running {
                 extra: Default::default(),
+                child_wait: None,
             },
             input,
         ];
@@ -357,7 +492,8 @@ mod tests {
             WaitCondition::All,
             [
                 AttemptState::Running {
-                    extra: Default::default()
+                    extra: Default::default(),
+                    child_wait: None
                 },
                 AttemptState::Queued {
                     extra: Default::default()
@@ -365,5 +501,32 @@ mod tests {
             ]
             .iter()
         ));
+    }
+    #[test]
+    fn status_waits_round_trip_and_reject_malformed_reason_facts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let result = RunResult::Status {
+            extra: Default::default(),
+            lane_waits: vec![provenant_records::run::LaneWait {
+                extra: Default::default(),
+                attempt_id: AttemptId::from_bytes([1; 16]),
+                lane_class: provenant_records::run::LaneClass::Writer,
+                waiting_for: provenant_records::run::LaneWaitReason::ProviderSilence {
+                    silent_for_ms: 3_000,
+                },
+            }],
+            attempt: attempt(),
+        };
+        let encoded = serde_json::to_value(&result)?;
+        assert_eq!(
+            serde_json::from_value::<RunResult>(encoded.clone())?,
+            result
+        );
+        let mut malformed = encoded;
+        malformed["lane_waits"][0]["waiting_for"] = serde_json::json!({
+            "kind":"provider_silence", "silent_for_ms":"long"
+        });
+        assert!(serde_json::from_value::<RunResult>(malformed).is_err());
+        Ok(())
     }
 }

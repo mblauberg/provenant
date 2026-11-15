@@ -208,7 +208,7 @@ fn message(id: &str, output: u64) -> String {
 }
 
 #[test]
-fn stats_default_output_omits_attempt_rows_and_leaves_other_sections_unchanged() -> Result {
+fn stats_output_omits_attempt_rows_and_keeps_unlinked_usage() -> Result {
     let (rig, _) = refresh_rig()?;
     let config = rig.root.join("claude");
     register_account(&rig, "claude", "current", "current", &config)?;
@@ -250,31 +250,26 @@ fn stats_default_output_omits_attempt_rows_and_leaves_other_sections_unchanged()
     ])?;
     assert_eq!(code(&end), 0, "{end:?}");
 
-    let default_output = rig.command(&["telemetry", "stats"])?;
-    assert_eq!(code(&default_output), 0);
-    let default_text = String::from_utf8(default_output.stdout.bytes)?;
-
-    let detail_output = rig.command(&["telemetry", "stats", "--detail"])?;
-    assert_eq!(code(&detail_output), 0);
-    let detail_text = String::from_utf8(detail_output.stdout.bytes)?;
-
-    let header = "native sub-agent usage (host; may overlap chair usage):\n";
-    assert!(default_text.contains(header));
-    assert!(detail_text.contains(header));
-
-    // The other sections preceding the native section are identical.
-    let default_prefix = default_text.split(header).next().unwrap();
-    let detail_prefix = detail_text.split(header).next().unwrap();
-    assert_eq!(default_prefix, detail_prefix);
-
-    // Default output omits per-attempt rows; `--detail` includes them.
-    assert!(!default_text.contains("reviewer claude-opus-5-5:"));
-    assert!(detail_text.contains("reviewer claude-opus-5-5: input=23 output=45"));
-    assert_ne!(default_text, detail_text);
-
-    // Both retain unlinked sub-agent usage.
-    assert!(default_text.contains("unlinked claude-opus-5-5: 1 messages, input=23 output=30"));
-    assert!(detail_text.contains("unlinked claude-opus-5-5: 1 messages, input=23 output=30"));
+    let output = rig.command(&["telemetry", "stats", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let native = &report["data"]["native_subagents"];
+    // Attempt rows are omitted (an absent or empty list), never reported.
+    assert!(
+        native["attempts"]
+            .as_array()
+            .is_none_or(|rows| rows.is_empty()),
+        "{native}"
+    );
+    let unlinked = native["unlinked"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["model"] == "claude-opus-5-5"))
+        .ok_or("unlinked usage row")?;
+    assert_eq!(unlinked["messages"], 1);
+    assert_eq!(unlinked["buckets"][0], 5);
+    assert_eq!(unlinked["buckets"][1], 7);
+    assert_eq!(unlinked["buckets"][2], 11);
+    assert_eq!(unlinked["buckets"][4], 30);
 
     Ok(())
 }

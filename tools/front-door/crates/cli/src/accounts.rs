@@ -52,7 +52,7 @@ pub enum Accounts {
     ///
     /// Reapplies the installed release to each registered account directory and
     /// to every recorded install target. What is synced: the managed hooks, the
-    /// managed skills, the Fabric MCP entry, and the allow-listed keys of the
+    /// managed skills and the allow-listed keys of the
     /// shared Claude `settings.json` (`[domains.accounts.shared_settings]`).
     /// Never touched: identity and credentials, `.claude.json` identity fields,
     /// settings keys outside the allow-list, and hooks you edited or removed.
@@ -173,7 +173,7 @@ fn execute_inner(
     home: &Path,
     kind: &mut Option<provenant_run::ErrorKind>,
 ) -> Result<Settings, String> {
-    let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+    let settings = crate::config_reads::read_for(roots, "accounts")
         .map_err(|error| {
             if error.refusal_code().is_some() {
                 *kind = Some(provenant_run::ErrorKind::SharedSettingsNeverSynced);
@@ -373,7 +373,7 @@ pub fn set_quota_display(
     let mut refusal = None;
     let edited = provenant_config::edit_config(
         roots,
-        &crate::domains::SECTIONS,
+        &crate::config_reads::sections_for("accounts set").map_err(|error| error.to_string())?,
         &provenant_config::EditOptions::new("cli"),
         |doc, current| {
             let icon = match icon {
@@ -500,8 +500,8 @@ fn apply_settings(doc: &mut toml_edit::DocumentMut, settings: &Settings) -> Resu
     Ok(())
 }
 
-/// Records the organisation first seen for a legacy registration (trust on
-/// first use). Best effort: the next validation retries on any failure.
+/// Records the organisation first seen when a provider exposes it (trust on
+/// first use). Best effort: a later validation retries the pin after failures.
 pub fn record_org(roots: &Roots, adapter: &str, label: &str, org: &str) -> Result<(), String> {
     edit_accounts(roots, |mut settings| {
         let entry = settings
@@ -527,7 +527,7 @@ fn edit_accounts(
     let mut refusal = None;
     let edited = provenant_config::edit_config(
         roots,
-        &crate::domains::SECTIONS,
+        &crate::config_reads::sections_for("accounts").map_err(|error| error.to_string())?,
         &provenant_config::EditOptions::new("cli"),
         |doc, current| match change(current.domains.accounts.clone())
             .and_then(|settings| apply_settings(doc, &settings))

@@ -1,16 +1,28 @@
 //! Advisory tracker lint composition. Forge failures do not block work.
-use crate::{emit, pr, roots};
+use crate::{emit, roots};
 use provenant_cli::{
     Globals, Tracker,
     tracker::{self, Config, Finding},
 };
+use provenant_config::{Port, PortTable};
 use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::Path, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 #[derive(Clone, Deserialize)]
 struct IssueType {
     name: String,
+}
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PortIssue {
+    body: Option<String>,
+    state: String,
+    kind: Option<String>,
 }
 #[derive(Clone, Deserialize)]
 struct Issue {
@@ -25,24 +37,35 @@ struct Report {
     skipped: Vec<String>,
 }
 
-fn issue(root: &Path, number: u64, timeout: Duration) -> Result<Issue, String> {
-    let number = number.to_string();
-    let args = [
-        "gh",
-        "issue",
-        "view",
-        &number,
-        "--json",
-        "body,state,issueType",
-    ];
-    let output = pr::execute_for(root, &args, timeout, false)
-        .and_then(pr::successful)
-        .map_err(|e| e.to_string())?;
-    serde_json::from_slice(&output).map_err(|e| e.to_string())
+/// The tracker projection uses the same forge adapter as pull/CI operations.
+struct TrackerPort {
+    port: Port,
+    state: PathBuf,
+}
+impl TrackerPort {
+    fn from_port(port: Port, state: PathBuf) -> Self {
+        Self { port, state }
+    }
+
+    fn issue(&mut self, root: &Path, number: u64, timeout: Duration) -> Result<Issue, String> {
+        let mut forge =
+            provenant_config::ForgePort::new(self.port.clone(), "tracker", root, &self.state)
+                .map_err(|error| error.to_string())?;
+        let response = forge
+            .request(provenant_config::ForgeOperation::Issue { number }, timeout)
+            .map_err(|error| error.to_string())?;
+        let issue: PortIssue = serde_json::from_slice(&response.body)
+            .map_err(|error| format!("invalid tracker projection: {error}"))?;
+        Ok(Issue {
+            body: issue.body,
+            state: issue.state,
+            issue_type: issue.kind.map(|name| IssueType { name }),
+        })
+    }
 }
 
 fn config(root: &Path, skipped: &mut Vec<String>) -> Config {
-    let path = root.join(".provenant/tracker-lint.toml");
+    let path = root.join(provenant_config::repository_files::TRACKER_LINT);
     match std::fs::read_to_string(&path) {
         Ok(text) => match toml_edit::de::from_str(&text) {
             Ok(config) => {
@@ -136,7 +159,7 @@ fn collect(
                 issue.body.unwrap_or_default(),
                 issue.issue_type.map_or_else(|| kind.to_owned(), |t| t.name),
             )),
-            Err(_) => skipped.push(format!("issue #{number} skipped: forge unavailable")),
+            Err(error) => skipped.push(format!("issue #{number} skipped: {error}")),
         }
     }
     if sources.is_empty() && numbers.is_empty() && file.is_none() {
@@ -165,21 +188,36 @@ pub fn run(command: Tracker, globals: &Globals) -> u8 {
         file,
         kind,
     } = command;
-    let root = match roots::selected_project(globals.project.as_deref(), false) {
-        Ok(root) => root,
+    let resolved =
+        match roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return crate::fail(
+                    "tracker lint",
+                    Outcome::Invalid,
+                    "ROOT",
+                    &error.to_string(),
+                    globals,
+                );
+            }
+        };
+    let root = project_root(&resolved.project);
+    let ports = match PortTable::read_for(Some(&root), resolved.roots.state.as_path()) {
+        Ok(ports) => ports,
         Err(error) => {
             return crate::fail(
                 "tracker lint",
                 Outcome::Invalid,
-                "ROOT",
-                &error.to_string(),
+                "PORT_CONFIG",
+                &format!("cannot read tracker port: {error}"),
                 globals,
             );
         }
     };
-    let root = project_root(&root);
+    let mut port =
+        TrackerPort::from_port(ports.tracker, resolved.roots.state.as_path().to_path_buf());
     let report = collect(&root, &numbers, file.as_deref(), &kind, &mut |n| {
-        issue(&root, n, Duration::from_secs(15))
+        port.issue(&root, n, Duration::from_secs(15))
     });
     let human = human(&report);
     emit(

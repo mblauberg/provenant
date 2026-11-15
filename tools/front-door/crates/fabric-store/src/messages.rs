@@ -92,11 +92,11 @@ pub(crate) fn insert_message(tx: &rusqlite::Connection, message: &Message) -> Re
         return Ok(false);
     }
     tx.execute(
-        "INSERT INTO messages VALUES(?,?,?)",
+        "INSERT INTO messages (project, id, record) VALUES(?,?,?)",
         params![message.project.to_string(), message.id.to_string(), bytes],
     )?;
     tx.execute(
-        "INSERT INTO delivery_sequences VALUES(?,0) ON CONFLICT(project) DO NOTHING",
+        "INSERT INTO delivery_sequences (project, seq) VALUES(?,0) ON CONFLICT(project) DO NOTHING",
         [message.project.to_string()],
     )?;
     for recipient in &message.recipients {
@@ -211,7 +211,7 @@ impl Store {
             if seq>highest { return Err(Error::Invalid("mail cursor")); }
             let previous:i64=tx.query_row("SELECT seq FROM mail_cursors WHERE project=? AND recipient=?",params![project.to_string(),recipient.to_string()],|r|r.get(0)).optional()?.unwrap_or(0);
             if seq>previous {
-                tx.execute("INSERT INTO mail_cursors VALUES(?,?,?) ON CONFLICT(project,recipient) DO UPDATE SET seq=max(seq,excluded.seq)",params![project.to_string(),recipient.to_string(),seq])?;
+                tx.execute("INSERT INTO mail_cursors (project, recipient, seq) VALUES(?,?,?) ON CONFLICT(project,recipient) DO UPDATE SET seq=max(seq,excluded.seq)",params![project.to_string(),recipient.to_string(),seq])?;
                 append(tx,&event(project,Some(recipient),EventKind::MailRead,None,seq.to_string(),at),None)?;
             }
             Ok(())

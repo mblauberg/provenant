@@ -35,7 +35,7 @@ impl Store {
         }
         let result = action()?;
         tx.execute(
-            "INSERT INTO coordination_operations VALUES (?1,?2,?3,?4,?5)",
+            "INSERT INTO coordination_operations (project, id, actor, request, result) VALUES (?1,?2,?3,?4,?5)",
             params![
                 project.to_string(),
                 id.to_string(),

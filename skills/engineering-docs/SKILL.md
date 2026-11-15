@@ -24,7 +24,7 @@ invariants with no second status projection.
 | What changed and when | `git log`; release fragments per repository policy |
 
 A spec that code can regenerate, or a task spec that has shipped, should die.
-Keep only what code cannot say, and link code, schemas and tests.
+Keep only what code cannot say, and link owning symbols, declarations and schemas.
 
 ## Rules
 
@@ -32,8 +32,10 @@ Keep only what code cannot say, and link code, schemas and tests.
   superseded text in the same change; never append dated `Update:` or "as of"
   entries. Changelogs and release notes are the exception.
 - **Owner and anchor.** Each spec and runbook opens with `Owner:` and `Anchor:`
-  (links to the source symbols or tests that let a reader check it). Name the
-  symbol, not a line number. A rule's `Why:` cites its event, or reads
+  naming owning modules, types or declarations. Specs never name individual
+  tests, line numbers or inventory counts. Tests cite the section they pin with
+  `Spec: docs/specs/NAME.md#anchor`; the drift gate resolves these links.
+  A rule's `Why:` cites its event, or reads
   `Why (default):` for a default open to change.
 - **Three hops** from claim to owner to evidence. Merge duplicate truths and
   tiny files that change together. Before cutting apparent restatement, check
@@ -51,10 +53,7 @@ replaces. Merge or delete superseded ADRs and leave no compatibility stubs.
 A kept prototype lives in the repository with a one-line index entry in its
 owning doc; throwaway ones are not indexed. The root instruction file routes;
 by default a nested `AGENTS.md` is added only at a real boundary after an
-observed failure, and `CLAUDE.md` holds just `@AGENTS.md`. Diagrams default to
-Mermaid (`d2-diagrams` for a justified fixed layout) with `accTitle` and
-`accDescr`; render the block and open the output, because a clean parse is not
-visual verification. Archive retired docs with owner authority and repair
+observed failure, and `CLAUDE.md` holds just `@AGENTS.md`. Use `d2-diagrams` for diagram authoring and visual verification. Archive retired docs with owner authority and repair
 references.
 
 See [placement](references/placement.md) for default homes.

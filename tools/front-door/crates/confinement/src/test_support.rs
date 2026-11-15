@@ -61,7 +61,9 @@ impl Fixture {
             run_fixture_git(&executor, &git, temp.path(), &env, &args)?;
         }
 
-        let runtime = UtilityRuntime::new(&git, &home)?;
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let runtime = UtilityRuntime::new(&git, &home, &state)?;
         let probe_budget = UtilityBudget::bounded(Duration::from_secs(10))?;
         let repo = runtime.open_repo(&executor, &root, probe_budget, &CancelToken::new())?;
         Ok(Self {
@@ -255,7 +257,12 @@ pub(crate) fn run_fixture_git(
     );
     let outcome = executor.execute(options)?;
     if outcome.termination != Termination::Exit(0) || outcome.timed_out || outcome.cancelled {
-        return Err(io::Error::other("bounded Git fixture setup failed").into());
+        return Err(io::Error::other(format!(
+            "bounded Git fixture setup failed: git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&outcome.stderr.bytes).trim()
+        ))
+        .into());
     }
     Ok(outcome)
 }

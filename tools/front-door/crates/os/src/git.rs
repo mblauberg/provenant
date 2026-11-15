@@ -255,7 +255,11 @@ fn resolve(override_path: Option<&Path>, candidates: &[PathBuf]) -> Option<PathB
 
 /// Read `PROVENANT_GIT` and resolve the selected executable.
 pub fn git_executable() -> Option<PathBuf> {
-    resolve_git_executable(std::env::var_os("PROVENANT_GIT").as_deref().map(Path::new))
+    resolve_git_executable(
+        std::env::var_os(provenant_core::consumer_env::GIT)
+            .as_deref()
+            .map(Path::new),
+    )
 }
 
 #[cfg(test)]
@@ -499,11 +503,12 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
+        let test_path = crate::fixture::exact_test_path(
+            module_path!(),
+            "repository_path_ignores_poisoned_environment_for_linked_worktree",
+        );
         let status = Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "git::tests::repository_path_ignores_poisoned_environment_for_linked_worktree",
-            ])
+            .args(["--exact", test_path.as_str()])
             .env("PROVENANT_GIT_DISCOVERY_TEST_ROOT", temp.path())
             .env("GIT_DIR", poison.join(".git"))
             .env("GIT_WORK_TREE", &poison)

@@ -36,11 +36,10 @@ reconcile active work and report its disposition.
 Before compaction, handoff or a long interruption, rewrite a checkpoint near
 2 KiB from the [checkpoint template](templates/checkpoint.template.md), with
 the standing record and an Intent section as the
-[continuity contract](references/continuity.md) sets out. Save it with
-`provenant workflow session save SESSION --file checkpoint.md --client
-HARNESS`, using the host-supplied session ID and the actual harness. Append
-milestones with `provenant chair log append --session SESSION --file
-update.json`; history lives there, current context in the checkpoint. Move
+[continuity contract](references/continuity.md) sets out. Save it with `provenant workflow session save` and append milestones with
+`provenant chair log append`; `--help` on each gives the flags. Use the
+host-supplied session ID and the actual harness. History lives in the log,
+current context in the checkpoint. Move
 needed results out of scratch to their durable owner before it expires.
 
 When the chair's account runs low, `provenant chair switch` checkpoints and

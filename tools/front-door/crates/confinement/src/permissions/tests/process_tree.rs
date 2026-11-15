@@ -133,7 +133,9 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(children.len(), 3);
         let own = std::process::id();
         std::fs::write(root.join("lane.pid"), own.to_string())?;
-        let path = PathBuf::from(std::env::var_os(process_tree::ENV).ok_or("snapshot path")?);
+        let path = PathBuf::from(
+            std::env::var_os(provenant_core::consumer_env::PROCESS_TREE).ok_or("snapshot path")?,
+        );
         let _ = ready(&path)?;
         let sample = process_tree::read(&path, own)?;
         assert_eq!(sample.schema_version, 2);
@@ -307,7 +309,7 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
             AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                 git_grants_digest: [7; 32],
                 publishing: false,
-                common_git_dir: Some("/fixture/git".into()),
+                common_git_dir: "/fixture/git".into(),
                 cargo_cache: PathGrant {
                     path: root.join("cache"),
                     scope: PathScope::Subtree,
@@ -412,7 +414,7 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
                     (PEER.into(), peer_pid.to_string().into()),
                     (HELPER.into(), helper.as_os_str().to_owned()),
                     (
-                        process_tree::ENV.into(),
+                        provenant_core::consumer_env::PROCESS_TREE.into(),
                         snapshot_path.as_os_str().to_owned(),
                     ),
                 ];

@@ -1,10 +1,50 @@
 use std::{
     fmt::Display,
     io::Write,
+    path::Path,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use provenant_core::{PathResolver, RootInputs};
+
 static SKIP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Keep the fixture's state outside both its home and its checkout. A state
+/// root enclosing home would also enclose protected credentials and old state.
+/// The caller owns the temporary base; each root is an existing private directory.
+pub fn test_roots(base: &Path) -> std::io::Result<RootInputs> {
+    let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+    let state = base.join("state");
+    for path in [&inputs.home, &inputs.checkout, &state] {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(path)?;
+    }
+    inputs.state_dir = Some(state);
+    Ok(inputs)
+}
+
+/// Existing callers can continue to use the established fixture constructor
+/// while slices adopt `test_roots`.
+pub fn root_inputs(base: &Path) -> std::io::Result<RootInputs> {
+    test_roots(base)
+}
+
+/// Test-only resolver for fixture paths whose directories have already been
+/// created under an isolated temporary root.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IdentityPathResolver;
+
+impl PathResolver for IdentityPathResolver {
+    fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<std::path::PathBuf> {
+        Ok(path.to_owned())
+    }
+}
 
 /// Poll an observation until it satisfies a condition, reporting the last value
 /// when the deadline expires.

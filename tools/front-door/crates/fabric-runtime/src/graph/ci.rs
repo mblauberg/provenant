@@ -270,11 +270,6 @@ pub(super) fn evaluate<O: AttemptOwner>(
         truncated: observation.truncated,
         elapsed_seconds,
     });
-    if reanchors > 3 {
-        return Ok(Evaluation::Settled(Some(
-            "timeout: clock re-anchor limit (3) exceeded".into(),
-        )));
-    }
     if prior.is_some() && !superseded && elapsed_seconds >= *timeout_seconds {
         return Ok(Evaluation::Settled(Some(if unscheduled {
             format!("timeout: {NOT_SCHEDULED}")
@@ -334,11 +329,20 @@ pub(super) fn outputs(passed: bool, ci: Option<&CiEvidence>) -> NodeOutputs {
             .iter()
             .enumerate()
             .map(|(index, check)| Finding {
-                extra: check
-                    .url
-                    .as_ref()
-                    .map(|url| [("url".into(), serde_json::Value::String(url.clone()))].into())
-                    .unwrap_or_default(),
+                extra: Default::default(),
+                url: check.url.clone(),
+                trigger: None,
+                triage: None,
+                class: None,
+                verification: None,
+                evidence: None,
+                proposed_fix: None,
+                kind: None,
+                lens: None,
+                propagates: None,
+                design_defect: None,
+                risk_grew: None,
+                scope_grew: None,
                 id: format!("ci-{}", index + 1),
                 severity: "error".into(),
                 file: String::new(),

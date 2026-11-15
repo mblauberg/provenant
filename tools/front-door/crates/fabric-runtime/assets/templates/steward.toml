@@ -1,4 +1,3 @@
-identity = "fresh"
 doc = "Sweep tracker issues in proposal mode: suggest duplicates, report parent links and thin bodies."
 tier = "junior"
 access = "read_only"

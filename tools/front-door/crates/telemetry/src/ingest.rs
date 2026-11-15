@@ -1,5 +1,5 @@
-//! Native session ingest: per-message token rows from Claude Code transcripts,
-//! attributed to an account by the config directory they were found under.
+//! Native session ingest: per-message token rows from Claude Code transcripts.
+//! Transcript paths locate sessions; chair records carry per-session identity evidence.
 //!
 //! The store is the `ingest` directory in the state root: one dated segment per
 //! UTC day of message time (`2026-10-01.jsonl`), one row per assistant message,
@@ -7,9 +7,11 @@
 //! and identifiers only: never a prompt, a reply or a path. Ingest rewrites
 //! only the segments it touches and readers stream the days they ask for, so
 //! no operation meets a whole-store size.
+use crate::usage::{Identity, UnknownIdentityReason};
 use crate::{claude::Raw, segments};
-use provenant_core::Roots;
+use provenant_core::{Clock, MonoTime, Roots};
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
+use provenant_records::AccountIdentity;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -17,20 +19,20 @@ use std::{
     ffi::OsStr,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    time::{Instant, SystemTime},
+    time::SystemTime,
 };
 use thiserror::Error;
 
-pub const ROW_SCHEMA_VERSION: u64 = 1;
+pub const ROW_SCHEMA_VERSION: u64 = 3;
 /// The only provider whose sessions leave a native transcript.
 pub const PROVIDER: &str = "claude";
 const DIRECTORY: &str = "ingest";
-/// The single-file store earlier releases wrote; see [`migrate_legacy`].
-const LEGACY_STORE: &str = "ingest.jsonl";
-/// Where the old file is kept when some of its lines could not be carried over.
-const UNMIGRATED_STORE: &str = "ingest.jsonl.unmigrated";
 const LOCK: &str = "ingest.lock";
 const CURSORS: &str = "ingest-cursors.json";
+const IDENTITY_OVERRIDES: &str = "identity-overrides";
+const IDENTITY_OVERRIDE_PREFIX: &str = "session-identity-";
+const IDENTITY_OVERRIDE_SCHEMA_VERSION: u64 = 1;
+const IDENTITY_OVERRIDE_CAP: u64 = 16 << 10;
 const CURSOR_CAP: u64 = 32 << 20;
 /// Largest day ingest rewrites. At about 250 bytes a row this is roughly a
 /// quarter of a million messages in one day; past it ingest stops adding rows
@@ -57,6 +59,8 @@ pub enum IngestError {
     Io(#[from] std::io::Error),
     #[error("another ingest is running")]
     Busy,
+    #[error("the ingest identity-override store is invalid")]
+    IdentityOverrideStore,
 }
 
 impl IngestError {
@@ -66,6 +70,7 @@ impl IngestError {
             Self::Filesystem(_) => "filesystem",
             Self::Io(_) => "io",
             Self::Busy => "busy",
+            Self::IdentityOverrideStore => "identity_override_store",
         }
     }
 }
@@ -81,15 +86,15 @@ pub enum Source {
     Lane,
 }
 
-/// One assistant message's usage. The five buckets are disjoint: `cache_write`
-/// is the short-TTL part of cache creation and `cache_write_1h` the rest.
+/// One assistant message's usage and per-session identity evidence. The five
+/// buckets are disjoint: `cache_write` is the short-TTL part and `cache_write_1h` the rest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
     pub schema_version: u64,
-    pub account: String,
+    pub identity: AccountIdentity,
     pub provider: String,
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     pub uncached_input: u64,
     pub cache_read: u64,
@@ -100,20 +105,22 @@ pub struct Row {
     pub session: String,
     pub message: String,
     pub source: Source,
-    /// Native transcript identity, absent for older or non-subagent rows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Native transcript identity, absent for top-level sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
     /// Digest of the config directory that supplied this row.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub native_config: Option<String>,
     /// Native tool-use ID, present when an attempt matches this transcript.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub native_attempt: Option<String>,
     /// Provider-reported reasoning tokens; absent means unreported, never zero.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reply: Option<crate::signals::ReplyContext>,
+    #[serde(default, flatten)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 impl Row {
@@ -143,29 +150,19 @@ pub const BUCKETS: [&str; 5] = [
     "output",
 ];
 
-/// A Claude config directory and the account label it is attributed to.
+/// A transcript root. Its path locates sessions and never supplies identity.
 #[derive(Clone, Debug)]
 pub struct ConfigDir {
-    pub account: String,
     pub path: PathBuf,
 }
 
-/// Reserved account for config directories no registered account claims.
-pub const UNATTRIBUTED: &str = crate::usage::UNATTRIBUTED;
-
-/// The directories to ingest: each registered account's directories under its
-/// label, then every other `~/.claude*` directory with transcripts, including
-/// `~/.claude` itself, as `unattributed`. Nothing is dropped and nothing is
-/// guessed. `accounts` is `(label, directories)` in registration order.
-pub fn config_dirs(accounts: &[(String, Vec<PathBuf>)], home: &Path) -> Vec<ConfigDir> {
-    let mut dirs: Vec<ConfigDir> = accounts
+/// The directories to ingest: registered transcript roots plus other
+/// `~/.claude*` roots, including `~/.claude`. Paths locate transcripts only;
+/// account identity is carried from the chair session record when present.
+pub fn config_dirs(registered: &[PathBuf], home: &Path) -> Vec<ConfigDir> {
+    let mut dirs: Vec<ConfigDir> = registered
         .iter()
-        .flat_map(|(label, paths)| {
-            paths.iter().map(|path| ConfigDir {
-                account: label.clone(),
-                path: path.clone(),
-            })
-        })
+        .map(|path| ConfigDir { path: path.clone() })
         .collect();
     let claimed: BTreeSet<PathBuf> = dirs
         .iter()
@@ -187,24 +184,21 @@ pub fn config_dirs(accounts: &[(String, Vec<PathBuf>)], home: &Path) -> Vec<Conf
         }
     }
     found.sort();
-    dirs.extend(found.into_iter().map(|path| ConfigDir {
-        account: UNATTRIBUTED.into(),
-        path,
-    }));
+    dirs.extend(found.into_iter().map(|path| ConfigDir { path }));
     dirs
 }
 
 #[derive(Clone, Debug)]
 pub struct Request<'a> {
     pub dirs: &'a [ConfigDir],
-    /// Session IDs the chair hook recorded; other top-level sessions are lanes.
-    pub chair_sessions: &'a BTreeSet<String>,
+    /// Per-session identities recorded by the chair hook; other sessions stay unknown.
+    pub chair_sessions: &'a BTreeMap<String, AccountIdentity>,
     /// Only `claude` has native transcripts; any other value ingests nothing.
     pub provider: Option<&'a str>,
     /// Skip files not written since and messages stamped before.
     pub since: Option<jiff::Timestamp>,
-    /// Stop reading at this instant. Rows read before it are still written.
-    pub deadline: Option<Instant>,
+    /// Stop reading at this monotonic time. Rows read before it are still written.
+    pub deadline: Option<MonoTime>,
     /// Resume complete transcript lines from durable cursors.
     pub incremental: bool,
 }
@@ -252,7 +246,7 @@ struct Message {
     usage: Option<Raw>,
 }
 struct Pending {
-    account: String,
+    identity: AccountIdentity,
     model: String,
     effort: Option<String>,
     raw: Raw,
@@ -295,7 +289,6 @@ fn plain(path: &Path, directory: bool) -> Option<std::fs::Metadata> {
 
 struct Transcript {
     path: PathBuf,
-    account: String,
     session: String,
     source: Source,
     agent_id: Option<String>,
@@ -342,14 +335,13 @@ fn locate(
                 if !valid_session(session) || !fresh(&meta) {
                     continue;
                 }
-                let source = if request.chair_sessions.contains(session) {
+                let source = if request.chair_sessions.contains_key(session) {
                     Source::Chair
                 } else {
                     Source::Lane
                 };
                 out.push(Transcript {
                     path,
-                    account: dir.account.clone(),
                     session: session.into(),
                     source,
                     agent_id: None,
@@ -382,7 +374,6 @@ fn locate(
                     if fresh(&meta) {
                         out.push(Transcript {
                             path: file.path(),
-                            account: dir.account.clone(),
                             session: name.into(),
                             source: Source::Subagent,
                             agent_id,
@@ -404,11 +395,11 @@ struct Cursor {
     inode: u64,
     offset: u64,
     tail: String,
-    /// Pending structural events survive ingestion and routine upgrades.
-    #[serde(default)]
+    /// Pending structural events survive across incremental ingestion.
     reply: crate::signals::ReplyContext,
-    #[serde(default)]
     last_reply: Option<String>,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 fn identity(meta: &std::fs::Metadata) -> (u64, u64) {
@@ -438,43 +429,80 @@ struct CursorStore {
     schema_version: u64,
     store_digest: String,
     files: BTreeMap<String, Cursor>,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
-fn read_cursors(directory: &Directory, store: &str) -> BTreeMap<String, Cursor> {
+/// A durable mask for every row from a session with conflicting identity evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct SessionIdentityOverride {
+    schema_version: u64,
+    provider: String,
+    session: String,
+    identity: AccountIdentity,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
+}
+
+impl SessionIdentityOverride {
+    fn conflict(session: &str) -> Self {
+        Self {
+            schema_version: IDENTITY_OVERRIDE_SCHEMA_VERSION,
+            provider: PROVIDER.to_owned(),
+            session: session.to_owned(),
+            identity: AccountIdentity::conflicting_provider_observations(),
+            extra: Default::default(),
+        }
+    }
+}
+
+/// Compare declared attribution fields without interpreting opaque extensions.
+fn same_identity_scope(left: &AccountIdentity, right: &AccountIdentity) -> bool {
+    left.identity == right.identity
+        && left.epoch == right.epoch
+        && left.evidence_source == right.evidence_source
+}
+
+fn empty_cursor_store(store_digest: &str) -> CursorStore {
+    CursorStore {
+        schema_version: 2,
+        store_digest: store_digest.to_owned(),
+        files: BTreeMap::new(),
+        extra: Default::default(),
+    }
+}
+
+fn read_cursors(directory: &Directory, store: &str) -> CursorStore {
     let Ok(file) = directory.open_read(OsStr::new(CURSORS)) else {
-        return BTreeMap::new();
+        return empty_cursor_store(store);
     };
     let mut bytes = Vec::new();
     if file.metadata().map_or(true, |meta| meta.size > CURSOR_CAP)
         || file.take(CURSOR_CAP + 1).read_to_end(&mut bytes).is_err()
         || bytes.len() as u64 > CURSOR_CAP
     {
-        return BTreeMap::new();
+        return empty_cursor_store(store);
     }
-    serde_json::from_slice::<CursorStore>(&bytes)
+    crate::decode_record::<CursorStore>(&bytes, CURSOR_CAP)
         .ok()
-        // Version 1 did not retain pending structural events. Replay those
-        // transcripts rather than treating discarded observations as zero.
         .filter(|cursor| cursor.schema_version == 2 && cursor.store_digest == store)
-        .map(|cursor| cursor.files)
-        .unwrap_or_default()
+        .unwrap_or_else(|| empty_cursor_store(store))
 }
 
-/// Real time is sampled only here, for a request's wall budget.
-#[allow(clippy::disallowed_methods)]
-fn expired(deadline: Option<Instant>) -> bool {
-    deadline.is_some_and(|at| Instant::now() >= at)
+fn expired(deadline: Option<MonoTime>, clock: &dyn Clock) -> bool {
+    deadline.is_some_and(|at| clock.mono_now() >= at)
 }
 
 fn read_transcript(
     transcript: &Transcript,
-    since: Option<jiff::Timestamp>,
-    deadline: Option<Instant>,
+    request: &Request<'_>,
     messages: &mut BTreeMap<(String, String), Pending>,
     report: &mut Report,
     cursor: Option<&Cursor>,
-    incremental: bool,
+    clock: &dyn Clock,
 ) -> Result<Cursor, ()> {
+    let incremental = request.incremental;
+    let since = if incremental { None } else { request.since };
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -488,10 +516,11 @@ fn read_transcript(
         return Err(());
     }
     let (device, inode) = identity(&meta);
+    let same_transcript =
+        cursor.is_some_and(|cursor| cursor.device == device && cursor.inode == inode);
     let start = cursor
         .filter(|cursor| {
-            cursor.device == device
-                && cursor.inode == inode
+            same_transcript
                 && cursor.offset <= meta.len()
                 && tail_digest(&mut file, cursor.offset).ok().as_ref() == Some(&cursor.tail)
         })
@@ -512,13 +541,21 @@ fn read_transcript(
     let mut last_reply = cursor
         .filter(|_| start > 0)
         .and_then(|cursor| cursor.last_reply.clone());
-    let mut reply = cursor
-        .filter(|_| start > 0)
-        .map(|cursor| cursor.reply.clone())
-        .unwrap_or_default();
+    let mut reply = if start > 0 {
+        cursor
+            .map(|cursor| cursor.reply.clone())
+            .unwrap_or_default()
+    } else {
+        let mut reply = crate::signals::ReplyContext::default();
+        if same_transcript && let Some(cursor) = cursor {
+            // Reset known transcript state, while retaining opaque extensions.
+            reply.extra = cursor.reply.extra.clone();
+        }
+        reply
+    };
     let mut line = Vec::new();
     'read_loop: loop {
-        if expired(deadline) {
+        if expired(request.deadline, clock) {
             report.deadline_reached = true;
             break;
         }
@@ -536,7 +573,7 @@ fn read_transcript(
             // Drain the rest of an oversized line without keeping it.
             let mut sink = Vec::new();
             loop {
-                if expired(deadline) {
+                if expired(request.deadline, clock) {
                     report.deadline_reached = true;
                     break 'read_loop;
                 }
@@ -595,7 +632,13 @@ fn read_transcript(
         // its timestamp is excluded or unavailable. Stream repeats do not.
         let observed_reply = if last_reply.as_ref() != Some(&key.1) {
             last_reply = Some(key.1.clone());
-            std::mem::take(&mut reply)
+            // The flushed context moves to its row; the cursor keeps the
+            // opaque extensions of its own reply record.
+            let fresh = crate::signals::ReplyContext {
+                extra: reply.extra.clone(),
+                ..Default::default()
+            };
+            std::mem::replace(&mut reply, fresh)
         } else {
             crate::signals::ReplyContext::default()
         };
@@ -625,7 +668,11 @@ fn read_transcript(
         messages.insert(
             key,
             Pending {
-                account: transcript.account.clone(),
+                identity: request
+                    .chair_sessions
+                    .get(&transcript.session)
+                    .cloned()
+                    .unwrap_or_else(AccountIdentity::unknown),
                 model,
                 effort,
                 raw: usage,
@@ -646,6 +693,15 @@ fn read_transcript(
         tail,
         reply,
         last_reply,
+        // Extensions survive a cursor reset while the transcript identity is
+        // stable; a replaced file starts a new cursor record.
+        extra: if same_transcript {
+            cursor
+                .map(|cursor| cursor.extra.clone())
+                .unwrap_or_default()
+        } else {
+            Default::default()
+        },
     })
 }
 
@@ -663,7 +719,7 @@ fn row(session: String, message: String, pending: Pending) -> Row {
     let one_hour = one_hour_named.min(creation);
     Row {
         schema_version: ROW_SCHEMA_VERSION,
-        account: pending.account,
+        identity: pending.identity,
         provider: PROVIDER.into(),
         model: pending.model,
         effort: pending.effort,
@@ -681,6 +737,7 @@ fn row(session: String, message: String, pending: Pending) -> Row {
         native_attempt: None,
         reasoning_tokens: raw.reasoning_tokens,
         reply: Some(pending.reply),
+        extra: Default::default(),
     }
 }
 
@@ -691,7 +748,7 @@ fn split(bytes: &[u8]) -> (Vec<Row>, Vec<&[u8]>) {
     let mut rows = Vec::new();
     let mut kept = Vec::new();
     for line in bytes.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
-        match serde_json::from_slice::<Row>(line) {
+        match crate::decode_record::<Row>(line, MAX_ROW_LINE as u64) {
             Ok(row) if row.schema_version == ROW_SCHEMA_VERSION => rows.push(row),
             _ => kept.push(line),
         }
@@ -703,6 +760,17 @@ fn split(bytes: &[u8]) -> (Vec<Row>, Vec<&[u8]>) {
 /// are visited in order and a path seen twice, or a message found under two
 /// directories, counts once, for the first directory's account.
 pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestError> {
+    let clock = provenant_os::clock::SystemClock::new();
+    ingest_with_clock(roots, request, &clock)
+}
+
+/// Ingest using the supplied monotonic clock. The CLI uses [`ingest`] and this
+/// boundary lets tests advance time without consulting the host clock.
+pub fn ingest_with_clock(
+    roots: &Roots,
+    request: &Request<'_>,
+    clock: &dyn Clock,
+) -> Result<Report, IngestError> {
     let mut report = Report::default();
     if request.provider.is_some_and(|p| p != PROVIDER) {
         return Ok(report);
@@ -714,14 +782,47 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
             FsError::LockTimeout { .. } => IngestError::Busy,
             other => other.into(),
         })?;
-    migrate_legacy(&directory)?;
     let store = open_segments(&directory, true)?;
     sweep_staging(&store)?;
-    let mut cursors = if request.incremental {
+    let mut override_directory = open_identity_override_directory(&store, false)?;
+    if let Some(overrides) = &override_directory {
+        sweep_staging(overrides)?;
+    }
+    let mut identity_overrides = read_identity_overrides(override_directory.as_ref())?;
+    for (session, identity) in request.chair_sessions {
+        if matches!(
+            &identity.identity,
+            Identity::Unknown {
+                reason: UnknownIdentityReason::ConflictingProviderIdentity,
+            }
+        ) {
+            if !valid_session(session)
+                || !same_identity_scope(
+                    identity,
+                    &AccountIdentity::conflicting_provider_observations(),
+                )
+            {
+                return Err(IngestError::IdentityOverrideStore);
+            }
+            if !identity_overrides.contains_key(session) {
+                if override_directory.is_none() {
+                    override_directory = open_identity_override_directory(&store, true)?;
+                }
+                let Some(directory) = &override_directory else {
+                    return Err(IngestError::IdentityOverrideStore);
+                };
+                let record = SessionIdentityOverride::conflict(session);
+                write_identity_override(directory, &record)?;
+                identity_overrides.insert(session.clone(), record.identity);
+            }
+        }
+    }
+    let mut cursor_store = if request.incremental {
         read_cursors(&directory, &fingerprint(&store)?)
     } else {
-        BTreeMap::new()
+        empty_cursor_store("")
     };
+    let mut cursors = std::mem::take(&mut cursor_store.files);
     let cutoff = request.since.map(|since| {
         SystemTime::UNIX_EPOCH
             + std::time::Duration::from_secs(since.as_second().max(0).unsigned_abs())
@@ -729,7 +830,7 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     let mut seen_paths = BTreeSet::new();
     let mut transcripts = Vec::new();
     for dir in request.dirs {
-        if expired(request.deadline) {
+        if expired(request.deadline, clock) {
             report.deadline_reached = true;
             break;
         }
@@ -747,7 +848,7 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     }
     let mut messages = BTreeMap::new();
     for transcript in &transcripts {
-        if expired(request.deadline) {
+        if expired(request.deadline, clock) {
             report.deadline_reached = true;
             break;
         }
@@ -755,16 +856,11 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
         let key = cursor_key(transcript);
         match read_transcript(
             transcript,
-            if request.incremental {
-                None
-            } else {
-                request.since
-            },
-            request.deadline,
+            request,
             &mut messages,
             &mut report,
             cursors.get(&key),
-            request.incremental,
+            clock,
         ) {
             Ok(cursor) if request.incremental => {
                 cursors.insert(key, cursor);
@@ -774,6 +870,11 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
         }
     }
     report.messages = messages.len() as u64;
+    for ((session, _), pending) in &mut messages {
+        if let Some(identity) = identity_overrides.get(session) {
+            pending.identity = identity.clone();
+        }
+    }
 
     // Load the days new messages fall on and the newest few, so later chair
     // and attempt records still reach recent rows. Older days stay on disk.
@@ -799,15 +900,30 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     }
     for segment in days.values_mut() {
         for row in segment.rows.values_mut() {
-            if row.source == Source::Lane && request.chair_sessions.contains(&row.session) {
+            if row.source == Source::Lane && request.chair_sessions.contains_key(&row.session) {
                 row.source = Source::Chair;
+                segment.changed = true;
+            }
+            if let Some(identity) = identity_overrides.get(&row.session) {
+                if !same_identity_scope(&row.identity, identity) {
+                    row.identity = identity.clone();
+                    segment.changed = true;
+                }
+            } else if matches!(&row.identity.identity, Identity::Unknown { .. })
+                && let Some(identity) = request.chair_sessions.get(&row.session)
+                && matches!(&identity.identity, Identity::Known { .. })
+            {
+                row.identity = identity.clone();
                 segment.changed = true;
             }
         }
     }
     let mut fresh: BTreeMap<String, Vec<Row>> = BTreeMap::new();
     for ((session, message), pending) in messages {
-        let account = report.accounts.entry(pending.account.clone()).or_default();
+        let account = report
+            .accounts
+            .entry(pending.identity.account_key())
+            .or_default();
         let day = segments::name(pending.timestamp);
         let key = (session.clone(), message.clone());
         let holder = days
@@ -841,7 +957,18 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
                 .as_ref()
                 .is_none_or(|reply| reply.recorded.is_empty())
             {
+                // Keep reply metadata only within the same declared account scope.
+                let previous_reply_extra =
+                    if same_identity_scope(&previous.identity, &current.identity) {
+                        previous.reply.as_ref().map(|reply| reply.extra.clone())
+                    } else {
+                        None
+                    };
                 previous.reply = current.reply;
+                if let (Some(extra), Some(reply)) = (previous_reply_extra, previous.reply.as_mut())
+                {
+                    reply.extra = extra;
+                }
             }
             if previous.agent_id.is_none() {
                 previous.agent_id = current.agent_id;
@@ -907,7 +1034,7 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
             size += line.len() as u64;
             report
                 .accounts
-                .entry(row.account.clone())
+                .entry(row.identity.account_key())
                 .or_default()
                 .added += 1;
             report.added += 1;
@@ -921,12 +1048,10 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
         }
     }
     if request.incremental && !report.store_full {
-        let bytes = serde_json::to_vec(&CursorStore {
-            schema_version: 2,
-            store_digest: fingerprint(&store)?,
-            files: cursors,
-        })
-        .map_err(std::io::Error::other)?;
+        cursor_store.schema_version = 2;
+        cursor_store.store_digest = fingerprint(&store)?;
+        cursor_store.files = cursors;
+        let bytes = provenant_records::encode(&cursor_store).map_err(std::io::Error::other)?;
         if bytes.len() as u64 <= CURSOR_CAP {
             directory
                 .atomic_write(
@@ -1010,6 +1135,98 @@ impl Segment {
     }
 }
 
+fn identity_override_name(provider: &str, session: &str) -> String {
+    let key = format!("{provider}\0{session}");
+    format!("{IDENTITY_OVERRIDE_PREFIX}{}.json", digest(key.as_bytes()))
+}
+
+fn open_identity_override_directory(
+    store: &Directory,
+    create: bool,
+) -> Result<Option<Directory>, IngestError> {
+    if create {
+        match store.mkdir(OsStr::new(IDENTITY_OVERRIDES), 0o700) {
+            Ok(()) => store.sync()?,
+            Err(error) if error.is_exists() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    match store.open_directory(OsStr::new(IDENTITY_OVERRIDES)) {
+        Ok(directory) => Ok(Some(directory)),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_identity_overrides(
+    directory: Option<&Directory>,
+) -> Result<BTreeMap<String, AccountIdentity>, IngestError> {
+    let Some(directory) = directory else {
+        return Ok(BTreeMap::new());
+    };
+    let mut overrides = BTreeMap::new();
+    for entry in directory.entries()? {
+        let entry = entry?;
+        let name = entry.to_str().ok_or(IngestError::IdentityOverrideStore)?;
+        if name.starts_with(".ingest-") {
+            continue;
+        }
+        let Some(hash) = name
+            .strip_prefix(IDENTITY_OVERRIDE_PREFIX)
+            .and_then(|name| name.strip_suffix(".json"))
+        else {
+            return Err(IngestError::IdentityOverrideStore);
+        };
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(IngestError::IdentityOverrideStore);
+        }
+        let file = directory.open_read(OsStr::new(name))?;
+        if file.metadata()?.size > IDENTITY_OVERRIDE_CAP {
+            return Err(IngestError::IdentityOverrideStore);
+        }
+        let mut bytes = Vec::new();
+        file.take(IDENTITY_OVERRIDE_CAP + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > IDENTITY_OVERRIDE_CAP {
+            return Err(IngestError::IdentityOverrideStore);
+        }
+        let record: SessionIdentityOverride = crate::decode_record(&bytes, IDENTITY_OVERRIDE_CAP)
+            .map_err(|_| IngestError::IdentityOverrideStore)?;
+        if record.schema_version != IDENTITY_OVERRIDE_SCHEMA_VERSION
+            || record.provider != PROVIDER
+            || !valid_session(&record.session)
+            || !same_identity_scope(
+                &record.identity,
+                &AccountIdentity::conflicting_provider_observations(),
+            )
+            || name != identity_override_name(&record.provider, &record.session)
+            || overrides.insert(record.session, record.identity).is_some()
+        {
+            return Err(IngestError::IdentityOverrideStore);
+        }
+    }
+    Ok(overrides)
+}
+
+fn write_identity_override(
+    directory: &Directory,
+    record: &SessionIdentityOverride,
+) -> Result<(), IngestError> {
+    let bytes = serde_json::to_vec(record).map_err(std::io::Error::other)?;
+    if bytes.len() as u64 > IDENTITY_OVERRIDE_CAP {
+        return Err(IngestError::IdentityOverrideStore);
+    }
+    directory
+        .atomic_write(
+            OsStr::new(&identity_override_name(&record.provider, &record.session)),
+            ".ingest-identity-",
+            &bytes,
+            PublishMode::Replace,
+        )?
+        .require_durable()?;
+    Ok(())
+}
+
 /// The segments directory, created on request.
 fn open_segments(root: &Directory, create: bool) -> Result<Directory, IngestError> {
     if create {
@@ -1091,72 +1308,6 @@ fn each_line(reader: impl Read, mut each: impl FnMut(&[u8])) -> std::io::Result<
     }
 }
 
-/// One-off: earlier releases kept every row in one `ingest.jsonl`, which grew
-/// past its cap and stopped every reader. Split it into dated segments, then
-/// remove it. Rows go to the day of their timestamp; a line with none (a torn
-/// write, another schema's row) stays beside the line before it. Safe to repeat
-/// after an interruption: lines already in a segment are not added twice.
-/// Delete this function once no release writes the single file.
-/// The ingest lock must be held.
-#[allow(clippy::print_stderr)] // The one report of rows left behind; the rename keeps it to once.
-fn migrate_legacy(root: &Directory) -> Result<(), IngestError> {
-    let file = match root.open_read(OsStr::new(LEGACY_STORE)) {
-        Ok(file) => file,
-        Err(error) if error.is_not_found() => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut days: BTreeMap<String, Vec<Vec<u8>>> = BTreeMap::new();
-    let mut last = segments::name(jiff::Timestamp::UNIX_EPOCH);
-    let dropped = each_line(file, |line| {
-        if line.is_empty() {
-            return;
-        }
-        let day = serde_json::from_slice::<serde_json::Value>(line)
-            .ok()
-            .and_then(|value| value.get("timestamp")?.as_str()?.parse().ok())
-            .map_or_else(|| last.clone(), segments::name);
-        days.entry(day.clone()).or_default().push(line.to_vec());
-        last = day;
-    })?;
-    let store = open_segments(root, true)?;
-    for (day, lines) in days {
-        let mut out = match store.read_bounded(OsStr::new(&day), SEGMENT_CAP) {
-            Ok(bytes) => bytes,
-            Err(error) if error.is_not_found() => Vec::new(),
-            Err(error) => return Err(error.into()),
-        };
-        if out.last().is_some_and(|last| *last != b'\n') {
-            out.push(b'\n');
-        }
-        let mut held: BTreeSet<Vec<u8>> = out
-            .split(|byte| *byte == b'\n')
-            .map(<[u8]>::to_vec)
-            .collect();
-        for line in lines {
-            if held.insert(line.clone()) {
-                out.extend_from_slice(&line);
-                out.push(b'\n');
-            }
-        }
-        store
-            .atomic_write(OsStr::new(&day), ".ingest-", &out, PublishMode::Replace)?
-            .require_durable()?;
-    }
-    if dropped == 0 {
-        root.unlink(OsStr::new(LEGACY_STORE))?;
-    } else {
-        // Keep what could not be carried over, once: the rename also stops the
-        // next open from migrating again.
-        root.replace(OsStr::new(LEGACY_STORE), root, OsStr::new(UNMIGRATED_STORE))?;
-        eprintln!(
-            "provenant: {dropped} line(s) of the old {LEGACY_STORE} were too long to migrate; \
-             the file is kept as {UNMIGRATED_STORE}"
-        );
-    }
-    root.sync()?;
-    Ok(())
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct RowFilter {
     pub account: Option<String>,
@@ -1173,21 +1324,13 @@ pub fn read_rows(roots: &Roots, filter: &RowFilter) -> Result<Vec<Row>, IngestEr
         Err(error) if error.is_not_found() => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     };
-    // One-off: a reader meeting the single-file store splits it first.
-    if root.metadata_at(OsStr::new(LEGACY_STORE), false).is_ok() {
-        let _lock = root
-            .try_lock(OsStr::new(LOCK), LockMode::Exclusive)
-            .map_err(|error| match error {
-                FsError::LockTimeout { .. } => IngestError::Busy,
-                other => other.into(),
-            })?;
-        migrate_legacy(&root)?;
-    }
     let directory = match open_segments(&root, false) {
         Ok(directory) => directory,
         Err(IngestError::Filesystem(error)) if error.is_not_found() => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
+    let override_directory = open_identity_override_directory(&directory, false)?;
+    let identity_overrides = read_identity_overrides(override_directory.as_ref())?;
     let day = |seconds: i64| {
         jiff::Timestamp::from_second(seconds)
             .ok()
@@ -1202,11 +1345,17 @@ pub fn read_rows(roots: &Roots, filter: &RowFilter) -> Result<Vec<Row>, IngestEr
             continue;
         }
         each_line(directory.open_read(OsStr::new(&name))?, |line| {
-            let Ok(row) = serde_json::from_slice::<Row>(line) else {
+            let Ok(mut row) = crate::decode_record::<Row>(line, MAX_ROW_LINE as u64) else {
                 return;
             };
+            if let Some(identity) = identity_overrides.get(&row.session) {
+                row.identity = identity.clone();
+            }
             if row.schema_version != ROW_SCHEMA_VERSION
-                || filter.account.as_ref().is_some_and(|a| *a != row.account)
+                || filter
+                    .account
+                    .as_ref()
+                    .is_some_and(|a| a != &row.identity.account_key())
                 || filter.model.as_ref().is_some_and(|m| *m != row.model)
             {
                 return;

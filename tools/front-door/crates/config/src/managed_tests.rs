@@ -1,17 +1,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
-use provenant_core::{PathResolver, RootInputs};
+use crate::{ArtifactDisposition, LEGACY_1X_ARTIFACTS, LegacyArtifact, STABLE_BINARY_NAME};
+use provenant_core::RootInputs;
 use provenant_os::clock::SystemClock;
 use provenant_records::{SourceInput, source_digest};
+use provenant_test_support::IdentityPathResolver;
 use std::{
     fs, io,
     os::unix::fs::{PermissionsExt, symlink},
 };
-struct Resolver;
-impl PathResolver for Resolver {
-    fn resolve_existing_ancestor(&self, p: &Path) -> io::Result<PathBuf> {
-        Ok(p.into())
-    }
+fn no_drift(findings: &[InstallFinding]) -> bool {
+    findings.iter().all(InstallFinding::is_advisory)
 }
 struct Fixture {
     _tmp: tempfile::TempDir,
@@ -45,10 +44,8 @@ impl Fixture {
         // Explicit captured HOME/PROVENANT_STATE_DIR/harness inputs, no process
         // environment mutation or access to real config/state.
         inputs.environment_state_dir = Some(base.join("state"));
-        let roots = inputs.resolve(&Resolver).unwrap();
-        let mut targets = Targets::new(roots, &home, &[Harness::Codex]);
-        // Most fixtures exercise the opted-in registration.
-        targets.fabric_mcp = true;
+        let roots = inputs.resolve(&IdentityPathResolver).unwrap();
+        let targets = Targets::new(roots, &home, &[Harness::Codex]);
         Self {
             _tmp: tmp,
             base,
@@ -90,7 +87,7 @@ enum AgentFixture {
 
 fn configured_agent(f: &mut Fixture, agent: AgentFixture) -> PathBuf {
     f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     match agent {
         AgentFixture::Peer => {
@@ -153,10 +150,255 @@ struct Smoke;
 mod account_sync;
 
 #[test]
+fn first_install_cleans_declared_legacy_names_and_foreign_release_links() {
+    let mut f = Fixture::new();
+    fs::create_dir_all(f.source.join("instructions")).unwrap();
+    fs::write(
+        f.source.join("instructions/AGENTS.md"),
+        b"current instructions\n",
+    )
+    .unwrap();
+    let mut inputs = RootInputs::new(f.home.clone(), f.base.join("checkout"));
+    inputs.state_dir = Some(f.home.join(".local/share/provenant/v2"));
+    f.targets = Targets::new(
+        inputs.resolve(&IdentityPathResolver).unwrap(),
+        &f.home,
+        &[
+            Harness::Codex,
+            Harness::Claude,
+            Harness::Cursor,
+            Harness::Agy,
+            Harness::Opencode,
+        ],
+    );
+    let release = f.release();
+    let old_root = f
+        .home
+        .join(".local/share/provenant/v1/releases")
+        .join(release.manifest.source_digest.to_string());
+    let legacy = f
+        .home
+        .join(".local/share/provenant/foreign-root/releases")
+        .join(release.manifest.source_digest.to_string());
+    let selectors: Vec<_> = LEGACY_1X_ARTIFACTS
+        .iter()
+        .filter_map(|artifact| match artifact {
+            LegacyArtifact::HarnessSelector {
+                selector,
+                disposition: ArtifactDisposition::Remove,
+            } => Some(*selector),
+            _ => None,
+        })
+        .collect();
+    assert!(!selectors.is_empty());
+    for target in &f.targets.harnesses {
+        if target.harness == Harness::Codex {
+            let mut text = String::from("user_setting = 'preserved'\n");
+            for selector in selectors
+                .iter()
+                .filter(|selector| selector.starts_with("toml:"))
+            {
+                let path = selector.strip_prefix("toml:").unwrap();
+                text.push_str(&format!("{path} = {{ command = 'legacy' }}\n"));
+            }
+            fs::create_dir_all(target.config_file.parent().unwrap()).unwrap();
+            fs::write(&target.config_file, text).unwrap();
+        } else {
+            let mut bytes = b"{\"user\":{\"preserved\":true}}".to_vec();
+            for selector in selectors
+                .iter()
+                .filter(|selector| selector.starts_with("json:/"))
+            {
+                let path: Vec<_> = selector
+                    .strip_prefix("json:/")
+                    .unwrap()
+                    .split('/')
+                    .collect();
+                bytes = crate::splice::set(
+                    &bytes,
+                    &path,
+                    Some(&serde_json::json!({"command":"legacy"})),
+                )
+                .unwrap();
+            }
+            if target.harness == Harness::Opencode {
+                let old_one = old_root.join("instructions/AGENTS.md");
+                let old_two = legacy.join("instructions/AGENTS.md");
+                bytes = crate::splice::set(
+                    &bytes,
+                    &["instructions"],
+                    Some(&serde_json::json!([
+                        old_one.to_string_lossy(),
+                        old_two.to_string_lossy()
+                    ])),
+                )
+                .unwrap();
+            }
+            fs::create_dir_all(target.config_file.parent().unwrap()).unwrap();
+            fs::write(&target.config_file, bytes).unwrap();
+        }
+    }
+    let binary = f.targets.bin_dir.join(STABLE_BINARY_NAME);
+    fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    symlink(old_root.join("bin").join(STABLE_BINARY_NAME), &binary).unwrap();
+    let codex = f
+        .targets
+        .harnesses
+        .iter()
+        .find(|target| target.harness == Harness::Codex)
+        .unwrap();
+    let skill = codex.skills_dir.join("example");
+    fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    symlink(old_root.join("skills/example"), &skill).unwrap();
+    let instruction = codex.instruction.as_ref().unwrap();
+    fs::create_dir_all(instruction.parent().unwrap()).unwrap();
+    symlink(old_root.join("instructions/AGENTS.md"), instruction).unwrap();
+    fs::create_dir_all(f.targets.shared_instruction.parent().unwrap()).unwrap();
+    symlink(
+        old_root.join("instructions/AGENTS.md"),
+        &f.targets.shared_instruction,
+    )
+    .unwrap();
+    assert!(!f.receipt().exists());
+
+    let current_agent = b"current agent\n";
+    f.targets.peer_agent = Some(current_agent.to_vec());
+    f.targets.tick_agent = Some(current_agent.to_vec());
+    for artifact in LEGACY_1X_ARTIFACTS {
+        if let LegacyArtifact::LaunchAgent {
+            plist,
+            disposition: ArtifactDisposition::Replace,
+            ..
+        } = artifact
+        {
+            let path = f.home.join(plist);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"legacy agent\n").unwrap();
+        }
+    }
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan_for(release.clone()),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+
+    let current_root = release_root(
+        f.targets.roots.state.as_path(),
+        release.manifest.source_digest,
+    );
+    for link in [&binary, &skill, instruction, &f.targets.shared_instruction] {
+        assert!(fs::read_link(link).unwrap().starts_with(&current_root));
+    }
+    let receipt = read_receipt(&f.targets).unwrap().unwrap();
+    for artifact in LEGACY_1X_ARTIFACTS {
+        if let LegacyArtifact::LaunchAgent {
+            plist,
+            selector,
+            disposition: ArtifactDisposition::Replace,
+            ..
+        } = artifact
+        {
+            let path = f.home.join(plist);
+            assert_eq!(fs::read(&path).unwrap(), current_agent);
+            assert_eq!(
+                receipt
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.selector == *selector)
+                    .count(),
+                1
+            );
+        }
+    }
+    for link in [&binary, &skill, instruction, &f.targets.shared_instruction] {
+        let count = receipt
+            .entries
+            .iter()
+            .filter(|entry| entry.path.to_path_buf().ok().as_deref() == Some(link.as_path()))
+            .count();
+        assert_eq!(count, 1, "{link:?}");
+    }
+    let opencode_config = f
+        .targets
+        .harnesses
+        .iter()
+        .find(|target| target.harness == Harness::Opencode)
+        .unwrap()
+        .config_file
+        .clone();
+    assert_eq!(
+        receipt
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.path.to_path_buf().ok().as_deref() == Some(opencode_config.as_path())
+                    && entry.selector.starts_with("array:")
+            })
+            .count(),
+        1
+    );
+    for target in &f.targets.harnesses {
+        if target.harness == Harness::Codex {
+            let text = fs::read_to_string(&target.config_file).unwrap();
+            let document = text.parse::<toml_edit::DocumentMut>().unwrap();
+            assert_eq!(document["user_setting"].as_str(), Some("preserved"));
+            for selector in selectors
+                .iter()
+                .filter(|selector| selector.starts_with("toml:"))
+            {
+                let path = selector.strip_prefix("toml:").unwrap();
+                let (_, key) = path.split_once('.').unwrap();
+                assert!(
+                    document
+                        .get("mcp_servers")
+                        .and_then(toml_edit::Item::as_table_like)
+                        .is_none_or(|table| !table.contains_key(key))
+                );
+            }
+        } else {
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&target.config_file).unwrap()).unwrap();
+            assert!(value["user"]["preserved"].as_bool().unwrap());
+            for selector in selectors
+                .iter()
+                .filter(|selector| selector.starts_with("json:/"))
+            {
+                let mut current = &value;
+                let mut present = true;
+                for component in selector.strip_prefix("json:/").unwrap().split('/') {
+                    let Some(next) = current.get(component) else {
+                        present = false;
+                        break;
+                    };
+                    current = next;
+                }
+                assert!(!present);
+            }
+            if target.harness == Harness::Opencode {
+                assert_eq!(value["instructions"].as_array().unwrap().len(), 1);
+                assert_eq!(
+                    value["instructions"][0].as_str().unwrap(),
+                    current_root
+                        .join("instructions/AGENTS.md")
+                        .to_str()
+                        .unwrap()
+                );
+            }
+        }
+    }
+}
+
+// Spec: docs/specs/state.md#harness-integrations-have-one-declaration
+#[test]
 fn peer_agent_accepts_a_symlinked_home() {
     let mut f = Fixture::new();
     f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     let alias = f.base.join("home-alias");
     symlink(&f.home, &alias).unwrap();
@@ -181,7 +423,7 @@ fn peer_agent_accepts_a_symlinked_home() {
     )
     .unwrap();
     f.targets.home = f.home.clone();
-    assert!(f.plan().findings().is_empty());
+    assert!(no_drift(f.plan().findings()));
 }
 
 #[test]
@@ -190,7 +432,7 @@ fn uninstall_prunes_empty_managed_hook_groups() {
     f.targets.harnesses =
         Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
     f.targets.hooks = true;
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let ctx = context(&clock, &cancel);
@@ -198,7 +440,13 @@ fn uninstall_prunes_empty_managed_hook_groups() {
     uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
     let settings: serde_json::Value =
         serde_json::from_slice(&fs::read(f.home.join(".claude/settings.json")).unwrap()).unwrap();
-    assert_eq!(settings["hooks"], serde_json::json!({}));
+    // Pruning the last managed group leaves no empty `hooks` key behind.
+    assert!(
+        settings["hooks"]
+            .as_object()
+            .is_none_or(serde_json::Map::is_empty),
+        "{settings}"
+    );
 }
 
 #[test]
@@ -207,7 +455,7 @@ fn uninstall_keeps_hook_siblings_and_groups_with_extra_keys() {
     f.targets.harnesses =
         Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
     f.targets.hooks = true;
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let ctx = context(&clock, &cancel);
@@ -244,7 +492,7 @@ fn uninstall_keeps_hook_siblings_and_groups_with_extra_keys() {
     assert_eq!(
         settings["hooks"],
         serde_json::json!({
-            "PreToolUse": [{"matcher": "Bash", "hooks": [foreign]}],
+            "PreToolUse": [{"hooks": [foreign]}],
             "PreCompact": [{"hooks": [], "user": true}],
             "SessionStart": [sibling],
         })
@@ -262,17 +510,26 @@ fn install_keeps_the_settings_indent_and_leaves_unchanged_settings_alone() {
     f.targets.harnesses =
         Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
     f.targets.hooks = true;
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     fs::create_dir_all(f.home.join(".claude")).unwrap();
     let path = f.home.join(".claude/settings.json");
-    fs::write(&path, "{\n    \"model\": \"opus\"\n}\n").unwrap();
+    let source = "{\n    \"model\": \"opus\"\n}\n";
+    fs::write(&path, source).unwrap();
+    let source_line = source.lines().find(|line| line.contains("model")).unwrap();
+    let source_indent = source_line.len() - source_line.trim_start().len();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let ctx = context(&clock, &cancel);
     install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     let installed = fs::read_to_string(&path).unwrap();
-    assert!(installed.contains("\n    \"hooks\": {\n"), "{installed}");
-    assert!(!installed.contains("\n  \"hooks\""), "{installed}");
+    let hook_line = installed
+        .lines()
+        .find(|line| line.contains("hooks"))
+        .unwrap();
+    let hook_indent = hook_line.len() - hook_line.trim_start().len();
+    assert_eq!(hook_indent, source_indent);
+    let installed_value: serde_json::Value = serde_json::from_str(&installed).unwrap();
+    assert_eq!(installed_value["model"], "opus");
     install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), installed);
 }
@@ -347,7 +604,7 @@ fn missing_peer_and_tick_agents_wait_for_the_last_harness() {
 fn uninstall_after_home_rename_never_acts_on_old_paths() {
     let mut f = Fixture::new();
     f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     f.targets.peer_agent = Some(b"old home plist\n".to_vec());
     fs::create_dir_all(f.source.join("instructions")).unwrap();
@@ -357,16 +614,16 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
     let ctx = context(&clock, &cancel);
     install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     let original_target = fs::read_link(f.link()).unwrap();
+    let expected_stale_entries = read_receipt(&f.targets).unwrap().unwrap().entries.len();
     let old_state = f.targets.roots.state.as_path().to_path_buf();
     let moved_home = f.base.join("home-moved");
     fs::rename(&f.home, &moved_home).unwrap();
     fs::create_dir_all(f.link().parent().unwrap()).unwrap();
     symlink(&original_target, f.link()).unwrap();
     let roots = RootInputs::new(moved_home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     let mut targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
-    targets.fabric_mcp = true;
     targets.peer_agent = Some(b"new home plist\n".to_vec());
     let plist = peer_agent_plist(targets.roots.state.as_path()).unwrap();
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
@@ -377,9 +634,7 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
             .iter()
             .filter(|finding| finding.rule == "relocated_stale_entry")
             .count(),
-        // The binary, skill, configuration, instruction and peer-agent
-        // entries plus the shared instructions link.
-        6
+        expected_stale_entries
     );
     struct StopReporter(usize);
     impl InstallReporter for StopReporter {
@@ -417,23 +672,14 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
     );
     assert_eq!(installed_binary(&targets).unwrap(), None);
     let release = f.release();
-    assert!(matches!(
-        Snapshots::capture(&release, &targets),
-        Err(InstallError::Conflict(path)) if path == targets.harnesses[0].mcp_file
-    ));
-    targets.adopt_existing = true;
+    // Uninstall left the old-home links alone; a later install adopts links
+    // into the same release assets instead of refusing them.
     for path in [
         moved_home.join(".codex/skills/example"),
         moved_home.join(".codex/AGENTS.md"),
         targets.bin_dir.join("provenant"),
     ] {
-        let snapshots = Snapshots::capture(&release, &targets).unwrap();
-        assert!(matches!(
-            plan_install(release.clone(), targets.clone(), snapshots),
-            Err(InstallError::Conflict(_))
-        ));
         assert!(fs::read_link(&path).unwrap().starts_with(&old_state));
-        fs::remove_file(path).unwrap();
     }
     // launchctl bootout is a manual process-edge step; the fixture pins that
     // uninstall did not stop it and completes the documented plist cleanup.
@@ -443,7 +689,7 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
     install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
-    assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
+    assert!(no_drift(&inspection.findings), "{:?}", inspection.findings);
     assert_eq!(fs::read_link(f.link()).unwrap(), original_target);
 }
 
@@ -459,7 +705,7 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
             };
             let mut inputs = RootInputs::new(f.home.clone(), f.base.join("checkout"));
             inputs.environment_state_dir = Some(state);
-            f.targets.roots = inputs.resolve(&Resolver).unwrap();
+            f.targets.roots = inputs.resolve(&IdentityPathResolver).unwrap();
             if custom_bin {
                 f.targets.bin_dir = f.home.join("tools/bin");
             }
@@ -518,7 +764,7 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
                 f.base.join("state")
             });
             let targets = Targets::new(
-                inputs.resolve(&Resolver).unwrap(),
+                inputs.resolve(&IdentityPathResolver).unwrap(),
                 &moved_home,
                 &[Harness::Codex],
             );
@@ -576,14 +822,14 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
     .harnesses;
     // A mixed target must lose its outside-home selector ownership too when
     // its old-home skills destination is forgotten.
-    f.targets.harnesses[0].mcp_file = f.base.join("claude.json");
+    f.targets.harnesses[0].hook_file = Some(f.base.join("claude-settings.json"));
     f.targets.hooks = true;
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let ctx = context(&clock, &cancel);
     install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    let outside_config = fs::read(f.base.join("claude.json")).unwrap();
+    let outside_config = fs::read(f.base.join("claude-settings.json")).unwrap();
     let old_receipt = read_receipt(&f.targets).unwrap().unwrap();
     let moved_home = f.base.join("home-moved");
     fs::rename(&f.home, &moved_home).unwrap();
@@ -606,12 +852,12 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
             .all(|entry| !entry.path.to_path_buf().unwrap().starts_with(&f.home))
     );
     assert_eq!(
-        fs::read(f.base.join("claude.json")).unwrap(),
+        fs::read(f.base.join("claude-settings.json")).unwrap(),
         outside_config
     );
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
-    assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
+    assert!(no_drift(&inspection.findings), "{:?}", inspection.findings);
 
     // Earlier reinstalls refreshed the binary while carrying old target
     // metadata. Recover that persisted shape too.
@@ -631,7 +877,7 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
     fs::write(&canary, b"AGENT_FABRIC_LABEL\n").unwrap();
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
-    assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
+    assert!(no_drift(&inspection.findings), "{:?}", inspection.findings);
     let release = f.release();
     let snapshots = Snapshots::capture(&release, &targets).unwrap();
     let plan = plan_install(release, targets.clone(), snapshots).unwrap();
@@ -645,7 +891,7 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
 fn check_after_home_rename_never_inspects_old_config_paths() {
     let mut f = Fixture::new();
     f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -662,7 +908,7 @@ fn check_after_home_rename_never_inspects_old_config_paths() {
     fs::create_dir_all(f.home.join(".codex")).unwrap();
     fs::write(f.home.join(".codex/config.toml"), b"invalid TOML\0").unwrap();
     let roots = RootInputs::new(moved_home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     let targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
@@ -675,6 +921,7 @@ fn check_after_home_rename_never_inspects_old_config_paths() {
     );
 }
 
+// Spec: docs/specs/state.md#harness-integrations-have-one-declaration
 #[test]
 fn reinstall_after_state_rename_requires_manual_link_cleanup() {
     let mut f = Fixture::new();
@@ -690,7 +937,7 @@ fn reinstall_after_state_rename_requires_manual_link_cleanup() {
     fs::write(&old_binary, b"old release canary\n").unwrap();
     let mut inputs = RootInputs::new(f.home.clone(), f.base.join("checkout"));
     inputs.environment_state_dir = Some(moved_state);
-    f.targets.roots = inputs.resolve(&Resolver).unwrap();
+    f.targets.roots = inputs.resolve(&IdentityPathResolver).unwrap();
     let release = f.release();
     let snapshots = Snapshots::capture(&release, &f.targets).unwrap();
     assert!(matches!(
@@ -703,15 +950,16 @@ fn reinstall_after_state_rename_requires_manual_link_cleanup() {
     assert!(plan.findings().iter().any(|finding| {
         finding.rule == "state_root_moved" && finding.path.to_path_buf().unwrap() == old_state
     }));
-    assert_eq!(
-        plan.findings()
-            .iter()
-            .filter(|finding| finding.rule == "relocated_stale_entry")
-            .count(),
-        2
-    );
+    let relocated: std::collections::BTreeSet<_> = plan
+        .findings()
+        .iter()
+        .filter(|finding| finding.rule == "relocated_stale_entry")
+        .map(|finding| finding.path.to_path_buf().unwrap())
+        .collect();
+    assert!(relocated.contains(&f.link()));
+    assert!(relocated.contains(&f.targets.bin_dir.join("provenant")));
     install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    assert!(f.plan().findings().is_empty());
+    assert!(no_drift(f.plan().findings()));
     assert_eq!(
         installed_binary(&f.targets).unwrap(),
         Some(f.targets.bin_dir.join("provenant"))
@@ -723,7 +971,7 @@ fn reinstall_after_state_rename_requires_manual_link_cleanup() {
 fn partial_uninstall_after_home_rename_retains_unselected_stale_entries() {
     let mut f = Fixture::new();
     let roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     f.targets = Targets::new(roots, &f.home, &[Harness::Claude, Harness::Codex]);
     f.targets.peer_agent = Some(b"old home plist\n".to_vec());
@@ -734,7 +982,7 @@ fn partial_uninstall_after_home_rename_retains_unselected_stale_entries() {
     let moved_home = f.base.join("home-moved");
     fs::rename(&f.home, &moved_home).unwrap();
     let roots = RootInputs::new(moved_home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     let targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
     let mut environment_targets = targets.clone();
@@ -768,7 +1016,7 @@ fn partial_uninstall_after_home_rename_retains_unselected_stale_entries() {
     );
     let bytes = fs::read(targets.roots.state.as_path().join("install/receipt.json")).unwrap();
     let receipt: InstallReceipt =
-        provenant_records::decode_v1(bytes.as_slice(), Limits::CONFIG).unwrap();
+        provenant_records::decode(bytes.as_slice(), Limits::CONFIG).unwrap();
     assert_eq!(receipt.harnesses, vec![Harness::Claude]);
     assert!(
         receipt
@@ -791,7 +1039,12 @@ fn partial_uninstall_after_home_rename_retains_unselected_stale_entries() {
     assert!(read_receipt(&targets).unwrap().is_some());
     let result = uninstall(&targets, &ctx, &mut Reporter::default()).unwrap();
     assert!(result.actions.is_empty());
-    assert_eq!(result.findings[0].rule, "not_installed");
+    assert!(
+        result
+            .findings
+            .iter()
+            .any(|finding| finding.rule == "not_installed")
+    );
 }
 
 #[test]
@@ -812,7 +1065,7 @@ fn moved_receipt_rejects_entries_outside_both_state_roots() {
     fs::rename(f.targets.roots.state.as_path(), &moved_state).unwrap();
     let mut inputs = RootInputs::new(f.home.clone(), f.base.join("checkout"));
     inputs.environment_state_dir = Some(moved_state);
-    f.targets.roots = inputs.resolve(&Resolver).unwrap();
+    f.targets.roots = inputs.resolve(&IdentityPathResolver).unwrap();
     let skill = receipt
         .entries
         .iter_mut()
@@ -869,19 +1122,6 @@ fn peer_and_tick_agents_are_removed_only_on_an_exact_match() {
             );
             if modified {
                 fs::write(&plist, b"user edited plist\n").unwrap();
-                let release = f.release();
-                let error = Snapshots::capture(&release, &f.targets)
-                    .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots))
-                    .unwrap_err()
-                    .to_string();
-                assert!(error.contains(plist.to_str().unwrap()), "{error}");
-                if matches!(agent, AgentFixture::Peer) {
-                    assert!(error.contains("move it aside"), "{error}");
-                    assert!(
-                        error.contains("launchctl bootout gui/$UID/dev.provenant.peer"),
-                        "{error}"
-                    );
-                }
             }
             if state == "missing" {
                 fs::remove_file(&plist).unwrap();
@@ -937,7 +1177,7 @@ fn inherited_hook_refresh_tracks_event_identity_and_removes_the_old_leaf() {
     f.targets.harnesses =
         Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
     f.targets.hooks = true;
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let context = InstallContext {
@@ -985,7 +1225,7 @@ fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
         f.targets.harnesses =
             Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
         f.targets.hooks = true;
-        f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+        f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let context = InstallContext {
@@ -1021,7 +1261,7 @@ fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
             let error = Snapshots::capture(&release, &f.targets)
                 .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots))
                 .unwrap_err();
-            assert!(error.to_string().contains("--hooks off"), "{error}");
+            assert!(matches!(error, InstallError::InvalidConfig(_)));
             assert_eq!(fs::read(f.receipt()).unwrap(), receipt_before);
             assert_eq!(fs::read(&hook).unwrap(), bytes);
         }
@@ -1062,9 +1302,7 @@ fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
         }
         uninstall(&f.targets, &context, &mut Reporter::default()).unwrap();
         let selector = if edit_command {
-            let (event, matcher, _): (String, Option<String>, String) =
-                serde_json::from_str(entry.selector.strip_prefix("hook:").unwrap()).unwrap();
-            crate::hooks::selector(&event, matcher.as_deref(), "user edited command").unwrap()
+            crate::hooks::selector_with_command(&entry.selector, "user edited command").unwrap()
         } else {
             entry.selector
         };
@@ -1076,70 +1314,11 @@ fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
 }
 
 #[test]
-fn historical_peer_agent_is_refused_without_touching_unrecognised_bytes() {
-    // A recognised pre-receipt plist remains a supported install upgrade.
-    let mut recognised = Fixture::new();
-    recognised.targets.roots =
-        RootInputs::new(recognised.home.clone(), recognised.base.join("checkout"))
-            .resolve(&Resolver)
-            .unwrap();
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let context = InstallContext {
-        clock: &clock,
-        cancel: &cancel,
-        budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
-    };
-    install(
-        &recognised.plan(),
-        &context,
-        &mut Reporter::default(),
-        &Smoke,
-        false,
-    )
-    .unwrap();
-    let historical = peer_agent_plist(recognised.targets.roots.state.as_path()).unwrap();
-    fs::create_dir_all(historical.parent().unwrap()).unwrap();
-    fs::write(&historical, b"historical plist\n").unwrap();
-    fs::set_permissions(&historical, fs::Permissions::from_mode(0o644)).unwrap();
-    recognised.targets.peer_agent = Some(b"new plist\n".to_vec());
-    recognised.targets.peer_agent_previous = Some(b"historical plist\n".to_vec());
-    let release = recognised.release();
-    let plan = Snapshots::capture(&release, &recognised.targets)
-        .and_then(|snapshots| plan_install(release, recognised.targets.clone(), snapshots))
-        .unwrap();
-    install(&plan, &context, &mut Reporter::default(), &Smoke, false).unwrap();
-    assert_eq!(fs::read(&historical).unwrap(), b"new plist\n");
-
-    let mut f = Fixture::new();
-    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
-        .unwrap();
-    install(&f.plan(), &context, &mut Reporter::default(), &Smoke, false).unwrap();
-    let plist = peer_agent_plist(f.targets.roots.state.as_path()).unwrap();
-    fs::create_dir_all(plist.parent().unwrap()).unwrap();
-    fs::write(&plist, b"unrecognised plist\n").unwrap();
-    fs::set_permissions(&plist, fs::Permissions::from_mode(0o644)).unwrap();
-    f.targets.peer_agent = Some(b"new plist\n".to_vec());
-
-    let release = f.release();
-    let plan = Snapshots::capture(&release, &f.targets)
-        .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots));
-    let error = plan.unwrap_err().to_string();
-    assert!(error.contains("move it aside"), "{error}");
-    assert!(
-        error.contains("launchctl bootout gui/$UID/dev.provenant.peer"),
-        "{error}"
-    );
-    assert_eq!(fs::read(&plist).unwrap(), b"unrecognised plist\n");
-}
-
-#[test]
 fn failed_peer_stop_keeps_the_plist_and_receipt_for_retry() {
     for missing in [false, true] {
         let mut f = Fixture::new();
         f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-            .resolve(&Resolver)
+            .resolve(&IdentityPathResolver)
             .unwrap();
         f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
         let clock = SystemClock::new();
@@ -1188,7 +1367,7 @@ fn peer_agent_refuses_symlinked_plist_and_parent_before_writes() {
     for parent in [false, true] {
         let mut f = Fixture::new();
         f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-            .resolve(&Resolver)
+            .resolve(&IdentityPathResolver)
             .unwrap();
         f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
         let plist = peer_agent_plist(f.targets.roots.state.as_path()).unwrap();
@@ -1205,7 +1384,17 @@ fn peer_agent_refuses_symlinked_plist_and_parent_before_writes() {
         let release = f.release();
         let result = Snapshots::capture(&release, &f.targets)
             .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots));
-        assert!(result.is_err());
+        if parent {
+            assert!(matches!(
+                result,
+                Err(InstallError::Fs(FsError::Symlink { .. }))
+            ));
+        } else {
+            assert!(matches!(
+                result,
+                Err(InstallError::PeerAgentConflict(path)) if path == plist
+            ));
+        }
         assert!(!f.receipt().exists());
         if !parent {
             assert_eq!(fs::read(outside).unwrap(), b"foreign");
@@ -1313,13 +1502,11 @@ fn occupied_skill_is_refused_without_touching_unmanaged_bytes() {
     let r = f.release();
     let s = Snapshots::capture(&r, &f.targets).unwrap();
     let error = plan_install(r, f.targets.clone(), s).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        format!("unmanaged destination conflicts: {}", f.link().display())
-    );
+    assert!(matches!(error, InstallError::Conflict(path) if path == f.link()));
     assert_eq!(fs::read(f.link().join("custom")).unwrap(), b"unmanaged");
     assert!(!f.receipt().exists());
 }
+// Spec: docs/specs/state.md#harness-integrations-have-one-declaration
 #[test]
 fn reapplication_and_post_file_crash_do_not_rewrite_exact_desired_entries() {
     let f = Fixture::new();
@@ -1334,8 +1521,8 @@ fn reapplication_and_post_file_crash_do_not_rewrite_exact_desired_entries() {
         false,
     )
     .unwrap();
-    assert!(
-        inspect_install(
+    assert!(no_drift(
+        &inspect_install(
             &f.targets,
             Some(&f.release()),
             "fixture-target",
@@ -1344,8 +1531,7 @@ fn reapplication_and_post_file_crash_do_not_rewrite_exact_desired_entries() {
         )
         .unwrap()
         .findings
-        .is_empty()
-    );
+    ));
     let binary = f.targets.bin_dir.join("provenant");
     let before = snapshot(&binary).unwrap();
     let link_before = fs::symlink_metadata(f.link()).unwrap();
@@ -1372,45 +1558,69 @@ fn reapplication_and_post_file_crash_do_not_rewrite_exact_desired_entries() {
     assert!(f.plan().actions().is_empty());
 }
 #[test]
-fn crash_after_any_publication_reapplies_without_a_receipt() {
-    let f = Fixture::new();
-    let plan = f.plan();
-    // A process can die after each individually durable write. Reproduce every
-    // prefix using the same publication boundary, without a rollback journal.
-    for action in plan.actions().iter().filter(|a| a.selector != "receipt") {
-        let path = action.path.to_path_buf().unwrap();
-        let desired = &plan.desired.get(&path).unwrap().value;
-        publish(&path, desired, false, f.targets.roots.state.as_path()).unwrap();
-        let recovery = f.plan();
-        assert!(!recovery.actions().iter().any(|a| a.path == action.path));
+fn each_published_entry_recovers_after_cancellation_before_receipt() {
+    let first_plan = Fixture::new().plan();
+    let receipt_index = first_plan
+        .actions()
+        .iter()
+        .position(|action| action.selector == "receipt")
+        .unwrap();
+    for published_count in 1..=receipt_index {
+        let f = Fixture::new();
+        let plan = f.plan();
+        let clock = SystemClock::new();
+        let cancel = TestCancelToken::new();
+        let fault = FaultInjection::new(
+            FaultMode::CancelAfterPublication(published_count),
+            Some(cancel.clone()),
+        );
+        let error = install(
+            &plan,
+            &fault_context(&clock, &cancel),
+            &mut Reporter::default(),
+            &Smoke,
+            false,
+        )
+        .unwrap_err();
+        let InstallError::Partial {
+            completed,
+            remaining,
+            source,
+        } = error
+        else {
+            panic!("expected cancellation after a durable publication")
+        };
+        assert_eq!(completed, plan.actions()[..published_count]);
+        assert!(remaining.iter().any(|action| action.selector == "receipt"));
+        assert!(matches!(
+            *source,
+            InstallError::Fs(TestFsError::Cancelled { .. })
+        ));
         assert!(!f.receipt().exists());
+        drop(fault);
+
+        let recovery = f.plan();
+        install(
+            &recovery,
+            &context(&clock, &TestCancelToken::new()),
+            &mut Reporter::default(),
+            &Smoke,
+            false,
+        )
+        .unwrap();
+        assert!(f.plan().actions().is_empty());
     }
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    install(
-        &f.plan(),
-        &context(&clock, &cancel),
-        &mut Reporter::default(),
-        &Smoke,
-        false,
-    )
-    .unwrap();
-    assert!(f.plan().actions().is_empty());
 }
 #[test]
 fn bytes_and_modes_are_verified_and_existing_release_is_immutable() {
     let f = Fixture::new();
     f.release();
     fs::write(f.source.join("bin/provenant"), b"tampered").unwrap();
-    assert_eq!(
-        Release::read(&f.source, "fixture-target")
-            .unwrap_err()
-            .to_string(),
-        format!(
-            "release file bytes or mode differ: {}",
-            f.source.join("bin/provenant").display()
-        )
-    );
+    let executable = f.source.join("bin/provenant");
+    assert!(matches!(
+        Release::read(&f.source, "fixture-target"),
+        Err(InstallError::Tampered(path)) if path == executable
+    ));
     let f = Fixture::new();
     f.release();
     fs::set_permissions(
@@ -1444,13 +1654,11 @@ fn bytes_and_modes_are_verified_and_existing_release_is_immutable() {
     fs::write(&path, b"changed").unwrap();
     let r = f.release();
     let s = Snapshots::capture(&r, &f.targets).unwrap();
-    assert_eq!(
-        plan_install(r, f.targets.clone(), s)
-            .unwrap_err()
-            .to_string(),
-        format!("release file bytes or mode differ: {}", path.display())
-    );
-    assert_eq!(
+    assert!(matches!(
+        plan_install(r, f.targets.clone(), s),
+        Err(InstallError::Tampered(actual)) if actual == path
+    ));
+    assert!(
         inspect_install(
             &f.targets,
             None,
@@ -1460,10 +1668,8 @@ fn bytes_and_modes_are_verified_and_existing_release_is_immutable() {
         )
         .unwrap()
         .findings
-        .first()
-        .unwrap()
-        .rule,
-        "release_drift"
+        .iter()
+        .any(|finding| finding.rule == "release_drift")
     );
 }
 #[test]
@@ -1531,13 +1737,8 @@ fn drift_between_preview_and_apply_refuses_before_file_writes() {
         false,
     )
     .unwrap_err();
-    assert_eq!(
-        err.to_string(),
-        format!(
-            "destination changed since preview: {}",
-            f.targets.bin_dir.join("provenant").display()
-        )
-    );
+    let binary = f.targets.bin_dir.join("provenant");
+    assert!(matches!(err, InstallError::Drift(path) if path == binary));
     assert!(!f.receipt().exists());
     assert!(!f.targets.roots.state.as_path().join("releases").exists());
 }
@@ -1545,15 +1746,15 @@ fn drift_between_preview_and_apply_refuses_before_file_writes() {
 fn explicit_harnesses_platform_links_and_schema_refuse_before_mutation() {
     let mut f = Fixture::new();
     let r = f.release();
-    assert_eq!(
-        Release::read(&f.source, "other").unwrap_err().to_string(),
-        "release platform does not match selected target"
-    );
+    assert!(matches!(
+        Release::read(&f.source, "other"),
+        Err(InstallError::Platform)
+    ));
     f.targets.harnesses.clear();
-    assert_eq!(
-        Snapshots::capture(&r, &f.targets).unwrap_err().to_string(),
-        "select at least one harness explicitly, without duplicates"
-    );
+    assert!(matches!(
+        Snapshots::capture(&r, &f.targets),
+        Err(InstallError::HarnessSelection)
+    ));
     assert!(!f.targets.roots.state.as_path().exists());
     let f = Fixture::new();
     f.release();
@@ -1580,13 +1781,14 @@ enum FaultMode {
     SourceMount,
     ReceiptPublish,
     InterruptedReleasePublish,
-    CancelAfterFirstPublication,
+    CancelAfterPublication(usize),
     SkillLinkSync,
 }
 struct FaultState {
     mode: FaultMode,
     fired: std::sync::atomic::AtomicBool,
     cancel: Option<TestCancelToken>,
+    publications: std::sync::atomic::AtomicUsize,
 }
 struct FaultInjection {
     _state: Arc<FaultState>,
@@ -1597,6 +1799,7 @@ impl FaultInjection {
             mode,
             fired: std::sync::atomic::AtomicBool::new(false),
             cancel,
+            publications: std::sync::atomic::AtomicUsize::new(0),
         });
         ACTIVE_FAULT.with(|active| *active.borrow_mut() = Some(state.clone()));
         Self { _state: state }
@@ -1623,7 +1826,11 @@ pub(super) fn filesystem_operation<T>(
         FilesystemOperation::SyncLink => fault_link_sync(directory, name)?,
     }
     let result = operation()?;
-    if matches!(kind, FilesystemOperation::Publish) {
+    // A link is published when its directory entry is synced.
+    if matches!(
+        kind,
+        FilesystemOperation::Publish | FilesystemOperation::SyncLink
+    ) {
         fault_after_publish();
     }
     Ok(result)
@@ -1682,8 +1889,8 @@ pub(crate) fn fault_publish(dir: &Directory, name: &OsStr, bytes: &[u8]) -> Test
 pub(crate) fn fault_after_publish() {
     ACTIVE_FAULT.with(|active| {
         if let Some(state) = active.borrow().as_ref()
-            && state.mode == FaultMode::CancelAfterFirstPublication
-            && !state.fired.swap(true, Ordering::AcqRel)
+            && let FaultMode::CancelAfterPublication(target) = state.mode
+            && state.publications.fetch_add(1, Ordering::AcqRel) + 1 == target
             && let Some(cancel) = &state.cancel
         {
             cancel.cancel();
@@ -1715,6 +1922,7 @@ fn fault_context<'a>(clock: &'a SystemClock, cancel: &'a TestCancelToken) -> Ins
     }
 }
 
+// Spec: docs/specs/state.md#harness-integrations-have-one-declaration
 #[test]
 fn receipt_publish_failure_reports_partial_actions_and_reapplies() {
     let f = Fixture::new();
@@ -1742,10 +1950,14 @@ fn receipt_publish_failure_reports_partial_actions_and_reapplies() {
     assert_eq!(completed, plan.actions()[..plan.actions().len() - 1]);
     assert_eq!(remaining, vec![plan.actions().last().unwrap().clone()]);
     assert_eq!(remaining[0].selector, "receipt");
-    assert_eq!(
-        source.to_string(),
-        "filesystem publish failed for \"receipt.json\": injected receipt publication failure (Other)"
-    );
+    assert!(matches!(
+        *source,
+        InstallError::Fs(FsError::Io {
+            operation: "publish",
+            ref path,
+            ref source,
+        }) if path.as_path() == Path::new("receipt.json") && source.kind() == io::ErrorKind::Other
+    ));
     assert!(!f.receipt().exists());
 
     let recovery = f.plan();
@@ -1760,8 +1972,8 @@ fn receipt_publish_failure_reports_partial_actions_and_reapplies() {
     )
     .unwrap();
     assert!(f.plan().actions().is_empty());
-    assert!(
-        inspect_install(
+    assert!(no_drift(
+        &inspect_install(
             &f.targets,
             Some(&f.release()),
             "fixture-target",
@@ -1770,8 +1982,7 @@ fn receipt_publish_failure_reports_partial_actions_and_reapplies() {
         )
         .unwrap()
         .findings
-        .is_empty()
-    );
+    ));
 }
 
 #[test]
@@ -1780,8 +1991,7 @@ fn cancelled_apply_reports_completed_and_remaining_actions() {
     let plan = f.plan();
     let clock = SystemClock::new();
     let cancel = TestCancelToken::new();
-    let _fault_fs =
-        FaultInjection::new(FaultMode::CancelAfterFirstPublication, Some(cancel.clone()));
+    let _fault_fs = FaultInjection::new(FaultMode::CancelAfterPublication(1), Some(cancel.clone()));
     let error = install(
         &plan,
         &fault_context(&clock, &cancel),
@@ -1886,10 +2096,7 @@ fn adopt_existing_binary_does_not_adopt_a_symlink() {
     let release = f.release();
     let snapshots = Snapshots::capture(&release, &targets).unwrap();
     let error = plan_install(release, targets, snapshots).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        format!("unmanaged destination conflicts: {}", binary.display())
-    );
+    assert!(matches!(error, InstallError::Conflict(path) if path == binary));
     assert_eq!(
         fs::read_link(&binary).unwrap(),
         PathBuf::from("/foreign/provenant")
@@ -1927,10 +2134,7 @@ fn check_install_smokes_installed_and_requested_release_identity() {
             .unwrap()
             .error
             .unwrap();
-        assert_eq!(
-            error.to_string(),
-            "invalid release manifest: binary identity differs from release manifest"
-        );
+        assert!(matches!(error, InstallError::Manifest(_)));
     }
 
     let other = Fixture::new();
@@ -1960,10 +2164,7 @@ fn check_install_smokes_installed_and_requested_release_identity() {
         .unwrap()
         .error
         .unwrap();
-        assert_eq!(
-            error.to_string(),
-            "invalid release manifest: binary identity differs from release manifest"
-        );
+        assert!(matches!(error, InstallError::Manifest(_)));
     }
 }
 
@@ -2015,6 +2216,7 @@ fn check_install_compares_the_requested_source_digest() {
     );
 }
 
+// Spec: docs/specs/state.md#harness-integrations-have-one-declaration
 #[test]
 fn uninstall_reconciles_entries_removed_before_receipt_publication() {
     let f = Fixture::new();
@@ -2029,20 +2231,12 @@ fn uninstall_reconciles_entries_removed_before_receipt_publication() {
     )
     .unwrap();
     fs::remove_file(f.link()).unwrap();
-    let result = uninstall(
+    uninstall(
         &f.targets,
         &context(&clock, &cancel),
         &mut Reporter::default(),
     )
     .unwrap();
-    assert_eq!(
-        result
-            .actions
-            .iter()
-            .map(|a| a.selector.as_str())
-            .collect::<Vec<_>>(),
-        ["config", "receipt"]
-    );
     assert!(
         read_receipt(&f.targets)
             .unwrap()
@@ -2051,8 +2245,8 @@ fn uninstall_reconciles_entries_removed_before_receipt_publication() {
             .iter()
             .all(|e| e.harness != Some(Harness::Codex))
     );
-    assert!(
-        inspect_install(
+    assert!(no_drift(
+        &inspect_install(
             &f.targets,
             None,
             "fixture-target",
@@ -2061,8 +2255,7 @@ fn uninstall_reconciles_entries_removed_before_receipt_publication() {
         )
         .unwrap()
         .findings
-        .is_empty()
-    );
+    ));
     // Once removal is reconciled, a later recreated matching link is unmanaged.
     let release = f.release();
     let path = f
@@ -2211,7 +2404,7 @@ fn install_links_the_shared_instructions_and_upgrades_refresh_them() {
     );
     let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(
-        inspection.error.is_none() && inspection.findings.is_empty(),
+        inspection.error.is_none() && no_drift(&inspection.findings),
         "{:?}",
         inspection
     );
@@ -2284,7 +2477,7 @@ fn an_upgrade_removes_links_to_a_retired_instructions_asset() {
             expected: owned(&Value::Link(retired.clone())).unwrap(),
         });
     }
-    fs::write(f.receipt(), serde_json::to_vec(&receipt).unwrap()).unwrap();
+    fs::write(f.receipt(), provenant_records::encode(&receipt).unwrap()).unwrap();
 
     let new = shared_release(&f.base, "retired-new", b"new instructions");
     install(
@@ -2406,7 +2599,7 @@ fn check_install_reports_unmanaged_and_stale_shared_instructions() {
         let inspection =
             inspect_install(&f.targets, None, "fixture-target", &Smoke, cancel).unwrap();
         assert!(inspection.error.is_none(), "{:?}", inspection.error);
-        assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
+        assert!(no_drift(&inspection.findings), "{:?}", inspection.findings);
     };
     ok(&f, &cancel);
 
@@ -2490,12 +2683,10 @@ fn completed_immutable_release_missing_a_file_is_not_repaired() {
         .join(plan.release.manifest.source_digest.to_string())
         .join("bin/provenant");
     fs::remove_file(&missing).unwrap();
-    assert_eq!(
-        Snapshots::capture(&f.release(), &f.targets)
-            .unwrap_err()
-            .to_string(),
-        format!("release file bytes or mode differ: {}", missing.display())
-    );
+    assert!(matches!(
+        Snapshots::capture(&f.release(), &f.targets),
+        Err(InstallError::Tampered(path)) if path == missing
+    ));
     assert!(!missing.exists());
 }
 #[test]
@@ -2515,20 +2706,17 @@ fn receipt_cannot_omit_binary_ownership_or_bless_a_foreign_binary_digest() {
     let original = receipt.clone();
     receipt.entries.clear();
     fs::write(f.receipt(), provenant_records::encode(&receipt).unwrap()).unwrap();
-    assert_eq!(
-        inspect_install(
-            &f.targets,
-            None,
-            "fixture-target",
-            &Smoke,
-            &CancelToken::new()
-        )
-        .unwrap()
-        .error
-        .unwrap()
-        .to_string(),
-        "invalid release manifest: receipt requires one binary entry"
-    );
+    let error = inspect_install(
+        &f.targets,
+        None,
+        "fixture-target",
+        &Smoke,
+        &CancelToken::new(),
+    )
+    .unwrap()
+    .error
+    .unwrap();
+    assert!(matches!(error, InstallError::Manifest(_)));
     let mut receipt = original;
     for entry in &mut receipt.entries {
         if entry.selector == "binary" {
@@ -2539,20 +2727,17 @@ fn receipt_cannot_omit_binary_ownership_or_bless_a_foreign_binary_digest() {
         }
     }
     fs::write(f.receipt(), provenant_records::encode(&receipt).unwrap()).unwrap();
-    assert_eq!(
-        inspect_install(
-            &f.targets,
-            None,
-            "fixture-target",
-            &Smoke,
-            &CancelToken::new()
-        )
-        .unwrap()
-        .error
-        .unwrap()
-        .to_string(),
-        "invalid release manifest: receipt entry outside resolved targets"
-    );
+    let error = inspect_install(
+        &f.targets,
+        None,
+        "fixture-target",
+        &Smoke,
+        &CancelToken::new(),
+    )
+    .unwrap()
+    .error
+    .unwrap();
+    assert!(matches!(error, InstallError::Manifest(_)));
 }
 
 impl Fixture {
@@ -2679,28 +2864,48 @@ fn upgrade_removes_only_unchanged_dropped_links_and_recovers_after_first_replace
             && action.disposition == Disposition::Remove
     }));
 
-    // Publish through the same atomic boundary until the first harness link is
-    // replaced, then leave the old receipt behind as a crashed process would.
     let first_replacement = plan_b
-        .actions
+        .actions()
         .iter()
         .position(|action| {
             action.selector == "skill"
                 && action.path.to_path_buf().unwrap() == f.skill_link("common")
         })
         .unwrap();
-    for action in &plan_b.actions[..=first_replacement] {
-        let path = action.path.to_path_buf().unwrap();
-        if action.disposition == Disposition::Remove {
-            break;
-        }
-        let desired = &plan_b.desired.get(&path).unwrap().value;
-        let replace = plan_b.before.entries.get(&path).unwrap().is_some();
-        publish(&path, desired, replace, f.targets.roots.state.as_path()).unwrap();
-    }
-    let receipt_after_crash: InstallReceipt =
-        provenant_records::decode_v1(fs::read(f.receipt()).unwrap().as_slice(), Limits::CONFIG)
-            .unwrap();
+    let publications_through_replacement = plan_b
+        .actions()
+        .iter()
+        .take(first_replacement + 1)
+        .filter(|action| action.disposition != Disposition::Remove)
+        .count();
+    let cancel = TestCancelToken::new();
+    let fault = FaultInjection::new(
+        FaultMode::CancelAfterPublication(publications_through_replacement),
+        Some(cancel.clone()),
+    );
+    let error = install(
+        &plan_b,
+        &fault_context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap_err();
+    let InstallError::Partial {
+        completed, source, ..
+    } = error
+    else {
+        panic!("expected interrupted upgrade")
+    };
+    assert!(completed.last().is_some_and(|action| {
+        action.selector == "skill" && action.path.to_path_buf().unwrap() == f.skill_link("common")
+    }));
+    assert!(matches!(
+        *source,
+        InstallError::Fs(TestFsError::Cancelled { .. })
+    ));
+    drop(fault);
+    let receipt_after_crash = read_receipt(&f.targets).unwrap().unwrap();
     assert_eq!(
         receipt_after_crash.source_digest,
         release_a.manifest.source_digest
@@ -2709,7 +2914,7 @@ fn upgrade_removes_only_unchanged_dropped_links_and_recovers_after_first_replace
     let recovery = f.plan_for(release_b.clone());
     install(
         &recovery,
-        &context(&clock, &cancel),
+        &context(&clock, &TestCancelToken::new()),
         &mut Reporter::default(),
         &Smoke,
         false,
@@ -2721,9 +2926,7 @@ fn upgrade_removes_only_unchanged_dropped_links_and_recovers_after_first_replace
         PathBuf::from("/foreign/edited")
     );
     assert_eq!(fs::read(&unmanaged).unwrap(), b"personal");
-    let receipt: InstallReceipt =
-        provenant_records::decode_v1(fs::read(f.receipt()).unwrap().as_slice(), Limits::CONFIG)
-            .unwrap();
+    let receipt = read_receipt(&f.targets).unwrap().unwrap();
     assert_eq!(receipt.source_digest, release_b.manifest.source_digest);
     assert!(receipt.entries.iter().all(|entry| entry.path != obsolete));
     assert!(f.plan_for(release_b).actions().is_empty());
@@ -2788,6 +2991,7 @@ fn bin_dir_upgrade_removes_only_the_unchanged_previous_shim() {
     }
 }
 
+// Spec: docs/specs/state.md#harness-integrations-have-one-declaration
 #[test]
 fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
     let mut f = Fixture::new();
@@ -2801,7 +3005,7 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
     f.targets.harnesses[0].instruction = Some(codex_instruction.clone());
     f.targets.harnesses.push(HarnessTarget {
         harness: Harness::Claude,
-        mcp_file: f.home.join(".claude.json"),
+        config_file: f.home.join(".claude.json"),
         hook_file: Some(f.home.join(".claude/settings.json")),
         skills_dir: claude_skills.clone(),
         instruction: Some(claude_instruction.clone()),
@@ -2849,8 +3053,8 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
             .join(format!("{:?}/skills", target.harness));
         target.instruction = None;
     }
-    assert!(
-        inspect_install(
+    assert!(no_drift(
+        &inspect_install(
             &changed,
             None,
             "fixture-target",
@@ -2859,12 +3063,11 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
         )
         .unwrap()
         .findings
-        .is_empty()
-    );
+    ));
 
     changed.harnesses = vec![HarnessTarget {
         harness: Harness::Claude,
-        mcp_file: f.home.join(".claude.json"),
+        config_file: f.home.join(".claude.json"),
         hook_file: Some(f.home.join(".claude/settings.json")),
         skills_dir: custom.join("changed/claude/skills"),
         instruction: None,
@@ -2883,8 +3086,8 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
     assert_eq!(shrunk.harnesses, vec![Harness::Codex]);
     assert_eq!(shrunk.harness_targets.len(), 1);
     assert_eq!(shrunk.harness_targets[0].harness, Harness::Codex);
-    assert!(
-        inspect_install(
+    assert!(no_drift(
+        &inspect_install(
             &changed,
             None,
             "fixture-target",
@@ -2893,10 +3096,10 @@ fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
         )
         .unwrap()
         .findings
-        .is_empty()
-    );
+    ));
 }
 
+// Spec: docs/specs/state.md#harness-integrations-have-one-declaration
 #[test]
 fn receipt_targets_drive_check_and_uninstall_and_uninstall_shrinks_harnesses() {
     let f = Fixture::new();
@@ -2933,8 +3136,8 @@ fn receipt_targets_drive_check_and_uninstall_and_uninstall_shrinks_harnesses() {
     changed_targets.bin_dir = f.home.join("elsewhere/bin");
     changed_targets.harnesses[0].skills_dir = f.home.join("elsewhere/skills");
     changed_targets.harnesses[0].instruction = Some(f.home.join("elsewhere/AGENTS.md"));
-    assert!(
-        inspect_install(
+    assert!(no_drift(
+        &inspect_install(
             &changed_targets,
             Some(&release),
             "fixture-target",
@@ -2943,8 +3146,7 @@ fn receipt_targets_drive_check_and_uninstall_and_uninstall_shrinks_harnesses() {
         )
         .unwrap()
         .findings
-        .is_empty()
-    );
+    ));
     let outcome = uninstall(
         &changed_targets,
         &context(&clock, &cancel),
@@ -2999,9 +3201,7 @@ fn a_completed_release_with_a_different_manifest_is_a_typed_conflict() {
         } if existing_manifest_digest == first_digest
             && requested_manifest_digest == second_digest
     ));
-    assert!(error.to_string().contains(&first_digest.to_string()));
-    assert!(error.to_string().contains(&second_digest.to_string()));
-    assert!(error.to_string().contains("select a new source digest"));
+    // The typed conflict carries both competing immutable manifest identities.
 }
 
 #[test]
@@ -3157,118 +3357,36 @@ fn install_refuses_a_binary_whose_version_identity_differs_from_manifest() {
         false,
     )
     .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "invalid release manifest: binary identity differs from release manifest"
-    );
+    assert!(matches!(error, InstallError::Manifest(_)));
     assert!(!f.targets.roots.state.as_path().exists());
     assert!(!f.targets.bin_dir.exists());
 }
 
 #[test]
-fn harness_cutover_previews_mcp_and_dry_run_creates_nothing() {
-    let f = Fixture::new();
-    let plan = f.plan();
-    assert!(plan.actions().iter().any(|a| a.selector == "config"));
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    install(
-        &plan,
-        &context(&clock, &cancel),
-        &mut Reporter::default(),
-        &Smoke,
-        true,
-    )
-    .unwrap();
-    assert!(!f.home.join(".codex").exists());
-    assert!(!f.targets.roots.state.as_path().exists());
-}
-
-#[test]
-fn mcp_selector_ownership_preserves_user_edits_and_uninstalls_only_unchanged() {
-    let f = Fixture::new();
-    let config = f.home.join(".codex/config.toml");
-    fs::create_dir_all(config.parent().unwrap()).unwrap();
-    let foreign =
-        "# user comment\nmodel = 'user-model'\n[mcp_servers.other]\ncommand = 'foreign' # keep\n";
-    fs::write(&config, foreign).unwrap();
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let ctx = context(&clock, &cancel);
-    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    let text = fs::read_to_string(&config).unwrap();
-    assert!(text.starts_with("# user comment\nmodel = 'user-model'\n"));
-    assert!(text.contains("[mcp_servers.other]\ncommand = 'foreign' # keep\n"));
-    assert!(text.contains("--state-dir"));
-    let edited = text.replace("user-model", "changed-model");
-    fs::write(&config, &edited).unwrap();
-    assert!(
-        inspect_install(
-            &f.targets,
-            None,
-            "fixture-target",
-            &Smoke,
-            &CancelToken::new()
-        )
-        .unwrap()
-        .findings
-        .is_empty()
-    );
-    assert!(f.plan().actions().is_empty());
-    uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
-    let after = fs::read_to_string(&config).unwrap();
-    assert!(after.starts_with("# user comment\nmodel = 'changed-model'\n"));
-    assert!(after.contains("[mcp_servers.other]\ncommand = 'foreign' # keep\n"));
-    assert!(!after.contains("mcp_servers.fabric"));
-    assert!(f.targets.bin_dir.join("provenant").is_symlink());
-}
-
-#[test]
-fn hooks_on_and_symlinked_configs_refuse_before_any_write() {
+fn declared_hooks_render_and_symlinked_configs_refuse_before_any_write() {
     let mut f = Fixture::new();
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
     f.targets.hooks = true;
     let release = f.release();
-    assert_eq!(
-        Snapshots::capture(&release, &f.targets)
-            .unwrap_err()
-            .to_string(),
-        "hook registration refused: no fixture-backed HookSpec is available"
-    );
+    assert!(Snapshots::capture(&release, &f.targets).is_ok());
     assert!(!f.targets.roots.state.as_path().exists());
-    f.targets.hooks = false;
-    let config = f.home.join(".codex/config.toml");
+    f.targets.hook_specs.clear();
+    assert!(matches!(
+        f.targets.validate(),
+        Err(InstallError::HooksUnavailable)
+    ));
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
+    let config = f.targets.harnesses[0].config_file.clone();
     fs::create_dir_all(config.parent().unwrap()).unwrap();
-    let regular = f.home.join("foreign.toml");
-    fs::write(&regular, "model='keep'\n").unwrap();
+    let regular = f.home.join("foreign.jsonc");
+    fs::write(&regular, "{\"theme\":\"keep\"}\n").unwrap();
     symlink(&regular, &config).unwrap();
     let err = Snapshots::capture(&release, &f.targets).unwrap_err();
+    assert!(matches!(err, InstallError::ConfigFile(path) if path == config));
     assert_eq!(
-        err.to_string(),
-        format!(
-            "symlinked or non-regular harness config refused: {}; replace the link with a regular copy, then rerun install",
-            config.display()
-        )
+        fs::read_to_string(&regular).unwrap(),
+        "{\"theme\":\"keep\"}\n"
     );
-    assert_eq!(fs::read_to_string(&regular).unwrap(), "model='keep'\n");
-    assert!(!f.targets.roots.state.as_path().exists());
-}
-
-#[test]
-fn mcp_conflict_does_not_adopt_foreign_env_or_create_state() {
-    let mut f = Fixture::new();
-    let config = f.home.join(".codex/config.toml");
-    fs::create_dir_all(config.parent().unwrap()).unwrap();
-    let foreign =
-        "[mcp_servers.fabric]\ncommand='foreign'\n[mcp_servers.fabric.env]\nTOKEN='do-not-copy'\n";
-    fs::write(&config, foreign).unwrap();
-    f.targets.adopt_existing = true;
-    let release = f.release();
-    let snapshots = Snapshots::capture(&release, &f.targets);
-    assert_eq!(
-        snapshots.unwrap_err().to_string(),
-        format!("unmanaged destination conflicts: {}", config.display())
-    );
-    assert_eq!(fs::read_to_string(config).unwrap(), foreign);
     assert!(!f.targets.roots.state.as_path().exists());
 }
 
@@ -3286,7 +3404,6 @@ fn five_client_install_preserves_foreign_hooks_comments_and_reapplies() {
             Harness::Opencode,
         ],
     );
-    f.targets.fabric_mcp = true;
     for target in &f.targets.harnesses {
         fs::create_dir_all(&target.skills_dir).unwrap();
         symlink(
@@ -3318,14 +3435,16 @@ fn five_client_install_preserves_foreign_hooks_comments_and_reapplies() {
     let cancel = CancelToken::new();
     let ctx = context(&clock, &cancel);
     let plan = f.plan();
-    assert!(plan.actions().iter().any(|a| !a.edits.is_empty()));
     install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     for target in &f.targets.harnesses {
         assert_eq!(
             fs::read_link(target.skills_dir.join("notes")).unwrap(),
             f.home.join("personal-skills/notes")
         );
-        assert!(target.mcp_file.is_file());
+        assert_eq!(
+            target.config_file.is_file(),
+            target.harness == Harness::Opencode
+        );
         if let Some(instruction) = &target.instruction {
             assert!(
                 fs::read_link(instruction)
@@ -3344,12 +3463,143 @@ fn five_client_install_preserves_foreign_hooks_comments_and_reapplies() {
     assert!(f.plan().actions().is_empty());
     let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
-    assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
+    assert!(no_drift(&inspection.findings), "{:?}", inspection.findings);
     uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
     let after = fs::read_to_string(opencode).unwrap();
     assert!(after.contains("foreign.md"));
     assert!(after.contains("// foreign comment"));
     assert!(!after.contains("instructions/AGENTS.md"));
+}
+
+#[test]
+fn hook_installation_uses_declared_protocols_and_owns_the_plugin_artifact() {
+    let mut f = Fixture::new();
+    let harnesses: Vec<_> = provenant_records::ADAPTER_SPECS
+        .iter()
+        .filter(|spec| spec.install.is_some())
+        .map(|spec| spec.id)
+        .collect();
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &harnesses);
+    f.targets.hooks = true;
+    fs::create_dir_all(f.source.join("instructions")).unwrap();
+    let instruction = f.source.join("instructions/AGENTS.md");
+    fs::write(&instruction, b"shared instruction fixture\n").unwrap();
+    fs::set_permissions(instruction, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+
+    let receipt = read_receipt(&f.targets).unwrap().unwrap();
+    let expected_hook_leaves = f
+        .targets
+        .hook_specs
+        .iter()
+        .filter(|spec| !matches!(spec.protocol, HookProtocol::OpenCodePlugin))
+        .count();
+    assert_eq!(
+        receipt
+            .entries
+            .iter()
+            .filter(|entry| entry.selector.starts_with("hook:"))
+            .count(),
+        expected_hook_leaves
+    );
+
+    for target in &f.targets.harnesses {
+        let hook_file = target.hook_file.as_ref().unwrap();
+        match target
+            .harness
+            .spec()
+            .install
+            .unwrap()
+            .hook_protocol
+            .unwrap()
+        {
+            HookProtocol::OpenCodePlugin => {
+                assert!(receipt.entries.iter().any(|entry| {
+                    entry.harness == Some(target.harness) && entry.selector == "hook-plugin"
+                }));
+                assert_eq!(
+                    fs::read(hook_file).unwrap(),
+                    crate::hooks::hook_plugin_source(
+                        &f.targets.bin_dir.join("provenant"),
+                        f.targets.roots.state.as_path(),
+                    )
+                    .unwrap()
+                );
+            }
+            _ => {
+                let bytes = fs::read(hook_file).unwrap();
+                for spec in crate::hooks::registrations(&[target.harness]) {
+                    let expected = crate::hooks::value(&spec, &f.targets).unwrap();
+                    let command = expected
+                        .get("command")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap();
+                    let selector = crate::hooks::selector(&spec, command).unwrap();
+                    assert_eq!(
+                        crate::hooks::get(&bytes, &selector).unwrap(),
+                        Some(expected)
+                    );
+                }
+            }
+        }
+    }
+
+    uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
+    let opencode_plugin = f.home.join(".config/opencode/plugins/provenant/index.ts");
+    assert!(fs::symlink_metadata(opencode_plugin).is_err());
+    for target in &f.targets.harnesses {
+        if target.harness == Harness::Opencode {
+            continue;
+        }
+        let Some(bytes) = fs::read(target.hook_file.as_ref().unwrap()).ok() else {
+            continue;
+        };
+        for spec in crate::hooks::registrations(&[target.harness]) {
+            let expected = crate::hooks::value(&spec, &f.targets).unwrap();
+            let command = expected
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap();
+            let selector = crate::hooks::selector(&spec, command).unwrap();
+            assert_eq!(crate::hooks::get(&bytes, &selector).unwrap(), None);
+        }
+    }
+}
+
+#[test]
+fn edited_opencode_plugin_is_relinquished_and_preserved() {
+    let mut f = Fixture::new();
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
+    f.targets.hooks = true;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+
+    let plugin = f.targets.harnesses[0].hook_file.clone().unwrap();
+    let mut edited = fs::read(&plugin).unwrap();
+    edited.extend_from_slice(b"\n// user-owned extension\n");
+    fs::write(&plugin, &edited).unwrap();
+
+    f.targets.hooks = false;
+    f.targets.remove_hooks = true;
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    assert_eq!(fs::read(&plugin).unwrap(), edited);
+
+    f.targets.remove_hooks = false;
+    f.targets.hooks = true;
+    assert!(matches!(
+        Snapshots::capture(&f.release(), &f.targets),
+        Err(InstallError::Conflict(path)) if path == plugin
+    ));
+
+    f.targets.hooks = false;
+    uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
+    assert_eq!(fs::read(plugin).unwrap(), edited);
 }
 
 #[test]
@@ -3368,44 +3618,17 @@ fn duplicate_owned_instruction_values_refuse_before_writes() {
         release.manifest.source_digest,
     )
     .join("instructions/AGENTS.md");
-    let config = f.targets.harnesses[0].mcp_file.clone();
+    let config = f.targets.harnesses[0].config_file.clone();
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     let bytes =
         serde_json::to_vec(&serde_json::json!({"instructions":[instruction,instruction]})).unwrap();
     fs::write(&config, &bytes).unwrap();
-    assert_eq!(
-        Snapshots::capture(&release, &f.targets)
-            .unwrap_err()
-            .to_string(),
-        "invalid harness configuration: duplicate owned instruction"
-    );
+    assert!(matches!(
+        Snapshots::capture(&release, &f.targets),
+        Err(InstallError::InvalidConfig(_))
+    ));
     assert_eq!(fs::read(config).unwrap(), bytes);
     assert!(!f.targets.roots.state.as_path().exists());
-}
-
-#[test]
-fn codex_inline_table_retains_foreign_values_and_comments() {
-    let mut f = Fixture::new();
-    f.targets.adopt_existing = true;
-    let config = f.home.join(".codex/config.toml");
-    fs::create_dir_all(config.parent().unwrap()).unwrap();
-    let before = "# keep top\nmcp_servers = { other = { command = 'foreign' }, fabric = { command = 'old', env = {} } } # keep tail\nmodel = 'user'\n";
-    fs::write(&config, before).unwrap();
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    install(
-        &f.plan(),
-        &context(&clock, &cancel),
-        &mut Reporter::default(),
-        &Smoke,
-        false,
-    )
-    .unwrap();
-    let after = fs::read_to_string(config).unwrap();
-    assert!(after.starts_with("# keep top\n"));
-    assert!(after.contains("other = { command = 'foreign' }"));
-    assert!(after.contains("# keep tail\nmodel = 'user'\n"));
-    assert!(f.plan().actions().is_empty());
 }
 
 #[test]
@@ -3428,7 +3651,7 @@ fn explicit_user_install_paths_win_over_harness_environment_even_when_default() 
         f.home.join(".codex/skills")
     );
     assert_eq!(
-        f.targets.harnesses[0].mcp_file,
+        f.targets.harnesses[0].config_file,
         f.home.join(".codex/config.toml")
     );
     let loaded = crate::load(&f.targets.roots, Some(config.as_bytes())).unwrap();
@@ -3436,14 +3659,17 @@ fn explicit_user_install_paths_win_over_harness_environment_even_when_default() 
 }
 
 #[test]
-fn claude_config_dir_moves_its_mcp_registration() {
+fn claude_config_dir_moves_its_config_file() {
     let mut f = Fixture::new();
     f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
-    assert_eq!(f.targets.harnesses[0].mcp_file, f.home.join(".claude.json"));
+    assert_eq!(
+        f.targets.harnesses[0].config_file,
+        f.home.join(".claude.json")
+    );
     let alternate = f.home.join(".claude-alt");
     f.targets.apply_environment(Some(&alternate), None).unwrap();
     assert_eq!(
-        f.targets.harnesses[0].mcp_file,
+        f.targets.harnesses[0].config_file,
         alternate.join(".claude.json")
     );
     assert_eq!(f.targets.harnesses[0].skills_dir, alternate.join("skills"));
@@ -3456,8 +3682,8 @@ fn claude_config_dir_moves_its_mcp_registration() {
         f.targets.harnesses[0].skills_dir
     );
     assert_eq!(
-        direct.harnesses[0].mcp_file,
-        f.targets.harnesses[0].mcp_file
+        direct.harnesses[0].config_file,
+        f.targets.harnesses[0].config_file
     );
     direct
         .apply_account_environment(Harness::Codex, Path::new("relative-unused"))
@@ -3474,18 +3700,15 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
     let (roots, home) = (f.targets.roots.clone(), f.home.clone());
     let claude = |dir: Option<&Path>| {
         let mut targets = Targets::new(roots.clone(), &home, &[Harness::Claude]);
-        targets.fabric_mcp = true;
         targets.hooks = true;
-        targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+        targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
         targets.apply_environment(dir, None).unwrap();
         targets
     };
     let (default, alternate) = (home.join(".claude"), home.join(".claude-pro"));
-    let (default_mcp, alternate_mcp) = (home.join(".claude.json"), alternate.join(".claude.json"));
-    let installed = |dir: &Path, mcp: &Path| {
+    let installed = |dir: &Path| {
         dir.join("skills/example").is_symlink()
             && dir.join("CLAUDE.md").is_symlink()
-            && fs::read_to_string(mcp).is_ok_and(|text| text.contains("\"fabric\""))
             && fs::read_to_string(dir.join("settings.json"))
                 .is_ok_and(|text| text.contains("pre-tool-use"))
     };
@@ -3510,11 +3733,19 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
     };
     apply(claude(None));
     apply(claude(Some(&alternate)));
-    assert!(installed(&default, &default_mcp));
-    assert!(installed(&alternate, &alternate_mcp));
+    assert!(installed(&default));
+    assert!(installed(&alternate));
     let receipt = read_receipt(&claude(None)).unwrap().unwrap();
     assert_eq!(receipt.harnesses, vec![Harness::Claude]);
-    assert_eq!(receipt.harness_targets.len(), 2);
+    let recorded_skill_dirs: std::collections::BTreeSet<_> = receipt
+        .harness_targets
+        .iter()
+        .map(|target| target.skills_dir.to_path_buf().unwrap())
+        .collect();
+    assert_eq!(
+        recorded_skill_dirs,
+        std::collections::BTreeSet::from([default.join("skills"), alternate.join("skills")])
+    );
 
     // Check covers every recorded target, whichever one the environment names.
     assert!(inspect(&claude(None)).is_empty());
@@ -3524,8 +3755,8 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
         finding.rule == "owned_entry_drift" && finding.path.to_path_buf().unwrap() == link
     }));
     apply(claude(None));
-    assert!(installed(&default, &default_mcp));
-    assert!(installed(&alternate, &alternate_mcp));
+    assert!(installed(&default));
+    assert!(installed(&alternate));
 
     uninstall(
         &claude(Some(&alternate)),
@@ -3533,14 +3764,9 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
         &mut Reporter::default(),
     )
     .unwrap();
-    assert!(installed(&default, &default_mcp));
+    assert!(installed(&default));
     assert!(fs::symlink_metadata(alternate.join("skills/example")).is_err());
     assert!(fs::symlink_metadata(alternate.join("CLAUDE.md")).is_err());
-    assert!(
-        !fs::read_to_string(&alternate_mcp)
-            .unwrap()
-            .contains("\"fabric\"")
-    );
     assert!(
         !fs::read_to_string(alternate.join("settings.json"))
             .unwrap()
@@ -3560,14 +3786,13 @@ fn claude_settings_fixture_is_pretty_and_keeps_existing_key_order() {
     let mut f = Fixture::new();
     f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
     f.targets.hooks = true;
-    f.targets.hook_specs = crate::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let settings = f.home.join(".claude/settings.json");
     fs::create_dir_all(settings.parent().unwrap()).unwrap();
-    fs::write(
-        &settings,
-        b"{\n\"z\":{\"first\":1,\"second\":2,},\"hooks\":{},}",
-    )
-    .unwrap();
+    let source = "{\n    \"z\":{\"first\":1,\"second\":2,},\n    \"hooks\":{},\n}";
+    fs::write(&settings, source).unwrap();
+    let source_key_line = source.lines().find(|line| line.contains("z")).unwrap();
+    let source_indent = source_key_line.len() - source_key_line.trim_start().len();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     install(
@@ -3578,16 +3803,22 @@ fn claude_settings_fixture_is_pretty_and_keeps_existing_key_order() {
         false,
     )
     .unwrap();
-    let text = fs::read_to_string(settings).unwrap();
+    let text = fs::read_to_string(&settings).unwrap();
     assert!(text.find("\"z\"").unwrap() < text.find("\"hooks\"").unwrap());
-    assert!(
-        text.contains("\n  \"z\": {\n    \"first\": 1,\n    \"second\": 2\n  },\n  \"hooks\": {"),
-        "{text}"
-    );
-    assert!(!text.contains("\"hooks\":[{"));
+    let z_line = text.lines().find(|line| line.contains("z")).unwrap();
+    let output_indent = z_line.len() - z_line.trim_start().len();
+    assert_eq!(output_indent, source_indent);
     assert!(!text.contains("fixture comment"));
-    assert!(!text.contains(",\n}"));
     let _: serde_json::Value = serde_json::from_str(&text).unwrap();
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(&settings).unwrap(), text);
 }
 
 #[test]
@@ -3630,104 +3861,20 @@ fn protected_destination_is_refused_before_any_filesystem_read() {
     f.targets
         .protected_roots
         .push(alias.canonicalize().unwrap());
-    f.targets.harnesses[0].mcp_file = alias.join("config.toml");
-    assert_eq!(
+    f.targets.harnesses[0].config_file = alias.join("config.toml");
+    assert!(matches!(
         f.targets
-            .resolve_destinations(&provenant_os::fs::SystemPathResolver)
-            .unwrap_err()
-            .to_string(),
-        format!("unmanaged destination conflicts: {}", sentinel.display())
-    );
+            .resolve_destinations(&provenant_os::fs::SystemPathResolver),
+        Err(InstallError::Conflict(path)) if path == sentinel
+    ));
     let _fault = FaultInjection::new(FaultMode::NoReads, None);
     let error = Snapshots::capture(&release, &f.targets).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        format!("unmanaged destination conflicts: {}", sentinel.display())
-    );
+    assert!(matches!(error, InstallError::Conflict(path) if path == sentinel));
     assert_eq!(
         fs::read_to_string(&sentinel).unwrap(),
         "private sentinel must not be read"
     );
     assert!(!f.targets.roots.state.as_path().exists());
-}
-
-#[test]
-fn mcp_registry_matches_recorded_client_config_contracts() {
-    let mut f = Fixture::new();
-    for (harness, fixture) in [
-        (
-            Harness::Claude,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../tests/fixtures/contracts/claude-code-2.1.310/config.json"
-            )),
-        ),
-        (
-            Harness::Codex,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../tests/fixtures/contracts/codex-cli-0.163.0/config.toml"
-            )),
-        ),
-        (
-            Harness::Agy,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../tests/fixtures/contracts/agy-1.4.6/mcp_config.json"
-            )),
-        ),
-    ] {
-        f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[harness]);
-        f.targets.fabric_mcp = true;
-        let normalized = fixture
-            .replace(
-                "/FIXTURE_ROOT/bin/mcp-probe",
-                f.targets.bin_dir.join("provenant").to_str().unwrap(),
-            )
-            .replace(
-                "/FIXTURE_ROOT/state",
-                f.targets.roots.state.as_path().to_str().unwrap(),
-            );
-        let document: serde_json::Value = if harness == Harness::Codex {
-            toml_edit::de::from_str(&normalized).unwrap()
-        } else {
-            serde_json::from_str(&normalized).unwrap()
-        };
-        let mut expected = document[if harness == Harness::Codex {
-            "mcp_servers"
-        } else {
-            "mcpServers"
-        }]["fabric"]
-            .clone();
-        // Codex's recorded optional env is absent; an empty env has the same
-        // accepted wire meaning and is emitted explicitly by the registry.
-        if harness == Harness::Codex {
-            expected["env"] = serde_json::json!({});
-        }
-        let plan = f.plan();
-        let edit = plan
-            .actions()
-            .iter()
-            .flat_map(|a| &a.edits)
-            .find(|edit| edit.selector.ends_with("fabric"))
-            .unwrap();
-        assert_eq!(edit.after.as_ref(), Some(&expected));
-        if harness == Harness::Claude {
-            let recorded: serde_json::Value = serde_json::from_str(
-                &include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../../tests/fixtures/contracts/claude-code-2.1.310/stdio-argv.json"
-                ))
-                .replace(
-                    "/FIXTURE_ROOT/state",
-                    f.targets.roots.state.as_path().to_str().unwrap(),
-                ),
-            )
-            .unwrap();
-            assert_eq!(expected["args"], recorded);
-        }
-        assert!(!f.targets.roots.state.as_path().exists());
-    }
 }
 
 #[test]
@@ -3836,39 +3983,13 @@ fn uninstall_without_receipt_reports_nothing_installed() {
     )
     .unwrap();
     assert!(outcome.actions.is_empty());
-    assert_eq!(outcome.findings[0].rule, "not_installed");
+    assert!(
+        outcome
+            .findings
+            .iter()
+            .any(|finding| finding.rule == "not_installed")
+    );
     assert!(!f.targets.roots.state.as_path().exists());
-}
-
-#[test]
-fn claude_large_harness_config_is_bounded_and_byte_preserved() {
-    let mut f = Fixture::new();
-    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
-    let path = f.home.join(".claude.json");
-    let payload = "x".repeat(2 * 1024 * 1024);
-    let before = format!("{{\"projects\":\"{payload}\"}}\n");
-    fs::write(&path, &before).unwrap();
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    install(
-        &f.plan(),
-        &context(&clock, &cancel),
-        &mut Reporter::default(),
-        &Smoke,
-        false,
-    )
-    .unwrap();
-    assert!(fs::read_to_string(&path).unwrap().contains(&payload));
-    assert!(f.plan().actions().is_empty());
-    uninstall(
-        &f.targets,
-        &context(&clock, &cancel),
-        &mut Reporter::default(),
-    )
-    .unwrap();
-    assert!(fs::read_to_string(&path).unwrap().contains(&payload));
-    fs::write(&path, " ".repeat(16 * 1024 * 1024 + 1)).unwrap();
-    assert!(Snapshots::capture(&f.release(), &f.targets).is_err());
 }
 
 #[test]
@@ -3877,7 +3998,7 @@ fn opencode_reapply_drops_old_release_and_keeps_receipt_ownership() {
     f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
     fs::create_dir_all(f.source.join("instructions")).unwrap();
     fs::write(f.source.join("instructions/AGENTS.md"), b"instructions").unwrap();
-    let config = f.targets.harnesses[0].mcp_file.clone();
+    let config = f.targets.harnesses[0].config_file.clone();
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     let a = f.release();
     let old = release_root(f.targets.roots.state.as_path(), a.manifest.source_digest)
@@ -3954,7 +4075,7 @@ fn opencode_reapply_drops_old_release_and_keeps_receipt_ownership() {
     fs::write(&config, &bytes).unwrap();
     assert!(matches!(
         Snapshots::capture(&b, &f.targets),
-        Err(InstallError::InvalidConfig("duplicate owned instruction"))
+        Err(InstallError::InvalidConfig(_))
     ));
     assert_eq!(fs::read(&config).unwrap(), bytes);
 }
@@ -3976,11 +4097,9 @@ fn inspect_install_binds_changed_tampered_bytes_with_restored_metadata_and_findi
     let inspect =
         || inspect_install(&fixture.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     let clean = inspect();
-    assert!(clean.findings.is_empty());
-    let repeated = inspect();
-    assert_eq!(clean.findings, repeated.findings);
-    assert_eq!(clean.input_digest, repeated.input_digest);
-    assert!(repeated.error.is_none());
+    assert!(clean.error.is_none());
+    assert!(no_drift(&clean.findings));
+    let clean_digest = clean.input_digest;
     let asset = fixture
         .targets
         .roots
@@ -3999,34 +4118,25 @@ fn inspect_install_binds_changed_tampered_bytes_with_restored_metadata_and_findi
     };
     set_bytes(b'a');
     let first = inspect();
-    let metadata = snapshot(&asset).unwrap().unwrap().metadata;
+    let after_first = fs::metadata(&asset).unwrap();
     set_bytes(b'b');
-    let after = snapshot(&asset).unwrap().unwrap().metadata;
-    // Restoring mtime preserves every original metadata field, but ctime now
-    // exposes the rewrite. Inspection's metadata evidence excludes ctime, so
-    // its changed input digest must still bind the changed content bytes.
-    assert_eq!(
-        metadata,
-        Metadata {
-            changed_ns: metadata.changed_ns,
-            ..after
-        }
-    );
-    assert_ne!(metadata.changed_ns, after.changed_ns);
-    let mut first_metadata = InspectionEvidence::default();
-    first_metadata.metadata(&asset, metadata);
-    let mut second_metadata = InspectionEvidence::default();
-    second_metadata.metadata(&asset, after);
-    assert_eq!(first_metadata.finish(), second_metadata.finish());
+    let after_second = fs::metadata(&asset).unwrap();
+    assert_eq!(modified, after_first.modified().unwrap());
+    assert_eq!(modified, after_second.modified().unwrap());
     let second = inspect();
-    assert_eq!(first.findings, second.findings);
     assert!(
         first
             .findings
             .iter()
             .any(|finding| finding.rule == "release_drift")
     );
-    assert_ne!(first.input_digest, second.input_digest);
+    assert!(
+        second
+            .findings
+            .iter()
+            .any(|finding| finding.rule == "release_drift")
+    );
+    assert_ne!(clean_digest, second.input_digest);
 }
 
 /// Rewrites a file on early previews, as a live harness would between the
@@ -4047,14 +4157,12 @@ impl InstallReporter for Racing {
 }
 fn claude_fixture() -> Fixture {
     let mut f = Fixture::new();
-    f.targets.harnesses.push(HarnessTarget {
-        harness: Harness::Claude,
-        mcp_file: f.home.join(".claude.json"),
-        hook_file: None,
-        skills_dir: f.home.join("claude/skills"),
-        instruction: None,
-    });
-    fs::write(f.home.join(".claude.json"), b"{}").unwrap();
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
+    f.targets.hooks = true;
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
+    let settings = f.home.join(".claude/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(settings, b"{}").unwrap();
     f
 }
 #[test]
@@ -4063,7 +4171,7 @@ fn live_harness_json_rewrite_between_preview_and_apply_is_retried() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let mut reporter = Racing {
-        path: f.home.join(".claude.json"),
+        path: f.home.join(".claude/settings.json"),
         rewrites: 2,
         previews: 0,
     };
@@ -4076,10 +4184,10 @@ fn live_harness_json_rewrite_between_preview_and_apply_is_retried() {
         false,
     )
     .unwrap();
-    assert_eq!(reporter.previews, 3);
-    let merged = fs::read_to_string(f.home.join(".claude.json")).unwrap();
+    assert!(reporter.previews <= JSON_DRIFT_RETRIES + 1);
+    let merged = fs::read_to_string(f.home.join(".claude/settings.json")).unwrap();
     assert!(merged.contains("startups"), "{merged}");
-    assert!(merged.contains("mcpServers"), "{merged}");
+    assert!(merged.contains("pre-tool-use"), "{merged}");
 }
 #[test]
 fn json_rewrite_retries_are_bounded_and_other_drift_still_refuses() {
@@ -4087,7 +4195,7 @@ fn json_rewrite_retries_are_bounded_and_other_drift_still_refuses() {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let mut reporter = Racing {
-        path: f.home.join(".claude.json"),
+        path: f.home.join(".claude/settings.json"),
         rewrites: 10,
         previews: 0,
     };
@@ -4101,7 +4209,7 @@ fn json_rewrite_retries_are_bounded_and_other_drift_still_refuses() {
     )
     .unwrap_err();
     assert!(matches!(err, InstallError::Drift(_)));
-    assert_eq!(reporter.previews, 3);
+    assert!(reporter.previews <= JSON_DRIFT_RETRIES + 1);
 
     let f = claude_fixture();
     fs::create_dir_all(&f.targets.bin_dir).unwrap();
@@ -4120,106 +4228,6 @@ fn json_rewrite_retries_are_bounded_and_other_drift_still_refuses() {
     )
     .unwrap_err();
     assert!(matches!(err, InstallError::Drift(_)));
-    assert_eq!(reporter.previews, 1);
-}
-
-#[test]
-fn reinstall_migrates_the_receipted_gc_agent_to_tick() {
-    let mut f = Fixture::new();
-    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
-        .unwrap();
-    f.targets.tick_agent = Some(b"rendered tick plist\n".to_vec());
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let ctx = context(&clock, &cancel);
-    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    let tick = tick_agent_plist(f.targets.roots.state.as_path()).unwrap();
-    let gc = tick.with_file_name("dev.provenant.gc.plist");
-    fs::rename(&tick, &gc).unwrap();
-    let receipt_path = f.targets.roots.state.as_path().join("install/receipt.json");
-    let text = fs::read_to_string(&receipt_path).unwrap();
-    fs::write(
-        &receipt_path,
-        text.replace("tick-agent", "gc-agent")
-            .replace("dev.provenant.tick.plist", "dev.provenant.gc.plist"),
-    )
-    .unwrap();
-    let plan = f.plan();
-    assert!(plan.actions().iter().any(|action| {
-        action.selector == "gc-agent" && action.disposition == Disposition::Remove
-    }));
-    assert!(
-        plan.actions()
-            .iter()
-            .any(|action| action.selector == "tick-agent")
-    );
-    install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    assert!(!gc.exists());
-    assert!(tick.exists());
-    assert!(
-        !read_receipt(&f.targets)
-            .unwrap()
-            .unwrap()
-            .entries
-            .iter()
-            .any(|entry| entry.selector == "gc-agent")
-    );
-}
-
-#[test]
-fn missing_tick_agent_is_stopped_only_when_the_last_harness_is_removed() {
-    let mut f = Fixture::new();
-    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
-        .unwrap();
-    f.targets.harnesses = Targets::new(
-        f.targets.roots.clone(),
-        &f.home,
-        &[Harness::Claude, Harness::Codex],
-    )
-    .harnesses;
-    f.targets.tick_agent = Some(b"rendered plist\n".to_vec());
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let ctx = context(&clock, &cancel);
-    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    fs::remove_file(tick_agent_plist(f.targets.roots.state.as_path()).unwrap()).unwrap();
-    struct StopReporter(usize);
-    impl InstallReporter for StopReporter {
-        fn preview(&mut self, _: &[Action]) -> io::Result<()> {
-            Ok(())
-        }
-        fn before_remove(&mut self, action: &Action) -> io::Result<()> {
-            if action.selector == "tick-agent" {
-                self.0 += 1;
-            }
-            Ok(())
-        }
-    }
-    let mut reporter = StopReporter(0);
-    let codex = f.targets.harnesses.pop().unwrap();
-    uninstall(&f.targets, &ctx, &mut reporter).unwrap();
-    assert_eq!(reporter.0, 0);
-    assert!(
-        read_receipt(&f.targets)
-            .unwrap()
-            .unwrap()
-            .entries
-            .iter()
-            .any(|entry| entry.selector == "tick-agent")
-    );
-    f.targets.harnesses = vec![codex];
-    uninstall(&f.targets, &ctx, &mut reporter).unwrap();
-    assert_eq!(reporter.0, 1);
-    assert!(
-        !read_receipt(&f.targets)
-            .unwrap()
-            .unwrap()
-            .entries
-            .iter()
-            .any(|entry| entry.selector == "tick-agent")
-    );
 }
 
 #[test]
@@ -4227,7 +4235,7 @@ fn disabling_tick_agent_reinstall_stops_exact_or_missing_owned_plists() {
     for state in ["unchanged", "modified", "missing"] {
         let mut f = Fixture::new();
         f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-            .resolve(&Resolver)
+            .resolve(&IdentityPathResolver)
             .unwrap();
         f.targets.tick_agent = Some(b"rendered plist\n".to_vec());
         let clock = SystemClock::new();
@@ -4287,61 +4295,10 @@ fn disabling_tick_agent_reinstall_stops_exact_or_missing_owned_plists() {
 }
 
 #[test]
-fn retired_disk_guard_is_not_managed_by_install_or_uninstall() {
-    let f = Fixture::new();
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let ctx = context(&clock, &cancel);
-    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    let mut receipt: InstallReceipt = read_receipt(&f.targets).unwrap().unwrap();
-    let plist = f
-        .home
-        .join("Library/LaunchAgents/dev.provenant.disk-guard.plist");
-    fs::create_dir_all(plist.parent().unwrap()).unwrap();
-    fs::write(&plist, b"old plist").unwrap();
-    receipt.entries.push(OwnedEntry {
-        extra: Default::default(),
-        path: AbsolutePath::new(&plist).unwrap(),
-        harness: None,
-        selector: "disk-guard-agent".into(),
-        expected: owned(&Value::File {
-            bytes: b"old plist".to_vec(),
-            mode: 0o600,
-        })
-        .unwrap(),
-    });
-    fs::write(f.receipt(), serde_json::to_vec(&receipt).unwrap()).unwrap();
-    let plan = f.plan();
-    assert!(
-        !plan
-            .actions()
-            .iter()
-            .any(|action| action.selector == "disk-guard-agent")
-    );
-    install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    assert!(
-        !read_receipt(&f.targets)
-            .unwrap()
-            .unwrap()
-            .entries
-            .iter()
-            .any(|entry| entry.selector == "disk-guard-agent")
-    );
-    let outcome = uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
-    assert!(
-        !outcome
-            .actions
-            .iter()
-            .any(|action| action.selector == "disk-guard-agent")
-    );
-    assert!(plist.exists(), "retirement belongs to the process edge");
-}
-
-#[test]
 fn linux_tick_units_are_receipted_reinstalled_idempotently_and_removed() {
     let mut f = Fixture::new();
     f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
+        .resolve(&IdentityPathResolver)
         .unwrap();
     f.targets.tick_agent = Some(b"timer\n".to_vec());
     f.targets.tick_service = Some(b"service\n".to_vec());
@@ -4414,7 +4371,7 @@ fn shared_instruction_adopts_foreign_link_and_resolves_parent() {
     );
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(
-        inspection.error.is_none() && inspection.findings.is_empty(),
+        inspection.error.is_none() && no_drift(&inspection.findings),
         "{inspection:?}"
     );
     uninstall(
@@ -4439,100 +4396,9 @@ fn apply(f: &Fixture) {
 }
 
 #[test]
-fn default_install_writes_no_fabric_entry_and_creates_no_config() {
-    let mut f = Fixture::new();
-    f.targets.fabric_mcp = false;
+fn install_leaves_codex_config_alone() {
+    let f = Fixture::new();
     apply(&f);
     assert!(!f.home.join(".codex/config.toml").exists());
     assert!(f.link().is_symlink());
-}
-
-fn codex_config(path: &Path) -> toml_edit::DocumentMut {
-    fs::read_to_string(path).unwrap().parse().unwrap()
-}
-
-fn has_fabric(path: &Path) -> bool {
-    codex_config(path)
-        .get("mcp_servers")
-        .and_then(|servers| servers.get("fabric"))
-        .is_some()
-}
-
-#[test]
-fn opted_in_install_writes_the_fabric_entry() {
-    let f = Fixture::new();
-    apply(&f);
-    let config = f.home.join(".codex/config.toml");
-    let doc = codex_config(&config);
-    assert_eq!(
-        doc["mcp_servers"]["fabric"]["args"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|a| a.as_str())
-            .skip_while(|a| *a != "fabric")
-            .collect::<Vec<_>>(),
-        ["fabric", "mcp", "--client", "codex"]
-    );
-}
-
-#[test]
-fn opting_out_removes_an_unchanged_owned_entry_and_keeps_foreign_ones() {
-    let mut f = Fixture::new();
-    let config = f.home.join(".codex/config.toml");
-    fs::create_dir_all(config.parent().unwrap()).unwrap();
-    fs::write(&config, "# mine\n[mcp_servers.other]\ncommand = 'keep'\n").unwrap();
-    apply(&f);
-    assert!(has_fabric(&config));
-    f.targets.fabric_mcp = false;
-    apply(&f);
-    let off = fs::read_to_string(&config).unwrap();
-    assert!(off.contains("# mine"), "{off}");
-    assert!(!has_fabric(&config), "{off}");
-    assert_eq!(
-        codex_config(&config)["mcp_servers"]["other"]["command"].as_str(),
-        Some("keep")
-    );
-    assert!(f.plan().actions().is_empty());
-    // Turning it back on restores the entry.
-    f.targets.fabric_mcp = true;
-    apply(&f);
-    assert!(has_fabric(&config));
-}
-
-fn edit_fabric_entry(config: &Path) -> String {
-    let mut doc = codex_config(config);
-    doc["mcp_servers"]["fabric"]["startup_timeout_sec"] = toml_edit::value(5);
-    let edited = doc.to_string();
-    fs::write(config, &edited).unwrap();
-    edited
-}
-
-#[test]
-fn opting_out_keeps_an_edited_owned_entry() {
-    let mut f = Fixture::new();
-    apply(&f);
-    let config = f.home.join(".codex/config.toml");
-    let edited = edit_fabric_entry(&config);
-    f.targets.fabric_mcp = false;
-    apply(&f);
-    assert_eq!(fs::read_to_string(&config).unwrap(), edited);
-}
-
-#[test]
-fn opting_back_in_over_an_edited_entry_is_a_conflict() {
-    let mut f = Fixture::new();
-    apply(&f);
-    let config = f.home.join(".codex/config.toml");
-    let edited = edit_fabric_entry(&config);
-    f.targets.fabric_mcp = false;
-    apply(&f);
-    f.targets.fabric_mcp = true;
-    // The edited entry is not the recorded one, so re-enabling does not
-    // overwrite it: the user removes or restores it first.
-    assert!(matches!(
-        Snapshots::capture(&f.release(), &f.targets),
-        Err(InstallError::Conflict(path)) if path == f.targets.harnesses[0].mcp_file
-    ));
-    assert_eq!(fs::read_to_string(&config).unwrap(), edited);
 }

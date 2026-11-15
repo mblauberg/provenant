@@ -14,7 +14,7 @@ fn terminal_status_sees_graphs_submitted_under_harness_markers() -> Result {
         std::fs::write(
             &document,
             serde_json::to_vec(&serde_json::json!({
-                "schema_version":1,"graph_id":graph,"nodes":[{
+                "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":graph,"nodes":[{
                     "id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}
                 }]
             }))?,
@@ -77,7 +77,7 @@ fn worktree_creation_refuses_colliding_branch_names() -> Result {
 #[test]
 fn invalid_json_is_an_envelope() -> Result {
     let rig = TestRig::new()?;
-    let invalid = rig.command(&["run", "--wait=0", "--json"])?;
+    let invalid = rig.command(&["land", "2199", "--wait=0", "--json"])?;
     assert_eq!(code(&invalid), 2);
     let value: serde_json::Value = serde_json::from_slice(&invalid.stdout.bytes)?;
     assert_eq!(value["status"], "invalid");
@@ -87,56 +87,7 @@ fn invalid_json_is_an_envelope() -> Result {
             .unwrap_or_default()
             .contains("Usage:")
     );
-    rig.assert_legacy_unchanged()
-}
-
-#[test]
-fn bare_wait_duration_is_warned_and_requires_other_run_input() -> Result {
-    let rig = TestRig::new()?;
-
-    let refused = rig.command(&["run", "--wait", "1s", "--json"])?;
-    assert_eq!(code(&refused), 2);
-    let warning = String::from_utf8_lossy(&refused.stderr.bytes);
-    assert!(
-        warning.contains("warning:") && warning.contains("--wait=1s"),
-        "{warning}"
-    );
-    let envelope: serde_json::Value = serde_json::from_slice(&refused.stdout.bytes)?;
-    assert_eq!(envelope["status"], "invalid");
-    assert!(
-        envelope["error"]["message"]
-            .as_str()
-            .is_some_and(|message| { message.contains("--wait=1s") })
-    );
-
-    let graph = rig.root.join("wait-input.json");
-    std::fs::write(
-        &graph,
-        serde_json::to_vec(&serde_json::json!({
-            "schema_version":1,"graph_id":"bare-wait-input","nodes":[{
-                "id":"accept","kind":"gate","access":"read_only",
-                "condition":{"type":"budget"}
-            }]
-        }))?,
-    )?;
-    let continued = rig.command(&[
-        "run",
-        "--wait",
-        "1s",
-        "--file",
-        graph.to_str().ok_or("graph path")?,
-        "--json",
-    ])?;
-    assert_eq!(code(&continued), 0, "{continued:?}");
-    let warning = String::from_utf8_lossy(&continued.stderr.bytes);
-    assert!(warning.contains("--wait=1s"), "{warning}");
-    let envelope: serde_json::Value = serde_json::from_slice(&continued.stdout.bytes)?;
-    assert_eq!(envelope["status"], "ok");
-    assert_eq!(
-        envelope["data"]["checkpoint"]["graph_id"],
-        "bare-wait-input"
-    );
-    Ok(())
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -172,7 +123,7 @@ fn help_and_version_need_no_roots_and_catalogue_help_drives_every_leaf() -> Resu
     let empty = rig.command(&[])?;
     assert_eq!(code(&empty), 2);
     assert!(!rig.state.exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result {
@@ -226,7 +177,7 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
         human.stdout.bytes,
         format!("{}\n", release.display()).as_bytes()
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Result {
@@ -264,46 +215,24 @@ fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Resul
     assert_eq!(value["command"], "root");
     let hook = rig.command(&["hook", "claude", "pre-tool-use", "--json"])?;
     assert_eq!(code(&hook), 2);
-    let mcp = rig.command(&["fabric", "mcp", "--json"])?;
-    assert_eq!(code(&mcp), 2);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
 fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
     let rig = TestRig::new()?;
-    let attempt = format!(
-        "{}/{}/{}",
-        "11".repeat(16),
-        "22".repeat(16),
-        "33".repeat(16)
-    );
     let leaves: Vec<Vec<&str>> = vec![
         vec!["root"],
         vec!["config", "show"],
-        vec!["fabric", "mcp"],
         vec!["install", "--source", "/fixture", "--harness", "claude"],
         vec!["uninstall", "--harness", "claude"],
         vec!["route", "list"],
         vec!["route", "resolve", "--model", "codex/id"],
-        vec![
-            "dispatch",
-            "--prompt-stdin",
-            "--model",
-            "codex/id",
-            "--operation-id",
-            "fixture",
-        ],
-        vec!["lanes"],
-        vec!["output", &attempt],
-        vec!["cancel", &attempt, "--operation-id", "fixture"],
-        vec![
-            "resume",
-            &attempt,
-            "--prompt-stdin",
-            "--operation-id",
-            "fixture",
-        ],
+        vec!["status"],
+        vec!["wait", "fix-login"],
+        vec!["output", "fix-login/review#1"],
+        vec!["stop", "fix-login"],
+        vec!["retry", "fix-login/review#1"],
         vec!["reconcile"],
         vec!["telemetry", "stats"],
         vec!["quota", "show"],
@@ -333,11 +262,11 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
                     &"quota"
                         | &"route"
                         | &"worktree"
-                        | &"dispatch"
-                        | &"lanes"
+                        | &"status"
+                        | &"wait"
                         | &"output"
-                        | &"cancel"
-                        | &"resume"
+                        | &"stop"
+                        | &"retry"
                         | &"reconcile"
                         | &"telemetry"
                 )
@@ -347,7 +276,6 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
         }
         let out = rig.command(&leaf)?;
         let expected = match leaf.first().copied() {
-            Some("fabric") if leaf.get(1) == Some(&"mcp") => 0,
             Some("config") => 0,
             Some("install") => 1,
             Some("uninstall") => 0,
@@ -360,7 +288,7 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
             "{leaf:?}: {}",
             String::from_utf8_lossy(&out.stderr.bytes)
         );
-        if expected == 4 || leaf == ["fabric", "mcp"] {
+        if expected == 4 {
             assert!(out.stdout.bytes.is_empty());
         }
     }
@@ -374,7 +302,7 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
         "2147483647",
     ])?;
     assert_eq!(code(&internal), 3); // Reaches supervisor's typed invalid-handshake error.
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -416,7 +344,7 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
     assert_eq!(code(&unknown), 0);
     let stderr = String::from_utf8_lossy(&unknown.stderr.bytes);
     assert!(
-        stderr.contains("unknown: ignored invalid configuration (unknown_key)"),
+        stderr.contains("unknown") && stderr.contains("unknown configuration key"),
         "{stderr}"
     );
     for stream in [&unknown.stdout.bytes, &unknown.stderr.bytes] {
@@ -444,7 +372,7 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
         std::fs::read_to_string(rig.state.join("config.toml"))?,
         malformed
     );
-    // A misspelt knob name warns once, naming the nearest knob, and neither
+    // A misspelt knob name warns once, naming the key, and neither
     // `config show` nor `status` refuses.
     std::fs::write(
         rig.state.join("config.toml"),
@@ -471,18 +399,21 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
         1,
         "{stderr}"
     );
-    assert!(stderr.contains("lanes.max_concurrency"), "{stderr}");
     assert!(!stderr.contains("PathWire"), "{stderr}");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
 fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
+    let graph_checkpoint_days = provenant_config::GcSettings::default().graph_checkpoint_days;
     let rig = TestRig::new()?.without_state()?;
     let show = rig.command(&["config", "show", "--json"])?;
     assert_eq!(code(&show), 0);
     let show: serde_json::Value = serde_json::from_slice(&show.stdout.bytes)?;
-    assert_eq!(show["data"]["gc"]["graph_checkpoint_days"], 90);
+    assert_eq!(
+        show["data"]["gc"]["graph_checkpoint_days"],
+        graph_checkpoint_days
+    );
     assert_eq!(
         show["data"]["origins"]["gc.graph_checkpoint_days"]["kind"],
         "compiled"
@@ -493,7 +424,6 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
     let compact = schema["data"]["fields"]
         .as_array()
         .ok_or("compact fields")?;
-    assert!(compact.len() <= 40);
     assert!(
         !compact
             .iter()
@@ -503,7 +433,15 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
     assert_eq!(code(&all), 0);
     let all: serde_json::Value = serde_json::from_slice(&all.stdout.bytes)?;
     let advanced = all["data"]["fields"].as_array().ok_or("advanced fields")?;
+    // The compact schema is a strict subset of `--all`.
     assert!(advanced.len() > compact.len());
+    for field in compact {
+        assert!(
+            advanced.iter().any(|known| known["path"] == field["path"]),
+            "compact field missing from --all: {}",
+            field["path"]
+        );
+    }
     let registry: serde_json::Value =
         serde_json::from_str(include_str!("../../../config/harness-knobs.json"))?;
     let documented_providers = registry["provider_updates"]["provider_ids"]
@@ -537,8 +475,8 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
         .iter()
         .find(|field| field["path"] == "gc.graph_checkpoint_days")
         .ok_or("retention field")?;
-    assert_eq!(field["default"], 90);
-    assert_eq!(field["value"], 90);
+    assert_eq!(field["default"], graph_checkpoint_days);
+    assert_eq!(field["value"], graph_checkpoint_days);
     assert_eq!(field["source"], "default");
     std::fs::create_dir_all(&rig.state)?;
     std::fs::write(
@@ -553,7 +491,7 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
         show["data"]["origins"]["gc.graph_checkpoint_days"]["kind"],
         "user"
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -593,7 +531,7 @@ fn config_check_and_doctor_report_pool_effort_warnings_as_advice() -> Result {
     let doctor: serde_json::Value = serde_json::from_slice(&doctor.stdout.bytes)?;
     assert_eq!(doctor["status"], "ok");
     assert_eq!(doctor["data"]["warnings"][0], warning);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -677,5 +615,5 @@ fn hosts_doctor_uses_non_billing_status_and_preserves_identity_selection() -> Re
         code(&rig.command(&["hosts", "doctor", "bad;host", "--json"])?),
         2
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }

@@ -25,6 +25,8 @@ pub fn durable_sync_file(file: &File) -> io::Result<()> {
 
 pub use os::{DURABILITY_ENV, durability_relaxed};
 
+pub mod ledger;
+
 #[derive(Debug, Error)]
 pub enum FsError {
     #[error("expected one normal relative path component: {name:?}")]
@@ -114,6 +116,62 @@ impl provenant_core::PathResolver for SystemPathResolver {
     fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
         os::resolve_existing_ancestor(path)
     }
+}
+
+/// Bind a captured root context, discovering actual Git markers and their
+/// private/common directories and existing workspace state roots. Installed
+/// release assets need not be checkouts; a pathname alone implies no live state.
+pub fn bind_roots(
+    inputs: &provenant_core::RootInputs,
+) -> std::result::Result<provenant_core::Roots, provenant_core::RootError> {
+    let mut inputs = inputs.clone();
+    for top in std::iter::once(&inputs.checkout).chain(&inputs.workspaces) {
+        let metadata = (|| -> io::Result<Vec<PathBuf>> {
+            let path = top.join(".git");
+            match std::fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(error) => return Err(error),
+                Ok(_) => {}
+            }
+            let marker = crate::git::repository_marker(top)
+                .filter(|marker| marker.git_dir.is_some() && marker.common_dir.is_some())
+                .ok_or_else(|| {
+                    io::Error::other(format!("cannot read Git metadata at {}", path.display()))
+                })?;
+            let mut paths = vec![path];
+            for target in marker.git_dir.iter().chain(&marker.common_dir) {
+                paths.push(std::fs::canonicalize(target)?);
+            }
+            Ok(paths)
+        })()
+        .map_err(|source| provenant_core::RootError::Resolution {
+            path: top.clone(),
+            source,
+        })?;
+        for path in metadata {
+            if !inputs.git_metadata.contains(&path) {
+                inputs.git_metadata.push(path);
+            }
+        }
+    }
+    for workspace in &inputs.workspaces {
+        let state = workspace.join(".agent-run");
+        match std::fs::symlink_metadata(&state) {
+            Ok(_) => {
+                if !inputs.old_roots.contains(&state) {
+                    inputs.old_roots.push(state);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(provenant_core::RootError::Resolution {
+                    path: state,
+                    source,
+                });
+            }
+        }
+    }
+    inputs.resolve(&SystemPathResolver)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,29 +365,6 @@ impl From<FsError> for io::Error {
         }
     }
 }
-/// Open (creating if absent) an owner lock relative to a held directory.
-///
-/// On macOS/APFS, `openat(O_CREAT)` of one new name by concurrent callers can
-/// fail the loser with ENOENT even though the directory is live and the entry
-/// now exists (measured: about half of two-thread races; one immediate retry
-/// always succeeded). A genuinely removed directory keeps returning ENOENT, so
-/// a small bounded retry absorbs the race without hiding that case. The caller
-/// still verifies the opened inode against the directory entry.
-fn open_lock_creating(dir: &File, name: &OsStr) -> io::Result<File> {
-    open_lock_creating_with(|| os::open_lock(dir, name))
-}
-fn open_lock_creating_with(mut open: impl FnMut() -> io::Result<File>) -> io::Result<File> {
-    const ATTEMPTS: usize = 5;
-    let mut attempt = 1;
-    loop {
-        match open() {
-            Err(source) if source.kind() == io::ErrorKind::NotFound && attempt < ATTEMPTS => {
-                attempt += 1;
-            }
-            result => return result,
-        }
-    }
-}
 fn error<'a>(operation: &'static str, path: &'a Path) -> impl FnOnce(io::Error) -> FsError + 'a {
     move |source| {
         if source.raw_os_error() == Some(errno::ELOOP) {
@@ -475,6 +510,13 @@ pub fn directory_scans() -> u64 {
 }
 
 impl Directory {
+    /// Test seam for simulating a mount boundary without requiring a host mount.
+    #[cfg(test)]
+    pub(crate) fn with_device_for_test(mut self, device: u64) -> Self {
+        self.device = device;
+        self
+    }
+
     /// Open the signal itself as its lock, refusing links and replaced entries.
     pub(crate) fn signal_file(&self, name: &OsStr, write: bool) -> Result<File> {
         let name = component(name)?;
@@ -755,7 +797,7 @@ impl Directory {
     /// Observe a stable existing lock using a read-only descriptor. This never
     /// creates a missing lock or changes its contents, mode or timestamps.
     pub fn try_lock_existing(&self, name: &OsStr, mode: LockMode) -> Result<LockGuard> {
-        self.lock_existing_with_timeout(name, mode, Duration::ZERO, &CancelToken::new())
+        self.lock_existing_with_timeout(name, mode, Duration::ZERO, &CancelToken::new(), os::wait)
     }
 
     /// Probe a lock file another program owns, such as Cargo's `.cargo-lock`,
@@ -809,7 +851,7 @@ impl Directory {
         clock: &dyn Clock,
     ) -> Result<LockGuard> {
         let timeout = Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
-        self.lock_existing_with_timeout(name, mode, timeout, cancel)
+        self.lock_existing_with_timeout(name, mode, timeout, cancel, os::wait)
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -819,6 +861,7 @@ impl Directory {
         mode: LockMode,
         timeout: Duration,
         cancel: &CancelToken,
+        mut wait: impl FnMut(Duration),
     ) -> Result<LockGuard> {
         let name = component(name)?;
         if !name.as_bytes().ends_with(b".lock") {
@@ -866,7 +909,7 @@ impl Directory {
             if remaining.is_zero() {
                 return Err(FsError::LockTimeout { path, timeout });
             }
-            os::wait(remaining.min(Duration::from_millis(5)));
+            wait(remaining.min(Duration::from_millis(5)));
         }
     }
 
@@ -898,7 +941,7 @@ impl Directory {
             Err(error) if error.is_not_found() => None,
             Err(error) => return Err(error),
         };
-        let file = open_lock_creating(&self.file, name).map_err(error("open owner lock", &path))?;
+        let file = os::open_lock(&self.file, name).map_err(error("open owner lock", &path))?;
         let opened = file
             .metadata()
             .map(Metadata::from_std)
@@ -1032,6 +1075,18 @@ impl Directory {
     }
     pub fn unlink(&self, name: &OsStr) -> Result<()> {
         self.remove(name, false)
+    }
+    /// Unlink only the symlink observed by the caller, including lock-named
+    /// links. Never opens the link or its target, and refuses a replaced entry.
+    pub fn unlink_symlink(&self, name: &OsStr, expected: &Metadata) -> Result<()> {
+        let name = component(name)?;
+        let current = self.metadata_at(name, false)?;
+        if expected.kind != FileKind::Symlink || !expected.unchanged(&current) {
+            return Err(FsError::RaceRefused { name: name.into() });
+        }
+        os::unlink(&self.file, name, false)
+            .map_err(error("unlinkat symlink", &self.path.join(name)))?;
+        self.sync()
     }
     pub fn rmdir(&self, name: &OsStr) -> Result<()> {
         self.remove(name, true)
@@ -1194,7 +1249,7 @@ impl Directory {
     ) -> Result<Publication> {
         component(name)?;
         for _ in 0..128 {
-            let temporary = staging_name(".provenant-staging.")?;
+            let temporary = staging_name(STAGING_PREFIX)?;
             match self.symlink(target, &temporary) {
                 Ok(()) => {}
                 Err(error) if error.is_exists() => continue,
@@ -1463,9 +1518,11 @@ pub fn entropy_128() -> Result<[u8; 16]> {
 }
 
 /// OS entropy, no global counter or clock; callers use exclusive creation too.
+const STAGING_PREFIX: &str = ".provenant-staging.";
+
 pub fn temporary_name() -> Result<OsString> {
     let bytes = os::entropy::<12>().map_err(error("getentropy", Path::new("<temporary name>")))?;
-    let mut name = String::from(".provenant-staging.");
+    let mut name = String::from(STAGING_PREFIX);
     name.push_str(&provenant_core::hex(&bytes));
     Ok(name.into())
 }

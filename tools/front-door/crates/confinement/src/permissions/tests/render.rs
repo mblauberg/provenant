@@ -7,10 +7,181 @@ use provenant_core::CancelToken;
 use provenant_os::exec::SystemExecutor;
 #[cfg(target_os = "macos")]
 use provenant_os::exec::{ExecOutcome, Executor, Termination};
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+use provenant_records::policy::Policy;
 #[cfg(target_os = "macos")]
 use std::collections::BTreeMap;
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 use std::path::{Path, PathBuf};
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RuleAction {
+    Allow,
+    Deny,
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[derive(Debug)]
+pub(super) struct RuleFact {
+    pub(super) action: RuleAction,
+    pub(super) operations: Vec<String>,
+    pub(super) strings: Vec<String>,
+    pub(super) atoms: Vec<String>,
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+pub(super) fn rule_facts(source: &str) -> Vec<RuleFact> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let expression = line.trim().strip_prefix('(')?;
+            let header = expression.split('(').next()?;
+            let mut atoms = header.split_whitespace();
+            let action = match atoms.next()? {
+                "allow" => RuleAction::Allow,
+                "deny" => RuleAction::Deny,
+                _ => return None,
+            };
+            let operations = atoms
+                .map(|atom| atom.trim_end_matches(')').to_owned())
+                .filter(|atom| !atom.is_empty())
+                .collect();
+            let mut strings = Vec::new();
+            let mut remaining = line;
+            while let Some((_, quoted)) = remaining.split_once('"') {
+                let mut value = String::new();
+                let mut chars = quoted.chars();
+                while let Some(ch) = chars.next() {
+                    match ch {
+                        '"' => break,
+                        '\\' => {
+                            if let Some(escaped) = chars.next() {
+                                value.push(escaped);
+                            }
+                        }
+                        _ => value.push(ch),
+                    }
+                }
+                strings.push(value);
+                remaining = chars.as_str();
+            }
+            let mut atoms = Vec::new();
+            let mut token = String::new();
+            let mut chars = line.chars().peekable();
+            let mut quoted = false;
+            while let Some(ch) = chars.next() {
+                if quoted {
+                    if ch == '\\' {
+                        chars.next();
+                    } else if ch == '"' {
+                        quoted = false;
+                    }
+                } else if ch == '"' {
+                    if !token.is_empty() {
+                        atoms.push(std::mem::take(&mut token));
+                    }
+                    quoted = true;
+                } else if ch.is_whitespace() || matches!(ch, '(' | ')') {
+                    if !token.is_empty() {
+                        atoms.push(std::mem::take(&mut token));
+                    }
+                } else {
+                    token.push(ch);
+                }
+            }
+            if !token.is_empty() {
+                atoms.push(token);
+            }
+            Some(RuleFact {
+                action,
+                operations,
+                strings,
+                atoms,
+            })
+        })
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+pub(super) fn rule_index(
+    source: &str,
+    action: RuleAction,
+    operation: &str,
+    target: Option<&str>,
+) -> Option<usize> {
+    match target {
+        Some(target) => rule_index_with_targets(source, action, operation, &[target]),
+        None => rule_index_with_targets(source, action, operation, &[]),
+    }
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+pub(super) fn rule_index_with_targets(
+    source: &str,
+    action: RuleAction,
+    operation: &str,
+    targets: &[&str],
+) -> Option<usize> {
+    rule_index_with_facts(source, action, operation, targets, &[])
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+pub(super) fn rule_index_with_facts(
+    source: &str,
+    action: RuleAction,
+    operation: &str,
+    targets: &[&str],
+    atoms: &[&str],
+) -> Option<usize> {
+    rule_facts(source).iter().position(|rule| {
+        rule.action == action
+            && rule.operations.iter().any(|name| name == operation)
+            && targets
+                .iter()
+                .all(|target| rule.strings.iter().any(|value| value == target))
+            && atoms
+                .iter()
+                .all(|atom| rule.atoms.iter().any(|value| value == atom))
+    })
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only the macOS escape and grant tests call it")
+)]
+pub(super) fn rule_index_without_strings(
+    source: &str,
+    action: RuleAction,
+    operation: &str,
+) -> Option<usize> {
+    rule_facts(source).iter().position(|rule| {
+        rule.action == action
+            && rule.operations.iter().any(|name| name == operation)
+            && rule.strings.is_empty()
+    })
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only the macOS escape and grant tests call it")
+)]
+pub(super) fn has_rule_atoms(
+    source: &str,
+    action: RuleAction,
+    operation: &str,
+    required: &[&str],
+) -> bool {
+    rule_facts(source).iter().any(|rule| {
+        rule.action == action
+            && rule.operations.iter().any(|name| name == operation)
+            && required
+                .iter()
+                .all(|atom| rule.atoms.iter().any(|value| value == atom))
+    })
+}
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
@@ -20,7 +191,7 @@ fn writer_programs_keep_filesystem_and_credential_boundaries() -> Result<(), Per
     plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
         git_grants_digest: [0; 32],
         publishing: false,
-        common_git_dir: Some("/fixture/repo/.git".into()),
+        common_git_dir: "/fixture/repo/.git".into(),
         cargo_cache: PathGrant {
             path: "/fixture/cache".into(),
             scope: PathScope::Subtree,
@@ -35,24 +206,32 @@ fn writer_programs_keep_filesystem_and_credential_boundaries() -> Result<(), Per
     );
     let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), Some(worktree))?;
     let source = render(&grants)?;
-    assert!(source.contains("(allow default)"));
-    assert!(!source.contains("(deny default)"));
-    let exec = source.find("(allow process-exec)\n").expect("writer exec");
-    assert!(source.contains("(allow process-fork)\n"));
-    assert!(source.contains("(allow pseudo-tty)\n"));
+    assert!(rule_index(&source, RuleAction::Allow, "default", None).is_some());
+    assert!(rule_index(&source, RuleAction::Deny, "default", None).is_none());
+    let exec =
+        rule_index(&source, RuleAction::Allow, "process-exec", None).expect("writer exec rule");
+    assert!(rule_index(&source, RuleAction::Allow, "process-fork", None).is_some());
+    assert!(rule_index(&source, RuleAction::Allow, "pseudo-tty", None).is_some());
     assert!(
-        source
-            .find("(deny process-exec (literal \"/usr/bin/security\"))")
-            .expect("keychain denied")
-            > exec
+        rule_index_with_facts(
+            &source,
+            RuleAction::Deny,
+            "process-exec",
+            &["/usr/bin/security"],
+            &["literal"],
+        )
+        .is_some_and(|index| index > exec)
     );
-    for deny in [
-        "(deny file-write* (subpath \"/fixture/repo/.git\"))",
-        "(deny file-read* (subpath \"/fixture/home/.ssh\"))",
-        "(deny file-read* (subpath \"/fixture/home/.config/gh\"))",
-        "(deny file-write* (subpath \"/fixture/worktrees/lane/.git\"))",
+    for (operation, path) in [
+        ("file-write*", "/fixture/repo/.git"),
+        ("file-read*", "/fixture/home/.ssh"),
+        ("file-read*", "/fixture/home/.config/gh"),
+        ("file-write*", "/fixture/worktrees/lane/.git"),
     ] {
-        assert!(source.contains(deny), "{deny}");
+        assert!(
+            rule_index_with_facts(&source, RuleAction::Deny, operation, &[path], &["subpath"],)
+                .is_some()
+        );
     }
     Ok(())
 }
@@ -100,7 +279,12 @@ fn expanded_authentication_family_grants_only_selected_credentials() -> Result<(
             in_place_writes: vec![],
         });
     }
-    validate_profile_spec_with_home(&profile.spec, Path::new("/fixture/home"), 128)?;
+    validate_profile_spec_with_home(
+        &profile.spec,
+        Path::new("/fixture/home"),
+        &provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
+        128,
+    )?;
     let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
     for auth in &profile.spec.authentication {
         for root in &auth.roots {
@@ -112,60 +296,136 @@ fn expanded_authentication_family_grants_only_selected_credentials() -> Result<(
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
-fn profiles_above_former_thresholds_render_without_truncation()
--> Result<(), Box<dyn std::error::Error>> {
+fn large_profiles_render_without_truncation() -> Result<(), Box<dyn std::error::Error>> {
     let (plan, profile) = write_grants_fixture();
-    let mut many = plan.clone();
-    many.read_roots = (0..129)
-        .map(|index| PathGrant {
-            path: PathBuf::from(format!("/fixture/root/{index}")),
-            scope: PathScope::Subtree,
-        })
-        .collect();
-    assert!(validate_plan_grant_limit(&many, 128).is_err());
-    assert!(validate_plan_grant_limit(&many, 256).is_ok());
     let mut grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
     let root = |index: usize, width: usize| PathGrant {
         path: PathBuf::from(format!("/fixture/reads/{index}/{}", "x".repeat(width))),
         scope: PathScope::Subtree,
     };
-    // About 130 KiB: over the former 64 KiB cap, inside the launch limit.
-    grants.reads = (0..1000).map(|index| root(index, 100)).collect();
-    let source = render(&grants)?;
-    assert!(source.len() > 64 * 1024 && source.len() <= PROFILE_LIMIT);
-    grants.reads = (0..4000).map(|index| root(index, 200)).collect();
-    let expanded = render(&grants)?;
-    assert!(expanded.len() > PROFILE_LIMIT);
-    assert_eq!(expanded, render_with_limit(&grants, usize::MAX)?);
-    for grant in &grants.reads {
-        assert!(expanded.contains(grant.path.to_str().expect("fixture UTF-8")));
-    }
-    for origin in [
-        provenant_records::diagnostic::SettingSource::ShippedDefault,
-        provenant_records::diagnostic::SettingSource::Configuration,
-    ] {
-        let warning = capacity_warning(
-            "domains.run.profile_limit_bytes",
-            expanded.len(),
-            PROFILE_LIMIT,
-            origin,
-        )
-        .expect("warning above threshold");
-        assert!(warning.contains(&expanded.len().to_string()));
-        assert!(warning.contains(&PROFILE_LIMIT.to_string()));
-        assert!(warning.contains(origin.description()));
-        assert!(warning.len() < 256);
-        assert!(
-            capacity_warning(
-                "domains.run.profile_limit_bytes",
-                PROFILE_LIMIT,
-                PROFILE_LIMIT,
-                origin
-            )
-            .is_none()
-        );
+    // One pass over the rendered quoted paths, not one substring scan per
+    // grant: the check stays linear in the profile size.
+    let rendered = |source: &str| {
+        source
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect::<std::collections::HashSet<_>>()
+    };
+    for (count, width) in [(1000, 100), (4000, 200)] {
+        grants.reads = (0..count).map(|index| root(index, width)).collect();
+        let paths = rendered(&render(&grants)?);
+        for grant in &grants.reads {
+            assert!(paths.contains(grant.path.to_str().expect("fixture UTF-8")));
+        }
     }
     Ok(())
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn capacity_policy_controls_warning_off_and_typed_refusal() {
+    use provenant_records::policy::{Boundary, Source, Strength};
+    use std::collections::BTreeMap;
+
+    let default = Policy::default();
+    for code in ["GRANT_COUNT", "PROFILE_GRANT_COUNT", "PROFILE_BYTES"] {
+        let rule = default.rule(code);
+        assert_eq!(rule.rule.boundary, Boundary::None);
+        assert_eq!(rule.rule.strength, Strength::Warn);
+    }
+    let origin = provenant_records::diagnostic::SettingSource::Configuration;
+    assert!(
+        check_capacity_policy(
+            &default,
+            "GRANT_COUNT",
+            "domains.run.grant_limit",
+            2,
+            1,
+            origin,
+            PermissionError::GrantLimitExceeded {
+                family: "plan root grant count",
+                limit: 1,
+            },
+        )
+        .expect("warning policy proceeds")
+        .is_some()
+    );
+
+    let mut off = Policy::default();
+    off.overlay(
+        &BTreeMap::from([("PROFILE_GRANT_COUNT".to_owned(), Strength::Off)]),
+        Source::Host,
+    );
+    assert!(
+        check_capacity_policy(
+            &off,
+            "PROFILE_GRANT_COUNT",
+            "domains.run.grant_limit",
+            2,
+            1,
+            origin,
+            PermissionError::GrantLimitExceeded {
+                family: "provider profile grant count",
+                limit: 1,
+            },
+        )
+        .expect("off policy proceeds")
+        .is_none()
+    );
+
+    let mut strict = Policy::default();
+    strict.overlay(
+        &BTreeMap::from([("PROFILE_BYTES".to_owned(), Strength::Refuse)]),
+        Source::Dispatch,
+    );
+    assert!(matches!(
+        check_capacity_policy(
+            &strict,
+            "PROFILE_BYTES",
+            "domains.run.profile_limit_bytes",
+            2,
+            1,
+            origin,
+            PermissionError::ProfileTooLarge { bytes: 2, limit: 1 },
+        ),
+        Err(PermissionError::ProfileTooLarge { bytes: 2, limit: 1 })
+    ));
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn read_only_extension_guard_uses_immutable_authority_policy() {
+    use crate::plan::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    use provenant_records::policy::{Boundary, Effect, Facts, Strength};
+
+    let (permissions, _) = write_grants_fixture();
+    let error = ConfinedPlan::new(PlanRequest {
+        scope: provenant_core::WorkScope::Project(provenant_core::ProjectId::from_bytes([1; 16])),
+        permissions,
+        codex: CodexPolicy::Inherited,
+        extensions: ExtensionPolicy::Unconfined,
+        agy_state: None,
+    })
+    .err()
+    .expect("unconfined read-only extensions are refused");
+    assert!(matches!(
+        error,
+        crate::plan::PlanError::UnconfinedExtensions
+    ));
+
+    let policy = provenant_records::policy::Policy::default();
+    let rule = policy.rule("PLAN_CONFINEDPLAN_NEW_AUTHORITY");
+    assert_eq!(rule.rule.boundary, Boundary::Authority);
+    assert_eq!(rule.rule.strength, Strength::Refuse);
+    assert!(matches!(
+        policy.check(
+            "PLAN_CONFINEDPLAN_NEW_AUTHORITY",
+            Facts::violation("guard failed"),
+        ),
+        Effect::Refuse(_)
+    ));
 }
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
@@ -254,6 +514,7 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
         PlanRequest {
             scope: WorkScope::Project(binding.project_id()),
             permissions: PlanPermissions {
+                credential_roots: provenant_core::CredentialRoots::for_home(&home),
                 policy: Some(lane_policy),
                 read_only: None,
                 mode: AccessMode::ReadOnly,
@@ -353,6 +614,7 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     let compiled = MacOsSandboxBackend {
         ready: true,
         limits: ProfileLimits::default(),
+        policy: Policy::default(),
     }
     .compile(plan.permissions(), &profile, &anchors)?;
     let source = String::from_utf8(compiled.profile)?;
@@ -364,11 +626,12 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
             grant_origin: provenant_records::diagnostic::SettingSource::Configuration,
             profile_origin: provenant_records::diagnostic::SettingSource::Configuration,
         },
+        policy: Policy::default(),
     }
     .compile(plan.permissions(), &profile, &anchors)?;
     assert_eq!(over_threshold.profile, source.as_bytes());
-    // Medium/native acceptance: real anchors and compiler, above both former
-    // defaults. Exact absent files share an already-held read-only parent.
+    // Large/native acceptance: real anchors and compiler, above the effective
+    // profile threshold. Exact absent files share an already-held read parent.
     let mut large_profile = ProviderProfile {
         spec: profile.spec.clone(),
         observations: profile.observations.clone(),
@@ -388,9 +651,10 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     let large = MacOsSandboxBackend {
         ready: true,
         limits: ProfileLimits::default(),
+        policy: Policy::default(),
     }
     .compile(plan.permissions(), &large_profile, &anchors)?;
-    assert!(large.profile.len() > PROFILE_LIMIT);
+    assert!(large.profile.len() > ProfileLimits::default().profile_limit_bytes);
     let native = || -> Result<(), Box<dyn std::error::Error>> {
         let env = [("HOME".into(), home.clone().into_os_string())];
         let executor = SystemExecutor::new(1)?;
@@ -439,6 +703,7 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     let strict_profile = MacOsSandboxBackend {
         ready: true,
         limits: ProfileLimits::default(),
+        policy: Policy::default(),
     }
     .compile(strict.permissions(), &profile, &anchors)?;
     let strict_source = String::from_utf8(strict_profile.profile)?;
@@ -511,7 +776,8 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     assert!(
         MacOsSandboxBackend {
             ready: true,
-            limits: ProfileLimits::default()
+            limits: ProfileLimits::default(),
+            policy: Policy::default(),
         }
         .compile(plan.permissions(), &profile, &anchors)
         .is_err()
@@ -524,7 +790,8 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     assert!(
         MacOsSandboxBackend {
             ready: true,
-            limits: ProfileLimits::default()
+            limits: ProfileLimits::default(),
+            policy: Policy::default(),
         }
         .compile(plan.permissions(), &profile, &anchors)
         .is_err()
@@ -576,6 +843,9 @@ fn sbpl_process_and_pty_authority_is_ambient_without_catalogue_grants() {
         observations: BTreeMap::new(),
     };
     let plan = PlanPermissions {
+        credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+            "/fixture/home",
+        )),
         policy: None,
         read_only: None,
         private_state: None,
@@ -649,6 +919,9 @@ fn network_levels_shared_writes_and_hard_denies_render_in_order() {
         observations: BTreeMap::new(),
     };
     let mut plan = PlanPermissions {
+        credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+            "/fixture/home",
+        )),
         policy: None,
         read_only: None,
         private_state: None,
@@ -670,62 +943,175 @@ fn network_levels_shared_writes_and_hard_denies_render_in_order() {
     };
     let provider = render(&plan);
     // Read-only lanes never exec from write roots.
-    assert!(!provider.contains("(allow process-exec (subpath \"/work/repo/.agent-run\"))"));
-    assert!(!provider.contains("localhost"));
-    assert!(!provider.contains("PGSQL"));
-    assert!(!provider.contains("\"*:*\""));
+    assert!(
+        rule_index(
+            &provider,
+            RuleAction::Allow,
+            "process-exec",
+            Some("/work/repo/.agent-run")
+        )
+        .is_none()
+    );
+    assert!(rule_facts(&provider).iter().all(|rule| {
+        !rule
+            .strings
+            .iter()
+            .any(|value| value.contains("localhost") || value.contains("PGSQL"))
+            && !rule.strings.iter().any(|value| value == "*:*")
+    }));
     let last_allow = ["/Users/fixture/.cargo/registry", "/work/repo/.agent-run"]
         .map(|path| {
-            provider
-                .find(&format!("(allow file-write* (subpath \"{path}\"))"))
-                .expect(path)
+            rule_index(&provider, RuleAction::Allow, "file-write*", Some(path))
+                .expect("declared write grant")
         })
         .into_iter()
         .max()
         .expect("allow rules");
-    for denied in [
-        "(deny file-read* (subpath \"/Users/fixture/.ssh\"))",
-        "(deny file-write* (subpath \"/Users/fixture/.kube\"))",
-        "(deny file-read* (subpath \"/Users/fixture/Monero\"))",
-        "(deny file-write* (subpath \"/Users/fixture/Archives/git-preservation\"))",
-        "(deny file-read* (literal \"/Users/fixture/.cargo/credentials.toml\"))",
-        "(deny file-read* (subpath \"/Users/fixture/.gnupg\"))",
-        "(deny file-read* (subpath \"/Users/fixture/.azure\"))",
-        "(deny file-read* (subpath \"/Users/fixture/.config/gh\"))",
+    for (operation, path, scope) in [
+        ("file-read*", "/Users/fixture/.ssh", "subpath"),
+        ("file-write*", "/Users/fixture/.kube", "subpath"),
+        ("file-read*", "/Users/fixture/Monero", "subpath"),
+        (
+            "file-write*",
+            "/Users/fixture/Archives/git-preservation",
+            "subpath",
+        ),
+        (
+            "file-read*",
+            "/Users/fixture/.cargo/credentials.toml",
+            "literal",
+        ),
+        ("file-read*", "/Users/fixture/.gnupg", "subpath"),
+        ("file-read*", "/Users/fixture/.azure", "subpath"),
+        ("file-read*", "/Users/fixture/.config/gh", "subpath"),
     ] {
         assert!(
-            provider.find(denied).expect(denied) > last_allow,
-            "{denied}"
+            rule_index_with_facts(&provider, RuleAction::Deny, operation, &[path], &[scope])
+                .is_some_and(|index| index > last_allow)
         );
     }
     plan.network = NetworkAccess::Local;
     let local = render(&plan);
-    assert!(local.contains("(allow network-outbound (remote ip \"localhost:*\"))"));
-    assert!(local.contains("(allow network-bind (local ip \"localhost:*\"))"));
-    assert!(local.contains("\\.s\\.PGSQL\\."));
-    assert!(!local.contains("\"*:*\""));
+    assert!(
+        rule_index_with_facts(
+            &local,
+            RuleAction::Allow,
+            "network-outbound",
+            &["localhost:*"],
+            &["remote", "ip"],
+        )
+        .is_some()
+    );
+    assert!(
+        rule_index_with_facts(
+            &local,
+            RuleAction::Allow,
+            "network-bind",
+            &["localhost:*"],
+            &["local", "ip"],
+        )
+        .is_some()
+    );
+    assert!(rule_facts(&local).iter().any(|rule| {
+        rule.operations
+            .iter()
+            .any(|name| name == "network-outbound")
+            && rule.strings.iter().any(|value| value.contains("PGSQL"))
+    }));
+    assert!(rule_index(&local, RuleAction::Allow, "network-outbound", Some("*:*")).is_none());
     plan.network = NetworkAccess::Open;
     let open = render(&plan);
-    assert!(open.contains("(allow network-outbound (remote ip \"*:*\"))"));
-    assert!(open.contains("PGSQL"));
+    assert!(
+        rule_index_with_facts(
+            &open,
+            RuleAction::Allow,
+            "network-outbound",
+            &["*:*"],
+            &["remote", "ip"],
+        )
+        .is_some()
+    );
+    assert!(rule_facts(&open).iter().any(|rule| {
+        rule.operations
+            .iter()
+            .any(|name| name == "network-outbound")
+            && rule.strings.iter().any(|value| value.contains("PGSQL"))
+    }));
     for path in [
         "/Users/fixture/.config/gh",
         "/Users/fixture/Library/Application Support/GitHub CLI",
     ] {
-        let read = format!("(allow file-read* (subpath \"{path}\"))");
-        let deny_read = format!("(deny file-read* (subpath \"{path}\"))");
-        let deny_write = format!("(deny file-write* (subpath \"{path}\"))");
-        assert!(open.contains(&read), "{path}");
-        assert!(!open.contains(&deny_read), "{path}");
-        assert!(open.contains(&deny_write), "{path}");
-        assert!(!provider.contains(&read), "{path}");
-        assert!(!local.contains(&read), "{path}");
-        assert!(provider.contains(&deny_read), "{path}");
+        assert!(
+            rule_index_with_facts(
+                &open,
+                RuleAction::Allow,
+                "file-read*",
+                &[path],
+                &["subpath"],
+            )
+            .is_some()
+        );
+        assert!(
+            rule_index_with_facts(&open, RuleAction::Deny, "file-read*", &[path], &["subpath"],)
+                .is_none()
+        );
+        assert!(
+            rule_index_with_facts(
+                &open,
+                RuleAction::Deny,
+                "file-write*",
+                &[path],
+                &["subpath"],
+            )
+            .is_some()
+        );
+        assert!(
+            rule_index_with_facts(
+                &provider,
+                RuleAction::Allow,
+                "file-read*",
+                &[path],
+                &["subpath"],
+            )
+            .is_none()
+        );
+        assert!(
+            rule_index_with_facts(
+                &local,
+                RuleAction::Allow,
+                "file-read*",
+                &[path],
+                &["subpath"],
+            )
+            .is_none()
+        );
+        assert!(
+            rule_index_with_facts(
+                &provider,
+                RuleAction::Deny,
+                "file-read*",
+                &[path],
+                &["subpath"],
+            )
+            .is_some()
+        );
     }
-    let ssh_read = "(deny file-read* (subpath \"/Users/fixture/.ssh\"))";
-    assert!(
-        open.find(ssh_read).expect("ssh deny") > open.rfind("(allow file-read*").expect("allow")
-    );
+    let ssh_deny = rule_index_with_facts(
+        &open,
+        RuleAction::Deny,
+        "file-read*",
+        &["/Users/fixture/.ssh"],
+        &["subpath"],
+    )
+    .expect("ssh credential denial");
+    let last_read = rule_facts(&open)
+        .iter()
+        .rposition(|rule| {
+            rule.action == RuleAction::Allow
+                && rule.operations.iter().any(|name| name == "file-read*")
+        })
+        .expect("read grant");
+    assert!(ssh_deny > last_read);
 
     // A secret root overlapping the gh config must be denied after the allow.
     for secret in [
@@ -735,9 +1121,23 @@ fn network_levels_shared_writes_and_hard_denies_render_in_order() {
     ] {
         plan.secret_roots = vec![grant(secret)];
         let hidden = render(&plan);
-        let deny = format!("(deny file-read* (subpath \"{secret}\"))");
-        let allow = "(allow file-read* (subpath \"/Users/fixture/.config/gh\"))";
-        assert!(hidden.find(&deny).expect(secret) > hidden.find(allow).expect(allow));
+        let deny = rule_index_with_facts(
+            &hidden,
+            RuleAction::Deny,
+            "file-read*",
+            &[secret],
+            &["subpath"],
+        )
+        .expect("secret root denial");
+        let allow = rule_index_with_facts(
+            &hidden,
+            RuleAction::Allow,
+            "file-read*",
+            &["/Users/fixture/.config/gh"],
+            &["subpath"],
+        )
+        .expect("GitHub CLI credential grant");
+        assert!(deny > allow);
     }
 }
 
@@ -834,7 +1234,7 @@ fn network_endpoints_accept_only_sbpl_hosts_and_checked_ports() {
 }
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
-fn invalid_provider_endpoints_warn_and_preserve_open_network() -> Result<(), PermissionError> {
+fn invalid_provider_endpoints_are_omitted_from_sbpl() -> Result<(), PermissionError> {
     let (mut plan, mut profile) = write_grants_fixture();
     plan.network = NetworkAccess::Open;
     profile.spec.process_executables.push(PathGrant {
@@ -855,13 +1255,48 @@ fn invalid_provider_endpoints_warn_and_preserve_open_network() -> Result<(), Per
             port: 0,
         },
     ];
-    validate_profile_spec_with_home(&profile.spec, Path::new("/fixture/home"), 128)?;
+    validate_profile_spec_with_home(
+        &profile.spec,
+        Path::new("/fixture/home"),
+        &provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
+        128,
+    )?;
     let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
     let source = render(&grants)?;
-    assert!(source.contains("(allow network-outbound (remote tcp \"localhost:443\"))"));
-    assert!(source.contains("(allow network-outbound (remote ip \"*:*\"))"));
-    assert!(!source.contains("invalid"));
-    assert!(!source.contains("remote tcp \"*:0\""));
+    let policy = provenant_records::policy::Policy::default();
+    let rule = policy.rule("RENDER_RENDER_PROFILE_WITH_LIMIT_NONE");
+    assert_eq!(
+        rule.rule.boundary,
+        provenant_records::policy::Boundary::None
+    );
+    assert_eq!(
+        rule.rule.strength,
+        provenant_records::policy::Strength::Warn
+    );
+    assert!(matches!(
+        policy.check(
+            "RENDER_RENDER_PROFILE_WITH_LIMIT_NONE",
+            provenant_records::policy::Facts::violation("predicate observed"),
+        ),
+        provenant_records::policy::Effect::Warn(_)
+    ));
+    assert!(
+        rule_index_with_facts(
+            &source,
+            RuleAction::Allow,
+            "network-outbound",
+            &["localhost:443"],
+            &["tcp"],
+        )
+        .is_some()
+    );
+    assert!(rule_index(&source, RuleAction::Allow, "network-outbound", Some("*:*")).is_some());
+    assert!(
+        rule_facts(&source)
+            .iter()
+            .all(|rule| rule.strings.iter().all(|value| !value.contains("invalid")))
+    );
+    assert!(rule_index(&source, RuleAction::Allow, "network-outbound", Some("*:0")).is_none());
     Ok(())
 }
 
@@ -896,15 +1331,48 @@ fn invalid_discovery_reads_are_omitted_before_anchoring_and_rendering()
             scope: PathScope::Subtree,
         },
     ];
-    validate_profile_spec_with_home(&profile.spec, Path::new("/fixture/home"), 128)?;
+    validate_profile_spec_with_home(
+        &profile.spec,
+        Path::new("/fixture/home"),
+        &provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
+        128,
+    )?;
     let anchors = required_anchors(&plan, &profile, None);
     assert!(!anchors.contains(Path::new("/fixture/home/.config/gh")));
     assert!(!anchors.contains(invalid_native.parent().expect("fixture parent")));
     let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
     let source = render(&grants)?;
-    assert!(source.contains("(allow file-read* (literal \"/fixture/repo/.agents\"))"));
-    assert!(!source.contains("hosts.yml"));
-    assert!(!source.contains("/fixture/unsafe/.codex"));
+    let policy = provenant_records::policy::Policy::default();
+    let rule = policy.rule("RENDER_RENDER_PROFILE_WITH_LIMIT_NONE_2");
+    assert_eq!(
+        rule.rule.boundary,
+        provenant_records::policy::Boundary::None
+    );
+    assert_eq!(
+        rule.rule.strength,
+        provenant_records::policy::Strength::Warn
+    );
+    assert!(matches!(
+        policy.check(
+            "RENDER_RENDER_PROFILE_WITH_LIMIT_NONE_2",
+            provenant_records::policy::Facts::violation("predicate observed"),
+        ),
+        provenant_records::policy::Effect::Warn(_)
+    ));
+    assert!(
+        rule_index(
+            &source,
+            RuleAction::Allow,
+            "file-read*",
+            Some("/fixture/repo/.agents")
+        )
+        .is_some()
+    );
+    assert!(rule_facts(&source).iter().all(|rule| {
+        rule.strings
+            .iter()
+            .all(|value| value != "hosts.yml" && value != "/fixture/unsafe/.codex")
+    }));
     Ok(())
 }
 
@@ -949,53 +1417,77 @@ fn ambient_policy_renders_complete_mandatory_and_host_denials()
     });
     let grants = GrantSet::build(&plan, &profile, home, None)?;
     let rendered = render(&grants)?;
-    assert!(rendered.starts_with("(version 1)\n(allow default)\n"));
-    assert!(rendered.contains("(deny file-link)"));
-    assert!(rendered.contains("(deny network-outbound (require-all (remote unix-socket (path-literal \"/fixture/agent.sock\"))))"));
-    let last_ordinary_write = rendered
-        .find("(allow file-write* (subpath \"/fixture/home\"))")
-        .expect("broad ordinary grant");
+    assert!(rule_index(&rendered, RuleAction::Allow, "default", None).is_some());
+    assert!(rule_index(&rendered, RuleAction::Deny, "file-link", None).is_some());
+    assert!(
+        rule_index_with_facts(
+            &rendered,
+            RuleAction::Deny,
+            "network-outbound",
+            &["/fixture/agent.sock"],
+            &["require-all", "unix-socket", "path-literal"],
+        )
+        .is_some()
+    );
+    let last_ordinary_write = rule_index_with_facts(
+        &rendered,
+        RuleAction::Allow,
+        "file-write*",
+        &["/fixture/home"],
+        &["subpath"],
+    )
+    .expect("broad ordinary grant");
     let gh = gh_config_paths(home);
     for credential in mandatory.credentials() {
+        let target = credential.path.to_string_lossy();
         let scope = match credential.scope {
             PathScope::Exact => "literal",
             PathScope::Subtree => "subpath",
         };
         for operation in ["file-write*", "process-exec"] {
-            let denial = format!(
-                "(deny {operation} ({scope} \"{}\"))",
-                credential.path.display()
+            assert!(
+                rule_index_with_facts(
+                    &rendered,
+                    RuleAction::Deny,
+                    operation,
+                    &[&target],
+                    &[scope],
+                )
+                    .is_some_and(|index| index > last_ordinary_write)
             );
-            assert!(rendered.find(&denial).expect(&denial) > last_ordinary_write);
         }
         if !gh.contains(&credential.path) {
-            let denial = format!(
-                "(deny file-read* ({scope} \"{}\"))",
-                credential.path.display()
-            );
-            assert!(rendered.find(&denial).expect(&denial) > last_ordinary_write);
-            let clone_denial = format!(
-                "(deny file-clone ({scope} \"{}\"))",
-                credential.path.display()
-            );
-            assert!(rendered.find(&clone_denial).expect(&clone_denial) > last_ordinary_write);
+            for operation in ["file-read*", "file-clone"] {
+                assert!(
+                    rule_index_with_facts(
+                        &rendered,
+                        RuleAction::Deny,
+                        operation,
+                        &[&target],
+                        &[scope],
+                    )
+                    .is_some_and(|index| index > last_ordinary_write)
+                );
+            }
         }
     }
-    for (operation, path) in [
-        ("file-read*", "/fixture/host-state"),
-        ("file-clone", "/fixture/host-state"),
-        ("file-write*", "/fixture/host-state"),
-        ("process-exec", "/fixture/host-state"),
-        ("file-write*", "/fixture/host-git"),
-        ("file-read*", "/fixture/host-private"),
-        ("file-clone", "/fixture/host-private"),
-        ("process-exec", "/fixture/host-private"),
-        ("file-write*", "/fixture/host-archive"),
+    for (operation, path, scope) in [
+        ("file-read*", "/fixture/host-state", "subpath"),
+        ("file-clone", "/fixture/host-state", "subpath"),
+        ("file-write*", "/fixture/host-state", "subpath"),
+        ("process-exec", "/fixture/host-state", "subpath"),
+        ("file-write*", "/fixture/host-git", "subpath"),
+        ("file-read*", "/fixture/host-private", "subpath"),
+        ("file-clone", "/fixture/host-private", "subpath"),
+        ("process-exec", "/fixture/host-private", "subpath"),
+        ("file-write*", "/fixture/host-archive", "subpath"),
     ] {
-        let denial = format!("(deny {operation} (subpath \"{path}\"))");
-        assert!(rendered.contains(&denial), "missing {denial}");
+        assert!(
+            rule_index_with_facts(&rendered, RuleAction::Deny, operation, &[path], &[scope],)
+                .is_some()
+        );
     }
-    assert_eq!(plan.policy.as_ref().expect("policy").warnings().len(), 3);
+    assert!(!plan.policy.as_ref().expect("policy").warnings().is_empty());
     for root in [state, Path::new("/fixture")] {
         profile.spec.authentication.push(AuthenticationProfile {
             keychain: None,
@@ -1254,6 +1746,7 @@ fn enforcing_backend_refuses_missing_host_policy_before_inspecting_grants() {
     let result = MacOsSandboxBackend {
         ready: true,
         limits: ProfileLimits::default(),
+        policy: Policy::default(),
     }
     .compile(&plan, &profile, &anchors);
     assert!(matches!(
@@ -1286,7 +1779,17 @@ fn host_writer_roots_inside_protected_checkouts_render_as_exceptions() -> Result
         mandatory.add_host_write(grant)?;
         mandatory.validate_extra_write(grant)?;
     }
-    assert_eq!(mandatory.host_writes(), [locks.clone(), target.clone()]);
+    let expected_host_writes = [locks.path.clone(), target.path.clone()]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        mandatory
+            .host_writes()
+            .iter()
+            .map(|grant| grant.path.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_host_writes
+    );
     // Equal, enclosing, Git and dispatch-only roots are not exceptions.
     for path in [
         "/fixture/primary",
@@ -1307,7 +1810,14 @@ fn host_writer_roots_inside_protected_checkouts_render_as_exceptions() -> Result
         mandatory.validate_extra_write(&subtree("/fixture/primary/scripts")),
         Err(PermissionError::ProtectedOverlap)
     ));
-    assert_eq!(mandatory.host_writes().len(), 2);
+    assert_eq!(
+        mandatory
+            .host_writes()
+            .iter()
+            .map(|grant| grant.path.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_host_writes
+    );
 
     let (mut plan, profile) = write_grants_fixture();
     plan.read_only = None;
@@ -1316,7 +1826,7 @@ fn host_writer_roots_inside_protected_checkouts_render_as_exceptions() -> Result
     plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
         git_grants_digest: [0; 32],
         publishing: false,
-        common_git_dir: Some("/fixture/primary/.git".into()),
+        common_git_dir: "/fixture/primary/.git".into(),
         cargo_cache: subtree("/fixture/cache"),
     }));
     plan.write_roots = vec![locks, target];
@@ -1327,24 +1837,71 @@ fn host_writer_roots_inside_protected_checkouts_render_as_exceptions() -> Result
         "lane",
     );
     let writer = render(&GrantSet::build(&plan, &profile, home, Some(worktree))?)?;
-    for denial in [
-        "(deny file-write* (require-all (subpath \"/fixture/primary\") (require-not (subpath \"/fixture/primary/.worktrees/lane\")) (require-not (subpath \"/fixture/primary/.agent-run/locks\")) (require-not (subpath \"/fixture/primary/.worktrees/other/target\"))))",
-        "(deny file-write* (require-all (subpath \"/fixture/primary/.worktrees/other\") (require-not (subpath \"/fixture/primary/.worktrees/other/target\"))))",
-        "(deny file-write* (subpath \"/fixture/elsewhere/.git\"))",
-        "(deny file-write* (subpath \"/fixture/primary/.git\"))",
-    ] {
-        assert!(writer.contains(denial), "{denial}");
+    assert!(
+        rule_index_with_facts(
+            &writer,
+            RuleAction::Deny,
+            "file-write*",
+            &[
+                "/fixture/primary",
+                "/fixture/primary/.worktrees/lane",
+                "/fixture/primary/.agent-run/locks",
+                "/fixture/primary/.worktrees/other/target",
+            ],
+            &["subpath", "require-all", "require-not"],
+        )
+        .is_some()
+    );
+    assert!(
+        rule_index_with_facts(
+            &writer,
+            RuleAction::Deny,
+            "file-write*",
+            &[
+                "/fixture/primary/.worktrees/other",
+                "/fixture/primary/.worktrees/other/target",
+            ],
+            &["subpath", "require-all", "require-not"],
+        )
+        .is_some()
+    );
+    for path in ["/fixture/elsewhere/.git", "/fixture/primary/.git"] {
+        assert!(
+            rule_index_with_facts(
+                &writer,
+                RuleAction::Deny,
+                "file-write*",
+                &[path],
+                &["subpath"],
+            )
+            .is_some()
+        );
     }
 
     plan.mode = AccessMode::ReadOnly;
     plan.write_roots.clear();
     let reader = render(&GrantSet::build(&plan, &profile, home, None)?)?;
-    for denial in [
-        "(deny file-write* (subpath \"/fixture/primary\"))",
-        "(deny file-write* (subpath \"/fixture/primary/.worktrees/other\"))",
-    ] {
-        assert!(reader.contains(denial), "{denial}");
+    for path in ["/fixture/primary", "/fixture/primary/.worktrees/other"] {
+        assert!(
+            rule_index_with_facts(
+                &reader,
+                RuleAction::Deny,
+                "file-write*",
+                &[path],
+                &["subpath"],
+            )
+            .is_some()
+        );
     }
-    assert!(!reader.contains("/fixture/primary/.agent-run/locks"));
+    assert!(
+        rule_index_with_facts(
+            &reader,
+            RuleAction::Deny,
+            "file-write*",
+            &["/fixture/primary/.agent-run/locks"],
+            &["subpath"],
+        )
+        .is_none()
+    );
     Ok(())
 }

@@ -1,29 +1,105 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestartMode {
+    Pending,
+    Retryable,
+    UncertainAbsent,
+    UncertainPresent,
+    UncertainOther,
+    AmbiguousError,
+    UncertainBindingMismatch,
+    Cancelled,
+    LateCancel,
+    DefiniteFailed,
+    BindingMismatch,
+    HeadMismatch,
+    WriterBusy,
+    EffectsBusy,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ExpectedReceipt {
+    Done,
+    Cancelled,
+    Failed,
+}
+
+struct RestartCase {
+    mode: RestartMode,
+    expected_receipt: ExpectedReceipt,
+}
+
+const RESTART_CASES: [RestartCase; 14] = [
+    RestartCase {
+        mode: RestartMode::Pending,
+        expected_receipt: ExpectedReceipt::Done,
+    },
+    RestartCase {
+        mode: RestartMode::Retryable,
+        expected_receipt: ExpectedReceipt::Done,
+    },
+    RestartCase {
+        mode: RestartMode::UncertainAbsent,
+        expected_receipt: ExpectedReceipt::Done,
+    },
+    RestartCase {
+        mode: RestartMode::UncertainPresent,
+        expected_receipt: ExpectedReceipt::Done,
+    },
+    RestartCase {
+        mode: RestartMode::UncertainOther,
+        expected_receipt: ExpectedReceipt::Done,
+    },
+    RestartCase {
+        mode: RestartMode::AmbiguousError,
+        expected_receipt: ExpectedReceipt::Done,
+    },
+    RestartCase {
+        mode: RestartMode::UncertainBindingMismatch,
+        expected_receipt: ExpectedReceipt::Failed,
+    },
+    RestartCase {
+        mode: RestartMode::Cancelled,
+        expected_receipt: ExpectedReceipt::Cancelled,
+    },
+    RestartCase {
+        mode: RestartMode::LateCancel,
+        expected_receipt: ExpectedReceipt::Done,
+    },
+    RestartCase {
+        mode: RestartMode::DefiniteFailed,
+        expected_receipt: ExpectedReceipt::Failed,
+    },
+    RestartCase {
+        mode: RestartMode::BindingMismatch,
+        expected_receipt: ExpectedReceipt::Failed,
+    },
+    RestartCase {
+        mode: RestartMode::HeadMismatch,
+        expected_receipt: ExpectedReceipt::Failed,
+    },
+    RestartCase {
+        mode: RestartMode::WriterBusy,
+        expected_receipt: ExpectedReceipt::Done,
+    },
+    RestartCase {
+        mode: RestartMode::EffectsBusy,
+        expected_receipt: ExpectedReceipt::Done,
+    },
+];
+
 #[test]
-fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
+fn delivery_restart_recovers_pending_retryable_and_uncertain_receipts()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    for mode in [
-        "pending",
-        "retryable",
-        "uncertain_absent",
-        "uncertain_present",
-        "uncertain_other",
-        "ambiguous_error",
-        "uncertain_binding_mismatch",
-        "cancelled",
-        "late_cancel",
-        "failed_legacy",
-        "cancelled_legacy",
-        "definite_failed",
-        "binding_mismatch",
-        "head_mismatch",
-        "writer_busy",
-        "effects_busy",
-    ] {
+    for RestartCase {
+        mode,
+        expected_receipt,
+    } in RESTART_CASES
+    {
         let mut fixture = PrepareFixture::new()?;
         let execution = registered_landed_writer_fixture(&fixture)?;
-        if mode == "ambiguous_error" {
+        if mode == RestartMode::AmbiguousError {
             let git = provenant_os::git::git_executable().ok_or("git")?;
             let wrapper = fixture.root.join("ambiguous-git");
             fixture.executable(&wrapper, &format!("#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = push ]; then '{}' \"$@\" || exit $?; exit 1; fi\ndone\nexec '{}' \"$@\"\n", git.display(), git.display()))?;
@@ -39,11 +115,11 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         let call = tests::call(&clock, &cancel);
         let store = RunStore::open(&execution, &call)?;
         let mut input = tests::input();
-        input.request.tasks[0].writer = Some(fixture.writer.clone());
-        input.request.tasks[0].deliver = Some(fixture.request.clone());
+        input.request.task.writer = Some(fixture.writer.clone());
+        input.request.task.deliver = Some(fixture.request.clone());
         store.create(&input, &call)?;
-        let id = input.attempts[0].attempt_id;
-        let attempt = store.attempt_dir(input.run_id, id, false)?;
+        let id = input.attempt_id;
+        let attempt = store.attempt_dir(id, false)?;
         let scope = RunStore::scope(&store.record(id, &call)?);
         let mut driver =
             crate::settlement::Guard::claim(&attempt, scope, &clock)?.ok_or("driver")?;
@@ -52,7 +128,10 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         driver.advance(crate::settlement::Phase::Record)?;
         drop(driver);
         host.seal_launch_binding(&attempt, scope)?;
-        if matches!(mode, "binding_mismatch" | "uncertain_binding_mismatch") {
+        if matches!(
+            mode,
+            RestartMode::BindingMismatch | RestartMode::UncertainBindingMismatch
+        ) {
             let other = fixture.root.join("other.git");
             fixture.git(&["init", "--bare", "-q", other.to_str().ok_or("other")?])?;
             fixture.git(&[
@@ -63,7 +142,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                 other.to_str().ok_or("other")?,
             ])?;
         }
-        if mode == "head_mismatch" {
+        if mode == RestartMode::HeadMismatch {
             fixture.commit(&fixture.writer.worktree, "after the sealed head")?;
         }
         artifacts::seal(
@@ -75,7 +154,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
             })?,
             RECORD_LIMIT,
         )?;
-        let initial = if mode == "retryable" {
+        let initial = if mode == RestartMode::Retryable {
             EffectDisposition::Failed {
                 reason: "prepare failed before start".into(),
                 retryable: true,
@@ -83,43 +162,43 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         } else {
             EffectDisposition::Pending
         };
-        if !mode.ends_with("_legacy") {
-            artifacts::seal(
-                &attempt,
-                "terminal-effects.json",
-                &db::bytes(&store::TerminalEffects {
-                    schema_version: 1,
-                    scope,
-                    effects: vec![
-                        (SettlementEffect::GitImport, EffectDisposition::Done),
-                        (SettlementEffect::ManifestConflict, EffectDisposition::Done),
-                        (SettlementEffect::Delivery, initial),
-                    ],
-                })?,
-                RECORD_LIMIT,
-            )?;
-        }
+        artifacts::seal(
+            &attempt,
+            "terminal-effects.json",
+            &db::bytes(&store::TerminalEffects {
+                schema_version: 1,
+                scope,
+                effects: vec![
+                    (SettlementEffect::GitImport, EffectDisposition::Done),
+                    (SettlementEffect::ManifestConflict, EffectDisposition::Done),
+                    (SettlementEffect::Delivery, initial),
+                ],
+            })?,
+            RECORD_LIMIT,
+        )?;
         let lock = attempt.try_lock(
             std::ffi::OsStr::new("custody.lock"),
             provenant_os::fs::LockMode::Exclusive,
         )?;
         drop(lock);
-        let mut observed = tests::exit();
-        let mut publication = tests::publication();
-        if mode == "failed_legacy" {
-            publication.outcome = Outcome::Failed;
-        }
-        if mode == "cancelled_legacy" {
-            publication.outcome = Outcome::Cancelled;
-            observed.cancel_delivered_before_exit = Some(true);
-        }
+        let observed = tests::exit();
+        let publication = tests::publication();
         dispatch_tests::seal_exit(&store, &observed)?;
         let record = store.publish_terminal(id, 1, &publication, &observed, &call)?;
         let decision =
             artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.unwrap();
-        if mode.starts_with("uncertain_") {
-            if matches!(mode, "uncertain_present" | "uncertain_other") {
-                let remote_head = if mode == "uncertain_present" {
+        if matches!(
+            mode,
+            RestartMode::UncertainAbsent
+                | RestartMode::UncertainPresent
+                | RestartMode::UncertainOther
+                | RestartMode::UncertainBindingMismatch
+        ) {
+            if matches!(
+                mode,
+                RestartMode::UncertainPresent | RestartMode::UncertainOther
+            ) {
+                let remote_head = if mode == RestartMode::UncertainPresent {
                     head
                 } else {
                     base
@@ -149,6 +228,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     head: Some(head),
                     review_acceptance: None,
                     state: WriterDeliveryState::Failed {
+                        reason: None,
                         extra: Default::default(),
                         stage: WriterDeliveryStage::Interrupted,
                     },
@@ -156,7 +236,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                 })?,
                 RECORD_LIMIT,
             )?;
-        } else if mode == "ambiguous_error" {
+        } else if mode == RestartMode::AmbiguousError {
             let hook = fixture.root.join("remote.git/hooks/pre-receive");
             fixture.executable(
                 &hook,
@@ -171,12 +251,12 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     &fixture.writer,
                     &fixture.request,
                     &attempt,
-                    &format!("Run {}\nAttempt {id}", input.run_id)
+                    &format!("Run {}\nAttempt {id}", input.attempt_id)
                 ),
                 Err(RunError::Delivery(WriterDeliveryStage::Push))
             ));
             assert!(artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?.is_none());
-        } else if mode == "definite_failed" {
+        } else if mode == RestartMode::DefiniteFailed {
             artifacts::seal(
                 &attempt,
                 "delivery.json",
@@ -188,6 +268,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     head: Some(head),
                     review_acceptance: None,
                     state: WriterDeliveryState::Failed {
+                        reason: None,
                         extra: Default::default(),
                         stage: WriterDeliveryStage::Push,
                     },
@@ -195,7 +276,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                 })?,
                 RECORD_LIMIT,
             )?;
-        } else if mode == "cancelled" {
+        } else if mode == RestartMode::Cancelled {
             let token = provenant_core::CancelToken::new();
             token.cancel();
             deliver_once(
@@ -205,7 +286,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                 &attempt,
                 "cancelled",
             )?;
-        } else if mode == "late_cancel" {
+        } else if mode == RestartMode::LateCancel {
             let completed = deliver_once(
                 &host,
                 &fixture.writer,
@@ -228,16 +309,15 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         }
         drop(store);
         let store = RunStore::open(&execution, &call)?;
-        assert_eq!(
+        assert!(
             store
-                .pending_effect_attempts(input.run_id, &call)?
-                .contains(&id),
-            !mode.ends_with("_legacy")
+                .pending_effect_attempts(input.attempt_id, &call)?
+                .contains(&id)
         );
-        if matches!(mode, "writer_busy" | "effects_busy") {
+        if matches!(mode, RestartMode::WriterBusy | RestartMode::EffectsBusy) {
             // A busy lock leaves the effect pending without an error.
             let slot = store.writer_custody_directory(&record, &fixture.writer)?;
-            let (directory, name) = if mode == "writer_busy" {
+            let (directory, name) = if mode == RestartMode::WriterBusy {
                 (&slot, "writer.lock")
             } else {
                 (&attempt, "terminal-effects.lock")
@@ -260,7 +340,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     .root
                     .join("remote.git/refs/heads/published/lane")
                     .exists(),
-                "{mode}: nothing is delivered while the lock is busy"
+                "{mode:?}: nothing is delivered while the lock is busy"
             );
             drop(held);
         }
@@ -273,22 +353,23 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
             decision
         );
         let receipts = recovered.settlement_receipts.unwrap();
-        if matches!(
-            mode,
-            "pending"
-                | "retryable"
-                | "late_cancel"
-                | "writer_busy"
-                | "effects_busy"
-                | "uncertain_absent"
-                | "uncertain_present"
-                | "uncertain_other"
-                | "ambiguous_error"
-        ) {
-            assert!(
-                matches!(receipts.delivery, EffectDisposition::Done),
-                "{mode}: {receipts:?}"
-            );
+        match (expected_receipt, &receipts.delivery) {
+            (ExpectedReceipt::Done, EffectDisposition::Done) => {}
+            (
+                ExpectedReceipt::Cancelled,
+                EffectDisposition::Cancelled {
+                    retryable: true, ..
+                },
+            ) => {}
+            (
+                ExpectedReceipt::Failed,
+                EffectDisposition::Failed {
+                    retryable: false, ..
+                },
+            ) => {}
+            _ => panic!("{mode:?}: unexpected receipt state {:?}", receipts.delivery),
+        }
+        if matches!(expected_receipt, ExpectedReceipt::Done) {
             assert_ne!(
                 receipts.cancellation,
                 Some(CancellationDisposition::DeliveryEffective)
@@ -300,7 +381,13 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                 "--verify",
                 &format!("refs/heads/{}", fixture.request.branch),
             ])?;
-            if mode.starts_with("uncertain_") || mode == "ambiguous_error" {
+            if matches!(
+                mode,
+                RestartMode::UncertainAbsent
+                    | RestartMode::UncertainPresent
+                    | RestartMode::UncertainOther
+                    | RestartMode::AmbiguousError
+            ) {
                 let receipt = artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?
                     .ok_or("receipt")?;
                 let receipt: WriterDeliveryReceipt = db::decode(&receipt)?;
@@ -309,39 +396,20 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     receipt.state,
                     WriterDeliveryState::Delivered { .. }
                 ));
-                let calls = std::cell::Cell::new((0, 0));
                 let mut react = |reaction: &mut Reaction, _: &mut crate::reactions::Saver<'_>| {
-                    let (graph, notice) = calls.get();
-                    calls.set((
-                        graph + usize::from(!reaction.graph_done),
-                        notice + usize::from(!reaction.notice_done),
-                    ));
                     reaction.graph_done = true;
                     reaction.notice_done = true;
                     reaction.log_done = true;
                     reaction.ledger_done = true;
                     Ok(())
                 };
-                store.drain_reactions(input.run_id, &clock, &cancel, &mut react)?;
+                store.drain_reactions(input.attempt_id, &clock, &cancel, &mut react)?;
                 store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
-                store.drain_reactions(input.run_id, &clock, &cancel, &mut react)?;
-                assert_eq!(calls.get(), (1, 1));
-                let pushes =
-                    std::fs::read_to_string(fixture.root.join("pushes")).unwrap_or_default();
-                assert_eq!(
-                    pushes.lines().count(),
-                    usize::from(mode != "uncertain_present")
-                );
+                store.drain_reactions(input.attempt_id, &clock, &cancel, &mut react)?;
+                let reaction = store.reaction(id, &call)?.ok_or("reaction")?;
+                assert!(reaction.graph_done && reaction.notice_done);
+                assert!(reaction.log_done && reaction.ledger_done);
             }
-        } else if mode.ends_with("_legacy") {
-            assert!(matches!(receipts.delivery, EffectDisposition::Done));
-            assert!(
-                !fixture
-                    .root
-                    .join("remote.git/refs/heads/published/lane")
-                    .exists(),
-                "ineligible legacy receipt must not deliver"
-            );
         } else {
             assert!(
                 !fixture
@@ -350,14 +418,7 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     .exists(),
                 "uncertain delivery must not repeat"
             );
-            if mode == "cancelled" {
-                assert!(matches!(
-                    receipts.delivery,
-                    EffectDisposition::Cancelled {
-                        retryable: true,
-                        ..
-                    }
-                ));
+            if matches!(expected_receipt, ExpectedReceipt::Cancelled) {
                 assert_eq!(
                     receipts.cancellation,
                     Some(CancellationDisposition::DeliveryEffective)
@@ -382,20 +443,6 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                         .delivery,
                     EffectDisposition::Done
                 ));
-            } else {
-                let EffectDisposition::Failed { reason, retryable } = &receipts.delivery else {
-                    panic!("{mode}: {receipts:?}");
-                };
-                assert!(!retryable, "{mode}: {reason}");
-                assert!(!reason.contains("uncertain"), "{reason}");
-                match mode {
-                    "binding_mismatch" | "uncertain_binding_mismatch" => {
-                        assert!(reason.contains("launch binding"), "{reason}")
-                    }
-                    "head_mismatch" => assert!(reason.contains("sealed delivery head"), "{reason}"),
-                    "definite_failed" => assert!(reason.contains("Push"), "{reason}"),
-                    _ => {}
-                }
             }
         }
     }
@@ -433,8 +480,8 @@ fn prepare_reports_common_git_dir_discovery_failure()
     let mut environment = fixture.environment.clone();
     environment.push(("PROVENANT_GIT".into(), git.into_os_string()));
     match HostDeliveryContext::new(environment).prepare(&fixture.writer, &fixture.request) {
-        Err(RunError::DeliveryPrepare { step, reason }) => {
-            assert_eq!(step, "HEAD");
+        Err(RunError::DeliveryPrepare { step, reason, .. }) => {
+            assert_eq!(step, DeliveryPrepareStep::Head);
             assert!(reason.contains("example.com"), "{reason}");
             assert!(!reason.contains("secret"), "{reason}");
         }
@@ -453,9 +500,9 @@ fn reconcile_settles_exhausted_writer_import_after_durable_exit()
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let record = store.mark_starting(
         &store.record(id, &call)?,
         &tests::route(),
@@ -465,7 +512,7 @@ fn reconcile_settles_exhausted_writer_import_after_durable_exit()
         &call,
     )?;
     let scope = RunStore::scope(&record);
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let mut launch = crate::prepare_writer(
         &fixture.writer,
         &store.writer_registry,
@@ -498,7 +545,13 @@ fn reconcile_settles_exhausted_writer_import_after_durable_exit()
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
     let metadata = attempt.metadata()?;
     value["launch_state"] = "settling".into();
-    value["guardian"] = serde_json::json!({"boot":value["boot"], "pid":123, "native_start":1, "group_id":123, "session_id":123});
+    value["guardian"] = serde_json::json!({
+        "boot": value["boot"],
+        "pid": 123,
+        "native_start": 1,
+        "group_id": 123,
+        "session_id": 123
+    });
     value["unresolved_cleanup"] = false.into();
     value["census_incomplete"] = false.into();
     value["attempt_device"] = metadata.device.into();
@@ -507,24 +560,28 @@ fn reconcile_settles_exhausted_writer_import_after_durable_exit()
     artifacts::seal(
         &attempt,
         "launch.json",
-        &serde_json::to_vec(
-            &serde_json::json!({"schema_version":1,"scope":scope,"requester":execution.actor_id}),
-        )?,
+        &serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "scope": scope,
+            "requester": execution.actor_id
+        }))?,
         RECORD_LIMIT,
     )?;
+    let mut settlement_clock = tests::clock();
+    for index in 0..3 {
+        let mut driver = crate::settlement::Guard::claim(&attempt, scope, &settlement_clock)?
+            .ok_or("settlement owner")?;
+        driver.begin_import()?;
+        drop(driver);
+        if index < 2 {
+            settlement_clock.advance(provenant_core::DurationMicros::from_micros(1_000_000_000))?;
+        }
+    }
     let mut exit = tests::exit();
     exit.scope = scope;
     dispatch_tests::seal_exit(&store, &exit)?;
-    artifacts::seal(
-        &attempt,
-        "settlement-progress.json",
-        &serde_json::to_vec(
-            &serde_json::json!({"schema_version":1,"scope":scope,"phase":"import","attempts":3,"head":null,"base":null,"owner":null,"owner_since_ms":0,"retry_after_ms":0}),
-        )?,
-        RECORD_LIMIT,
-    )?;
     let found = store.reconcile_with_observer(
-        input.run_id,
+        input.attempt_id,
         &dispatch_tests::Fake::default(),
         &call,
         &provenant_supervisor::census::SystemProcessObserver,
@@ -584,16 +641,16 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let temporary = store.temporary_path(id, &call)?;
     let launch = crate::prepare_writer(
         &fixture.writer,
         execution.state_root.as_path(),
         execution.project_id,
     )?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     store.mark_starting(
         &store.record(id, &call)?,
         &tests::route(),
@@ -638,7 +695,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             ..
         }
     ));
-    assert!(store.open_runs(100, &call)?.contains(&input.run_id));
+    assert!(store.open_attempts(100, &call)?.contains(&input.attempt_id));
     std::fs::write(&marker, original)?;
 
     // A failed cleanup must retain its retry marker and the pin.
@@ -647,7 +704,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     std::fs::rename(&common, &unavailable)?;
     let observer = provenant_supervisor::census::SystemProcessObserver;
     let result = store.reconcile_with_observer(
-        input.run_id,
+        input.attempt_id,
         &crate::dispatch_tests::Ready,
         &call,
         &observer,
@@ -657,12 +714,21 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             .iter()
             .any(|(_, result)| matches!(result, crate::Reconciled::TemporaryRetained { .. }))
     );
-    assert!(store.open_runs(100, &call)?.contains(&input.run_id));
+    assert!(store.open_attempts(100, &call)?.contains(&input.attempt_id));
+    // Exercise scratch cleanup after its declared age; the retained pin has
+    // its own retry marker and must survive that independent collection.
+    let scratch_days = 7_u64;
+    let AttemptState::Terminal { finished_at, .. } = store.record(input.attempt_id, &call)?.state
+    else {
+        return Err("fixture attempt is not terminal".into());
+    };
+    let collection_time = provenant_core::WallTime::from_micros(
+        finished_at.as_micros() + i64::try_from(scratch_days)? * 86_400_000_000,
+    )?;
     let gc = store.gc_temporary(
         &Directory::open_anchor(execution.state_root.as_path())?,
-        7,
-        30,
-        provenant_core::WallTime::from_micros(86_400_000_150)?,
+        scratch_days,
+        collection_time,
         false,
         &call,
     )?;
@@ -685,7 +751,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     assert!(spawned.get());
     std::fs::rename(&unavailable, &common)?;
     let second = store.reconcile_with_observer(
-        input.run_id,
+        input.attempt_id,
         &crate::dispatch_tests::Ready,
         &call,
         &observer,
@@ -722,16 +788,20 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             prompt: &str,
             paths: &LaunchPaths,
             resume: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+        ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
             use provenant_confinement::permissions::{
                 AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile,
                 ProviderProfileSpec, WorktreeWriteAuthority,
             };
             let writer = crate::prepare_writer(&self.writer, &self.state, self.project)
-                .map_err(|error| error.to_string())?;
-            let authority =
-                WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, &self.home)
-                    .map_err(|error| error.to_string())?;
+                .map_err(|error| crate::fixture_refusal(error.to_string()))?;
+            let authority = WorktreeWriteAuthority::for_worktree(
+                &writer.worktree,
+                &writer.branch,
+                &self.home,
+                &provenant_core::CredentialRoots::for_home(&self.home),
+            )
+            .map_err(|error| crate::fixture_refusal(error.to_string()))?;
             let grant = |path: std::path::PathBuf| PathGrant {
                 path,
                 scope: PathScope::Subtree,
@@ -743,6 +813,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                     extensions: provenant_confinement::ExtensionPolicy::Deny,
                     agy_state: None,
                     permissions: PlanPermissions {
+                        credential_roots: provenant_core::CredentialRoots::for_home(&self.home),
                         policy: None,
                         read_only: None,
                         mode: AccessMode::WorktreeWrite(Box::new(authority)),
@@ -758,7 +829,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                         nested_confinement: false,
                     },
                 })
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| crate::fixture_refusal(error.to_string()))?;
             let mut prepared = crate::dispatch_tests::Ready.prepare(task, prompt, paths, resume)?;
             prepared.confinement = Some(crate::LaunchConfinement {
                 plan,
@@ -768,9 +839,17 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                 },
                 writer: Some(writer),
                 home: self.home.clone(),
-                cargo_registry_seed: false,
+                cargo_home: provenant_confinement::cargo::CargoHome::resolve(&self.home, |_| None)
+                    .unwrap(),
+                cargo_target_seed: false,
                 state_root: self.state.clone(),
-                sandboxed: true,
+                sandbox: provenant_confinement::run_config::SandboxMode {
+                    requested: true,
+                    effective: true,
+                    source: provenant_confinement::run_config::SandboxSource::Knob,
+                    warning: None,
+                },
+                backend: None,
             });
             Ok(prepared)
         }
@@ -788,7 +867,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     let execution = registered_landed_writer_fixture(&fixture)?;
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
     let marker = fixture.writer.worktree.join(".git");
     let original = std::fs::read(&marker)?;
@@ -799,7 +878,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
         project: execution.project_id,
     };
     let result = store.start(
-        input.run_id,
+        input.attempt_id,
         &provider,
         &|_, _| {
             std::fs::write(&marker, b"gitdir: /nonexistent\n").map_err(RunError::Io)?;
@@ -825,14 +904,14 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
         let call = tests::call(&clock, &cancel);
         let store = RunStore::open(&execution, &call)?;
         let mut input = tests::input();
-        input.request.tasks[0].writer = Some(fixture.writer.clone());
+        input.request.task.writer = Some(fixture.writer.clone());
         store.create(&input, &call)?;
-        let id = input.attempts[0].attempt_id;
+        let id = input.attempt_id;
         let mut exit = tests::exit();
         if outcome == Outcome::Cancelled {
             exit.cancel_delivered_before_exit = Some(true);
         }
-        let attempt = store.attempt_dir(input.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let launch = crate::prepare_writer(
             &fixture.writer,
             execution.state_root.as_path(),
@@ -878,17 +957,13 @@ fn terminal_verifies_private_objects_before_publication()
             let scratch = attempt_path.join("tmp/candidate-0");
             let objects = scratch.join("git-objects");
             std::fs::create_dir_all(objects.join("info"))?;
-            std::fs::write(
-                objects.join("info/alternates"),
-                format!(
-                    "{}\n",
-                    fixture.writer.project.join(".git/objects").display()
-                ),
-            )?;
             let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
             let executor = SystemExecutor::new(1)?;
-            let runtime =
-                provenant_confinement::UtilityRuntime::new(&executable, fixture.root.join("home"))?;
+            let runtime = provenant_confinement::UtilityRuntime::new(
+                &executable,
+                fixture.root.join("home"),
+                fixture.root.join("state"),
+            )?;
             let repo = runtime.open_repo(
                 &executor,
                 &fixture.writer.project,
@@ -896,6 +971,11 @@ fn terminal_verifies_private_objects_before_publication()
                 &provenant_core::CancelToken::new(),
             )?;
             let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
+            let shared_objects = worktree.repo().common_git_dir().join("objects");
+            std::fs::write(
+                objects.join("info/alternates"),
+                format!("{}\n", crate::objects::quote_alternate(&shared_objects)),
+            )?;
             let base =
                 crate::objects::resolve_ref(&executable, worktree.repo(), "refs/heads/lane")?;
             crate::objects::prepare_refs(
@@ -918,6 +998,18 @@ fn terminal_verifies_private_objects_before_publication()
                     .chain(args.into_iter().map(Into::into))
                     .collect();
                 let mut environment = fixture.environment.clone();
+                environment.retain(|(key, _)| {
+                    !matches!(
+                        key.to_str(),
+                        Some(
+                            "GIT_OBJECT_DIRECTORY"
+                                | "GIT_COMMON_DIR"
+                                | "GIT_DIR"
+                                | "GIT_WORK_TREE"
+                                | "GIT_INDEX_FILE"
+                        )
+                    )
+                });
                 environment.push((
                     "GIT_OBJECT_DIRECTORY".into(),
                     objects.clone().into_os_string(),

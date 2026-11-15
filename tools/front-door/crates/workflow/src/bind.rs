@@ -160,13 +160,17 @@ mod tests {
     fn attempt() -> AttemptFact {
         let path = PathWire::from_relative(&RelativePath::parse("out.md").unwrap()).unwrap();
         AttemptFact {
+            routing_context: Some(Default::default()),
             context: None,
             attempt_id: AttemptId::from_bytes([1; 16]),
-            task_id: TaskId::from_bytes([2; 16]),
+            key: provenant_records::WorkKey::new(ProjectId::from_bytes([4; 16]), "g", "n", 1)
+                .unwrap(),
             attempt_number: 1,
-            operation_id: OperationId::parse("op").unwrap(),
             project_id: ProjectId::from_bytes([4; 16]),
             terminal_state: AttemptOutcome::Succeeded,
+            cause_source: provenant_records::run::CauseSource::Unavailable,
+            settlement_reason: None,
+            account_identity: provenant_records::AccountIdentity::unknown(),
             exit_code: Some(0),
             queued_at: UtcMicros::from_micros(1).unwrap(),
             started_at: None,
@@ -194,6 +198,7 @@ mod tests {
                 model: Some("m".into()),
                 effort: None,
                 account_label: None,
+                account_key: None,
             }),
             verified_owner: None,
             lineage: vec![],
@@ -287,19 +292,13 @@ mod tests {
     fn observed_provenance_requires_the_actual_observed_route() {
         let mut a = attempt();
         a.observed_route = None;
-        assert_eq!(
-            bind(&a, &subject()).unwrap_err().to_string(),
-            "review attempt has no observed route"
-        );
+        assert_eq!(bind(&a, &subject()), Err(BindError::NoObservedRoute));
     }
 
     #[test]
     fn review_attempt_with_multiple_outputs_is_rejected() {
         let mut a = attempt();
         a.output_refs.push(a.output_refs[0].clone());
-        assert_eq!(
-            bind(&a, &subject()).unwrap_err().to_string(),
-            "review attempt retained more than one output"
-        );
+        assert_eq!(bind(&a, &subject()), Err(BindError::MultipleOutputs));
     }
 }

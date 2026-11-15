@@ -8,15 +8,11 @@
 //! generation, so its attempt keys never collide with the retired ones.
 
 use super::*;
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-
-/// Expansion field holding the retired expansion and its progress rows.
-pub(super) const RETIRED: &str = "retired";
 
 impl Expansion {
     pub(super) fn retired(&self) -> bool {
-        self.extra.contains_key(RETIRED)
+        self.retired.is_some()
     }
 }
 
@@ -55,15 +51,19 @@ pub(super) fn dynamic_subtree(
                 .iter()
                 .filter_map(|node| rows.remove(&node.id))
                 .collect();
-            let record = serde_json::json!({
-                "reason": reason,
-                "expansion": serde_json::to_value(&*expansion).map_err(|e| e.to_string())?,
-                "progress": serde_json::to_value(progress).map_err(|e| e.to_string())?,
-            });
+            let record = RetiredExpansion {
+                reason: reason.to_owned(),
+                expansion: expansion.clone(),
+                progress,
+            };
             *expansion = Expansion {
-                extra: [(RETIRED.to_owned(), record)].into_iter().collect(),
+                extra: Default::default(),
+                retired: Some(Box::new(record)),
+                retry_generation: None,
+                final_result: false,
+                final_fragment: false,
+                floor_warnings: Vec::new(),
                 source: String::new(),
-                continuation: false,
                 nodes: Vec::new(),
                 uses: Vec::new(),
                 patch: None,
@@ -84,13 +84,8 @@ pub(super) fn dynamic_subtree(
     // A settled consumer keeps the container generation it observed; retired
     // members are no longer graph nodes it can name.
     for row in &mut checkpoint.nodes {
-        if let Some(snapshots) = row
-            .extra
-            .get_mut("settled_dependency_snapshots")
-            .and_then(Value::as_object_mut)
-        {
-            snapshots.retain(|node, _| !retired.contains(node));
-        }
+        row.settled_dependency_snapshots
+            .retain(|node, _| !retired.contains(node));
     }
     Ok(retired)
 }
@@ -100,33 +95,23 @@ pub(super) fn dynamic_subtree(
 pub(super) fn rebind(expansions: &[Expansion], row: &mut NodeProgress) {
     let mut generation = None::<u64>;
     let mut history = Vec::new();
-    for expansion in expansions.iter().filter(|expansion| expansion.retired()) {
-        let rows = expansion
-            .extra
-            .get(RETIRED)
-            .and_then(|record| record.get("progress"))
-            .and_then(Value::as_array);
-        for old in rows.into_iter().flatten() {
-            if old.get("id").and_then(Value::as_str) != Some(row.id.as_str()) {
+    for retired in expansions
+        .iter()
+        .filter_map(|expansion| expansion.retired.as_deref())
+    {
+        for old in &retired.progress {
+            if old.id != row.id {
                 continue;
             }
-            let Ok(old) = serde_json::from_value::<NodeProgress>(old.clone()) else {
-                continue;
-            };
-            let prior = old
-                .extra
-                .get("retry_generation")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
+            let prior = old.retry_generation.unwrap_or_default();
             generation = Some(generation.map_or(prior, |current| current.max(prior)));
-            history = old.previous_attempts;
-            history.extend(old.attempts);
+            history = old.previous_attempts.clone();
+            history.extend(old.attempts.clone());
         }
     }
     if let Some(generation) = generation {
-        row.extra
-            .insert("retry_generation".into(), (generation + 1).into());
-        row.extra.insert("container_retry".into(), true.into());
+        row.retry_generation = Some(generation + 1);
+        row.container_retry = true;
         row.previous_attempts = history;
     }
 }

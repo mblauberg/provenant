@@ -1,12 +1,19 @@
 //! Repository-scoped linked-worktree lifecycle and merged-ref pruning.
 
+mod archive;
+pub use archive::{ArchiveError, ArchiveInfo, ArchiveReport, collect_archives};
 mod census;
 mod context;
 mod custody;
 mod doctor;
 #[cfg(test)]
 mod doctor_tests;
+mod evidence;
 mod gc;
+pub use evidence::{
+    EvidenceRef, LandingAssessment, matches_pattern, removal_evidence, retained_refs,
+    validate_removal_evidence,
+};
 mod inventory;
 mod landed;
 mod lifecycle;
@@ -20,8 +27,12 @@ pub use context::{
     with_context_using_workers_and_facts,
 };
 pub use custody::*;
-pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, doctor};
-pub use gc::{OutputEntry, WorktreeGcPolicy, WorktreeGcReport, collect, collect_lazy};
+pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, WorktreeRepairKind, doctor};
+pub use gc::{
+    CandidateReport, CollectionMode, ForgeObservation, OutputEntry, RetirementFeeds,
+    WorktreeGcPolicy, WorktreeGcReport, acknowledge_foreign_preview, branch_candidate, collect,
+    collect_selected, first_foreign_pass, resume_pending_retirements,
+};
 pub use inventory::*;
 pub use landed::{
     CommitGraph, IntegrationEdge, LandedBy, Landing, LandingTarget, RepoGraph, Unproven,
@@ -30,12 +41,14 @@ pub use landed::{
 pub use lifecycle::*;
 pub use owner::{
     WorktreeOrigin, WorktreeOwner, branch_ownership, load_owner, owned_worktree_paths, prune_owned,
-    save_lane_owner_when_free, save_owner, update_owner_when_unchanged,
+    refresh_owner_reference_while_held, save_lane_owner_when_free, save_owner,
+    update_owner_when_unchanged,
 };
-pub use refs::{RefEndpoint, RefLedger, RefObservation, RefOrigin, RefOwnership, RefRecord};
+pub use refs::{RefLedger, RefObservation, RefRecord};
 pub use removal::{
-    Artefact, ArtefactOutcome, ArtefactState, RefDeletion, branch_checked_out, created_branch,
-    delete_ref_leased, has_commit, landing_in_repo, ref_tip,
+    Artefact, ArtefactClass, ArtefactOutcome, ArtefactState, RefDeletion, branch_checked_out,
+    created_branch, delete_ref_leased, delete_ref_leased_when, has_commit, landing_in_repo,
+    ref_tip,
 };
 
 use crate::repo::{
@@ -54,6 +67,7 @@ use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode, can
 #[cfg(test)]
 use provenant_os::pid::ProcessUids;
 use provenant_os::pid::{CensusIgnoreEntry, CwdObservation, CwdObserver, SystemCwdObserver};
+use provenant_records::custody::{RefEndpoint, RefOrigin, RefOwnership};
 use provenant_records::{PathWireError, StructuredPathWire};
 use provenant_supervisor::census::{
     Ancestry, ProcessFact, ProcessLookup, ProcessObservation, ProcessObserver,
@@ -65,6 +79,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
+use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -74,8 +89,8 @@ const MAX_WORKTREES: usize = 10_000;
 const MAX_BRANCHES: usize = 10_000;
 const MAX_STATE_RECORD: u64 = 64 * 1024;
 /// The single common-directory protocol for repository mutations and the Git
-/// snapshots they depend on. Blocking acquisition follows writer custody, when
-/// held; a repository holder may only try a writer lock without waiting. Release
+/// snapshots they depend on. Acquisition tries once;
+/// a repository holder may only try a writer lock without waiting. Release
 /// this owner before network discovery, slow census, or provider execution.
 pub const REPOSITORY_LOCK: &str = "provenant-repository.lock";
 
@@ -88,40 +103,80 @@ pub fn lock_repository(
     cancel: &CancelToken,
     clock: &dyn Clock,
 ) -> Result<LockGuard, FsError> {
-    common.lock(OsStr::new(REPOSITORY_LOCK), mode, budget, cancel, clock)
+    let _ = (budget, clock);
+    if cancel.is_cancelled() {
+        return Err(FsError::Cancelled {
+            path: common.anchored_path().join(REPOSITORY_LOCK),
+        });
+    }
+    // Protect creation/removal, registration, and coherent Git config snapshots.
+    // Never retain this hold across provider work or network discovery.
+    common.try_lock(OsStr::new(REPOSITORY_LOCK), mode)
 }
 const WRITER_LOCK: &str = "writer.lock";
-const WORKTREE_ROOT: &str = ".worktrees";
 
-/// Allocation root for a host-registered Git common directory, including a
-/// bare repository. Protect it before any individual checkout is created.
-pub(crate) fn allocation_directory(common: &Path) -> Result<PathBuf, WorktreeError> {
+/// The configured path for a writer created from a validated branch name.
+pub fn managed_writer_relative_path(
+    project: &Path,
+    host_state: &Path,
+    branch: &str,
+) -> Result<PathBuf, WorktreeError> {
+    GitRefName::branch(branch).map_err(|_| WorktreeError::InvalidRequest)?;
+    let ports = provenant_config::PortTable::read_for(Some(project), host_state)
+        .map_err(WorktreeError::PortConfiguration)?;
+    ports
+        .managed_writer_path(branch)
+        .map_err(WorktreeError::PortConfiguration)
+}
+
+/// Resolve a relative path against the configured layout roots.
+pub fn managed_writer_branch(
+    project: &Path,
+    host_state: &Path,
+    relative: &Path,
+) -> Result<Option<String>, WorktreeError> {
+    let ports = provenant_config::PortTable::read_for(Some(project), host_state)
+        .map_err(WorktreeError::PortConfiguration)?;
+    Ok(ports.managed_writer_branch(relative).map(str::to_owned))
+}
+
+/// Configured allocation roots for a host-registered Git common directory.
+/// Project roots use their sourced layout; bare/common-only repositories still
+/// receive host overrides while retaining the same common-dir anchoring.
+pub(crate) fn allocation_directories(
+    common: &Path,
+    host_state: &Path,
+) -> Result<Vec<PathBuf>, WorktreeError> {
     let parent = common.parent().ok_or(WorktreeError::InvalidRequest)?;
-    if common.file_name() == Some(OsStr::new(".git")) {
-        return Ok(parent.join(WORKTREE_ROOT));
-    }
-    // The lifecycle also supports a primary whose gitfile names a separate
-    // common directory inside that checkout. A bare location has no such
-    // backlink and retains its own allocation root.
-    let directory = Directory::open_anchor(parent)?;
-    match directory.metadata_at(OsStr::new(".git"), false) {
-        Ok(metadata) if metadata.kind == provenant_os::fs::FileKind::Regular => {
-            let bytes = inventory::read_bounded(&directory, OsStr::new(".git"), 4096)?;
-            let target = crate::repo::parse_git_path(&bytes, b"gitdir: ")
-                .ok_or(WorktreeError::InvalidRequest)?;
-            let target = crate::repo::resolve_git_path(parent, &target)?;
-            if crate::permissions::resolve_boundary_path(&target)
-                .map_err(|_| WorktreeError::InvalidRequest)?
-                == common
-            {
-                return Ok(parent.join(WORKTREE_ROOT));
+    let (base, project) = if common.file_name() == Some(OsStr::new(".git")) {
+        (parent, Some(parent))
+    } else {
+        // A primary may have a gitfile that names a separate common directory
+        // inside the checkout. Keep its allocation base and project source.
+        let directory = Directory::open_anchor(parent)?;
+        match directory.metadata_at(OsStr::new(".git"), false) {
+            Ok(metadata) if metadata.kind == provenant_os::fs::FileKind::Regular => {
+                let bytes = inventory::read_bounded(&directory, OsStr::new(".git"), 4096)?;
+                let target = crate::repo::parse_git_path(&bytes, b"gitdir: ")
+                    .ok_or(WorktreeError::InvalidRequest)?;
+                let target = crate::repo::resolve_git_path(parent, &target)?;
+                if crate::permissions::resolve_boundary_path(&target)
+                    .map_err(|_| WorktreeError::InvalidRequest)?
+                    == common
+                {
+                    (parent, Some(parent))
+                } else {
+                    (common, None)
+                }
             }
+            Ok(_) => (common, None),
+            Err(error) if error.is_not_found() => (common, None),
+            Err(error) => return Err(error.into()),
         }
-        Ok(_) => {}
-        Err(error) if error.is_not_found() => {}
-        Err(error) => return Err(error.into()),
-    }
-    Ok(common.join(WORKTREE_ROOT))
+    };
+    let ports = provenant_config::PortTable::read_for(project, host_state)
+        .map_err(WorktreeError::PortConfiguration)?;
+    Ok(ports.worktree_roots_under(base))
 }
 
 impl From<provenant_config::ConfigError> for WorktreeError {
@@ -130,10 +185,43 @@ impl From<provenant_config::ConfigError> for WorktreeError {
     }
 }
 
+/// Declared alternatives for admitting a checkout whose HEAD is detached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetachedWorktreeRemedy {
+    CreateBranch,
+    ReadOnly,
+}
+impl DetachedWorktreeRemedy {
+    pub const ALL: &'static [Self] = &[Self::CreateBranch, Self::ReadOnly];
+
+    fn instruction(self) -> &'static str {
+        match self {
+            Self::CreateBranch => "git switch -c BRANCH",
+            Self::ReadOnly => "remove --worktree and pass --mode read-only",
+        }
+    }
+}
+struct DetachedWorktreeRemedies;
+impl std::fmt::Display for DetachedWorktreeRemedies {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, remedy) in DetachedWorktreeRemedy::ALL.iter().enumerate() {
+            if index != 0 {
+                formatter.write_str(" or ")?;
+            }
+            formatter.write_str(remedy.instruction())?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum WorktreeError {
+    #[error(transparent)]
+    Archive(#[from] ArchiveError),
     #[error("worktree census configuration refused: {0}")]
     Configuration(#[from] Box<provenant_config::ConfigError>),
+    #[error("worktree port configuration refused: {0}")]
+    PortConfiguration(#[source] io::Error),
     #[error("worktree request is invalid")]
     InvalidRequest,
     #[error("worktree name {name} matches more than one checkout")]
@@ -142,9 +230,7 @@ pub enum WorktreeError {
     DetachedPrimary,
     #[error("detached HEAD at {head} is not merged into the integration branch")]
     DetachedUnmerged { head: GitOid },
-    #[error(
-        "detached HEAD at {head}; git switch -c BRANCH or remove --worktree and pass --mode read-only"
-    )]
+    #[error("detached HEAD at {head}; {}", DetachedWorktreeRemedies)]
     DetachedWorktree { head: GitOid },
     #[error("worktree writer is busy{}", .holder.as_ref().map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
     WriterBusy { holder: Option<AttemptId> },
@@ -227,10 +313,12 @@ pub enum WorktreeError {
     PrimaryMoved,
     #[error("worktree result path cannot be represented safely")]
     PathEncoding,
+    #[error("durable retirement authority could not be read or advanced")]
+    Retirement(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("worktree creation failed: {cause}; {}", if *.rolled_back {
         "the partial checkout and new branch were removed, so it is safe to retry"
     } else {
-        "the partial checkout or branch it made could not be fully removed; inspect .worktrees and the branch before retrying"
+        "the partial checkout or branch it made could not be fully removed; inspect the configured worktree layout and branch before retrying"
     })]
     CreateFailed {
         cause: Box<WorktreeError>,
@@ -250,6 +338,10 @@ pub enum WorktreeError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
 pub enum GitMutationOperation {
+    #[error("git bundle create")]
+    BundleCreate,
+    #[error("git update-ref (preservation)")]
+    PreserveRef,
     #[error("git merge --ff-only")]
     FastForward,
     #[error("git worktree add")]
@@ -324,6 +416,14 @@ impl WorktreeError {
                 | Self::UnknownOccupancy { .. }
                 | Self::GitEntryHeld { .. }
         )
+    }
+
+    /// Typed alternatives for the detached-checkout admission refusal.
+    pub fn detached_remedies(&self) -> &'static [DetachedWorktreeRemedy] {
+        match self {
+            Self::DetachedWorktree { .. } => DetachedWorktreeRemedy::ALL,
+            _ => &[],
+        }
     }
 
     /// The operator's next step for a refusal that has one.
@@ -486,6 +586,59 @@ pub struct WorktreeContext<'a> {
     /// legitimately take minutes on a large repository, so it is far longer.
     pub mutation_budget: UtilityBudget,
     pub lock_budget: WaitBudget,
+}
+
+/// A removal intent after the caller has verified its authority against the
+/// exact live reference generation and tip.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetirementIntent {
+    pub project: provenant_core::ProjectId,
+    pub related_subjects: Vec<provenant_records::custody::Subject>,
+    pub reference: provenant_records::custody::RefOwnership,
+    pub expected_tip: GitOid,
+    pub decision: provenant_records::custody::RetirementDecision,
+}
+
+/// Port to the single durable retirement owner. Confinement verifies live Git
+/// state and performs deletion; the host application stores lifecycle intent.
+pub trait RetirementPort {
+    fn begin_retirement(
+        &self,
+        intent: RetirementIntent,
+    ) -> Result<Option<provenant_records::custody::RetirementRecord>, WorktreeError>;
+
+    fn retirement_for_subject(
+        &self,
+        project: provenant_core::ProjectId,
+        subject: &provenant_records::custody::Subject,
+    ) -> Result<Option<provenant_records::custody::RetirementRecord>, WorktreeError>;
+
+    /// Pending and resumable lifecycle records for a project. Recovery is
+    /// shared by confinement; the application only supplies the durable reader.
+    fn pending_retirements(
+        &self,
+        project: provenant_core::ProjectId,
+    ) -> Result<Vec<provenant_records::custody::RetirementRecord>, WorktreeError>;
+
+    fn advance_retirement(
+        &self,
+        record: &provenant_records::custody::RetirementRecord,
+        step: provenant_records::custody::RetirementStep,
+        state: provenant_records::custody::RetirementStepState,
+    ) -> Result<provenant_records::custody::RetirementRecord, WorktreeError>;
+}
+
+impl WorktreeContext<'_> {
+    /// Host config root shared by project and host port declarations.
+    pub fn host_state(&self) -> Result<PathBuf, WorktreeError> {
+        self.project_state
+            .current_path()
+            .map_err(|_| WorktreeError::InvalidRequest)?
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .ok_or(WorktreeError::InvalidRequest)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -690,6 +843,7 @@ pub struct RemoveOutcome {
     /// Unmerged branches deleted with `discard`. `head` is the commit the
     /// branch pointed at, which recovers it while Git still holds the object.
     pub discarded: Vec<DiscardedRef>,
+    pub archives: Vec<ArchiveInfo>,
     pub retained: Vec<RetainedBranch>,
 }
 
@@ -737,7 +891,7 @@ impl std::fmt::Display for TaintCause {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UncertaintyReason {
     CensusUnavailable,
     UnstableProcessIdentity,
@@ -747,6 +901,19 @@ pub enum UncertaintyReason {
     ListingIncomplete,
     PolicyRejected,
     RootUnreadable,
+}
+
+impl UncertaintyReason {
+    pub const ALL: &'static [Self] = &[
+        Self::CensusUnavailable,
+        Self::UnstableProcessIdentity,
+        Self::CwdUnreadable,
+        Self::OccupancyIncomplete,
+        Self::PathUnplaceable,
+        Self::ListingIncomplete,
+        Self::PolicyRejected,
+        Self::RootUnreadable,
+    ];
 }
 
 impl std::fmt::Display for UncertaintyReason {
@@ -778,6 +945,31 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detached_worktree_refusal_carries_the_head_and_declared_remedies() {
+        let head = "1".repeat(40).parse::<GitOid>().unwrap();
+        let error = WorktreeError::DetachedWorktree { head };
+        assert!(
+            matches!(&error, WorktreeError::DetachedWorktree { head: actual } if *actual == head)
+        );
+        let mut branch = false;
+        let mut read_only = false;
+        for remedy in error.detached_remedies() {
+            match remedy {
+                DetachedWorktreeRemedy::CreateBranch => {
+                    assert!(!branch, "duplicate branch remedy");
+                    branch = true;
+                }
+                DetachedWorktreeRemedy::ReadOnly => {
+                    assert!(!read_only, "duplicate read-only remedy");
+                    read_only = true;
+                }
+            }
+        }
+        assert!(branch && read_only);
+        assert!(WorktreeError::InvalidRequest.detached_remedies().is_empty());
+    }
 
     #[test]
     fn admission_causes_keep_transient_observation_distinct_from_custody() {
@@ -880,5 +1072,67 @@ mod tests {
         let duplicate_head = b"worktree /tmp/tree\0HEAD 0000000000000000000000000000000000000000\0HEAD 0000000000000000000000000000000000000000\0branch refs/heads/topic\0\0";
         assert!(parse_worktree_list(missing_head).is_err());
         assert!(parse_worktree_list(duplicate_head).is_err());
+    }
+}
+
+#[cfg(test)]
+mod worktree_layout_tests {
+    use super::*;
+
+    #[test]
+    fn managed_writer_paths_use_the_project_layout_declaration() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".provenant")).unwrap();
+        let mut ports = provenant_config::PortTable::builtin();
+        let root = ports.worktree_layout.roots[0].clone();
+        let branch_token = ports
+            .worktree_layout
+            .default
+            .file_name()
+            .unwrap()
+            .to_owned();
+        ports.worktree_layout.default = root.join(branch_token);
+        std::fs::write(
+            project.path().join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            managed_writer_relative_path(project.path(), project.path(), "feature/topic").unwrap(),
+            root.join("feature-topic"),
+        );
+        assert_eq!(
+            managed_writer_branch(project.path(), project.path(), &root.join("other")).unwrap(),
+            Some("other".to_owned()),
+        );
+        assert_eq!(
+            managed_writer_branch(project.path(), project.path(), &root.join("feature-topic"),)
+                .unwrap(),
+            Some("feature-topic".to_owned()),
+        );
+    }
+
+    #[test]
+    fn allocation_roots_use_every_project_layout_root() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        std::fs::create_dir(project.path().join(".provenant")).unwrap();
+        let ports = provenant_config::PortTable::builtin();
+        std::fs::write(
+            project.path().join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            allocation_directories(&project.path().join(".git"), project.path()).unwrap(),
+            ports
+                .worktree_layout
+                .roots
+                .iter()
+                .map(|root| project.path().join(root))
+                .collect::<Vec<_>>(),
+        );
     }
 }

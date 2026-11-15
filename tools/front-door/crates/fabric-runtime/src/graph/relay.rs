@@ -1,7 +1,7 @@
 //! Live children: a running lane adds nodes to its own graph.
 //!
-//! A lane's `provenant run` or `fabric_run` crosses
-//! `crates/fabric-mcp/src/lane.rs#HostRelay`; the host finds the node that
+//! A lane's `provenant run` crosses
+//! `crates/fabric-runtime/src/relay/host.rs#HostRelay`; the host finds the node that
 //! owns the calling attempt and admits the child through
 //! [`super::patch::admit_patch`], so a child is an ordinary node named
 //! `parent--child` in the same graph, sharing its budget, cancellation and
@@ -19,17 +19,11 @@ use std::collections::BTreeSet;
 pub const DEFAULT_CHILD_DEPTH: usize = 8;
 /// Node field marking a child that outlives its parent's cancellation.
 pub const DETACHED: &str = "detached";
-/// Progress field set while a parent waits on its children.
-pub const YIELDED_SLOT: &str = "yielded_slot";
-pub(super) const DETACHED_FROM_GRAPH_CANCEL: &str = "detached_from_graph_cancel";
-pub(super) const SUBTREE_CANCEL: &str = "subtree_cancel";
 const SEPARATOR: &str = "--";
 const ID_BYTES: usize = 64;
-const REQUEST_DIGEST: &str = "relay_request_digest";
 
 /// A document launch retains its node overrides and inline template definitions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ChildLaunch {
     pub node: Value,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -38,7 +32,6 @@ pub struct ChildLaunch {
 
 /// A lane's request to add one child to its graph.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ChildRequest {
     /// Local ID; the node joins as `parent--id`.
     pub id: String,
@@ -136,6 +129,27 @@ pub struct ChildReceipt {
     pub lifecycle_notice: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredChildReceipt {
+    #[serde(flatten)]
+    pub header: provenant_records::RecordHeader,
+    pub request_digest: String,
+    pub receipt: ChildReceipt,
+}
+
+fn persist_child_receipt(
+    record: &mut super::patch::PatchRecord,
+    request_digest: &str,
+    receipt: &ChildReceipt,
+) {
+    let stored = StoredChildReceipt {
+        header: provenant_records::RecordHeader::V1,
+        request_digest: request_digest.to_owned(),
+        receipt: receipt.clone(),
+    };
+    record.child_receipt = Some(stored);
+}
+
 fn child_lifecycle_notice(detached: bool) -> &'static str {
     if detached {
         "Detached child: it may continue after the parent settles."
@@ -176,8 +190,21 @@ pub fn parent_of_attempt<'a>(checkpoint: &'a GraphCheckpoint, attempt: &str) -> 
 }
 
 /// A writer child's own worktree, beside the graph's other lane worktrees.
-pub fn child_worktree(graph_id: &str, node: &str) -> String {
-    format!(".worktrees/{graph_id}-{node}")
+pub fn child_worktree(
+    layout: &provenant_config::WorktreeLayoutPort,
+    graph_id: &str,
+    node: &str,
+) -> std::io::Result<String> {
+    layout
+        .path_for_branch(&format!("{graph_id}-{node}"))?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "worktree path must be UTF-8",
+            )
+        })
 }
 
 /// The node that owns `attempt` in any state, including a settled parent or a
@@ -196,51 +223,36 @@ pub fn historical_parent_of_attempt<'a>(
         .map(|node| node.id.as_str())
 }
 
-fn writer_worktree(graph: &str, node: &str, request: &ChildRequest) -> Option<String> {
-    request.writer.then(|| {
-        request
-            .launch
-            .as_ref()
-            .and_then(|launch| launch.node.get("worktree"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| child_worktree(graph, node))
-    })
-}
-
-/// Honest-stop nodes continue their source's logical work. Follow recorded
-/// lineage rather than stripping a suffix that a user may legitimately name.
-fn logical_parent(checkpoint: &GraphCheckpoint, parent: &str) -> String {
-    let mut current = parent;
-    for _ in 0..checkpoint.expansions.len() {
-        let Some(expansion) = checkpoint.expansions.iter().find(|expansion| {
-            expansion.continuation && expansion.nodes.iter().any(|node| node.id == current)
-        }) else {
-            break;
-        };
-        current = &expansion.source;
-    }
-    current.to_owned()
-}
-
-fn request_key(
-    checkpoint: &GraphCheckpoint,
-    parent: &str,
+fn writer_worktree(
+    layout: &provenant_config::WorktreeLayoutPort,
+    graph: &str,
+    node: &str,
     request: &ChildRequest,
-) -> Result<String, PatchError> {
-    CanonicalV1::record_digest(
-        "graph-child-key",
-        1,
-        &(logical_parent(checkpoint, parent), &request.idempotency_key),
-    )
-    .map(|digest| format!("child:{}", digest))
-    .map_err(|error| PatchError {
-        cause: None,
-        admission: None,
-        parameter: None,
-        code: "invalid",
-        message: error.to_string(),
-    })
+) -> std::io::Result<Option<String>> {
+    if !request.writer {
+        return Ok(None);
+    }
+    let worktree = request
+        .launch
+        .as_ref()
+        .and_then(|launch| launch.node.get("worktree"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    worktree
+        .map(Some)
+        .map_or_else(|| child_worktree(layout, graph, node).map(Some), Ok)
+}
+
+fn request_key(parent: &str, request: &ChildRequest) -> Result<String, PatchError> {
+    CanonicalV1::record_digest("graph-child-key", 1, &(parent, &request.idempotency_key))
+        .map(|digest| format!("child:{}", digest))
+        .map_err(|error| PatchError {
+            cause: None,
+            admission: None,
+            parameter: None,
+            code: "invalid",
+            message: error.to_string(),
+        })
 }
 
 /// The earlier receipt for this request's idempotency key, if any. It compares
@@ -260,11 +272,10 @@ pub fn replay_child(
         code: "invalid",
         message,
     };
-    let graph_id = document.graph_id.clone();
     let digest = CanonicalV1::record_digest("fabric-relay-child", 1, request)
         .map_err(|error| invalid(error.to_string()))?
         .to_string();
-    let key = request_key(checkpoint, parent, request)?;
+    let key = request_key(parent, request)?;
     let Some(record) = checkpoint
         .expansions
         .iter()
@@ -273,35 +284,56 @@ pub fn replay_child(
     else {
         return Ok(None);
     };
-    let original_parent = record.parent.as_deref().unwrap_or_default();
-    let same_parent =
-        logical_parent(checkpoint, original_parent) == logical_parent(checkpoint, parent);
-    if !same_parent
-        || record.extra.get(REQUEST_DIGEST).and_then(Value::as_str) != Some(digest.as_str())
-    {
+    let stored = record
+        .child_receipt
+        .as_ref()
+        .ok_or_else(|| invalid("stored child receipt is missing".into()))?;
+    if stored.request_digest != digest {
         return Err(PatchError {
             cause: None,
             admission: None,
             parameter: None,
             code: "idempotency_conflict",
-            message: "child idempotency key was used for a different request or parent".into(),
+            message: "child idempotency key was used for a different request".into(),
         });
     }
-    let node = format!("{original_parent}{SEPARATOR}{}", request.id);
-    let worktree = writer_worktree(&graph_id, &node, request);
-    Ok(Some(ChildReceipt {
-        graph_id,
-        parent: original_parent.into(),
-        node,
-        revision: record.revision,
-        replayed: true,
-        worktree,
-        detached: request.detached,
-        lifecycle_notice: child_lifecycle_notice(request.detached).into(),
-    }))
+
+    let expected_node = format!("{parent}{SEPARATOR}{}", request.id);
+    let receipt = &stored.receipt;
+    if record.parent.as_deref() != Some(parent)
+        || receipt.graph_id != document.graph_id
+        || receipt.parent != parent
+        || receipt.node != expected_node
+        || receipt.revision != record.revision
+        || receipt.detached != request.detached
+        || receipt.replayed
+        || receipt.lifecycle_notice.is_empty()
+        || !receipt_worktree_matches_request(receipt, request)
+    {
+        return Err(invalid(
+            "stored child receipt does not match its admission".into(),
+        ));
+    }
+    let mut receipt = stored.receipt.clone();
+    receipt.replayed = true;
+    Ok(Some(receipt))
 }
 
-const PENDING_PROVISIONING: &str = "pending_writer_provisioning";
+fn receipt_worktree_matches_request(receipt: &ChildReceipt, request: &ChildRequest) -> bool {
+    let explicit = request
+        .launch
+        .as_ref()
+        .and_then(|launch| launch.node.get("worktree"))
+        .and_then(Value::as_str);
+    match (request.writer, explicit, receipt.worktree.as_deref()) {
+        (false, _, None) => true,
+        (false, _, Some(_)) => false,
+        (true, Some(path), Some(stored)) => path == stored,
+        (true, Some(_), None) => false,
+        (true, None, Some(path)) => !path.is_empty(),
+        (true, None, None) => false,
+    }
+}
 
 /// Fence a writer child's worktree creation in the checkpoint. The caller saves
 /// the checkpoint before any Git effect, so a crash leaves the intent durable.
@@ -313,52 +345,60 @@ pub fn fence_provisioning(checkpoint: &mut GraphCheckpoint, node: &str, path: &s
         .iter_mut()
         .flat_map(|expansion| &mut expansion.nodes)
     {
-        if spec.id == node && spec.worktree.as_deref() == Some(path) {
-            spec.extra.insert("provision_worktree".into(), true.into());
+        if (spec.id == node || spec.id.starts_with(&format!("{node}--")))
+            && spec.worktree.as_deref() == Some(path)
+        {
+            spec.provision_worktree = true;
         }
     }
-    let entry = checkpoint
-        .extra
-        .entry(PENDING_PROVISIONING.into())
-        .or_insert_with(|| Value::Object(Map::new()));
-    if let Some(map) = entry.as_object_mut() {
-        map.insert(
-            node.into(),
-            serde_json::json!({"path": path, "source": source}),
-        );
+    checkpoint.pending_writer_provisioning.insert(
+        node.to_owned(),
+        PendingWriterProvisioning {
+            path: path.to_owned(),
+            source: source.to_owned(),
+        },
+    );
+}
+
+/// The logical node that owns `writer`'s provisioning: the outermost expanded
+/// composite that exports the writer's commit (a planned implementation's
+/// boundary), or the writer itself. Fences, refusals and retries key on it, as
+/// a relayed add keys on its receipt node.
+pub fn provisioning_owner(checkpoint: &GraphCheckpoint, writer: &str) -> String {
+    let specs: Vec<&GraphNode> = checkpoint
+        .expansions
+        .iter()
+        .flat_map(|expansion| &expansion.nodes)
+        .collect();
+    let mut owner = writer.to_owned();
+    for _ in 0..specs.len() {
+        let Some(boundary) = specs.iter().find(|spec| {
+            owner.starts_with(&format!("{}--", spec.id))
+                && spec.composite.as_ref().is_some_and(|composite| {
+                    composite.exports.iter().any(|export| {
+                        export.node == owner && export.outputs.contains(&OutputKind::Commit)
+                    })
+                })
+        }) else {
+            break;
+        };
+        owner.clone_from(&boundary.id);
     }
+    owner
 }
 
 /// Provisioning fenced but not yet confirmed: `(node, path, source)`.
 pub fn pending_provisioning(checkpoint: &GraphCheckpoint) -> Vec<(String, String, String)> {
     checkpoint
-        .extra
-        .get(PENDING_PROVISIONING)
-        .and_then(Value::as_object)
-        .into_iter()
-        .flatten()
-        .filter_map(|(node, value)| {
-            Some((
-                node.clone(),
-                value.get("path")?.as_str()?.to_owned(),
-                value.get("source")?.as_str()?.to_owned(),
-            ))
-        })
+        .pending_writer_provisioning
+        .iter()
+        .map(|(node, fence)| (node.clone(), fence.path.clone(), fence.source.clone()))
         .collect()
 }
 
 /// Clear the fence when recording successful provisioning or a definitive refusal.
 pub fn clear_provisioning(checkpoint: &mut GraphCheckpoint, node: &str) {
-    if let Some(map) = checkpoint
-        .extra
-        .get_mut(PENDING_PROVISIONING)
-        .and_then(Value::as_object_mut)
-    {
-        map.remove(node);
-        if map.is_empty() {
-            checkpoint.extra.remove(PENDING_PROVISIONING);
-        }
-    }
+    checkpoint.pending_writer_provisioning.remove(node);
 }
 
 /// Admit one child of `parent` through the patch path.
@@ -403,14 +443,24 @@ pub fn admit_child_bound(
     if let Some(receipt) = replay_child(graph.document, graph.checkpoint, parent, request)? {
         return Ok(receipt);
     }
-    let worktree = writer_worktree(&graph_id, &node, request);
+    let worktree =
+        writer_worktree(&context.worktree_layout, &graph_id, &node, request).map_err(|error| {
+            invalid(format!(
+                "configured worktree layout cannot name child: {error}"
+            ))
+        })?;
     let digest = CanonicalV1::record_digest("fabric-relay-child", 1, request)
         .map_err(|error| invalid(error.to_string()))?
         .to_string();
     let mut patch = child_patch(request, worktree.as_deref(), context)?;
-    patch.idempotency_key = Some(request_key(graph.checkpoint, parent, request)?);
+    patch.idempotency_key = Some(request_key(parent, request)?);
     if let Some((branch, commit)) = writer_base {
         fn bind_writers(node: &mut Value, branch: &str, commit: &str, provision_root: bool) {
+            // A generated planning boundary reads the same host-pinned source
+            // as its writer. Composite expansion passes this to both leaves.
+            if provision_root && node.get("source").is_none_or(Value::is_null) {
+                node["source"] = serde_json::json!({"type":"commit", "commit":commit});
+            }
             let mut boundary = false;
             for pointer in ["/composite/nodes", "/loop/body"] {
                 if let Some(children) = node.pointer_mut(pointer).and_then(Value::as_array_mut) {
@@ -467,12 +517,21 @@ pub fn admit_child_bound(
             });
         }
     }
-    // Add replay evidence to the same record before the journal callback runs.
-    let capture = |record: &super::patch::PatchRecord| {
+    let receipt_for = |revision| ChildReceipt {
+        graph_id: graph_id.clone(),
+        parent: parent.to_owned(),
+        node: node.clone(),
+        revision,
+        replayed: false,
+        worktree: worktree.clone(),
+        detached: request.detached,
+        lifecycle_notice: child_lifecycle_notice(request.detached).into(),
+    };
+    // Journal and checkpoint both receive the same typed receipt record.
+    let capture = |record: &super::patch::PatchRecord| -> Result<(), String> {
         let mut record = record.clone();
-        record
-            .extra
-            .insert(REQUEST_DIGEST.into(), digest.clone().into());
+        let receipt = receipt_for(record.revision);
+        persist_child_receipt(&mut record, &digest, &receipt);
         if let Some(journal) = context.journal {
             journal(&record)?;
         }
@@ -480,6 +539,7 @@ pub fn admit_child_bound(
     };
     let admission_context = PatchContext {
         journal: Some(&capture),
+        worktree_layout: context.worktree_layout.clone(),
         ..*context
     };
     let Admitted {
@@ -491,7 +551,8 @@ pub fn admit_child_bound(
         .last_mut()
         .and_then(|expansion| expansion.patch.as_mut())
         .ok_or_else(|| invalid("admitted child patch record missing".into()))?;
-    record.extra.insert(REQUEST_DIGEST.into(), digest.into());
+    let receipt = receipt_for(record.revision);
+    persist_child_receipt(record, &digest, &receipt);
     record.journaled = context.journal.is_some();
     // A retried parent can admit fresh live children after an earlier settle.
     // Re-arm closure only when a new admission actually commits.
@@ -501,7 +562,7 @@ pub fn admit_child_bound(
         .iter_mut()
         .find(|node| node.id == parent)
     {
-        progress.extra.remove("children_cancelled");
+        progress.children_cancelled = false;
     }
     Ok(ChildReceipt {
         graph_id,
@@ -556,7 +617,7 @@ fn child_patch(
     let mut node = Map::new();
     node.insert("id".into(), request.id.clone().into());
     node.insert("use".into(), request.template.clone().into());
-    node.insert("brief".into(), request.brief.clone().into());
+    node.insert("prompt".into(), request.brief.clone().into());
     if let Some(tier) = &request.tier {
         node.insert("tier".into(), tier.clone().into());
     }
@@ -569,17 +630,9 @@ fn child_patch(
         if !request.write_scope.is_empty() {
             node.insert("write_scope".into(), request.write_scope.clone().into());
         }
-    } else if !request.write_scope.is_empty() {
-        return Err(PatchError {
-            cause: None,
-            admission: None,
-            parameter: None,
-            code: "invalid",
-            message: "write_scope requires a writer child".into(),
-        });
     }
     if request.detached {
-        node.insert("extensions".into(), serde_json::json!({DETACHED:true}));
+        node.insert(DETACHED.into(), true.into());
     }
     if let Ok(template) = context.library.resolve(&request.template)
         && template.is_composite()
@@ -593,7 +646,7 @@ fn child_patch(
                 message: "writer composite children require explicit per-node work bindings".into(),
             });
         }
-        node.remove("brief");
+        node.remove("prompt");
         node.remove("tier");
         if template.parameters.contains_key("brief") {
             node.insert("with".into(), serde_json::json!({"brief": request.brief}));
@@ -679,18 +732,13 @@ pub fn set_waiting(checkpoint: &mut GraphCheckpoint, parent: &str, waiting: bool
     let Some(progress) = checkpoint.nodes.iter_mut().find(|node| node.id == parent) else {
         return false;
     };
-    if waiting && progress.state == NodeState::Running {
-        progress.extra.insert(YIELDED_SLOT.into(), true.into());
-    } else {
-        progress.extra.remove(YIELDED_SLOT);
-    }
+    progress.yielded_slot = waiting && progress.state == NodeState::Running;
     true
 }
 
 /// Whether a running node has yielded its slot while it waits.
 pub fn yields_slot(progress: &NodeProgress) -> bool {
-    progress.state == NodeState::Running
-        && progress.extra.get(YIELDED_SLOT) == Some(&Value::Bool(true))
+    progress.state == NodeState::Running && progress.yielded_slot
 }
 
 /// The effect of cancelling a parent's subtree.
@@ -720,7 +768,7 @@ pub fn fence_detached_cancellation(
     let roots: Vec<_> = expanded
         .nodes
         .iter()
-        .filter(|node| node.extra.get(DETACHED) == Some(&Value::Bool(true)))
+        .filter(|node| node.detached)
         .map(|node| node.id.as_str())
         .collect();
     let mut protected = BTreeSet::new();
@@ -729,11 +777,10 @@ pub fn fence_detached_cancellation(
             .iter()
             .any(|root| node.id == *root || node.id.starts_with(&format!("{root}{SEPARATOR}")))
         {
-            node.extra
-                .insert(DETACHED_FROM_GRAPH_CANCEL.into(), true.into());
+            node.detached_from_graph_cancel = true;
             protected.insert(node.id.clone());
         } else {
-            node.extra.remove(DETACHED_FROM_GRAPH_CANCEL);
+            node.detached_from_graph_cancel = false;
         }
     }
     Ok(protected)
@@ -755,11 +802,10 @@ pub fn cancel_subtree(
     let detached: BTreeSet<&str> = expanded
         .nodes
         .iter()
-        .filter(|node| node.extra.get(DETACHED) == Some(&Value::Bool(true)))
+        .filter(|node| node.detached)
         .map(|node| node.id.as_str())
         .collect();
-    let logical = logical_parent(checkpoint, parent);
-    let prefix = format!("{logical}{SEPARATOR}");
+    let prefix = format!("{parent}{SEPARATOR}");
     let mut result = SubtreeCancel::default();
     let mut changed = false;
     for progress in &mut checkpoint.nodes {
@@ -770,7 +816,7 @@ pub fn cancel_subtree(
             continue;
         };
         // `parent--a--b` is protected if `parent--a` or `parent--a--b` is detached.
-        let mut ancestor = logical.clone();
+        let mut ancestor = parent.to_owned();
         let protected = rest.split(SEPARATOR).any(|part| {
             ancestor.push_str(SEPARATOR);
             ancestor.push_str(part);
@@ -780,7 +826,7 @@ pub fn cancel_subtree(
             result.detached.push(progress.id.clone());
             continue;
         }
-        no_work::fence_stopped(progress);
+        next_step::fence_stopped(progress);
         let live = progress
             .attempts
             .iter()
@@ -790,13 +836,13 @@ pub fn cancel_subtree(
                 progress.cancelled_from = Some(progress.state);
                 progress.state = NodeState::Skipped;
                 progress.skip_reason = Some(format!("parent {parent} cancelled"));
-                progress.extra.remove(YIELDED_SLOT);
+                progress.yielded_slot = false;
                 result.skipped.push(progress.id.clone());
                 changed = true;
             }
             NodeState::Pending | NodeState::Running => {
-                progress.extra.insert(SUBTREE_CANCEL.into(), parent.into());
-                progress.extra.remove(YIELDED_SLOT);
+                progress.subtree_cancel = Some(parent.to_owned());
+                progress.yielded_slot = false;
                 result.running.push(progress.id.clone());
             }
             _ => {}
@@ -820,9 +866,7 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
     let parents: Vec<String> = checkpoint
         .nodes
         .iter()
-        .filter(|node| {
-            node.state.settled() && node.extra.get("children_cancelled") != Some(&Value::Bool(true))
-        })
+        .filter(|node| node.state.settled() && !node.children_cancelled)
         .map(|node| node.id.clone())
         .collect();
     if !parents.is_empty() {
@@ -831,41 +875,31 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
                 .nodes
                 .iter()
                 .any(|node| node.id == parent && node.state == NodeState::Succeeded);
-            let logical = logical_parent(checkpoint, &parent);
-            if succeeded
-                && checkpoint.nodes.iter().any(|node| {
-                    node.id != parent
-                        && !node.state.settled()
-                        && logical_parent(checkpoint, &node.id) == logical
-                })
-            {
-                // An honest-stop continuation owns the same logical children.
-                // Its predecessor settling must not cancel inherited work.
-                continue;
-            }
             if succeeded {
                 // Final patches deliberately schedule work after their producer
                 // completes. Only live relay children share the process lifetime.
-                let children: Vec<String> =
-                    checkpoint
-                        .expansions
-                        .iter()
-                        .filter(|expansion| {
-                            expansion.patch.as_ref().is_some_and(|record| {
-                                record.parent.as_deref().is_some_and(|source| {
-                                    logical_parent(checkpoint, source) == logical
-                                }) && record.extra.contains_key(REQUEST_DIGEST)
-                            })
+                let children: Vec<String> = checkpoint
+                    .expansions
+                    .iter()
+                    .filter(|expansion| {
+                        expansion.patch.as_ref().is_some_and(|record| {
+                            record
+                                .parent
+                                .as_deref()
+                                .is_some_and(|source| source == parent)
+                                && record.child_receipt.is_some()
                         })
-                        .flat_map(|expansion| expansion.nodes.iter())
-                        .filter(|node| {
-                            node.extra.get(DETACHED) != Some(&Value::Bool(true))
-                                && checkpoint.nodes.iter().any(|progress| {
-                                    progress.id == node.id && !progress.state.settled()
-                                })
-                        })
-                        .map(|node| node.id.clone())
-                        .collect();
+                    })
+                    .flat_map(|expansion| expansion.nodes.iter())
+                    .filter(|node| {
+                        !node.detached
+                            && checkpoint
+                                .nodes
+                                .iter()
+                                .any(|progress| progress.id == node.id && !progress.state.settled())
+                    })
+                    .map(|node| node.id.clone())
+                    .collect();
                 for child in children {
                     super::cancel_node_subtree(
                         document,
@@ -885,20 +919,14 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
                 .ok_or_else(|| {
                     GraphError::Refused("cancelled parent missing from checkpoint".into())
                 })?
-                .extra
-                .insert("children_cancelled".into(), true.into());
+                .children_cancelled = true;
         }
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     }
     let mut first_error = None;
     for index in 0..checkpoint.nodes.len() {
         let node = &checkpoint.nodes[index];
-        let Some(parent) = node
-            .extra
-            .get(SUBTREE_CANCEL)
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        else {
+        let Some(parent) = node.subtree_cancel.clone() else {
             continue;
         };
         if node.state.settled() {
@@ -942,7 +970,6 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
 
 /// Child states visible to their parent, including terminal delivery outcomes.
 pub fn child_states(checkpoint: &GraphCheckpoint, parent: &str) -> Value {
-    let logical = logical_parent(checkpoint, parent);
     let roots: Vec<_> = checkpoint
         .expansions
         .iter()
@@ -951,7 +978,7 @@ pub fn child_states(checkpoint: &GraphCheckpoint, parent: &str) -> Value {
                 .patch
                 .as_ref()
                 .and_then(|record| record.parent.as_deref())
-                .is_some_and(|source| logical_parent(checkpoint, source) == logical)
+                .is_some_and(|source| source == parent)
         })
         .flat_map(|expansion| expansion.nodes.iter().map(|node| &node.id))
         .collect();
@@ -997,17 +1024,30 @@ pub fn child_source(
     child: &str,
     limits: &crate::config::GraphLimits,
 ) -> Result<Option<String>, String> {
-    Ok(plans::expand(
+    let expanded = plans::expand(
         document,
         &checkpoint.extensions,
         &checkpoint.expansions,
         limits,
-    )?
-    .nodes
-    .into_iter()
-    .find(|node| node.id == child)
-    .and_then(|node| match node.source {
-        Some(SourceBinding::Commit { commit }) => Some(commit),
-        _ => None,
-    }))
+    )?;
+    let mut id = child;
+    // A planning composite keeps the receipt's logical ID; its commit output
+    // identifies the writer whose checkout the host provisions.
+    for _ in 0..=expanded.nodes.len() {
+        let Some(node) = expanded.nodes.iter().find(|node| node.id == id) else {
+            return Ok(None);
+        };
+        if let Some(SourceBinding::Commit { commit }) = &node.source {
+            return Ok(Some(commit.clone()));
+        }
+        let Some(export) = node.composite.as_ref().and_then(|spec| {
+            spec.exports
+                .iter()
+                .find(|export| export.outputs.contains(&OutputKind::Commit))
+        }) else {
+            return Ok(None);
+        };
+        id = &export.node;
+    }
+    Err("cyclic child commit exports".into())
 }

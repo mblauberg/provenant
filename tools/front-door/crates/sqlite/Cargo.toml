@@ -1,14 +1,23 @@
 [package]
 name = "provenant-sqlite"
-version = "1.11.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[features]
+fixture = [
+    "provenant-os/fixture",
+    "provenant-core/fixture",
+]
 
 [dependencies]
 provenant-os = { workspace = true }
 provenant-core = { workspace = true }
 rusqlite = { workspace = true }
+
+[dev-dependencies]
+regex = { workspace = true }
 
 # Native VFS callbacks live only in read_only_vfs. Mirror workspace lints.
 [lints.rust]

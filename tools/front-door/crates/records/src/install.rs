@@ -1,4 +1,4 @@
-//! Version-one installation records. These describe desired ownership, never
+//! Version-two installation records. These describe desired ownership, never
 //! authorise adopting a foreign entry. Config validates paths and selectors.
 use crate::{FileDigest, PathWire, SourceDigest};
 use provenant_core::RelativePath;
@@ -90,7 +90,7 @@ pub struct ResolvedHarnessTarget {
     pub extra: crate::ExtraFields,
     pub harness: Harness,
     pub skills_dir: AbsolutePath,
-    pub mcp_file: AbsolutePath,
+    pub config_file: AbsolutePath,
     pub hook_file: Option<AbsolutePath>,
     pub instruction: Option<AbsolutePath>,
     /// The account removed every managed hook on purpose, so a later install
@@ -98,19 +98,14 @@ pub struct ResolvedHarnessTarget {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hooks_relinquished: bool,
 }
-pub const BASELINE_STATE_FORMAT_VERSION: u64 = 1;
-pub const STATE_FORMAT_VERSION: u64 = BASELINE_STATE_FORMAT_VERSION;
-
-fn default_state_format_version() -> u64 {
-    BASELINE_STATE_FORMAT_VERSION
-}
+pub const STATE_FORMAT_VERSION: u64 = 2;
+pub const INSTALL_RECEIPT_SCHEMA_VERSION: u64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstallReceipt {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub schema_version: u64,
-    #[serde(default = "default_state_format_version")]
     pub state_format_version: u64,
     pub source_digest: SourceDigest,
     pub manifest_digest: FileDigest,

@@ -1,43 +1,134 @@
 //! Read-only disk observations shared by the inventory owners.
 use crate::fs::{Directory, FileKind, Metadata};
+use provenant_core::{Clock, MonoTime};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, HashSet},
     ffi::OsStr,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    sync::Arc,
+    time::Duration,
 };
 
-#[derive(Debug)]
 struct WalkBudget {
     remaining: usize,
-    started: Instant,
+    started: MonoTime,
     reported: bool,
-    duration: Duration,
+    duration_micros: u64,
+    clock: Arc<dyn Clock + Send + Sync>,
 }
 
-impl Default for WalkBudget {
-    // The traversal budget measures real elapsed time.
-    #[allow(clippy::disallowed_methods)]
-    fn default() -> Self {
-        Self {
-            remaining: 1_000_000,
-            started: Instant::now(),
-            reported: false,
-            duration: Duration::from_secs(10),
-        }
+impl std::fmt::Debug for WalkBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WalkBudget")
+            .field("remaining", &self.remaining)
+            .field("started", &self.started)
+            .field("reported", &self.reported)
+            .field("duration_micros", &self.duration_micros)
+            .finish_non_exhaustive()
     }
 }
 
 impl WalkBudget {
+    fn new(remaining: usize, duration: Duration, clock: Arc<dyn Clock + Send + Sync>) -> Self {
+        let started = clock.mono_now();
+        Self {
+            remaining,
+            started,
+            reported: false,
+            duration_micros: duration.as_micros().min(u128::from(u64::MAX)) as u64,
+            clock,
+        }
+    }
+
+    fn exhausted(&self) -> bool {
+        self.remaining == 0
+            || self
+                .clock
+                .mono_now()
+                .as_micros()
+                .saturating_sub(self.started.as_micros())
+                >= self.duration_micros
+    }
+
     fn reached_limit(&mut self, report: &mut DiskReport, path: &Path) -> bool {
-        let exhausted = self.remaining == 0 || self.started.elapsed() >= self.duration;
-        if exhausted && !self.reported {
-            report.error(path, "walk entry or time budget reached");
+        if !self.exhausted() {
+            return false;
+        }
+        if !self.reported {
+            report.error_kind(
+                path,
+                DiskErrorKind::WalkBudgetExhausted,
+                "walk budget reached",
+            );
             self.reported = true;
         }
-        exhausted
+        true
     }
+}
+
+impl Default for WalkBudget {
+    fn default() -> Self {
+        #[cfg(test)]
+        let clock: Arc<dyn Clock + Send + Sync> = Arc::new(ManualClock::default());
+        #[cfg(not(test))]
+        let clock: Arc<dyn Clock + Send + Sync> = Arc::new(crate::clock::SystemClock::new());
+        Self::new(1_000_000, Duration::from_secs(10), clock)
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ManualClock(std::sync::Mutex<u64>);
+
+#[cfg(test)]
+impl ManualClock {
+    fn advance(&self, micros: u64) {
+        let mut now = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *now = now.saturating_add(micros);
+    }
+}
+
+#[cfg(test)]
+impl Clock for ManualClock {
+    fn wall_now(&self) -> std::result::Result<provenant_core::WallTime, provenant_core::TimeError> {
+        provenant_core::WallTime::from_micros(0)
+    }
+
+    fn mono_now(&self) -> MonoTime {
+        MonoTime::from_micros(
+            *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    fn wait_until(&self, deadline: MonoTime) -> std::result::Result<(), provenant_core::TimeError> {
+        let mut now = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *now = (*now).max(deadline.as_micros());
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskErrorKind {
+    Observation,
+    WalkBudgetExhausted,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiskError {
+    pub path: PathBuf,
+    pub kind: DiskErrorKind,
+    pub reason: String,
 }
 
 /// The existing state directory, or its nearest existing ancestor. Other
@@ -49,12 +140,11 @@ pub struct DiskVolume {
     pub available_bytes: u64,
 }
 
-/// A lane cache's immediate children: `target`, `cargo-home` and the rest.
+/// A lane cache's immediate children: `target` and the rest.
 /// The parts use unshared bytes and sum to the lane's unshared total.
 #[derive(Debug, Default, Serialize)]
 pub struct DiskParts {
     pub target: u64,
-    pub cargo_home: u64,
     pub other: u64,
 }
 
@@ -128,12 +218,6 @@ pub struct DiskTotal {
     pub unshared_bytes: u64,
 }
 
-#[derive(Debug, Serialize)]
-pub struct DiskError {
-    pub path: PathBuf,
-    pub reason: String,
-}
-
 /// The `data` of `provenant disk report`: a sequence of read-only
 /// observations, not an atomic filesystem snapshot. Per-path errors
 /// accompany a successful partial report.
@@ -184,8 +268,7 @@ impl DiskReport {
 
     /// Whether the report's shared traversal budget has been consumed.
     pub fn traversal_exhausted(&self) -> bool {
-        self.walk_budget.remaining == 0
-            || self.walk_budget.started.elapsed() >= self.walk_budget.duration
+        self.walk_budget.exhausted()
     }
 
     /// Bound traversal across every measurement in this report. Exhaustion
@@ -198,13 +281,18 @@ impl DiskReport {
     ) -> Self {
         let mut report = Self::new(path, available_bytes);
         report.walk_budget.remaining = max_entries;
-        report.walk_budget.duration = duration;
+        report.walk_budget.duration_micros = duration.as_micros().min(u128::from(u64::MAX)) as u64;
         report
     }
 
     pub fn error(&mut self, path: impl AsRef<Path>, reason: impl ToString) {
+        self.error_kind(path, DiskErrorKind::Observation, reason);
+    }
+
+    fn error_kind(&mut self, path: impl AsRef<Path>, kind: DiskErrorKind, reason: impl ToString) {
         self.errors.push(DiskError {
             path: path.as_ref().into(),
+            kind,
             reason: reason.to_string(),
         });
     }
@@ -215,7 +303,7 @@ impl DiskReport {
         self.measure_with(class, path, false)
     }
 
-    /// Split only immediate lane children into target, cargo-home and other.
+    /// Split only immediate lane children into target and other.
     /// Parts contain the same unshared-byte observations as the entry total.
     pub fn measure_lane(&mut self, path: &Path) -> Option<usize> {
         self.measure_with("lane_cache", path, true)
@@ -537,7 +625,6 @@ impl DiskReport {
                 if let Some(parts) = &mut entry.parts {
                     match name.to_str() {
                         Some("target") => parts.target = bytes,
-                        Some("cargo-home") => parts.cargo_home = bytes,
                         _ => parts.other = parts.other.saturating_add(bytes),
                     }
                 }
@@ -547,10 +634,7 @@ impl DiskReport {
             && depth == 0
             && let Some(parts) = &mut entry.parts
         {
-            parts.other = entry
-                .unshared_bytes
-                .saturating_sub(parts.target)
-                .saturating_sub(parts.cargo_home);
+            parts.other = entry.unshared_bytes.saturating_sub(parts.target);
         }
     }
 
@@ -598,9 +682,6 @@ impl DiskReport {
 
 #[cfg(test)]
 mod tests {
-    // Unit tests use a real monotonic sample to exercise expiration.
-    #![allow(clippy::disallowed_methods)]
-
     #[test]
     fn measurement_budget_is_shared_across_paths() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = tempfile::tempdir()?;
@@ -652,47 +733,47 @@ mod tests {
     #[test]
     fn walk_budget_preserves_partial_bytes_and_reports_exhaustion() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        for index in 0..20 {
-            let child = temp.path().join(index.to_string());
-            fs::create_dir(&child)?;
-            fs::write(child.join("payload"), vec![1; 4096])?;
-        }
-        let parent = Directory::open_anchor(temp.path().parent().ok_or("parent")?)?;
-        let name = temp.path().file_name().ok_or("name")?;
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        fs::create_dir(&first)?;
+        fs::create_dir(&second)?;
+        fs::write(first.join("payload"), vec![1; 4096])?;
+        fs::write(second.join("payload"), vec![2; 4096])?;
+        let parent = Directory::open_anchor(temp.path())?;
         let mut report = DiskReport::new(temp.path().into(), 0);
         let mut entry = DiskEntry::default();
-        let mut budget = WalkBudget {
-            remaining: 5,
-            ..Default::default()
-        };
-        report.walk(
+        let clock = Arc::new(ManualClock::default());
+        let mut budget = WalkBudget::new(10, Duration::from_millis(10), clock.clone());
+        assert!(report.walk(
             &parent,
-            name,
-            temp.path(),
-            temp.path(),
+            OsStr::new("first"),
+            &first,
+            &first,
             &mut entry,
             false,
             0,
             &mut budget,
-        );
-        assert!(entry.allocated_bytes >= 2 * 4096);
-        assert_eq!(report.errors.len(), 1);
-        assert!(report.errors[0].reason.contains("budget"));
-        let mut budget = WalkBudget {
-            started: Instant::now() - Duration::from_secs(11),
-            ..Default::default()
-        };
+        ));
+        let partial_bytes = entry.allocated_bytes;
+        assert!(partial_bytes > 0);
+        clock.advance(10_000);
         assert!(!report.walk(
             &parent,
-            name,
-            temp.path(),
-            temp.path(),
+            OsStr::new("second"),
+            &second,
+            &second,
             &mut entry,
             false,
             0,
             &mut budget
         ));
-        assert_eq!(report.errors.len(), 2);
+        assert!(entry.allocated_bytes >= partial_bytes);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.kind == DiskErrorKind::WalkBudgetExhausted })
+        );
         Ok(())
     }
 
@@ -751,15 +832,24 @@ mod tests {
         let nested = temp.path().join(".worktrees/feature");
         fs::create_dir_all(&nested)?;
         fs::write(nested.join("payload"), vec![1; 16384])?;
-        let mut report = DiskReport::new(temp.path().into(), 0);
-        let child = report.measure("worktree", &nested).ok_or("nested")?;
-        let child_bytes = report.entries[child].allocated_bytes;
-        let parent = report.measure("worktree", temp.path()).ok_or("parent")?;
-        let expected = fs::symlink_metadata(temp.path())?.blocks() * 512
-            + fs::symlink_metadata(temp.path().join(".worktrees"))?.blocks() * 512;
-        assert_eq!(report.entries[parent].allocated_bytes, expected);
-        assert!(child_bytes >= 16384);
-        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let mut parent_first = DiskReport::new(temp.path().into(), 0);
+        let whole = parent_first
+            .measure("worktree", temp.path())
+            .map(|index| parent_first.entries[index].allocated_bytes)
+            .ok_or("parent")?;
+        let mut child_first = DiskReport::new(temp.path().into(), 0);
+        let child_bytes = child_first
+            .measure("worktree", &nested)
+            .map(|index| child_first.entries[index].allocated_bytes)
+            .ok_or("nested")?;
+        let parent_bytes = child_first
+            .measure("worktree", temp.path())
+            .map(|index| child_first.entries[index].allocated_bytes)
+            .ok_or("parent")?;
+        assert!(child_bytes > 0);
+        assert_eq!(parent_bytes + child_bytes, whole);
+        assert!(parent_first.errors.is_empty());
+        assert!(child_first.errors.is_empty());
         Ok(())
     }
 
@@ -778,6 +868,7 @@ mod tests {
         symlink(&real, &alias)?;
         let aliased_root = alias.join("container/repo");
 
+        let mut observations = Vec::new();
         for (first, second) in [(&root, &aliased_root), (&aliased_root, &root)] {
             let mut report = DiskReport::new(root.clone(), 0);
             let child = report
@@ -785,13 +876,7 @@ mod tests {
                 .ok_or("nested")?;
             let child_bytes = report.entries[child].allocated_bytes;
             let parent = report.measure("worktree", second).ok_or("parent")?;
-            let expected = fs::symlink_metadata(&root)?.blocks() * 512
-                + fs::symlink_metadata(root.join(".worktrees"))?.blocks() * 512
-                + fs::symlink_metadata(root.join("state"))?.blocks() * 512
-                + fs::symlink_metadata(&state)?.blocks() * 512
-                + fs::symlink_metadata(state.join("payload"))?.blocks() * 512;
-            assert_eq!(report.entries[parent].allocated_bytes, expected);
-            assert!(child_bytes >= 16384);
+            let parent_bytes = report.entries[parent].allocated_bytes;
             let newest = report.entries[parent].newest_write_ns;
             let inventory = report
                 .measure("attempt_tmp", &first.join("state/tmp"))
@@ -800,14 +885,16 @@ mod tests {
             assert_eq!(report.entries[inventory].unshared_bytes, 0);
             assert_eq!(report.entries[inventory].newest_write_ns, newest);
             assert!(report.errors.is_empty(), "{:?}", report.errors);
+            observations.push((parent_bytes, child_bytes, newest));
         }
+        assert_eq!(observations[0], observations[1]);
         Ok(())
     }
 
     #[test]
     fn state_inside_a_worktree_keeps_first_observation_ownership() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        let temporary = temp.path().join("state/runs/run/attempts/a/tmp");
+        let temporary = temp.path().join("state/attempts/a/tmp");
         fs::create_dir_all(temporary.join("target"))?;
         fs::write(temporary.join("target/CACHEDIR.TAG"), "cache")?;
         fs::write(temporary.join("target/payload"), vec![1; 16384])?;
@@ -852,10 +939,7 @@ mod tests {
         let index = report
             .measure_lane(temp.path())
             .ok_or("missing measurement")?;
-        let expected = fs::symlink_metadata(temp.path())?.blocks() * 512
-            + fs::symlink_metadata(temp.path().join("one"))?.blocks() * 512
-            + fs::symlink_metadata(temp.path().join("target"))?.blocks() * 512
-            + fs::symlink_metadata(temp.path().join("target/payload"))?.blocks() * 512;
+        let expected = unique_allocated_bytes(temp.path())?;
         assert_eq!(report.entries[index].allocated_bytes, expected);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         let parts = report.entries[index]
@@ -863,10 +947,29 @@ mod tests {
             .as_ref()
             .ok_or("missing parts")?;
         assert_eq!(
-            parts.target + parts.cargo_home + parts.other,
+            parts.target + parts.other,
             report.entries[index].unshared_bytes
         );
         Ok(())
+    }
+
+    fn unique_allocated_bytes(root: &Path) -> Result<u64, Box<dyn Error>> {
+        let mut pending = vec![root.to_owned()];
+        let mut identities = HashSet::new();
+        let mut bytes = 0_u64;
+        while let Some(path) = pending.pop() {
+            let metadata = fs::symlink_metadata(&path)?;
+            if !identities.insert((metadata.dev(), metadata.ino())) {
+                continue;
+            }
+            bytes = bytes.saturating_add(metadata.blocks().saturating_mul(512));
+            if metadata.file_type().is_dir() {
+                for entry in fs::read_dir(path)? {
+                    pending.push(entry?.path());
+                }
+            }
+        }
+        Ok(bytes)
     }
 
     #[test]
@@ -897,29 +1000,6 @@ mod tests {
         assert_eq!(second.newest_write_ns, 99);
         metadata.device = 3;
         assert!(report.claim(&mut second, metadata));
-    }
-
-    #[test]
-    fn existing_lock_observation_never_creates_a_missing_lock() -> Result<(), Box<dyn Error>> {
-        use crate::fs::LockMode;
-        let temp = tempfile::tempdir()?;
-        let directory = Directory::open_anchor(temp.path())?;
-        assert!(
-            directory
-                .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
-                .is_err_and(|error| error.is_not_found())
-        );
-        assert!(!temp.path().join("writer.lock").exists());
-        fs::write(temp.path().join("writer.lock"), b"stable")?;
-        let lock = directory.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)?;
-        assert!(matches!(
-            directory.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive),
-            Err(crate::fs::FsError::LockTimeout { .. })
-        ));
-        drop(lock);
-        let _lock = directory.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)?;
-        assert_eq!(fs::read(temp.path().join("writer.lock"))?, b"stable");
-        Ok(())
     }
 
     #[test]

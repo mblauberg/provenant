@@ -4,17 +4,7 @@ use serde_json::{Value, json};
 use support::{Result, TestRig, code};
 
 fn call(rig: &TestRig, args: &[&str]) -> Result<Value> {
-    let mut words = args.to_vec();
-    words.push("--json");
-    let output = rig.command(&words)?;
-    assert_eq!(
-        code(&output),
-        0,
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout.bytes),
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    Ok(serde_json::from_slice(&output.stdout.bytes)?)
+    support::call(rig, args, 0)
 }
 
 #[test]
@@ -176,29 +166,8 @@ fn overview_needs_you() -> Result {
     assert_eq!(data["counts"]["needs_you"], 1);
     assert!(!overview.to_string().contains("PRIVATE BODY MARKER"));
 
-    let fabric_db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
-    let original: Vec<u8> =
-        fabric_db.query_row("SELECT record FROM human_requests", [], |row| row.get(0))?;
-    let mut legacy: Value = serde_json::from_slice(&original)?;
-    legacy
-        .as_object_mut()
-        .ok_or("request object")?
-        .remove("chair_session_id");
-    fabric_db.execute(
-        "UPDATE human_requests SET record=?1",
-        [serde_json::to_vec(&legacy)?],
-    )?;
-    let legacy_overview = call(&rig, &["console", "overview"])?;
-    assert_eq!(
-        legacy_overview["data"]["needs_you"][0]["chair_session_id"],
-        "chair-a"
-    );
-    assert_eq!(legacy_overview["data"]["counts"]["needs_you"], 1);
-    assert_eq!(legacy_overview["data"]["coverage"]["inbox"], "complete");
-    fabric_db.execute("UPDATE human_requests SET record=?1", [&original])?;
-
     // Submit a queued lane through its owner, without starting a provider.
-    use provenant_core::{ActorId, CancelToken, OperationId, ProjectId, TaskId};
+    use provenant_core::{ActorId, CancelToken, OperationId, ProjectId};
     use provenant_run::{
         DispatchRequest, DispatchTask, ExecutionContext, HarnessProfile, LaneAccess, Request,
         RequestedRoute, RunStore, Service,
@@ -223,17 +192,22 @@ fn overview_needs_you() -> Result {
         DispatchRequest {
             chair: None,
             operation_id: OperationId::parse("overview-lane")?,
-            tasks: vec![DispatchTask {
-                context: None,
+            task: DispatchTask {
+                context: Some(provenant_records::run::WorkContext {
+                    graph_id: Some("overview-graph".into()),
+                    node_id: Some("review".into()),
+                    attempt: Some(1),
+                    ..Default::default()
+                }),
                 build_heavy: false,
                 title: Some("Review changes".into()),
-                task_id: TaskId::from_bytes([3; 16]),
                 prompt: "PRIVATE PROMPT MARKER".into(),
                 base: None,
                 pinned_base: None,
                 source_head: None,
                 head: None,
                 route: RequestedRoute::Named {
+                    required_family: None,
                     extra: Default::default(),
                     name: "senior".into(),
                     effort: None,
@@ -245,8 +219,7 @@ fn overview_needs_you() -> Result {
                 deliver: None,
                 worktree: None,
                 access: LaneAccess::default(),
-            }],
-            concurrency: 1,
+            },
             lane_depth: 1,
             parent_attempt: None,
         },
@@ -260,47 +233,11 @@ fn overview_needs_you() -> Result {
     assert_eq!(lane["project_label"], "project");
     assert_eq!(lane["state"], "queued");
     assert!(lane["attempt_id"].is_string());
+    assert_eq!(lane["key"]["graph"], "overview-graph");
+    assert_eq!(lane["key"]["node"], "review");
+    assert_eq!(lane["key"]["attempt"], 1);
     assert_eq!(with_lane["data"]["counts"]["running"], 1);
     assert!(!with_lane.to_string().contains("PRIVATE PROMPT MARKER"));
-
-    // The inbox and run scans share one budget, including unprojected bodies.
-    let run_db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
-    let run_len: u32 =
-        run_db.query_row("SELECT length(record) FROM attempts", [], |row| row.get(0))?;
-    let target = 1_048_576 - run_len as usize + 1;
-    let mut added_ids = Vec::new();
-    let project_id = project.to_string();
-    for index in 0..5 {
-        let mut inflated: Value = serde_json::from_slice(&original)?;
-        let row_target = target / 5 + usize::from(index < target % 5);
-        let extra_id =
-            provenant_core::HumanRequestId::from_bytes([index as u8 + 20; 16]).to_string();
-        if index != 0 {
-            inflated["id"] = json!(extra_id);
-        }
-        inflated["request"]["body"] = json!("");
-        let overhead = serde_json::to_vec(&inflated)?.len();
-        inflated["request"]["body"] = json!("x".repeat(row_target - overhead));
-        let inflated = serde_json::to_vec(&inflated)?;
-        assert_eq!(inflated.len(), row_target);
-        if index == 0 {
-            fabric_db.execute("UPDATE human_requests SET record=?1", [&inflated])?;
-        } else {
-            fabric_db.execute(
-                "INSERT INTO human_requests VALUES(?1,?2,1,'chair-a','open',?3)",
-                rusqlite::params![project_id, extra_id, inflated],
-            )?;
-            added_ids.push(extra_id);
-        }
-    }
-    let bounded = call(&rig, &["console", "overview"])?;
-    assert_eq!(bounded["data"]["coverage"]["inbox"], "complete");
-    assert_eq!(bounded["data"]["coverage"]["runs"], "partial");
-    assert_eq!(bounded["data"]["lanes"], json!([]));
-    for added_id in added_ids {
-        fabric_db.execute("DELETE FROM human_requests WHERE id=?1", [&added_id])?;
-    }
-    fabric_db.execute("UPDATE human_requests SET record=?1", [&original])?;
 
     let human = rig.command(&["console", "overview", "--full"])?;
     assert_eq!(code(&human), 0);

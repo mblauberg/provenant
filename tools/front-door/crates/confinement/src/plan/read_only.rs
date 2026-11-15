@@ -6,12 +6,11 @@ use crate::{
 };
 use provenant_core::RelativePath;
 use provenant_os::fs::Directory;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, io::Read, path::Component};
 
 /// Stored in the host's project state, never loaded from lane-controlled config.
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Default, Deserialize, Serialize)]
 pub struct ReadOnlyPolicy {
     #[serde(default, rename = "readOnlyWritable")]
     writable: Vec<String>,
@@ -34,7 +33,21 @@ impl ReadOnlyPolicy {
         if bytes.len() > 16 * 1024 {
             return Err(PermissionError::InvalidReadOnlyPolicy);
         }
-        serde_json::from_slice(&bytes).map_err(|_| PermissionError::InvalidReadOnlyPolicy)
+        let source = project
+            .anchored_path()
+            .join("read-only.json")
+            .to_string_lossy()
+            .into_owned();
+        let (policy, warnings) =
+            decode_policy(&source, &bytes).map_err(|_| PermissionError::InvalidReadOnlyPolicy)?;
+        #[allow(
+            clippy::print_stderr,
+            reason = "unknown policy keys warn with their source shown"
+        )]
+        for warning in warnings {
+            eprintln!("warning: {warning}");
+        }
+        Ok(policy)
     }
 
     pub(crate) fn resolve(
@@ -78,6 +91,13 @@ impl ReadOnlyPolicy {
             relative: self.writable.clone(),
         })
     }
+}
+
+fn decode_policy(
+    source: &str,
+    bytes: &[u8],
+) -> Result<(ReadOnlyPolicy, Vec<provenant_records::InputWarning>), serde_json::Error> {
+    provenant_records::decode_input(source, bytes)
 }
 
 /// Host-resolved roots. There is deliberately no deserialisation or public
@@ -253,6 +273,14 @@ mod tests {
         let project = tempfile::tempdir()?;
         let dir = Directory::open_anchor(project.path())?;
         assert!(ReadOnlyPolicy::read(&dir)?.writable.is_empty());
+        let config = br#"{"readOnlyWritable":[".agent-run/locks"],"futureOption":true}"#;
+        std::fs::write(project.path().join("read-only.json"), config)?;
+        let loaded = ReadOnlyPolicy::read(&dir)?;
+        assert_eq!(loaded.writable, [".agent-run/locks"]);
+        let (_, warnings) = decode_policy("projects/fixture/read-only.json", config)?;
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].source, "projects/fixture/read-only.json");
+        assert_eq!(warnings[0].key, "futureOption");
         std::fs::write(project.path().join("read-only.json"), b"{broken")?;
         assert!(ReadOnlyPolicy::read(&dir).is_err());
         std::fs::remove_file(project.path().join("read-only.json"))?;

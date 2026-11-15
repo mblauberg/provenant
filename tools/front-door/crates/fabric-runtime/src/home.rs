@@ -15,44 +15,43 @@ pub struct RemoteCoordination<'a> {
     pub project: ProjectId,
     pub actor: ActorId,
     pub clock: &'a dyn Clock,
-    pub backoff: &'a dyn Pause,
 }
 impl<'a> CoordinationService<'a> {
     pub fn open(
         root: &StateRoot,
         project: ProjectId,
         actor: ActorId,
+        observation: ObservationSettings,
         clock: &'a dyn Clock,
         backoff: &'a dyn Pause,
         cancel: &CancelToken,
     ) -> Result<Self, CoordinationError> {
         Ok(Self::Local(Box::new(LocalCoordination::open(
-            root, project, actor, clock, backoff, cancel,
+            root,
+            project,
+            actor,
+            observation,
+            clock,
+            backoff,
+            cancel,
         )?)))
     }
     pub fn new(
         store: Store,
         project: ProjectId,
         actor: ActorId,
+        observation: ObservationSettings,
         clock: &'a dyn Clock,
         backoff: &'a dyn Pause,
     ) -> Self {
         Self::Local(Box::new(LocalCoordination::new(
-            store, project, actor, clock, backoff,
+            store,
+            project,
+            actor,
+            observation,
+            clock,
+            backoff,
         )))
-    }
-
-    /// Pause a read observation without holding a store transaction.
-    pub fn pause_observation(&self, budget: WaitBudget, cancel: &CancelToken) {
-        match self {
-            Self::Local(local) => local.pause_observation(budget, cancel),
-            Self::Remote(remote) => remote.backoff.wait(
-                provenant_core::DurationMicros::from_micros(
-                    500_000.min(budget.remaining(remote.clock.mono_now()).as_micros()),
-                ),
-                cancel,
-            ),
-        }
     }
 
     pub fn mutate(
@@ -139,6 +138,7 @@ impl RemoteCoordination<'_> {
                     let mut recovery = request.clone();
                     recovery.action = PeerAction::Receipt {
                         extra: Default::default(),
+                        graph_context: None,
                         operation_id: id.clone(),
                     };
                     let response = self
@@ -397,6 +397,7 @@ impl<'a> CoordinationService<'a> {
         root: &StateRoot,
         identity: &crate::identity::Identity,
         config: &crate::config::FabricConfig,
+        observation: ObservationSettings,
         home: &'a std::path::Path,
         cwd: &'a std::path::Path,
         executor: &'a dyn provenant_os::exec::Executor,
@@ -444,13 +445,13 @@ impl<'a> CoordinationService<'a> {
                 project: identity.project,
                 actor: identity.inbox.actor,
                 clock,
-                backoff,
             })));
         }
         Self::open(
             root,
             identity.project,
             identity.inbox.actor,
+            observation,
             clock,
             backoff,
             cancel,
@@ -461,7 +462,6 @@ impl<'a> CoordinationService<'a> {
 #[cfg(test)]
 mod tests {
     use super::RemoteCoordination;
-    use crate::coordination::ThreadPause;
     use crate::coordination::facade;
     use crate::{
         coordination::{CoordinationError, EventsInput, EventsResult},
@@ -614,7 +614,6 @@ mod tests {
         root: StateRoot,
         clock: SystemClock,
         cancel: CancelToken,
-        backoff: ThreadPause,
         budget: WaitBudget,
         local_host: HostId,
         remote_host: HostId,
@@ -633,7 +632,6 @@ mod tests {
             let root: StateRoot = inputs.resolve(&SystemPathResolver).unwrap().state;
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
-            let backoff = ThreadPause;
             let budget = WaitBudget::cli(clock.mono_now(), 30).unwrap();
             let local_host = HostId::from_bytes([81; 16]);
             let remote_host = HostId::from_bytes([82; 16]);
@@ -647,7 +645,6 @@ mod tests {
                 root,
                 clock,
                 cancel,
-                backoff,
                 budget,
                 local_host,
                 remote_host,
@@ -693,7 +690,6 @@ mod tests {
                 project: self.project,
                 actor: self.actor,
                 clock: &self.clock,
-                backoff: &self.backoff,
             }
         }
     }

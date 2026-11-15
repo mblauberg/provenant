@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cache;
+pub mod cargo;
 pub mod disclosure;
 pub mod disk;
 pub mod git_evidence;
@@ -22,8 +23,8 @@ pub mod worktrees;
 pub use git_evidence::Git;
 pub use output_custody::OutputCustody;
 pub use permissions::{
-    ConfinementBackend, WriteGrant, WriteSource, is_codex_standalone_package, is_credential_root,
-    refuses_lane_root, write_grants,
+    ConfinementBackend, WriteGrant, WriteSource, is_codex_standalone_package, refuses_lane_root,
+    write_grants,
 };
 pub use plan::{
     CodexPolicy, ConfinedPlan, ExtensionPolicy, MAX_READ_ONLY_WRITABLE, PlanError, PlanRequest,

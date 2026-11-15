@@ -1,8 +1,7 @@
 //! Strict run-store records. Facts are constructed only after store validation.
-use crate::{CanonicalError, CanonicalV1, FileDigest, PathWire};
+use crate::{CanonicalError, CanonicalV1, FileDigest, LimitSource, PathWire};
 use provenant_core::{
-    ActorId, AttemptId, DeliveryId, Digest, GitOid, HostId, OperationId, ProjectId, RunId, TaskId,
-    WallTime,
+    ActorId, AttemptId, DeliveryId, Digest, GitOid, OperationId, ProjectId, WallTime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,36 +33,20 @@ pub const RESULT_LIMIT: u64 = 4 * 1024 * 1024;
 pub const CAPTURE_LIMIT: u64 = 64 * 1024 * 1024;
 pub const OUTPUT_LIMIT: u64 = 65536;
 
-/// Explicit submitting chair identity, separate from a worker provider session.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChairBinding {
-    #[serde(flatten)]
-    pub extra: crate::ExtraFields,
-    pub host: HostId,
-    pub actor: ActorId,
-    /// The chair's host session, when its harness names one. It addresses the
-    /// chair log that settlement appends to.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<String>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalRequest {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
-    /// Host-verifiable child run and attempt IDs. Absent on legacy, unindexed runs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_attempt_id_version: Option<u64>,
     /// Submission proposal only. Readers trust the host-owned Fabric index.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chair: Option<ChairBinding>,
+    pub chair: Option<crate::custody::Chair>,
     /// A fresh continuation retains the parent for lineage and admission, but
     /// starts the provider without its previous session. The reason is sealed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fresh_continuation: Option<String>,
     pub schema_version: u64,
-    pub tasks: Vec<TaskRequest>,
-    pub concurrency: u64,
+    /// One launch admits exactly one attempt.
+    pub task: TaskRequest,
     pub parent: Option<AttemptId>,
     /// Depth assigned to this run when it was dispatched from a lane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,45 +59,13 @@ impl CanonicalRequest {
     pub fn digest(&self) -> Result<Digest, CanonicalError> {
         CanonicalV1::record_digest("run-request", 1, self)
     }
+}
+/// A one-shot budget continuation allowance carried by its successor request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BudgetWrapUp {
+    pub remaining: u64,
+}
 
-    /// The host-derived run ID for this request under `operation`, or `None`
-    /// for a legacy, unversioned request. Version 1 binds the ID to the whole
-    /// proposal and the host's namespace, so no proposed ID is ever adopted.
-    pub fn child_run_id(
-        &self,
-        project: ProjectId,
-        operation: &OperationId,
-    ) -> Result<Option<RunId>, ChildIdError> {
-        match self.child_attempt_id_version {
-            None => Ok(None),
-            Some(1) => {
-                let parent = self.parent_attempt.ok_or(ChildIdError::MissingParent)?;
-                use sha2::{Digest as _, Sha256};
-                let mut hash = Sha256::new();
-                hash.update(b"provenant-child-run-v1\0");
-                hash.update(project.as_bytes());
-                hash.update(parent.as_bytes());
-                hash.update(CanonicalV1::file_digest(operation.as_str().as_bytes()).bytes());
-                hash.update(self.digest()?.as_bytes());
-                let digest = hash.finalize();
-                let mut id = [0; 16];
-                id.copy_from_slice(&digest[..16]);
-                Ok(Some(RunId::from_bytes(id)))
-            }
-            Some(_) => Err(ChildIdError::UnsupportedVersion),
-        }
-    }
-}
-/// Why a request cannot yield a host-derived child run ID.
-#[derive(Debug, thiserror::Error)]
-pub enum ChildIdError {
-    #[error("unsupported child attempt ID version")]
-    UnsupportedVersion,
-    #[error("derived child IDs require a parent attempt")]
-    MissingParent,
-    #[error(transparent)]
-    Canonical(#[from] CanonicalError),
-}
 /// Effective dispatch policy, sealed with the request and copied to each attempt.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessProfile {
@@ -123,26 +74,37 @@ pub struct HarnessProfile {
     pub name: String,
     pub knobs: std::collections::BTreeMap<String, serde_json::Value>,
     pub overrides: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confidential: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parent_sandboxed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_by: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub knob_sources: std::collections::BTreeMap<String, LimitSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_wrap_up: Option<BudgetWrapUp>,
+    /// Resolved policy strengths for this run, sealed by the dispatch owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_policy: Option<crate::policy::Policy>,
+    /// Dispatch-level policy overrides after typed validation.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub policy_overrides: std::collections::BTreeMap<String, crate::policy::Strength>,
+    /// Project key used to resolve project-scoped policy at launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_project: Option<ProjectId>,
+    /// Repository classification sealed before the provider is selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_policy: Option<LaunchPolicy>,
+    /// Declared project-relative write scope for writer lanes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_scope: Vec<String>,
     /// Require the adapter to expose its own skill location.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_skill_location: bool,
     /// Remaining settlement retries sealed for a graph task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settlement_retry_limit: Option<u8>,
-    // Preserve the removed field only to verify sealed request and attempt digests.
-    #[doc(hidden)]
-    #[serde(
-        rename = "task_class",
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_legacy_task_class"
-    )]
-    pub legacy_task_class: Option<Option<String>>,
-}
-fn deserialize_legacy_task_class<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Option<String>>, D::Error> {
-    Option::<String>::deserialize(deserializer).map(Some)
 }
 impl HarnessProfile {
     fn is_empty(&self) -> bool {
@@ -155,6 +117,9 @@ impl HarnessProfile {
 /// Work labels and host-stamped graph provenance. Labels are at most 256 UTF-8 bytes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkContext {
+    /// Sources of writer budget fields, retained by graph compilation.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub budget_sources: std::collections::BTreeMap<String, crate::LimitSource>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,10 +128,20 @@ pub struct WorkContext {
     pub risk_tier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_kind: Option<String>,
+    /// Pull request associated with this work item, when it is a PR review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<u64>,
+    /// Review lens requested by the work item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
+    /// The graph's one-based launch order within the node. With `graph_id`
+    /// and `node_id` it is the attempt's work key; the store never assigns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
     /// Stamped by trusted graph launch admission, never inferred from labels.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub graph_template_launch: bool,
@@ -211,6 +186,7 @@ impl WorkContext {
             &self.work_item,
             &self.risk_tier,
             &self.task_kind,
+            &self.lens,
             &self.graph_id,
             &self.node_id,
             &self.preset,
@@ -227,6 +203,8 @@ impl WorkContext {
         .into_iter()
         .flatten()
         .all(|s| !s.trim().is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+            && self.attempt != Some(0)
+            && self.pr != Some(0)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +213,9 @@ pub struct TaskRequest {
     pub context: Option<WorkContext>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
+    /// Named limit increases requested by `retry --extend`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub limit_extensions: std::collections::BTreeMap<String, u64>,
     /// Select the build-heavy scheduling priority for this task.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub build_heavy: bool,
@@ -243,7 +224,6 @@ pub struct TaskRequest {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "HarnessProfile::is_empty")]
     pub profile: HarnessProfile,
-    pub task_id: TaskId,
     pub prompt_digest: FileDigest,
     /// Chair-verified review head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -287,12 +267,17 @@ pub enum NetworkAccess {
     Open,
 }
 
+/// Capability name to the source that enabled it, shared by graph and access records.
+pub type CapabilitySources = std::collections::BTreeMap<String, String>;
+
 /// Access a dispatch adds to its mode's defaults, sealed in the authority
 /// digest. Paths are canonical directories checked at the submission edge.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneAccess {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub capability_sources: CapabilitySources,
     /// Explicit network reach; absent defaults to open network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkAccess>,
@@ -357,6 +342,8 @@ impl UserSkillsMode {
 pub struct WriterRequest {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custody_project: Option<ProjectId>,
     pub project: std::path::PathBuf,
     pub worktree: std::path::PathBuf,
 }
@@ -365,7 +352,7 @@ pub struct WriterRequest {
 pub struct WriterDeliveryRequest {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
-    /// Push is the legacy behaviour; integration never checks out either head.
+    /// Push is the default delivery mode; integration never checks out either head.
     #[serde(default, skip_serializing_if = "DeliveryMode::is_push")]
     pub mode: DeliveryMode,
     /// A configured remote name, never a URL supplied by a provider.
@@ -479,6 +466,8 @@ pub enum WriterDeliveryState {
         #[serde(flatten)]
         extra: crate::ExtraFields,
         stage: WriterDeliveryStage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 }
 
@@ -502,8 +491,7 @@ pub struct WriterDeliveryReceipt {
     pub review_acceptance: Option<WriterReviewAcceptance>,
     pub state: WriterDeliveryState,
     /// The destination ref's tips around a delivered push or integration.
-    /// Absent on receipts that did not publish, and on older receipts, whose
-    /// destinations are then unobserved.
+    /// Absent when this receipt did not publish to a destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration: Option<WriterIntegration>,
 }
@@ -533,12 +521,16 @@ pub enum RequestedRoute {
     Adapter {
         #[serde(flatten)]
         extra: crate::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        required_family: Option<String>,
         provider: String,
         name: String,
     },
     Model {
         #[serde(flatten)]
         extra: crate::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        required_family: Option<String>,
         provider: String,
         model: String,
         effort: Option<String>,
@@ -546,6 +538,8 @@ pub enum RequestedRoute {
     Named {
         #[serde(flatten)]
         extra: crate::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        required_family: Option<String>,
         name: String,
         effort: Option<String>,
     },
@@ -553,6 +547,8 @@ pub enum RequestedRoute {
     Review {
         #[serde(flatten)]
         extra: crate::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        required_family: Option<String>,
         name: String,
         effort: Option<String>,
         excluded_families: Vec<String>,
@@ -566,6 +562,55 @@ pub enum RequestedRoute {
     },
 }
 impl RequestedRoute {
+    pub fn required_family(&self) -> Option<&str> {
+        match self {
+            Self::Adapter {
+                required_family, ..
+            }
+            | Self::Model {
+                required_family, ..
+            }
+            | Self::Named {
+                required_family, ..
+            }
+            | Self::Review {
+                required_family, ..
+            } => required_family.as_deref(),
+        }
+    }
+
+    pub fn set_required_family(&mut self, family: Option<String>) {
+        match self {
+            Self::Adapter {
+                required_family, ..
+            }
+            | Self::Model {
+                required_family, ..
+            }
+            | Self::Named {
+                required_family, ..
+            }
+            | Self::Review {
+                required_family, ..
+            } => *required_family = family,
+        }
+    }
+
+    pub fn workload(
+        &self,
+        profile: &HarnessProfile,
+    ) -> Result<crate::route_selection::Workload, serde_json::Error> {
+        if matches!(self, Self::Review { .. }) {
+            return Ok(crate::route_selection::Workload::Review);
+        }
+        profile
+            .knobs
+            .get("routing.workload")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map(|value| value.unwrap_or_default())
+    }
     pub fn projection(self) -> crate::RouteFact {
         match self {
             Self::Adapter { provider, .. } => crate::RouteFact {
@@ -573,6 +618,7 @@ impl RequestedRoute {
                 model: None,
                 effort: None,
                 account_label: None,
+                account_key: None,
             },
             Self::Model {
                 provider,
@@ -584,18 +630,28 @@ impl RequestedRoute {
                 model: Some(model),
                 effort,
                 account_label: None,
+                account_key: None,
             },
             Self::Named { effort, .. } | Self::Review { effort, .. } => crate::RouteFact {
                 provider: None,
                 model: None,
                 effort,
                 account_label: None,
+                account_key: None,
             },
         }
     }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_context: Option<crate::route_selection::RouteAttemptContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_native: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_warning: Option<crate::route_selection::EffortWarning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_warning: Option<String>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub provider: Option<String>,
@@ -608,6 +664,339 @@ pub struct RouteRecord {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_selection: Option<crate::RouteSelectionReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_source: Option<AccountSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_token: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registered_lane_token: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_paths: Option<ProjectPathsReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv_prompt_limit: Option<ArgvPromptLimitReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_preparation: Option<DependencyPreparationReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_skills: Option<UserSkillsReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo_home: Option<CargoHomeReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_closure: Option<Vec<ToolClosureReceipt>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_access: Option<AppliedAccessReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_warnings: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_credential: Option<GitHubCredentialReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_scope: Option<CiScopeReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxModeReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_admission: Option<SandboxAdmissionReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_grant_limit: Option<WriteGrantLimitReceipt>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountSource {
+    Continuation,
+    Pin,
+    Automatic,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxSourceReceipt {
+    Parent,
+    Route,
+    Restriction,
+    Platform,
+    Knob,
+    #[default]
+    Default,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxModeReceipt {
+    #[serde(default)]
+    pub requested: bool,
+    #[serde(default)]
+    pub effective: bool,
+    pub source: SandboxSourceReceipt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxFloorStrength {
+    Off,
+    #[default]
+    Warn,
+    Strict,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxAdmissionReceipt {
+    pub parent_sandboxed: bool,
+    pub boundary: crate::diagnostic::BoundaryClass,
+    pub strength: SandboxFloorStrength,
+    pub knob: String,
+    pub source: crate::LimitSource,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OriginReceipt {
+    Compiled {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
+    },
+    User {
+        path: crate::PathWire,
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
+    },
+}
+
+impl Default for OriginReceipt {
+    fn default() -> Self {
+        Self::Compiled {
+            profile: None,
+            extra: Default::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArgvPromptLimitReceipt {
+    #[serde(default)]
+    pub value: u64,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub origin: OriginReceipt,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteGrantLimitOrigin {
+    Configuration,
+    #[default]
+    CompiledDefault,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WriteGrantLimitReceipt {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub value: u64,
+    #[serde(default)]
+    pub origin: WriteGrantLimitOrigin,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectPathEntry {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectPathWarning {
+    pub code: Option<String>,
+    pub source: Option<String>,
+    pub key: Option<String>,
+    pub reason: Option<String>,
+    pub policy_code: Option<String>,
+    pub policy_message: Option<String>,
+    pub credential_source: Option<String>,
+    pub path: Option<String>,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectPathsReceipt {
+    #[serde(default)]
+    pub shared_paths: Vec<ProjectPathEntry>,
+    #[serde(default)]
+    pub exec_roots: Vec<ProjectPathEntry>,
+    #[serde(default)]
+    pub warnings: Vec<ProjectPathWarning>,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DependencyPreparationReceipt {
+    pub command: Option<String>,
+    pub outcome: Option<String>,
+    pub reason: Option<String>,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UserSkillWarningReceipt {
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UserSkillsSourceReceipt {
+    pub route_policy: Option<Vec<String>>,
+    pub key: Option<String>,
+    pub origin: Option<OriginReceipt>,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UserSkillsReceipt {
+    #[serde(default)]
+    pub mode: crate::UserSkillsMode,
+    #[serde(default)]
+    pub exposed: bool,
+    #[serde(default)]
+    pub directory: Option<String>,
+    #[serde(default)]
+    pub staged_file_count: usize,
+    #[serde(default)]
+    pub warnings: Vec<UserSkillWarningReceipt>,
+    #[serde(default)]
+    pub source: UserSkillsSourceReceipt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_max_bytes: Option<ArgvPromptLimitReceipt>,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CargoHomeReceipt {
+    #[serde(default)]
+    pub path: std::path::PathBuf,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub source_writes: bool,
+    #[serde(default)]
+    pub source_writes_source: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolClosureReceipt {
+    pub tool: String,
+    pub outcome: String,
+    pub reason: Option<String>,
+    pub reasons: Vec<String>,
+    pub unresolved: Vec<String>,
+    pub libraries: Vec<String>,
+    pub already_covered: Vec<String>,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppliedAccessGrantReceipt {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub scope: PathScope,
+    #[serde(default)]
+    pub path_id: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OmittedAccessReceipt {
+    pub code: String,
+    pub reason: String,
+    pub credential_source: Option<String>,
+    pub path: String,
+    pub path_id: String,
+    pub source: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppliedAccessReceipt {
+    pub libraries: Vec<AppliedAccessGrantReceipt>,
+    pub staged_content: Option<String>,
+    pub toolchain_roots: Vec<AppliedAccessGrantReceipt>,
+    pub omitted_grants: Vec<OmittedAccessReceipt>,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitHubCredentialReceipt {
+    pub identity: Option<String>,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub delivery: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub mediation: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CiScopeReceipt {
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub source: crate::LimitSource,
+    #[serde(default)]
+    pub key: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
 }
 impl RouteRecord {
     /// Copy the resolved routing decision into the launch record.
@@ -617,6 +1006,11 @@ impl RouteRecord {
         source: &str,
     ) -> Self {
         Self {
+            extra: Default::default(),
+            selection_context: Some(route.selection_context.clone()),
+            host_native: None,
+            effort_warning: route.diagnostics.effort_warning.clone(),
+            availability_warning: None,
             provider: Some(route.adapter.clone()),
             model: Some(format!("{}/{}", route.adapter, route.model)),
             effort: route.effort.clone(),
@@ -635,6 +1029,7 @@ impl From<RouteRecord> for crate::RouteFact {
             model: r.model,
             effort: r.effort,
             account_label: r.account_label,
+            account_key: r.account_key,
         }
     }
 }
@@ -652,6 +1047,25 @@ pub struct UsageRecord {
     pub reasoning: Option<u64>,
     pub source: Option<String>,
     pub context_basis_points: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_attempt: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_total: Option<Box<UsageRecord>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_invocations: Option<GhInvocationReceipt>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GhInvocationReceipt {
+    #[serde(default)]
+    pub count: u64,
+    pub budget: Option<u64>,
+    pub source: Option<crate::LimitSource>,
+    #[serde(default)]
+    pub over_budget: bool,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
 }
 impl From<UsageRecord> for crate::Usage {
     fn from(u: UsageRecord) -> Self {
@@ -664,36 +1078,6 @@ impl From<UsageRecord> for crate::Usage {
             reasoning: u.reasoning,
         }
     }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Closure {
-    Open,
-    Closing,
-    Closed,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunRecord {
-    #[serde(flatten)]
-    pub extra: crate::ExtraFields,
-    pub schema_version: u64,
-    pub run_id: RunId,
-    pub project_id: ProjectId,
-    pub actor_id: ActorId,
-    pub operation_id: OperationId,
-    pub request_digest: Digest,
-    pub task_ids: Vec<TaskId>,
-    /// Continuation target, independently of nested dispatch metadata.
-    pub parent: Option<AttemptId>,
-    /// Attempt that submitted this nested run; grants no cancellation authority.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_attempt: Option<AttemptId>,
-    pub children: Vec<RunId>,
-    pub revision: u64,
-    pub generation: u64,
-    pub created_at: WallTime,
-    pub closed_at: Option<WallTime>,
-    pub closure: Closure,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -714,17 +1098,36 @@ pub enum OperationKind {
     Resume,
     Cancel,
 }
+/// The persisted notification policy resolved at refusal time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalNotice {
+    Inbox,
+    Off,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationRecord {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_digest_version: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_notice: Option<RefusalNotice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_code: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refusal_notice_done: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_intent_digest: Option<Digest>,
     pub schema_version: u64,
     pub project_id: ProjectId,
     pub actor_id: ActorId,
     pub operation_id: OperationId,
     pub kind: OperationKind,
     pub request_digest: Digest,
-    pub run_id: RunId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_attempt: Option<AttemptId>,
     pub state: OperationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
@@ -738,7 +1141,7 @@ pub struct OperationRecord {
     pub refused_at: Option<WallTime>,
     /// Chair bound at submission, retained for refusal notice recovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refusal_chair: Option<ChairBinding>,
+    pub refusal_chair: Option<crate::custody::Chair>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -828,7 +1231,6 @@ impl From<Outcome> for crate::AttemptOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalCause {
-    PreparationRefused,
     /// The pinned source view of an isolated lane could not be built.
     SourceViewRefused,
     AccountLoginRequired,
@@ -856,7 +1258,7 @@ pub enum TerminalCause {
     FreePoolQuota,
     CommandUnavailable,
     HostNativeUnconfigured,
-    IdentityUnobserved,
+    IdentityMismatch,
     /// A writer declared unfinished work and its pinned head equals its base.
     StoppedNoWork,
     /// A writer finished without a final message.
@@ -864,6 +1266,8 @@ pub enum TerminalCause {
     /// The host stopped a writer at its context handoff threshold so a fresh
     /// attempt continues from its handoff on the same worktree.
     ContextHandoff,
+    /// A writer's handoff says `blocked`; the stop carries its note.
+    Blocked,
     /// The lane's launch-time access token was revoked or expired mid-run
     /// while the account login stayed usable.
     LaneTokenLost,
@@ -873,12 +1277,11 @@ impl TerminalCause {
     /// Bounded label for human status rows. Structured results use `detail`.
     pub fn reason(self) -> &'static str {
         match self {
-            Self::PreparationRefused => "preparation refused; provenant output ID",
             Self::SourceViewRefused => "source view refused; provenant output ID",
             Self::AccountLoginRequired => "login required; provenant output ID",
             Self::RouteResolutionRefused => "route refused; provenant output ID",
             Self::AccessPolicyRefused => "access policy refused; provenant output ID",
-            Self::DiskFloor => "disk below gc.free_floor; provenant output ID",
+            Self::DiskFloor => "disk below gc.critical_free; provenant output ID",
             Self::DiskObservationUnavailable => "disk probe unavailable; provenant output ID",
             Self::StoredPromptUnreadable => "stored prompt unreadable; provenant output ID",
             Self::CloudPlacementRemoved => "cloud placement removed; provenant output ID",
@@ -900,10 +1303,11 @@ impl TerminalCause {
             Self::FreePoolQuota => "free-pool quota exhausted; provenant output ID",
             Self::CommandUnavailable => "command unavailable; provenant output ID",
             Self::HostNativeUnconfigured => "host-native unconfigured; provenant output ID",
-            Self::IdentityUnobserved => "provider identity unobserved; provenant output ID",
+            Self::IdentityMismatch => "provider identity mismatch; provenant output ID",
             Self::StoppedNoWork => "stopped with no work (no new commit); provenant output ID",
             Self::EmptyWriterResult => "empty final message; review writer commit",
             Self::ContextHandoff => "context handoff threshold; provenant output ID",
+            Self::Blocked => "blocked; provenant output ID",
             Self::LaneTokenLost => "lane token lost; provenant output ID",
         }
     }
@@ -914,9 +1318,6 @@ impl TerminalCause {
             Self::AccountLoginRequired => {
                 crate::diagnostic::ProviderFailureFact::AuthRequired.reason()
             }
-            Self::PreparationRefused => {
-                "local launch preparation refused the lane; inspect route and account configuration and local launch evidence before retrying"
-            }
             Self::SourceViewRefused => {
                 "the pinned source view of the lane could not be built; the step and cause follow. Retry, or raise domains.run.source_view_seconds, source_view_entries or source_view_bytes when the cause names a limit"
             }
@@ -924,7 +1325,7 @@ impl TerminalCause {
                 "route resolution refused the lane; check the model, effort, exclusions and availability with `provenant route resolve` and `provenant quota tick`"
             }
             Self::DiskFloor => {
-                "the host writer disk precheck refused launch below gc.free_floor; free disk space or run `provenant gc --apply` before retrying"
+                "the host writer disk precheck refused launch below gc.critical_free; free disk space or run `provenant gc --apply` before retrying"
             }
             Self::DiskObservationUnavailable => {
                 "the host writer disk precheck could not observe free space; restore the host disk observation before retrying"
@@ -982,8 +1383,8 @@ impl TerminalCause {
             Self::HostNativeUnconfigured => {
                 "the requested host-native route is not configured in domains.fabric.host_native; select a configured route"
             }
-            Self::IdentityUnobserved => {
-                "provider identity was not observed; inspect the local session evidence"
+            Self::IdentityMismatch => {
+                "observed provider identity differs from the requested route; inspect the local session evidence"
             }
             Self::StoppedNoWork => {
                 "the writer stopped with no work: its branch has no new commit; acceptance remains unmet"
@@ -994,11 +1395,22 @@ impl TerminalCause {
             Self::ContextHandoff => {
                 "the host stopped the writer at lanes.context_handoff_tokens; a fresh attempt continues from its handoff on the same worktree"
             }
+            Self::Blocked => {
+                "the writer declared itself blocked: an owner decision, a missing capability or an external change prevents progress; its handoff note says what"
+            }
             Self::LaneTokenLost => {
                 "the lane's access token was revoked or expired mid-run while the account login stayed usable; a writer continues from its handoff on a new token"
             }
         }
     }
+}
+
+/// Why a running lane yielded while its graph children were active.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildWait {
+    Children,
+    Admission,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1015,6 +1427,8 @@ pub enum AttemptState {
     Running {
         #[serde(flatten)]
         extra: crate::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_wait: Option<ChildWait>,
     },
     Settling {
         #[serde(flatten)]
@@ -1024,12 +1438,43 @@ pub enum AttemptState {
     Terminal {
         #[serde(flatten)]
         extra: crate::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_cause: Option<TerminalCause>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop: Option<crate::Stop>,
         outcome: Outcome,
         exit_code: Option<i64>,
         finished_at: WallTime,
         reason: Option<String>,
     },
 }
+impl AttemptState {
+    /// Read the sealed typed stop. Malformed wire values fail while the record
+    /// is decoded, before they can be observed as an absent stop.
+    pub fn stop(&self) -> Option<crate::Stop> {
+        match self {
+            Self::Terminal { stop, .. } => stop.clone(),
+            _ => None,
+        }
+    }
+
+    pub fn terminal_cause(&self) -> Option<TerminalCause> {
+        match self {
+            Self::Terminal { terminal_cause, .. } => *terminal_cause,
+            _ => None,
+        }
+    }
+
+    pub fn terminal_note(&self) -> Option<&str> {
+        match self {
+            Self::Terminal { terminal_note, .. } => terminal_note.as_deref(),
+            _ => None,
+        }
+    }
+}
+
 /// A typed refusal made during local provider preparation, before custody.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1090,11 +1535,21 @@ impl SkipKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkippedRoute {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_accounts: Vec<crate::SkippedAccount>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     /// `adapter/model`, or the adapter alone for an account-level skip.
     pub route: String,
     pub kind: SkipKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_error: Option<crate::diagnostic::PlanFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_boundary: Option<crate::diagnostic::BoundaryClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_resource: Option<crate::diagnostic::ResourceFact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confinement_guard: Option<crate::diagnostic::ConfinementGuard>,
     /// Typed readiness cause, when the router supplied one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<crate::RouteExclusionReason>,
@@ -1118,15 +1573,32 @@ impl SkippedRoute {
         boundary: Option<crate::diagnostic::BoundaryClass>,
         resource: Option<crate::diagnostic::ResourceFact>,
     ) -> Result<(), serde_json::Error> {
-        if let Some(boundary) = boundary {
-            self.extra
-                .insert("guard_boundary".into(), serde_json::to_value(boundary)?);
-        }
-        if let Some(resource) = resource {
-            self.extra
-                .insert("guard_resource".into(), serde_json::to_value(resource)?);
-        }
+        self.guard_boundary = boundary;
+        self.guard_resource = resource;
         Ok(())
+    }
+
+    /// Describe a refused route for public output without provider or OS text.
+    pub fn describe(&self) -> String {
+        let diagnostic = self.diagnostic();
+        let mut reason = format!(
+            "{}: {}",
+            crate::diagnostic::safe_text(&self.route),
+            diagnostic
+                .detail
+                .as_deref()
+                .unwrap_or("the route was refused")
+        );
+        if let Some(next) = diagnostic.next {
+            reason.push_str("; ");
+            reason.push_str(&next);
+        }
+        let accounts = &self.skipped_accounts;
+        if !accounts.is_empty() {
+            reason.push_str("; accounts skipped: ");
+            reason.push_str(&crate::SkippedAccount::describe(accounts));
+        }
+        reason
     }
 
     /// Project typed facts only; `detail` may contain provider or OS text.
@@ -1137,25 +1609,36 @@ impl SkippedRoute {
             .map(|cause| cause.diagnostic("REFUSED"))
             .unwrap_or_else(|| self.kind.diagnostic());
         if self.cause == Some(crate::RouteExclusionReason::ConfinementUnavailable)
-            && let Some(guard) = self.extra.get("confinement_guard").and_then(|value| {
-                serde_json::from_value::<crate::diagnostic::ConfinementGuard>(value.clone()).ok()
-            })
+            && let Some(guard) = self.confinement_guard
         {
             diagnostic = guard.project(diagnostic);
         }
         // Preserve the preparation diagnostic when both typed fact sets exist.
-        if let Some(failure) = self.extra.get("plan_error").and_then(|value| {
-            serde_json::from_value::<crate::diagnostic::PlanFailure>(value.clone()).ok()
-        }) {
+        if let Some(failure) = self.plan_error {
             diagnostic.detail = Some(failure.detail().into());
         }
-        match self.extra.get("guard_resource").and_then(|value| {
-            serde_json::from_value::<crate::diagnostic::ResourceFact>(value.clone()).ok()
-        }) {
+        match self.guard_resource {
             Some(fact) => fact
                 .project(diagnostic)
                 .fact(crate::diagnostic::DiagnosticFact::Resource(fact)),
             None => diagnostic,
+        }
+    }
+}
+
+impl Default for SkippedRoute {
+    fn default() -> Self {
+        Self {
+            skipped_accounts: Vec::new(),
+            extra: Default::default(),
+            route: String::new(),
+            kind: SkipKind::Unavailable,
+            plan_error: None,
+            guard_boundary: None,
+            guard_resource: None,
+            confinement_guard: None,
+            cause: None,
+            detail: String::new(),
         }
     }
 }
@@ -1179,9 +1662,10 @@ pub struct WriteGrantRecord {
     pub scope: PathScope,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PathScope {
+    #[default]
     Exact,
     Subtree,
 }
@@ -1217,58 +1701,237 @@ pub enum TerminalEvidence {
     },
 }
 
-/// The closed reason an attempt reached its terminal state. The free-text
-/// reason on the state explains; this enum is what callers match on.
+/// Who owns a settlement cause, independently of any completed provider work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SettlementReason {
-    /// The provider finished and reported its results.
-    Completed,
-    /// The provider finished without a final handoff, so nothing was reported.
-    HandoffMissing,
-    /// The lane declared that work remains.
-    DeclaredStop,
-    /// The provider stopped for a reason other than a finished turn.
-    ProviderStop,
-    /// A writer left edits it did not commit.
-    UncommittedWork,
-    /// Refused before any process started.
-    PreLaunchRefusal,
-    Cancelled,
-    Lost,
-    Unsettled,
-    /// The provider ran and ended in a non-success outcome.
+pub enum CauseSource {
+    Provider,
+    Host,
+    Owner,
+    /// Retained terminal data did not carry a valid typed stop or reason.
+    Unavailable,
+}
+
+/// Whether a settled attempt may release its graph dependants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettlementNodeOutcome {
+    Succeeded,
     Failed,
 }
+
+/// The source and graph result for one settlement reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SettlementRule {
+    pub reason: SettlementReason,
+    pub source: CauseSource,
+    pub node_outcome: SettlementNodeOutcome,
+    pub terminal_outcome: SettlementTerminalOutcome,
+    pub stop_cause: Option<crate::stop::StopCause>,
+}
+
+/// How a settlement reason normalises a successful-looking provisional outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettlementTerminalOutcome {
+    Preserve,
+    Succeeded,
+    ReviewRequired,
+    Uncommitted,
+}
+
+impl SettlementTerminalOutcome {
+    fn apply(self, observed: Outcome) -> Outcome {
+        match self {
+            Self::Preserve => observed,
+            Self::Succeeded => Outcome::Succeeded,
+            Self::ReviewRequired if observed == Outcome::Succeeded => Outcome::ReviewRequired,
+            Self::ReviewRequired => observed,
+            Self::Uncommitted
+                if matches!(observed, Outcome::Succeeded | Outcome::ReviewRequired) =>
+            {
+                Outcome::Uncommitted
+            }
+            Self::Uncommitted => observed,
+        }
+    }
+}
+
+/// One declaration owns the durable reasons and their cross-cutting policy.
+/// Generated enum, ALL and table cannot drift apart.
+macro_rules! settlement_reasons {
+    ($($(#[$meta:meta])* $reason:ident { source: $source:ident, node: $node:ident, outcome: $outcome:ident, stop: $stop:expr }),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum SettlementReason {
+            $($(#[$meta])* $reason),+
+        }
+
+        impl SettlementReason {
+            pub const ALL: &'static [Self] = &[$(Self::$reason),+];
+
+            pub const fn rule(self) -> SettlementRule {
+                match self {
+                    $(Self::$reason => SettlementRule {
+                        reason: Self::$reason,
+                        source: CauseSource::$source,
+                        node_outcome: SettlementNodeOutcome::$node,
+                        terminal_outcome: SettlementTerminalOutcome::$outcome,
+                        stop_cause: $stop,
+                    }),+
+                }
+            }
+        }
+
+        pub const SETTLEMENT_TABLE: &[SettlementRule] = &[
+            $(SettlementRule {
+                reason: SettlementReason::$reason,
+                source: CauseSource::$source,
+                node_outcome: SettlementNodeOutcome::$node,
+                terminal_outcome: SettlementTerminalOutcome::$outcome,
+                stop_cause: $stop,
+            }),+
+        ];
+    };
+}
+
+settlement_reasons! {
+    /// The provider finished and reported its results.
+    Completed { source: Provider, node: Succeeded, outcome: Preserve, stop: None },
+    /// A complete handoff preceded the host token-budget stop.
+    CompletedBeforeBudget { source: Host, node: Succeeded, outcome: Succeeded, stop: Some(crate::stop::StopCause::TokenBudget) },
+    /// The provider finished without a final handoff, so nothing was reported.
+    HandoffMissing { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMissing) },
+    /// A final handoff was present but malformed; retain its field diagnostics.
+    HandoffMalformed { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMalformed) },
+    /// The writer exited without a final message.
+    EmptyResult { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::EmptyResult) },
+    /// The lane declared that work remains.
+    DeclaredStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: None },
+    /// The provider stopped for a reason other than a finished turn.
+    ProviderStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
+    /// A writer left edits it did not commit.
+    UncommittedWork { source: Provider, node: Failed, outcome: Uncommitted, stop: None },
+    /// Refused before any process started.
+    PreLaunchRefusal { source: Host, node: Failed, outcome: Preserve, stop: None },
+    Cancelled { source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
+    Lost { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
+    Unsettled { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
+    /// The provider ran and ended in a non-success outcome.
+    Failed { source: Provider, node: Failed, outcome: Preserve, stop: None },
+}
 impl SettlementReason {
-    /// Derive the reason from facts the terminal decision already holds.
+    /// Derive the reason from the complete terminal facts before any reader
+    /// interprets the outcome, stop or next step independently.
     pub fn derive(
         outcome: Outcome,
         evidence: Option<&TerminalEvidence>,
         partial: &[PartialSignal],
+        terminal_cause: Option<TerminalCause>,
+        handoff: Result<Option<&crate::handoff::Handoff>, &crate::handoff::HandoffError>,
     ) -> Self {
         match (evidence, outcome) {
-            // A lost or unsettled outcome may still carry a process exit: the
-            // process ran, but custody or reporting was not proven. The
-            // outcome names the reason, whatever evidence accompanied it.
             (_, Outcome::Lost) => Self::Lost,
             (_, Outcome::Unsettled) => Self::Unsettled,
             (Some(TerminalEvidence::Lost { .. }), _) => Self::Lost,
             (Some(TerminalEvidence::Unsettled { .. }), _) => Self::Unsettled,
             (_, Outcome::Cancelled) => Self::Cancelled,
             (Some(TerminalEvidence::PreLaunchRefusal), _) => Self::PreLaunchRefusal,
-            (_, Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted) => [
-                (PartialSignal::DeclaredStop, Self::DeclaredStop),
-                (PartialSignal::HandoffMissing, Self::HandoffMissing),
-                (PartialSignal::ProviderStop, Self::ProviderStop),
-                (PartialSignal::UncommittedWork, Self::UncommittedWork),
-            ]
-            .into_iter()
-            .find(|(signal, _)| partial.contains(signal))
-            .map_or(Self::Completed, |(_, reason)| reason),
-            _ => Self::Failed,
+            _ if handoff.is_err() => Self::HandoffMalformed,
+            _ => match terminal_cause {
+                Some(TerminalCause::EmptyWriterResult) => Self::EmptyResult,
+                Some(TerminalCause::Blocked | TerminalCause::StoppedNoWork) => Self::DeclaredStop,
+                Some(TerminalCause::ProviderEarlyStop) => Self::ProviderStop,
+                _ if handoff
+                    .is_ok_and(|handoff| handoff.is_some_and(|handoff| handoff.unfinished())) =>
+                {
+                    Self::DeclaredStop
+                }
+                _ if partial.contains(&PartialSignal::DeclaredStop) => Self::DeclaredStop,
+                _ if partial.contains(&PartialSignal::HandoffMissing) => Self::HandoffMissing,
+                _ if partial.contains(&PartialSignal::ProviderStop) => Self::ProviderStop,
+                _ if partial.contains(&PartialSignal::UncommittedWork)
+                    || outcome == Outcome::Uncommitted =>
+                {
+                    Self::UncommittedWork
+                }
+                Some(TerminalCause::TokenBudget)
+                    if matches!(
+                        outcome,
+                        Outcome::Succeeded
+                            | Outcome::ReviewRequired
+                            | Outcome::Failed
+                            | Outcome::TimedOut
+                    ) && handoff.is_ok_and(|handoff| {
+                        handoff.is_some_and(|handoff| {
+                            !handoff.unfinished() && handoff.validate().is_ok()
+                        })
+                    }) =>
+                {
+                    Self::CompletedBeforeBudget
+                }
+                _ if matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired) => {
+                    Self::Completed
+                }
+                _ => Self::Failed,
+            },
         }
     }
+
+    /// A completed budget boundary retains its host stop without closing
+    /// dependants. Other typed stops keep dependants closed.
+    pub const fn node_outcome(self, stop: Option<crate::stop::StopCause>) -> SettlementNodeOutcome {
+        if stop.is_some()
+            && !matches!(
+                self.rule().terminal_outcome,
+                SettlementTerminalOutcome::Succeeded
+            )
+        {
+            SettlementNodeOutcome::Failed
+        } else {
+            self.rule().node_outcome
+        }
+    }
+
+    /// Derive the persisted reason, sealed stop, source and graph result from
+    /// the same complete terminal facts.
+    pub fn classify(
+        outcome: Outcome,
+        evidence: Option<&TerminalEvidence>,
+        partial: &[PartialSignal],
+        terminal_cause: Option<TerminalCause>,
+        handoff: Result<Option<&crate::handoff::Handoff>, &crate::handoff::HandoffError>,
+    ) -> Result<SettlementClassification, crate::stop::StopError> {
+        let reason = Self::derive(outcome, evidence, partial, terminal_cause, handoff);
+        let outcome = reason.rule().terminal_outcome.apply(outcome);
+        let stop = crate::stop::Stop::sealed(
+            terminal_cause,
+            outcome,
+            reason,
+            handoff
+                .map(|handoff| handoff.cloned())
+                .map_err(Clone::clone),
+        )?;
+        let stop_cause = stop.as_ref().map(crate::stop::Stop::cause);
+        let source = stop_cause.map_or(reason.rule().source, crate::stop::StopCause::source);
+        let node_outcome = reason.node_outcome(stop_cause);
+        Ok(SettlementClassification {
+            outcome,
+            reason,
+            stop,
+            source,
+            node_outcome,
+        })
+    }
+}
+
+/// Complete terminal classification shared by persistence, graph transitions
+/// and route quality.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettlementClassification {
+    pub outcome: Outcome,
+    pub reason: SettlementReason,
+    pub stop: Option<crate::stop::Stop>,
+    pub source: CauseSource,
+    pub node_outcome: SettlementNodeOutcome,
 }
 
 /// Independently retried work after a terminal decision.
@@ -1316,7 +1979,6 @@ pub struct SettlementReceipts {
     pub git_import: EffectDisposition,
     pub manifest_conflict: EffectDisposition,
     pub cleanup_custody_release: EffectDisposition,
-    #[serde(default)]
     pub delivery: EffectDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancellation: Option<CancellationDisposition>,
@@ -1337,26 +1999,227 @@ impl SettlementReceipts {
     }
 }
 
+fn decode_continuation<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let value = Option::<String>::deserialize(deserializer)?;
+    if value.as_deref() == Some("automatic") {
+        return Err(serde::de::Error::custom(
+            "automatic continuation was removed",
+        ));
+    }
+    Ok(value)
+}
+
+/// Stable identity of a graph hosted by a peer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerGraph {
+    pub host: provenant_core::HostId,
+    pub graph_id: String,
+}
+
+/// Typed peer graph metadata carried beside an attempt or an output page.
+/// Its serde flattening keeps the established wire keys at the owning record.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PeerGraphFields {
+    #[serde(rename = "peer_graph", skip_serializing_if = "Option::is_none")]
+    pub peer_graph: Option<PeerGraph>,
+    #[serde(
+        rename = "peer_graph_collected",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub peer_graph_collected: Option<bool>,
+    #[serde(
+        rename = "peer_origin_work_key",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub peer_origin_work_key: Option<crate::WorkKey>,
+    #[serde(
+        rename = "peer_origin_context",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub peer_origin_context: Option<WorkContext>,
+    #[serde(rename = "peer_subtree", skip_serializing_if = "Option::is_none")]
+    pub peer_subtree: Option<PeerGraphSubtree>,
+    #[serde(
+        rename = "graph_custody_released",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub graph_custody_released: Option<bool>,
+    #[serde(
+        rename = "graph_handoff",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "decode_peer_handoff"
+    )]
+    /// The peer's sealed settlement outcome: a declaration, an explicit
+    /// malformed declaration, or none.
+    pub graph_handoff: Option<crate::handoff::HandoffResult>,
+}
+
+impl PeerGraphFields {
+    /// Apply a projection while preserving peer metadata already attached to the record.
+    pub fn merge(&mut self, newer: Self) {
+        if newer.peer_graph.is_some() {
+            self.peer_graph = newer.peer_graph;
+        }
+        if newer.peer_graph_collected.is_some() {
+            self.peer_graph_collected = newer.peer_graph_collected;
+        }
+        if newer.peer_origin_work_key.is_some() {
+            self.peer_origin_work_key = newer.peer_origin_work_key;
+        }
+        if newer.peer_origin_context.is_some() {
+            self.peer_origin_context = newer.peer_origin_context;
+        }
+        if newer.peer_subtree.is_some() {
+            self.peer_subtree = newer.peer_subtree;
+        }
+        if newer.graph_custody_released.is_some() {
+            self.graph_custody_released = newer.graph_custody_released;
+        }
+        if newer.graph_handoff.is_some() {
+            self.graph_handoff = newer.graph_handoff;
+        }
+    }
+}
+
+/// Output-only peer metadata, with the byte length owned by the output boundary.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PeerOutputFields {
+    #[serde(flatten)]
+    pub graph: PeerGraphFields,
+    #[serde(rename = "length", skip_serializing_if = "Option::is_none")]
+    pub length: Option<u64>,
+    #[serde(rename = "planner_fallback", skip_serializing_if = "Option::is_none")]
+    pub planner_fallback: Option<String>,
+}
+
+impl PeerOutputFields {
+    pub fn merge_graph(&mut self, newer: PeerGraphFields) {
+        self.graph.merge(newer);
+    }
+}
+
+impl From<PeerGraphFields> for PeerOutputFields {
+    fn from(graph: PeerGraphFields) -> Self {
+        Self {
+            graph,
+            length: None,
+            planner_fallback: None,
+        }
+    }
+}
+
+fn decode_peer_handoff<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::handoff::HandoffResult>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(sealed) = Option::<crate::handoff::HandoffResult>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    // A sealed declaration was validated on its host; one that no longer
+    // validates is corrupt, not evidence.
+    match sealed {
+        Ok(Some(handoff)) => {
+            let bytes = serde_json::to_vec(&handoff).map_err(serde::de::Error::custom)?;
+            crate::handoff::Handoff::from_json(&bytes)
+                .map(|handoff| Some(Ok(Some(handoff))))
+                .map_err(serde::de::Error::custom)
+        }
+        other => Ok(Some(other)),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerGraphSubtree {
+    pub status: crate::graph::GraphStatus,
+    pub outcome: Option<crate::graph::GraphOutcome>,
+    pub next_node: Option<usize>,
+    pub checkpoint: PeerGraphCheckpoint,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerGraphCheckpoint {
+    pub schema_version: u64,
+    pub graph_id: String,
+    pub plan_digest: String,
+    pub cancelled: bool,
+    pub nodes: Vec<PeerGraphNode>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerGraphNode {
+    pub id: String,
+    pub state: crate::graph::NodeState,
+    pub worktree: Option<String>,
+    pub attempts: Vec<PeerGraphAttempt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerGraphAttempt {
+    pub launched: bool,
+    pub key: crate::graph::AttemptKey,
+    pub route: PeerGraphRoute,
+    pub state: crate::graph::AttemptState,
+    pub attempt_ref: Option<String>,
+    pub outcome: Option<crate::graph::AttemptOutcome>,
+    pub launch_actor: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerGraphRoute {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+    pub adapter: Option<String>,
+    pub model: Option<String>,
+    pub alias: Option<String>,
+    pub name: Option<String>,
+    pub effort: Option<String>,
+    pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_family: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<WorkContext>,
+    /// The attempt's work identity: graph, node and attempt number.
+    pub key: crate::WorkKey,
+    #[serde(flatten)]
+    pub peer: PeerGraphFields,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_overrun: Option<crate::limit::BudgetOverrun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_wrap_up_refused: Option<crate::limit::BudgetWrapUpRefused>,
+    /// Frozen repository command and lease phase used for admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_admission_binding: Option<RepositoryAdmissionBinding>,
     /// Human-supplied task title, when provided at submission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// `fresh` when a resume could not use provider continuation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "decode_continuation"
+    )]
     pub continuation: Option<String>,
     #[serde(default, skip_serializing_if = "HarnessProfile::is_empty")]
     pub profile: HarnessProfile,
+    /// The limits resolved when the attempt was admitted to launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<crate::LaneLimits>,
     pub schema_version: u64,
     pub attempt_id: AttemptId,
-    pub run_id: RunId,
     pub project_id: ProjectId,
-    pub task_id: TaskId,
-    pub operation_id: OperationId,
     pub attempt_number: u64,
     pub revision: u64,
     pub generation: u64,
@@ -1371,7 +2234,6 @@ pub struct AttemptRecord {
     pub observed_route: Option<RouteRecord>,
     pub authority_digest: Digest,
     /// Project-relative write exceptions actually granted before launch.
-    #[serde(default)]
     pub read_only_writable: Vec<String>,
     /// Explicit write allowances from the plan handed to confinement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1379,12 +2241,8 @@ pub struct AttemptRecord {
     /// Writers only; concrete Git paths stay out of the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_grants_digest: Option<Digest>,
-    /// Compatibility with records from earlier development versions; never used as authority.
-    #[serde(default, skip_serializing)]
-    pub granted_tracking_ref: Option<String>,
     pub subject: Option<GitOid>,
     pub head: Option<GitOid>,
-    #[serde(default)]
     pub protected_paths: Vec<PathWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<WriterDeliveryReceipt>,
@@ -1409,11 +2267,7 @@ pub struct AttemptRecord {
     /// identity-checked. Used only for live coverage reporting.
     #[serde(skip)]
     pub process_observation_valid: Transient<bool>,
-    /// Whether the guardian reports a current disk pause or the host reports
-    /// a build-slot wait; either makes silence inapplicable.
-    #[serde(skip)]
-    pub provider_silence_suppressed: Transient<bool>,
-    /// Custody evidence. None in older records must never authorise a writer retry.
+    /// Custody evidence. Absence is an unknown launch state and never authorises a writer retry.
     #[serde(default)]
     pub provider_launched: Option<bool>,
     /// Confirmed pre-custody preparation refusal, sealed with its terminal row.
@@ -1452,20 +2306,41 @@ pub struct AttemptRecord {
     /// Fallback candidates that did not launch before this attempt did.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_routes: Vec<SkippedRoute>,
-    /// Stamped when the attempt is created; a record without one decodes as
-    /// all unknown.
-    #[serde(default)]
+    /// Trace context stamped when the attempt is created.
     pub trace: crate::Trace,
 }
+
+/// Encode the public form of an attempt, retaining all public extra metadata.
+pub fn public_attempt_value(
+    record: &AttemptRecord,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut value = serde_json::to_value(record)?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        <serde_json::Error as serde::ser::Error>::custom("attempt record must be an object")
+    })?;
+    object.remove("repository_admission_binding");
+    Ok(value)
+}
+
+/// Serialize an attempt for read-only owner and peer projections.
+pub fn serialise_public_attempt<S: serde::Serializer>(
+    record: &AttemptRecord,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    public_attempt_value(record)
+        .map_err(serde::ser::Error::custom)?
+        .serialize(serializer)
+}
+
 impl AttemptRecord {
-    /// Usage attributable to this attempt, excluding legacy Codex session totals.
+    /// Usage attributable to this attempt; unmarked Codex totals are session-wide.
     pub fn effective_usage(&self) -> UsageRecord {
         if self
             .applied_route
             .as_ref()
             .and_then(|route| route.provider.as_deref())
             == Some("codex")
-            && self.usage.extra.get("per_attempt") != Some(&serde_json::Value::Bool(true))
+            && self.usage.per_attempt != Some(true)
         {
             UsageRecord::default()
         } else {
@@ -1473,47 +2348,56 @@ impl AttemptRecord {
         }
     }
 
-    pub fn user_skills(&self) -> Option<&serde_json::Value> {
-        self.applied_route.as_ref()?.extra.get("user_skills")
+    pub fn user_skills(&self) -> Option<&UserSkillsReceipt> {
+        self.applied_route.as_ref()?.user_skills.as_ref()
     }
 
-    /// The recorded sandbox of a launched attempt: `{"sandboxed", "source"}`.
-    pub fn sandbox(&self) -> Option<&serde_json::Value> {
-        self.applied_route.as_ref()?.extra.get(SANDBOX_ROUTE_FIELD)
+    /// The recorded sandbox of a launched attempt: requested/effective/source.
+    pub fn sandbox(&self) -> Option<&SandboxModeReceipt> {
+        self.applied_route.as_ref()?.sandbox.as_ref()
     }
 
-    /// Whether a lane this attempt submits or admits must be sandboxed. It
-    /// must when this attempt was sandboxed by distrust: its route, its own
-    /// parent, the `lanes.sandbox` knob or the platform. A sandbox that only
-    /// enforces read-only access or a narrowed network does not pass on, so a
-    /// read-only planner's writers stay unsandboxed. A record that does not
-    /// say, such as one written before lanes could run unsandboxed, floors.
+    /// Whether this attempt carries a user-enabled sandbox admission floor.
+    /// Missing evidence does not enable sandboxing. Children use the selected
+    /// warn/off/strict policy rather than treating this as an authority grant.
     pub fn floors_children(&self) -> bool {
         sandbox_floors_children(self.sandbox())
     }
 }
 /// [`AttemptRecord::floors_children`] for a recorded sandbox mode.
-fn sandbox_floors_children(sandbox: Option<&serde_json::Value>) -> bool {
-    let Some(sandbox) = sandbox else {
-        return true;
-    };
-    match sandbox
-        .get("effective")
-        .or_else(|| sandbox.get("sandboxed"))
-        .and_then(serde_json::Value::as_bool)
-    {
-        Some(false) => false,
-        Some(true) => !matches!(
-            sandbox.get("source").and_then(serde_json::Value::as_str),
-            Some("read_only" | "network" | "default")
-        ),
-        None => true,
-    }
+fn sandbox_floors_children(sandbox: Option<&SandboxModeReceipt>) -> bool {
+    sandbox.is_some_and(|sandbox| {
+        sandbox.effective
+            && (sandbox.requested
+                || matches!(
+                    sandbox.source,
+                    SandboxSourceReceipt::Parent | SandboxSourceReceipt::Route
+                ))
+    })
 }
-/// The applied-route field that records an attempt's sandbox mode.
-pub const SANDBOX_ROUTE_FIELD: &str = "sandbox";
-/// The task field the host sets when the submitting lane was sandboxed.
-pub const PARENT_SANDBOXED_FIELD: &str = "parent_sandboxed";
+/// Sealed launch classification, shared by local, peer and recovered attempts.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchPolicy {
+    pub confidential: bool,
+    pub sources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_config: Option<String>,
+}
+
+/// The one sandbox admission floor. The parent fact comes from a host-sealed
+/// attempt, never from prompt text. This is advisory policy (boundary None),
+/// with warn as its default; strict is an explicit user override.
+pub fn admission_floor(
+    parent_sandboxed: bool,
+    sandbox: Option<&str>,
+    strength: &str,
+) -> (bool, bool) {
+    let applies = parent_sandboxed && sandbox != Some("on");
+    (
+        applies && strength == "strict",
+        applies && strength == "warn",
+    )
+}
 /// A live-only value that is deliberately absent from durable identity and
 /// equality. It can decorate a record read without making two reads of that
 /// record compare differently.
@@ -1537,8 +2421,12 @@ pub fn provider_silence_reason(silent_for_ms: u64) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PartialSignal {
-    /// A successful final answer did not include a valid final handoff.
+    /// Identity evidence is incomplete; usage stays attributed to the requested account.
+    IdentityUnobserved,
+    /// A successful final answer did not include a final handoff.
     HandoffMissing,
+    /// A final handoff was present but malformed.
+    HandoffMalformed,
     /// The final answer ends with a valid `handoff` block whose status is
     /// `stopped_early` or `blocked`: the lane's statement that work remains.
     DeclaredStop,
@@ -1550,7 +2438,9 @@ pub enum PartialSignal {
 impl PartialSignal {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::IdentityUnobserved => "identity_unobserved",
             Self::HandoffMissing => "handoff_missing",
+            Self::HandoffMalformed => "handoff_malformed",
             Self::DeclaredStop => "declared_stop",
             Self::ProviderStop => "provider_stop",
             Self::UncommittedWork => "uncommitted_work",
@@ -1585,6 +2475,135 @@ impl LaneClass {
         }
     }
 }
+/// Why a lane is waiting, including the facts needed to render a useful label.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LaneWaitReason {
+    HostStalled,
+    Children,
+    Admission,
+    ProviderSilence { silent_for_ms: u64 },
+    LaunchPreparation,
+    RecoveryWorkerRefused { used: u64, limit: u64 },
+}
+
+impl LaneWaitReason {
+    pub fn description(&self) -> String {
+        match self {
+            Self::HostStalled => "host_stalled: supervisor is in uninterruptible sleep".into(),
+            Self::Children => "children: host and project admission yielded".into(),
+            Self::Admission => "admission: waiting for host or project capacity".into(),
+            Self::ProviderSilence { silent_for_ms } => provider_silence_reason(*silent_for_ms),
+            Self::LaunchPreparation => "launch preparation".into(),
+            Self::RecoveryWorkerRefused { used, limit } => format!(
+                "launch: last recovery worker refused: user process count {used} of {limit}"
+            ),
+        }
+    }
+}
+
+/// Lifecycle phase for a frozen repository admission command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryAdmissionPhase {
+    AcquirePending,
+    Acquired,
+    ReleasePending,
+    Released,
+}
+
+impl RepositoryAdmissionPhase {
+    pub fn command(self) -> Option<&'static str> {
+        match self {
+            Self::AcquirePending => Some("acquire"),
+            Self::ReleasePending => Some("release"),
+            Self::Acquired | Self::Released => None,
+        }
+    }
+}
+
+/// The command, source and lifecycle phase frozen with an admitted attempt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RepositoryAdmissionBinding {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+    pub source: crate::PortSource,
+    pub command: crate::PortCommand,
+    pub command_digest: FileDigest,
+    pub lease_epoch: u64,
+    pub phase: RepositoryAdmissionPhase,
+}
+
+impl<'de> Deserialize<'de> for RepositoryAdmissionBinding {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(flatten)]
+            extra: crate::ExtraFields,
+            source: crate::PortSource,
+            command: crate::PortCommand,
+            command_digest: FileDigest,
+            lease_epoch: u64,
+            phase: RepositoryAdmissionPhase,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let binding = Self {
+            extra: wire.extra,
+            source: wire.source,
+            command: wire.command,
+            command_digest: wire.command_digest,
+            lease_epoch: wire.lease_epoch,
+            phase: wire.phase,
+        };
+        if !binding.valid() {
+            return Err(serde::de::Error::custom(
+                "invalid repository admission binding",
+            ));
+        }
+        Ok(binding)
+    }
+}
+
+impl RepositoryAdmissionBinding {
+    pub fn new(source: crate::PortSource, command: &crate::PortCommand) -> Self {
+        Self {
+            extra: Default::default(),
+            source,
+            command: command.clone(),
+            command_digest: command.digest(),
+            lease_epoch: 1,
+            phase: RepositoryAdmissionPhase::AcquirePending,
+        }
+    }
+
+    pub fn valid(&self) -> bool {
+        self.lease_epoch != 0
+            && self.command.is_valid()
+            && self.command_digest == self.command.digest()
+    }
+
+    pub fn can_transition_to(&self, next: RepositoryAdmissionPhase, active_owner: bool) -> bool {
+        matches!(
+            (self.phase, next),
+            (
+                RepositoryAdmissionPhase::AcquirePending,
+                RepositoryAdmissionPhase::Acquired
+            ) | (
+                RepositoryAdmissionPhase::AcquirePending,
+                RepositoryAdmissionPhase::ReleasePending
+            ) | (
+                RepositoryAdmissionPhase::Acquired,
+                RepositoryAdmissionPhase::ReleasePending
+            ) | (
+                RepositoryAdmissionPhase::ReleasePending,
+                RepositoryAdmissionPhase::Released
+            )
+        ) || (active_owner
+            && self.phase == RepositoryAdmissionPhase::Released
+            && next == RepositoryAdmissionPhase::AcquirePending)
+    }
+}
+
 /// What a lane that has not started is waiting for, shown by `lanes` and carried
 /// over the peer channel so a peer's lanes read like local ones.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1593,14 +2612,13 @@ pub struct LaneWait {
     pub extra: crate::ExtraFields,
     pub attempt_id: AttemptId,
     pub lane_class: LaneClass,
-    pub waiting_for: String,
+    pub waiting_for: LaneWaitReason,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmissionTicket {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub schema_version: u64,
-    pub operation_id: OperationId,
     pub attempt_id: AttemptId,
     pub project_id: ProjectId,
     pub sequence: u64,
@@ -1609,19 +2627,12 @@ pub struct AdmissionTicket {
     pub active: bool,
     /// Advisory available-memory floor as basis points of installed memory.
     pub memory_floor_basis_points: u64,
-    pub disk_floor_bytes: u64,
     /// Spacing for this lane's class, fixed at submission.
     pub startup_spacing_ms: u64,
-    /// Absent on tickets from before lane classes, which decode as writers.
-    #[serde(default)]
     pub lane_class: LaneClass,
-    /// The owning run's batch concurrency, distinct from host admission caps.
-    pub run_concurrency: u64,
     pub quota_permit: Option<String>,
     pub admission_deadline: WallTime,
-    /// The provider's wall-clock allowance once it starts, in seconds. Absent
-    /// (zero) on tickets from before runtime deadlines were recorded.
-    #[serde(default)]
+    /// The provider's wall-clock allowance once it starts, in seconds.
     pub runtime_seconds: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1631,11 +2642,9 @@ pub struct RunEvent {
     pub schema_version: u64,
     pub sequence: u64,
     pub project_id: ProjectId,
-    pub run_id: RunId,
     pub attempt_id: AttemptId,
     pub revision: u64,
     pub change: AttemptState,
-    #[serde(default)]
     pub trace: crate::Trace,
 }
 #[cfg(test)]
@@ -1643,26 +2652,103 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_sandbox_forced_by_distrust_floors_children() {
-        let floors = |value: serde_json::Value| sandbox_floors_children(Some(&value));
-        for source in ["route", "parent", "knob", "platform", "unknown"] {
-            assert!(
-                floors(serde_json::json!({"sandboxed":true,"source":source})),
-                "{source}"
-            );
+    fn attempt_state_fields_round_trip_and_reject_malformed_values() {
+        let base = serde_json::json!({
+            "state":"terminal",
+            "outcome":"failed",
+            "exit_code":1,
+            "finished_at":serde_json::to_value(WallTime::from_micros(1).unwrap()).unwrap(),
+            "reason":"fixture"
+        });
+        for (base, field, value, malformed) in [
+            (
+                base.clone(),
+                "terminal_cause",
+                serde_json::json!("token_budget"),
+                serde_json::json!("unknown"),
+            ),
+            (
+                base.clone(),
+                "terminal_note",
+                serde_json::json!("bounded reason"),
+                serde_json::json!(17),
+            ),
+            (
+                serde_json::json!({"state":"running"}),
+                "child_wait",
+                serde_json::json!("children"),
+                serde_json::json!("unknown"),
+            ),
+            (
+                serde_json::json!({"state":"running"}),
+                "child_wait",
+                serde_json::json!("admission"),
+                serde_json::json!({"kind":"children"}),
+            ),
+        ] {
+            let mut wire = base;
+            wire[field] = value;
+            let bytes = serde_json::to_vec(&wire).unwrap();
+            let decoded: AttemptState =
+                crate::json::decode(bytes.as_slice(), crate::json::Limits::default()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+            wire[field] = malformed;
+            let bytes = serde_json::to_vec(&wire).unwrap();
+            assert!(matches!(
+                crate::json::decode::<AttemptState, _>(
+                    bytes.as_slice(),
+                    crate::json::Limits::default()
+                ),
+                Err(crate::json::DecodeError::Typed { .. })
+            ));
         }
-        for source in ["read_only", "network"] {
-            assert!(
-                !floors(serde_json::json!({"sandboxed":true,"source":source})),
-                "{source}"
-            );
+    }
+
+    #[test]
+    fn only_a_user_enabled_sandbox_floors_children() -> Result<(), Box<dyn std::error::Error>> {
+        let project = ProjectId::from_bytes([1; 16]);
+        let mut record: AttemptRecord = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "key":crate::WorkKey::new(project, "sandbox-test", "lane", 1)?,
+            "attempt_id":AttemptId::from_bytes([2; 16]), "project_id":project,
+            "attempt_number":1, "revision":1, "generation":1,
+            "requested_route":{"kind":"named","name":"fixture"},
+            "authority_digest":Digest::from_bytes([3; 32]), "queued_at":WallTime::from_micros(1)?,
+            "state":{"state":"queued"}, "usage":{}, "trace":{},
+            "read_only_writable":[], "protected_paths":[],
+            "prompt":{"path":{"encoding":"utf8","path":"prompt"},
+                "digest":CanonicalV1::file_digest(b"fixture"),"bytes":7,"complete":true,"redacted":false}
+        }))?;
+        assert!(!record.floors_children());
+        let mut floors = |source: SandboxSourceReceipt, requested: bool, effective: bool| {
+            record.applied_route = Some(RouteRecord {
+                sandbox: Some(SandboxModeReceipt {
+                    requested,
+                    effective,
+                    source,
+                    warning: None,
+                    extra: Default::default(),
+                }),
+                ..Default::default()
+            });
+            record.floors_children()
+        };
+        for (source, parent_derived) in [
+            (SandboxSourceReceipt::Route, true),
+            (SandboxSourceReceipt::Parent, true),
+            (SandboxSourceReceipt::Knob, false),
+            (SandboxSourceReceipt::Platform, false),
+            (SandboxSourceReceipt::Restriction, false),
+            (SandboxSourceReceipt::Default, false),
+        ] {
+            for requested in [false, true] {
+                for effective in [false, true] {
+                    let expected = effective && (requested || parent_derived);
+                    assert_eq!(floors(source, requested, effective), expected);
+                }
+            }
         }
-        assert!(!floors(
-            serde_json::json!({"sandboxed":false,"source":"default"})
-        ));
-        assert!(floors(serde_json::json!({"sandboxed":true})));
-        assert!(floors(serde_json::json!({})));
-        assert!(sandbox_floors_children(None));
+        assert!(!floors(SandboxSourceReceipt::Default, false, false));
+        Ok(())
     }
 
     #[test]
@@ -1674,15 +2760,266 @@ mod tests {
             "cause": "confinement_unavailable", "confinement_guard": "protected_path_overlap"
         }))?;
         skipped = serde_json::from_slice(&serde_json::to_vec(&skipped)?)?;
-        assert_eq!(skipped.extra["guard_boundary"], "authority");
+        assert_eq!(
+            skipped.guard_boundary,
+            Some(crate::diagnostic::BoundaryClass::Authority)
+        );
         assert_eq!(
             skipped.diagnostic().detail.as_deref(),
             Some(crate::diagnostic::PlanFailure::ProtectedOverlap.detail())
         );
-        skipped
-            .extra
-            .insert("plan_error".into(), "SECRET_SENTINEL".into());
+        let mut malformed = serde_json::to_value(&skipped)?;
+        malformed["plan_error"] = serde_json::json!("SECRET_SENTINEL");
+        assert!(serde_json::from_value::<SkippedRoute>(malformed).is_err());
         assert!(!serde_json::to_string(&skipped.diagnostic())?.contains("SECRET_SENTINEL"));
+        Ok(())
+    }
+
+    #[test]
+    fn work_context_pr_and_lens_round_trip_and_reject_wrong_types()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let value = serde_json::json!({"pr":3078,"lens":"architecture","future":true});
+        let context: WorkContext = serde_json::from_value(value.clone())?;
+        assert_eq!(
+            (context.pr, context.lens.as_deref()),
+            (Some(3078), Some("architecture"))
+        );
+        assert_eq!(serde_json::to_value(&context)?, value);
+        for malformed in [
+            serde_json::json!({"pr":"3078"}),
+            serde_json::json!({"lens":7}),
+        ] {
+            assert!(serde_json::from_value::<WorkContext>(malformed).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn requested_route_required_family_round_trips_and_rejects_wrong_type()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let value = serde_json::json!({"kind":"named","name":"fixture","effort":null,
+            "required_family":"claude","future":true});
+        let route: RequestedRoute = serde_json::from_value(value.clone())?;
+        assert_eq!(route.required_family(), Some("claude"));
+        assert_eq!(serde_json::to_value(&route)?, value);
+        let malformed = serde_json::json!({"kind":"named","name":"fixture","effort":null,
+            "required_family":7});
+        assert!(serde_json::from_value::<RequestedRoute>(malformed).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn peer_graph_route_required_family_round_trips_and_rejects_wrong_type()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let value = serde_json::json!({
+            "adapter":"codex","required_family":"openai","future":true
+        });
+        let route: PeerGraphRoute = serde_json::from_value(value.clone())?;
+        assert_eq!(route.required_family.as_deref(), Some("openai"));
+        let encoded = serde_json::to_value(&route)?;
+        let decoded: PeerGraphRoute = serde_json::from_value(encoded.clone())?;
+        assert_eq!(decoded, route);
+        assert_eq!(encoded["required_family"], "openai");
+        assert_eq!(encoded["future"], true);
+        assert!(
+            serde_json::from_value::<PeerGraphRoute>(serde_json::json!({
+                "required_family":7
+            }))
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn peer_output_planner_fallback_round_trips_and_rejects_wrong_type()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A flattened fragment of its owning record, which keeps the future fields.
+        let value = serde_json::json!({"planner_fallback":"planner failed"});
+        let peer: PeerOutputFields = serde_json::from_value(value.clone())?;
+        assert_eq!(peer.planner_fallback.as_deref(), Some("planner failed"));
+        assert_eq!(serde_json::to_value(&peer)?, value);
+        assert!(
+            serde_json::from_value::<PeerOutputFields>(serde_json::json!({
+                "planner_fallback":{"reason":"wrong shape"}
+            }))
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn route_metadata_fields_round_trip_and_reject_wrong_types()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cases = [
+            ("account_source", serde_json::json!("continuation")),
+            ("lane_token", serde_json::json!(true)),
+            ("registered_lane_token", serde_json::json!(true)),
+            (
+                "project_paths",
+                serde_json::json!({
+                    "shared_paths":[{"path":"./shared","source":"domains.lanes.projects.x.shared_paths[0]"}],
+                    "exec_roots":[],"warnings":[],"future_nested":{"kept":true}
+                }),
+            ),
+            (
+                "argv_prompt_limit",
+                serde_json::json!({
+                    "value":65536,"key":"domains.run.argv_prompt_limit_bytes","origin":{"kind":"compiled"}
+                }),
+            ),
+            (
+                "dependency_preparation",
+                serde_json::json!({
+                    "command":"pnpm install --frozen-lockfile","outcome":"warning","reason":"bounded"
+                }),
+            ),
+            (
+                "user_skills",
+                serde_json::json!({
+                    "mode":"discover","exposed":false,"directory":null,"staged_file_count":0,
+                    "warnings":[],"source":{"route_policy":["domains.lanes.user_skills"]}
+                }),
+            ),
+            (
+                "cargo_home",
+                serde_json::json!({
+                    "path":"/home/agent/.cargo","source":"host HOME/.cargo","source_writes":true,
+                    "source_writes_source":"compiled default"
+                }),
+            ),
+            (
+                "tool_closure",
+                serde_json::json!([{
+                    "tool":"cargo","outcome":"complete","reason":null,"reasons":[],
+                    "unresolved":[],"libraries":[],"already_covered":[]
+                }]),
+            ),
+            (
+                "applied_access",
+                serde_json::json!({
+                    "libraries":[],"staged_content":null,"toolchain_roots":[],"omitted_grants":[]
+                }),
+            ),
+            (
+                "discovery_warnings",
+                serde_json::json!(["omitted optional grant"]),
+            ),
+            (
+                "github_credential",
+                serde_json::json!({
+                    "identity":"user","source":"default","delivery":"ambient","detail":"host login",
+                    "mediation":"none"
+                }),
+            ),
+            (
+                "ci_scope",
+                serde_json::json!({"value":"none","source":"default","key":"lanes.ci_scope"}),
+            ),
+            (
+                "sandbox",
+                serde_json::json!({
+                    "requested":true,"effective":true,"source":"route","warning":null
+                }),
+            ),
+            (
+                "sandbox_admission",
+                serde_json::json!({
+                    "parent_sandboxed":false,"boundary":"none","strength":"warn",
+                    "knob":"lanes.sandbox_floor","source":"default"
+                }),
+            ),
+            (
+                "write_grant_limit",
+                serde_json::json!({
+                    "key":"domains.run.write_grant_limit_bytes","value":1048576,"origin":"compiled_default"
+                }),
+            ),
+        ];
+        for (field, typed) in cases {
+            let value = serde_json::json!({(field): typed, "future_route_field": true});
+            let route: RouteRecord = serde_json::from_value(value.clone())?;
+            let encoded = serde_json::to_value(&route)?;
+            let decoded: RouteRecord = serde_json::from_value(encoded.clone())?;
+            assert_eq!(decoded, route, "{field}");
+            assert_eq!(encoded["future_route_field"], true, "{field}");
+            assert!(!route.extra.contains_key(field), "{field}");
+            let malformed = serde_json::json!({(field): "not a receipt"});
+            assert!(
+                serde_json::from_value::<RouteRecord>(malformed).is_err(),
+                "{field}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn skipped_route_guard_fields_round_trip_and_reject_wrong_types()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cases = [
+            ("plan_error", serde_json::json!("protected_overlap")),
+            ("guard_boundary", serde_json::json!("authority")),
+            (
+                "guard_resource",
+                serde_json::json!({"kind":"processes","used":4,"limit":3,"reserved":0}),
+            ),
+            (
+                "confinement_guard",
+                serde_json::json!("protected_path_overlap"),
+            ),
+        ];
+        for (field, typed) in cases {
+            let value = serde_json::json!({
+                "route":"fixture","kind":"refused","detail":"safe","future_route_field":true,
+                (field):typed
+            });
+            let route: SkippedRoute = serde_json::from_value(value.clone())?;
+            assert_eq!(serde_json::to_value(&route)?, value, "{field}");
+            assert!(!route.extra.contains_key(field), "{field}");
+            let malformed = serde_json::json!({
+                "route":"fixture","kind":"refused","detail":"safe",(field):"wrong type"
+            });
+            assert!(
+                serde_json::from_value::<SkippedRoute>(malformed).is_err(),
+                "{field}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn usage_metadata_round_trips_and_rejects_wrong_types() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let value = serde_json::json!({
+            "per_attempt":true,
+            "session_total":{"uncached_input":12,"future_nested":true},
+            "gh_invocations":{"count":4,"budget":3,"source":"launch","over_budget":true},
+            "future":true
+        });
+        let usage: UsageRecord = serde_json::from_value(value.clone())?;
+        assert_eq!(usage.per_attempt, Some(true));
+        assert_eq!(
+            usage
+                .session_total
+                .as_deref()
+                .and_then(|total| total.uncached_input),
+            Some(12)
+        );
+        assert_eq!(
+            usage.gh_invocations.as_ref().map(|receipt| receipt.count),
+            Some(4)
+        );
+        let encoded = serde_json::to_value(&usage)?;
+        let decoded: UsageRecord = serde_json::from_value(encoded.clone())?;
+        assert_eq!(decoded, usage);
+        assert_eq!(encoded["future"], true);
+        assert_eq!(encoded["session_total"]["future_nested"], true);
+        for malformed in [
+            serde_json::json!({"per_attempt":"yes"}),
+            serde_json::json!({"session_total":false}),
+            serde_json::json!({"gh_invocations":{"count":"4","over_budget":true}}),
+        ] {
+            assert!(serde_json::from_value::<UsageRecord>(malformed).is_err());
+        }
         Ok(())
     }
 
@@ -1738,77 +3075,6 @@ mod tests {
     }
 
     #[test]
-    fn request_without_lane_metadata_retains_its_sealed_digest()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let original = serde_json::json!({
-            "schema_version": 1, "tasks": [], "concurrency": 1, "parent": null
-        });
-        let digest = CanonicalV1::record_digest("run-request", 1, &original)?;
-        let request: CanonicalRequest = serde_json::from_value(original.clone())?;
-        assert_eq!(request.digest()?, digest);
-        assert_eq!(serde_json::to_value(request)?, original);
-        Ok(())
-    }
-
-    #[test]
-    fn request_with_a_removed_task_class_retains_its_sealed_digest()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let request = CanonicalRequest {
-            extra: Default::default(),
-            child_attempt_id_version: None,
-            chair: None,
-            fresh_continuation: None,
-            schema_version: 1,
-            tasks: vec![TaskRequest {
-                context: None,
-                extra: Default::default(),
-                build_heavy: false,
-                title: None,
-                profile: HarnessProfile {
-                    name: "rigorous".into(),
-                    ..HarnessProfile::default()
-                },
-                task_id: TaskId::from_bytes([3; 16]),
-                prompt_digest: CanonicalV1::file_digest(b"prompt"),
-                base: None,
-                head: None,
-                source_head: None,
-                base_ref: None,
-                route: RequestedRoute::Named {
-                    extra: Default::default(),
-                    name: "senior".into(),
-                    effort: None,
-                },
-                account: None,
-                authority_digest: Digest::from_bytes([5; 32]),
-                writer: None,
-                deliver: None,
-                provider_timeout_seconds: 60,
-                delivery_id: None,
-                access: LaneAccess::default(),
-            }],
-            concurrency: 1,
-            parent: None,
-            lane_depth: None,
-            parent_attempt: None,
-        };
-        let mut sealed = serde_json::to_value(&request)?;
-        assert!(sealed["tasks"][0].get("title").is_none());
-        assert!(sealed["tasks"][0].get("fallback").is_none());
-        let legacy: CanonicalRequest = serde_json::from_value(sealed.clone())?;
-        assert_eq!(serde_json::to_value(&legacy)?, sealed);
-        assert_eq!(legacy.digest()?, request.digest()?);
-        for task_class in [serde_json::Value::Null, serde_json::json!("mechanical")] {
-            sealed["tasks"][0]["profile"]["task_class"] = task_class;
-            let digest = CanonicalV1::record_digest("run-request", 1, &sealed)?;
-            let parsed: CanonicalRequest = serde_json::from_value(sealed.clone())?;
-            assert_eq!(parsed.digest()?, digest);
-            assert_eq!(serde_json::to_value(parsed)?, sealed);
-        }
-        Ok(())
-    }
-
-    #[test]
     fn new_profile_omits_task_class() -> Result<(), Box<dyn std::error::Error>> {
         let profile = HarnessProfile {
             name: "rigorous".into(),
@@ -1818,6 +3084,118 @@ mod tests {
         assert!(sealed.get("task_class").is_none());
         let parsed: HarnessProfile = serde_json::from_value(sealed.clone())?;
         assert_eq!(serde_json::to_value(parsed)?, sealed);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_profile_fields_round_trip_and_reject_malformed_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let profile = HarnessProfile {
+            name: "typed".into(),
+            confidential: true,
+            parent_sandboxed: true,
+            admitted_by: Some("parent".into()),
+            knob_sources: [("lanes.ci_scope".into(), LimitSource::Launch)].into(),
+            budget_wrap_up: Some(BudgetWrapUp { remaining: 17 }),
+            launch_policy: Some(crate::policy::Policy::default()),
+            policy_overrides: [("WRITE_SCOPE".into(), crate::policy::Strength::Warn)].into(),
+            policy_project: Some(ProjectId::from_bytes([7; 16])),
+            repository_policy: Some(LaunchPolicy {
+                confidential: true,
+                sources: vec!["git".into()],
+                repository_config: Some(".provenant.toml".into()),
+            }),
+            write_scope: vec!["src".into()],
+            ..HarnessProfile::default()
+        };
+        let mut wire = serde_json::to_value(&profile)?;
+        assert_eq!(
+            serde_json::from_value::<HarnessProfile>(wire.clone())?,
+            profile
+        );
+        for (field, malformed) in [
+            ("confidential", serde_json::json!("true")),
+            ("parent_sandboxed", serde_json::json!(1)),
+            ("admitted_by", serde_json::json!(false)),
+            (
+                "knob_sources",
+                serde_json::json!({"lanes.ci_scope":"unowned"}),
+            ),
+            ("budget_wrap_up", serde_json::json!({"remaining":"17"})),
+            ("launch_policy", serde_json::json!({"rules":"not-a-list"})),
+            (
+                "policy_overrides",
+                serde_json::json!({"WRITE_SCOPE":"refuse-me"}),
+            ),
+            ("policy_project", serde_json::json!([])),
+            ("repository_policy", serde_json::json!("host")),
+            ("write_scope", serde_json::json!([1])),
+        ] {
+            let mut malformed_value = wire.clone();
+            malformed_value[field] = malformed;
+            assert!(
+                serde_json::from_value::<HarnessProfile>(malformed_value).is_err(),
+                "{field}"
+            );
+        }
+        wire["unknown_future_profile_field"] = serde_json::json!(true);
+        let decoded: HarnessProfile = serde_json::from_value(wire)?;
+        assert!(decoded.extra.contains_key("unknown_future_profile_field"));
+        Ok(())
+    }
+
+    #[test]
+    fn task_limit_extensions_round_trip_and_reject_malformed_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let task = TaskRequest {
+            context: None,
+            extra: Default::default(),
+            limit_extensions: [("token_budget".into(), 5000)].into(),
+            build_heavy: false,
+            title: None,
+            profile: HarnessProfile::default(),
+            prompt_digest: CanonicalV1::file_digest(b"typed request"),
+            head: None,
+            source_head: None,
+            base: None,
+            base_ref: None,
+            route: RequestedRoute::Named {
+                extra: Default::default(),
+                required_family: None,
+                name: "junior".into(),
+                effort: None,
+            },
+            account: None,
+            authority_digest: Digest::from_bytes([3; 32]),
+            writer: None,
+            deliver: None,
+            provider_timeout_seconds: 60,
+            delivery_id: None,
+            access: LaneAccess::default(),
+        };
+        let mut wire = serde_json::to_value(&task)?;
+        assert_eq!(serde_json::from_value::<TaskRequest>(wire.clone())?, task);
+        wire["limit_extensions"] = serde_json::json!({"token_budget":"5000"});
+        assert!(serde_json::from_value::<TaskRequest>(wire).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn writer_custody_project_round_trips_and_rejects_malformed_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = WriterRequest {
+            extra: Default::default(),
+            custody_project: Some(ProjectId::from_bytes([9; 16])),
+            project: "/project".into(),
+            worktree: "/project/.worktrees/lane".into(),
+        };
+        let mut wire = serde_json::to_value(&request)?;
+        assert_eq!(
+            serde_json::from_value::<WriterRequest>(wire.clone())?,
+            request
+        );
+        wire["custody_project"] = serde_json::json!({"id": "invalid"});
+        assert!(serde_json::from_value::<WriterRequest>(wire).is_err());
         Ok(())
     }
 
@@ -1832,11 +3210,11 @@ mod tests {
             },
         ] {
             assert_eq!(
-                SettlementReason::derive(Outcome::Lost, Some(&evidence), &[]),
+                SettlementReason::derive(Outcome::Lost, Some(&evidence), &[], None, Ok(None)),
                 SettlementReason::Lost
             );
             assert_eq!(
-                SettlementReason::derive(Outcome::Unsettled, Some(&evidence), &[]),
+                SettlementReason::derive(Outcome::Unsettled, Some(&evidence), &[], None, Ok(None)),
                 SettlementReason::Unsettled
             );
         }
@@ -1851,9 +3229,9 @@ mod tests {
     }
 
     #[test]
-    fn database_ipc_is_explicit_and_round_trips() {
-        let old: LaneAccess = serde_json::from_str("{}").expect("old access");
-        assert!(!old.database_ipc);
+    fn default_access_denies_database_ipc_and_explicit_access_round_trips() {
+        let defaults = LaneAccess::default();
+        assert!(!defaults.database_ipc);
         let access = LaneAccess {
             database_ipc: true,
             ..Default::default()
@@ -1865,5 +3243,223 @@ mod tests {
             access
         );
         assert!(!access.is_default());
+    }
+    #[test]
+    fn lane_wait_fields_round_trip_and_reject_malformed_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for reason in [
+            LaneWaitReason::HostStalled,
+            LaneWaitReason::Children,
+            LaneWaitReason::Admission,
+            LaneWaitReason::ProviderSilence {
+                silent_for_ms: 5_000,
+            },
+            LaneWaitReason::LaunchPreparation,
+            LaneWaitReason::RecoveryWorkerRefused { used: 5, limit: 10 },
+        ] {
+            let wait = LaneWait {
+                extra: Default::default(),
+                attempt_id: AttemptId::from_bytes([1; 16]),
+                lane_class: LaneClass::Writer,
+                waiting_for: reason,
+            };
+            let encoded = serde_json::to_vec(&wait)?;
+            let decoded: LaneWait =
+                crate::json::decode(encoded.as_slice(), crate::json::Limits::default())?;
+            assert_eq!(decoded, wait);
+        }
+        let malformed = serde_json::to_vec(&serde_json::json!({
+            "attempt_id":AttemptId::from_bytes([1; 16]), "lane_class":"writer",
+            "waiting_for":{"kind":"provider_silence", "silent_for_ms":"many"}
+        }))?;
+        assert!(matches!(
+            crate::json::decode::<LaneWait, _>(
+                malformed.as_slice(),
+                crate::json::Limits::default()
+            ),
+            Err(crate::json::DecodeError::Typed { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn admission_binding_fields_round_trip_and_reject_malformed_values() {
+        let command = crate::PortCommand {
+            argv: vec!["admission-check".into()],
+            exit_codes: crate::CommandExitCodes {
+                success: vec![0],
+                unknown: vec![],
+                other: crate::ExitDisposition::Refused,
+            },
+        };
+        let binding = RepositoryAdmissionBinding::new(crate::PortSource::Project, &command);
+        let wire = serde_json::to_value(&binding).unwrap();
+        let bytes = serde_json::to_vec(&wire).unwrap();
+        let decoded: RepositoryAdmissionBinding =
+            crate::json::decode(bytes.as_slice(), crate::json::Limits::default()).unwrap();
+        assert_eq!(decoded, binding);
+        for (field, invalid) in [
+            ("source", serde_json::json!("unknown")),
+            (
+                "command",
+                serde_json::json!({"argv":[],"exit_codes":{"success":[0],"unknown":[],"other":"refused"}}),
+            ),
+            (
+                "command_digest",
+                serde_json::json!(CanonicalV1::file_digest(b"wrong command")),
+            ),
+            ("lease_epoch", serde_json::json!(0)),
+            ("phase", serde_json::json!("unknown")),
+        ] {
+            let mut malformed = wire.clone();
+            malformed[field] = invalid;
+            let bytes = serde_json::to_vec(&malformed).unwrap();
+            assert!(
+                matches!(
+                    crate::json::decode::<RepositoryAdmissionBinding, _>(
+                        bytes.as_slice(),
+                        crate::json::Limits::default()
+                    ),
+                    Err(crate::json::DecodeError::Typed { .. })
+                ),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn attempt_host_fields_round_trip_and_reject_malformed_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let project = ProjectId::from_bytes([1; 16]);
+        let base = serde_json::json!({
+            "schema_version":1, "key":crate::WorkKey::new(project, "typed-run-fields", "lane", 1)?,
+            "attempt_id":AttemptId::from_bytes([2; 16]), "project_id":project,
+            "attempt_number":1, "revision":1, "generation":1,
+            "requested_route":{"kind":"named","name":"fixture"},
+            "authority_digest":Digest::from_bytes([3; 32]), "queued_at":WallTime::from_micros(1)?,
+            "state":{"state":"queued"}, "usage":{}, "trace":{},
+            "read_only_writable":[], "protected_paths":[],
+            "prompt":{"path":{"encoding":"utf8","path":"prompt"},
+                "digest":CanonicalV1::file_digest(b"fixture"),"bytes":7,"complete":true,"redacted":false}
+        });
+        let command: crate::PortCommand = serde_json::from_value(serde_json::json!({
+            "argv":["admission-check"],
+            "exit_codes":{"success":[0],"unknown":[],"other":"refused"}
+        }))?;
+        let binding = RepositoryAdmissionBinding::new(crate::PortSource::Project, &command);
+        let field_values = [
+            (
+                "budget_overrun",
+                serde_json::json!({"schema_version":1,"tokens":101,"budget":100}),
+                serde_json::json!(false),
+            ),
+            (
+                "budget_wrap_up_refused",
+                serde_json::json!({"schema_version":1,"reason":"admission refused"}),
+                serde_json::json!(false),
+            ),
+            (
+                "repository_admission_binding",
+                serde_json::to_value(binding)?,
+                serde_json::json!(false),
+            ),
+            (
+                "peer_graph",
+                serde_json::json!({"host":provenant_core::HostId::from_bytes([4;16]),"graph_id":"peer-graph"}),
+                serde_json::json!(false),
+            ),
+            (
+                "peer_graph_collected",
+                serde_json::json!(true),
+                serde_json::json!("yes"),
+            ),
+            (
+                "peer_origin_work_key",
+                serde_json::to_value(crate::WorkKey::new(project, "origin", "parent", 1)?)?,
+                serde_json::json!(false),
+            ),
+            (
+                "peer_origin_context",
+                serde_json::json!({"graph_id":"origin","node_id":"parent","attempt":1}),
+                serde_json::json!(false),
+            ),
+            (
+                "peer_subtree",
+                serde_json::json!({
+                    "status":"complete","outcome":"succeeded","next_node":null,
+                    "checkpoint":{"schema_version":1,"graph_id":"peer-graph","plan_digest":"digest","cancelled":false,"nodes":[
+                        {"id":"node","state":"succeeded","worktree":null,"attempts":[{
+                            "launched":true,"key":{"graph_id":"peer-graph","node_id":"node","attempt":1,"route_index":0},
+                            "route":{"adapter":"fixture","model":"fixture/model","alias":null,"name":null,"effort":null,"account":null},
+                            "state":"terminal","attempt_ref":"host/attempt","outcome":"succeeded","launch_actor":"actor"
+                        }]}
+                    ]}
+                }),
+                serde_json::json!({"status":"complete","checkpoint":{"nodes":[{"state":"unknown"}]}}),
+            ),
+            (
+                "graph_custody_released",
+                serde_json::json!(true),
+                serde_json::json!("yes"),
+            ),
+            (
+                "graph_handoff",
+                serde_json::json!({"Ok":{"schema_version":2,"status":"done","note":"finished","remaining":[],"decisions":[],"verify":[]}}),
+                serde_json::json!({"Ok":{"schema_version":1,"status":"done","note":"finished","remaining":[],"decisions":[],"verify":[]}}),
+            ),
+        ];
+        for (field, value, malformed_value) in field_values {
+            let mut input = base.clone();
+            input[field] = value.clone();
+            let decoded: AttemptRecord = serde_json::from_value(input)?;
+            let round_trip = serde_json::to_value(&decoded)?;
+            assert_eq!(round_trip[field], value, "{field}");
+            assert!(
+                !decoded.extra.contains_key(field),
+                "typed host field leaked into ExtraFields: {field}"
+            );
+            if field == "repository_admission_binding" {
+                assert!(
+                    decoded
+                        .repository_admission_binding
+                        .as_ref()
+                        .is_some_and(RepositoryAdmissionBinding::valid)
+                );
+            }
+            let mut malformed = base.clone();
+            malformed[field] = malformed_value;
+            let bytes = serde_json::to_vec(&malformed)?;
+            assert!(
+                matches!(
+                    crate::json::decode::<AttemptRecord, _>(
+                        bytes.as_slice(),
+                        crate::json::Limits::default()
+                    ),
+                    Err(crate::json::DecodeError::Typed { .. })
+                ),
+                "{field}"
+            );
+        }
+        let mut oversized = base.clone();
+        oversized["graph_handoff"] = serde_json::json!({"Ok":{
+            "schema_version":2,"status":"done","note":"finished","remaining":[],"decisions":[],"verify":[],
+            "future_payload":"x".repeat(13_000)
+        }});
+        let oversized_bytes = serde_json::to_vec(&oversized)?;
+        assert!(matches!(
+            crate::json::decode::<AttemptRecord, _>(
+                oversized_bytes.as_slice(),
+                crate::json::Limits::default()
+            ),
+            Err(crate::json::DecodeError::Typed { .. })
+        ));
+        let mut future = base;
+        future["future_user_field"] = serde_json::json!({"kept":true});
+        let decoded: AttemptRecord = serde_json::from_value(future)?;
+        assert_eq!(
+            decoded.extra.get("future_user_field"),
+            Some(&serde_json::json!({"kept":true}))
+        );
+        Ok(())
     }
 }

@@ -12,7 +12,7 @@ module = importlib.util.module_from_spec(spec)
 loader.exec_module(module)
 name = 'example::native_test'
 row = [name, 'macOS', 'native', 'PROVENANT_CONFINEMENT_REQUIRED', 'suite']
-listing = {'rust-suites': {'suite': {'testcases': {name: {}}}}}
+listing = {'rust-suites': {'suite': {'package-name': 'example', 'testcases': {name: {}}}}}
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     (root / 'native.json').write_text(json.dumps({'PROVENANT_CONFINEMENT_REQUIRED': '1'}))
@@ -32,6 +32,8 @@ with tempfile.TemporaryDirectory() as directory:
         assert module.check([row], listing, root)
     report.write_text('<testsuites/>')  # Empty filter or zero tests.
     assert module.check([row], listing, root)
+    assert not module.check([row], listing, root, {('example', name)})
+    assert module.check([row], listing, root, {('other', name)})
     write_case()
     (root / 'native.json').write_text('{}')
     assert module.check([row], listing, root)
@@ -47,35 +49,30 @@ with tempfile.TemporaryDirectory() as directory:
     listing['rust-suites']['other'] = {'testcases': {name: {}}}
     report.write_text(f'<testsuites><testsuite><testcase classname="suite" name="{name}"/><testcase classname="other" name="{name}"/></testsuite></testsuites>')
     assert not module.check([row, other_row], listing, root)
-    inventory_file = root / 'inventory.md'
-    inventory_file.write_text('| Exact test name | Platform | Invocation | Environment | Binary |\n' + '\n'.join('| ' + ' | '.join(f'`{v}`' if i in (0, 4) else v for i, v in enumerate(r)) + ' |' for r in [row, other_row]))
-    assert len(module.inventory(inventory_file)) == 2
-    unquoted = inventory_file.read_text().replace('`example::native_test`', 'example::native_test', 1)
-    inventory_file.write_text(unquoted)
+    inventory_file = root / 'inventory.json'
+    fields = ('test', 'platform', 'invocation', 'environment', 'binary')
+    entries = [dict(zip(fields, item)) for item in (row, other_row)]
+    inventory_file.write_text(json.dumps(entries))
+    assert module.inventory(inventory_file) == [row, other_row]
+    # Schema errors and duplicate identities cannot silently trim native coverage.
+    for invalid in ({}, [], [row], [dict(entries[0], test='')],
+                    [dict(entries[0], platform='Linux')],
+                    [dict(entries[0], environment=[])],
+                    [dict(entries[0], unexpected='value')],
+                    [{key: value for key, value in entries[0].items() if key != 'test'}],
+                    [entries[0], entries[0]]):
+        inventory_file.write_text(json.dumps(invalid))
+        try:
+            module.inventory(inventory_file)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f'invalid inventory accepted: {invalid}')
+    inventory_file.write_text('[')
     try:
         module.inventory(inventory_file)
     except ValueError:
         pass
     else:
-        raise AssertionError('unquoted inventory row accepted')
-    inventory_file.write_text('| Exact test name | Platform | Invocation | Environment | Binary |\n' + '\n'.join('| ' + ' | '.join(f'`{v}`' if i in (0, 4) else v for i, v in enumerate(r)) + ' |' for r in [row, other_row]))
-    # A row without its leading pipe fails instead of ending the table early.
-    lines = inventory_file.read_text().splitlines()
-    inventory_file.write_text('\n'.join([lines[0], lines[1], lines[1].lstrip('| '), lines[2]]) + '\n')
-    try:
-        module.inventory(inventory_file)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError('row without a leading pipe ended the table')
-    inventory_file.write_text('\n'.join(lines) + '\n\nTrailing prose.\n')
-    assert len(module.inventory(inventory_file)) == 2
-    inventory_file.write_text('\n'.join(lines))
-    inventory_file.write_text(inventory_file.read_text() + '\n' + inventory_file.read_text().splitlines()[1])
-    try:
-        module.inventory(inventory_file)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError('duplicate binary/test identity accepted')
+        raise AssertionError('invalid JSON inventory accepted')
 print('Native inventory evidence fixtures passed.')

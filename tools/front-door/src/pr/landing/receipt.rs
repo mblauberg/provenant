@@ -37,7 +37,10 @@ pub fn lock(state: &Path) -> Result<provenant_os::fs::LockGuard, LandingError> {
             "publication.lock".as_ref(),
             provenant_os::fs::LockMode::Exclusive,
         )
-        .map_err(|e| failed("acquire landing publication lock", e))
+        .map_err(|e| match e {
+            provenant_os::fs::FsError::LockTimeout { .. } => LandingError::Busy,
+            e => failed("acquire landing publication lock", e),
+        })
 }
 
 fn receipt_dir(state: &Path) -> PathBuf {
@@ -45,7 +48,7 @@ fn receipt_dir(state: &Path) -> PathBuf {
 }
 
 /// Write `bytes` to `path` through a synced sibling file and a rename.
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LandingError> {
+pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LandingError> {
     use std::io::Write;
     let parent = path
         .parent()
@@ -81,10 +84,38 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LandingError> {
 /// `path` is the project state directory; the receipt lands under it, keyed by candidate
 /// commit and shadow flag, so a shadow run never overwrites a real receipt.
 pub fn write_receipt(path: &Path, receipt: &LandingReceipt) -> Result<(), LandingError> {
-    let kind = if receipt.shadow { "shadow" } else { "landed" };
-    let name = format!("{}.{kind}.json", component(&receipt.candidate)?);
+    let path = receipt_path(path, &receipt.candidate, receipt.shadow)?;
     let bytes = serde_json::to_vec_pretty(receipt).map_err(|e| failed("encode receipt", e))?;
-    atomic_write(&receipt_dir(path).join(name), &bytes)
+    atomic_write(&path, &bytes)
+}
+
+/// Resolve the contained path for a candidate receipt without exposing its filename format.
+pub fn receipt_path(state: &Path, commit: &str, shadow: bool) -> Result<PathBuf, LandingError> {
+    let kind = if shadow { "shadow" } else { "landed" };
+    Ok(receipt_dir(state).join(format!("{}.{kind}.json", component(commit)?)))
+}
+
+/// Read a receipt through the bounded record decoder, preserving fields from newer minor
+/// releases when the receipt is written again.
+#[cfg(test)]
+pub fn read_receipt(
+    state: &Path,
+    commit: &str,
+    shadow: bool,
+) -> Result<Option<LandingReceipt>, LandingError> {
+    let path = receipt_path(state, commit, shadow)?;
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(failed("read receipt", error)),
+    };
+    let receipt: LandingReceipt =
+        provenant_records::decode(file, provenant_records::Limits::default())
+            .map_err(|error| failed("decode receipt", error))?;
+    if receipt.candidate != commit || receipt.shadow != shadow {
+        return Err(LandingError::Failed("receipt identity mismatch".into()));
+    }
+    Ok(Some(receipt))
 }
 
 /// Record the overall run, including selections that never produced a candidate.
@@ -165,8 +196,9 @@ pub fn pending(
         let bytes = std::fs::read(&path).map_err(|e| failed("read pending record", e))?;
         // A record that cannot be read is a durable-state problem: refuse rather than skip,
         // because skipping could hide an uncertain publication.
-        let attempt: PendingAttempt = serde_json::from_slice(&bytes)
-            .map_err(|e| failed(&format!("decode {}", path.display()), e))?;
+        let attempt: PendingAttempt =
+            provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())
+                .map_err(|e| failed(&format!("decode {}", path.display()), e))?;
         if attempt.repository == repository && attempt.target == target {
             found.push(attempt);
         }
@@ -197,78 +229,27 @@ pub fn clear_pending(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::pr::landing::policy::LandPolicy;
-    use provenant_cli::domains::{GateKind, LandOverride, LandSettings};
+    use crate::pr::landing::test_support::LandingFixture;
+    #[allow(
+        unused_imports,
+        reason = "used only by #[test] functions, which the worktrees driver compiles out"
+    )]
     use std::collections::BTreeMap;
 
     pub(crate) fn candidate(commit: &str) -> Candidate {
-        Candidate {
-            base: "base".into(),
-            steps: vec![],
-            commit: commit.into(),
-            tree: "tree".into(),
-            ref_name: format!("land/{commit}"),
-        }
+        LandingFixture::candidate(commit)
     }
-    pub(crate) fn policy() -> LandPolicy {
-        LandPolicy::resolve(
-            &LandSettings::default(),
-            &BTreeMap::new(),
-            None,
-            None,
-            &LandOverride::default(),
-        )
-        .expect("default policy resolves")
+    pub(crate) fn policy() -> crate::pr::landing::policy::LandPolicy {
+        LandingFixture::policy()
     }
     pub(crate) fn definition() -> GateDefinition {
-        GateDefinition {
-            kind: GateKind::Checks,
-            digest: "d".into(),
-            checks: vec!["ci".into()],
-            commands: vec![],
-            issuer: None,
-            executor: None,
-            coverage: vec![],
-            timeout_seconds: 60,
-            pool: None,
-            env_passthrough: Vec::new(),
-        }
+        LandingFixture::definition()
     }
     pub(crate) fn evidence(commit: &str) -> GateEvidence {
-        GateEvidence {
-            commit: commit.into(),
-            tree: "tree".into(),
-            definition_digest: "d".into(),
-            checks: vec![],
-            issuer: None,
-            coverage: vec![],
-            result: GateResult::Passed,
-            pool: None,
-            duration_seconds: None,
-        }
+        LandingFixture::evidence(commit, GateResult::Passed, None)
     }
     pub(crate) fn receipt(commit: &str, shadow: bool) -> LandingReceipt {
-        LandingReceipt {
-            policy: policy(),
-            base: "base".into(),
-            candidate: commit.into(),
-            tree: "tree".into(),
-            candidate_ref: format!("land/{commit}"),
-            candidate_steps: vec![],
-            pull_requests: vec![],
-            gate_definition: definition(),
-            gate_evidence: evidence(commit),
-            publish: PublishDecision {
-                mode: PublishMode::FastForward,
-                reason: "test".into(),
-            },
-            outcomes: BTreeMap::new(),
-            split: Vec::new(),
-            approved_to_landed: BTreeMap::from([("head".to_string(), "landed".to_string())]),
-            cost: CostEstimate::Unknown { reason: "x".into() },
-            alarms: vec![],
-            shadow,
-        }
+        LandingFixture::receipt(commit, shadow)
     }
     pub(crate) fn attempt(target: &str, commit: &str) -> PendingAttempt {
         PendingAttempt {
@@ -281,11 +262,16 @@ pub(crate) mod tests {
             publish: PublishDecision {
                 mode: PublishMode::RestOrdered,
                 reason: "test".into(),
+                extra: Default::default(),
             },
-            cost: CostEstimate::Known { micros: 1 },
+            cost: CostEstimate::Known {
+                micros: 1,
+                extra: Default::default(),
+            },
             settled: None,
             dispatched: None,
             started_at: None,
+            extra: Default::default(),
         }
     }
 
@@ -324,12 +310,10 @@ pub(crate) mod tests {
     #[test]
     fn corrupt_pending_record_refuses_instead_of_hiding_an_attempt() -> Result<(), LandingError> {
         let dir = tempfile::tempdir().map_err(|e| failed("tmp", e))?;
-        record_pending(dir.path(), &attempt("main", "c1"))?;
-        std::fs::write(
-            pending_dir(dir.path()).join("fake-repository-c1.json"),
-            b"{",
-        )
-        .map_err(|e| failed("write", e))?;
+        let attempt = attempt("main", "c1");
+        let path = pending_path(dir.path(), &attempt.repository, &attempt.candidate)?;
+        record_pending(dir.path(), &attempt)?;
+        std::fs::write(path, b"{").map_err(|e| failed("write", e))?;
         assert!(pending(dir.path(), "fake-repository", "main").is_err());
         Ok(())
     }
@@ -341,29 +325,274 @@ pub(crate) mod tests {
         let shadow = receipt("c1", true);
         write_receipt(dir.path(), &real)?;
         write_receipt(dir.path(), &shadow)?;
-        let read = |name: &str| -> LandingReceipt {
-            serde_json::from_slice(
-                &std::fs::read(receipt_dir(dir.path()).join(name)).expect("receipt exists"),
-            )
-            .expect("receipt decodes")
-        };
-        assert_eq!(read("c1.landed.json"), real);
-        let shadow_back = read("c1.shadow.json");
+        assert_eq!(read_receipt(dir.path(), "c1", false)?, Some(real));
+        let shadow_back = read_receipt(dir.path(), "c1", true)?.expect("shadow receipt exists");
         assert!(shadow_back.shadow);
         assert_eq!(shadow_back.approved_to_landed["head"], "landed");
+        assert!(read_receipt(dir.path(), "missing", false)?.is_none());
         Ok(())
     }
 
     #[test]
-    fn keys_cannot_escape_the_state_directory() -> Result<(), LandingError> {
+    fn receipt_keys_are_sanitised_and_empty_keys_refused() -> Result<(), LandingError> {
         let dir = tempfile::tempdir().map_err(|e| failed("tmp", e))?;
-        write_receipt(dir.path(), &receipt("../../evil", false))?;
-        assert!(
-            receipt_dir(dir.path())
-                .join("______evil.landed.json")
-                .exists()
+        let hostile = receipt("../../evil", false);
+        let path = receipt_path(dir.path(), &hostile.candidate, hostile.shadow)?;
+        assert!(path.starts_with(dir.path()));
+        write_receipt(dir.path(), &hostile)?;
+        assert_eq!(
+            read_receipt(dir.path(), "../../evil", false)?,
+            Some(hostile)
         );
         assert!(write_receipt(dir.path(), &receipt("", false)).is_err());
+        Ok(())
+    }
+
+    fn round_trip_with_future_field<T>(record: &T) -> Result<(), Box<dyn std::error::Error>>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let mut payload = serde_json::to_value(record)?;
+        payload
+            .as_object_mut()
+            .expect("stored records are JSON objects")
+            .insert(
+                "future-from-newer-minor".into(),
+                serde_json::json!({"enabled": true}),
+            );
+        let bytes = serde_json::to_vec(&payload)?;
+        let decoded: T =
+            provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())?;
+        assert_eq!(serde_json::to_value(decoded)?, payload);
+        Ok(())
+    }
+
+    fn bounded_round_trip<T>(record: &T) -> Result<(), Box<dyn std::error::Error>>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let bytes = serde_json::to_vec(record)?;
+        let decoded: T =
+            provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())?;
+        assert_eq!(&decoded, record);
+        Ok(())
+    }
+
+    // These enums live in other crates, so the local test table cannot be
+    // generated beside their declarations. Exhaustive identity matches make
+    // adding a variant a compile-time prompt to extend each case table.
+    fn every_gate_kind(
+        value: provenant_records::landing::GateKind,
+    ) -> provenant_records::landing::GateKind {
+        match value {
+            provenant_records::landing::GateKind::Checks
+            | provenant_records::landing::GateKind::Commands => value,
+        }
+    }
+
+    fn gate_kinds() -> Vec<provenant_records::landing::GateKind> {
+        [
+            provenant_records::landing::GateKind::Checks,
+            provenant_records::landing::GateKind::Commands,
+        ]
+        .into_iter()
+        .map(every_gate_kind)
+        .collect()
+    }
+
+    fn every_gate_result(value: GateResult) -> GateResult {
+        match value {
+            GateResult::Passed
+            | GateResult::Failed
+            | GateResult::Pending
+            | GateResult::Missing
+            | GateResult::Skipped
+            | GateResult::Neutral => value,
+        }
+    }
+
+    fn gate_results() -> Vec<GateResult> {
+        [
+            GateResult::Passed,
+            GateResult::Failed,
+            GateResult::Pending,
+            GateResult::Missing,
+            GateResult::Skipped,
+            GateResult::Neutral,
+        ]
+        .into_iter()
+        .map(every_gate_result)
+        .collect()
+    }
+
+    fn every_approval_source(
+        value: provenant_cli::domains::ApprovalSource,
+    ) -> provenant_cli::domains::ApprovalSource {
+        match value {
+            provenant_cli::domains::ApprovalSource::ProvenantReview
+            | provenant_cli::domains::ApprovalSource::Forge => value,
+        }
+    }
+
+    fn approval_sources() -> Vec<provenant_cli::domains::ApprovalSource> {
+        [
+            provenant_cli::domains::ApprovalSource::ProvenantReview,
+            provenant_cli::domains::ApprovalSource::Forge,
+        ]
+        .into_iter()
+        .map(every_approval_source)
+        .collect()
+    }
+
+    fn add_future_field(value: &mut serde_json::Value, field: &str) {
+        value
+            .as_object_mut()
+            .expect("stored values are JSON objects")
+            .insert(field.into(), serde_json::json!({"from": "newer minor"}));
+    }
+
+    #[test]
+    // Spec: docs/specs/state.md#strict-bounded-records
+    fn stored_shapes_preserve_newer_fields_through_the_bounded_decoder()
+    -> Result<(), Box<dyn std::error::Error>> {
+        round_trip_with_future_field(&receipt("c1", false))?;
+        round_trip_with_future_field(&attempt("main", "c1"))?;
+        for mode in PublishMode::all() {
+            bounded_round_trip(&mode)?;
+        }
+        for outcome in Outcome::all() {
+            bounded_round_trip(&outcome)?;
+        }
+        for estimate in CostEstimate::all() {
+            round_trip_with_future_field(&estimate)?;
+        }
+        for outcome in SettledOutcome::all() {
+            round_trip_with_future_field(&outcome)?;
+        }
+        for kind in gate_kinds() {
+            bounded_round_trip(&kind)?;
+        }
+        for result in gate_results() {
+            bounded_round_trip(&result)?;
+        }
+        for source in approval_sources() {
+            bounded_round_trip(&source)?;
+        }
+
+        let mut attempt = attempt("main", "candidate");
+        attempt.candidate = crate::pr::landing::test_support::LandingFixture::ordered_candidate();
+        let pr = &mut attempt.candidate.steps[0].pr;
+        pr.approval_evidence = vec![super::super::model::ApprovalEvidence {
+            source: provenant_cli::domains::ApprovalSource::Forge,
+            reference: "review".into(),
+            reviewer: "reviewer".into(),
+            head: pr.head.clone(),
+            extra: Default::default(),
+        }];
+        pr.accepted = Some(super::super::model::Accepted {
+            reason: "accepted for test fixture".into(),
+            actor: "chair".into(),
+            extra: Default::default(),
+        });
+        let policy = LandingFixture::policy();
+        attempt.policy = policy;
+        let mut record = LandingFixture::receipt(&attempt.candidate.commit, false);
+        record.candidate_steps = attempt.candidate.steps.clone();
+        record.pull_requests = attempt
+            .candidate
+            .steps
+            .iter()
+            .map(|step| step.pr.clone())
+            .collect();
+        record.outcomes = BTreeMap::from([(2, Outcome::Landed)]);
+        record.alarms = vec![super::super::model::Alarm {
+            code: "POST_CHECK".into(),
+            message: "fixture alarm".into(),
+            extra: Default::default(),
+        }];
+        record.approved_to_landed = BTreeMap::from([("head-2".into(), "landed-2".into())]);
+        attempt.settled = Some(super::super::model::SettledAttempt {
+            record,
+            outcomes: BTreeMap::from([(
+                2,
+                super::super::model::SettledOutcome::Landed {
+                    commit: "landed-2".into(),
+                    extra: Default::default(),
+                },
+            )]),
+            landed_commit: Some("landed-2".into()),
+            refusal: None,
+            receipt_pending: true,
+            tree_pending: false,
+            follow_pending: false,
+            local_follow_pending: false,
+            cleanup_pending: true,
+            extra: Default::default(),
+        });
+        let mut payload = serde_json::to_value(&attempt)?;
+        add_future_field(&mut payload, "future-attempt-field");
+        add_future_field(&mut payload["candidate"], "future-candidate-field");
+        add_future_field(&mut payload["candidate"]["steps"][0], "future-step-field");
+        add_future_field(
+            &mut payload["candidate"]["steps"][0]["pr"],
+            "future-pr-field",
+        );
+        add_future_field(
+            &mut payload["candidate"]["steps"][0]["pr"]["accepted"],
+            "future-acceptance-field",
+        );
+        add_future_field(
+            &mut payload["candidate"]["steps"][0]["pr"]["approval_evidence"][0],
+            "future-approval-field",
+        );
+        // Closed gate and port declarations discard unknown fields; only the
+        // records with explicit extension maps promise to preserve them.
+        add_future_field(&mut payload["gate_evidence"], "future-evidence-field");
+        add_future_field(&mut payload["policy"], "future-policy-field");
+        let policy_fields = payload["policy"]["fields"]
+            .as_object_mut()
+            .expect("policy fields are a map");
+        let sourced = policy_fields
+            .values_mut()
+            .next()
+            .expect("resolved policy has sourced fields");
+        sourced["source"]["rule"] = serde_json::json!({"index": 0, "target": "main"});
+        add_future_field(sourced, "future-sourced-field");
+        add_future_field(&mut sourced["source"], "future-source-field");
+        add_future_field(&mut payload["publish"], "future-publish-field");
+        add_future_field(&mut payload["cost"], "future-cost-field");
+        add_future_field(&mut payload["settled"], "future-settlement-field");
+        add_future_field(
+            &mut payload["settled"]["record"],
+            "future-settled-receipt-field",
+        );
+        add_future_field(
+            &mut payload["settled"]["record"]["candidate_steps"][0],
+            "future-settled-step-field",
+        );
+        add_future_field(
+            &mut payload["settled"]["record"]["pull_requests"][0],
+            "future-settled-pr-field",
+        );
+        add_future_field(
+            &mut payload["settled"]["record"]["alarms"][0],
+            "future-alarm-field",
+        );
+        add_future_field(
+            &mut payload["settled"]["outcomes"]["2"],
+            "future-settled-outcome-field",
+        );
+        let sourced = payload["policy"]["fields"]
+            .as_object_mut()
+            .expect("policy fields are a map")
+            .values_mut()
+            .next()
+            .expect("resolved policy has sourced fields");
+        add_future_field(&mut sourced["source"]["rule"], "future-target-rule-field");
+        let bytes = serde_json::to_vec(&payload)?;
+        let decoded: PendingAttempt =
+            provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())?;
+        assert_eq!(serde_json::to_value(decoded)?, payload);
         Ok(())
     }
 }

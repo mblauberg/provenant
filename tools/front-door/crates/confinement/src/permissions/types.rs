@@ -8,17 +8,24 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+pub const GRANT_LIMIT_SETTING_KEY: &str = "domains.run.grant_limit";
+pub const PROFILE_LIMIT_SETTING_KEY: &str = "domains.run.profile_limit_bytes";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendKind {
     MacOsSbpl,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum AvailabilityReason {
+    #[error("this platform has no sandbox backend")]
     UnsupportedPlatform,
+    #[error("the sandbox executable is missing")]
     SandboxExecutableMissing,
+    #[error("the sandbox executable is not trusted")]
     SandboxExecutableUntrusted,
+    #[error("the sandbox capability probe failed")]
     ProbeFailed,
 }
 
@@ -38,8 +45,18 @@ pub enum PermissionError {
     BroadRoot,
     #[error("credential root requires a selected fixture-backed mechanism")]
     CredentialRoot,
-    #[error("credential root guard refused {path}: {guard}")]
-    CredentialRootAt { path: String, guard: &'static str },
+    #[error("credential root guard refused {path}: {guard} (source: {declaration_source})")]
+    CredentialRootAt {
+        path: String,
+        guard: &'static str,
+        declaration_source: String,
+    },
+    #[error("credential grant at {path} overlaps {root} (source: {declaration_source})")]
+    CredentialStore {
+        path: PathBuf,
+        root: PathBuf,
+        declaration_source: String,
+    },
     #[error("credential root refused for {access} grant at {}", .path.display())]
     CredentialGrant { path: PathBuf, access: &'static str },
     #[error("permission root overlaps a protected path")]
@@ -65,11 +82,13 @@ pub enum PermissionError {
     #[error("nested confinement is unsupported by this backend")]
     NestedConfinementUnsupported,
     #[error(
-        "compiled profile is {bytes} bytes, over the configured {limit}-byte limit; reduce granted roots or raise domains.run.profile_limit_bytes (the OS may impose its own argv limit)"
+        "compiled profile is {bytes} bytes, over the configured {limit}-byte limit; reduce granted roots or raise {setting_key} (the OS may impose its own argv limit)",
+        setting_key = PROFILE_LIMIT_SETTING_KEY
     )]
     ProfileTooLarge { bytes: usize, limit: usize },
     #[error(
-        "{family} exceeds its effective limit of {limit}; raise domains.run.grant_limit to allow more"
+        "{family} exceeds its effective limit of {limit}; raise {setting_key} to allow more",
+        setting_key = GRANT_LIMIT_SETTING_KEY
     )]
     GrantLimitExceeded { family: &'static str, limit: usize },
     #[error("{source} (source: {})", match origin { provenant_records::diagnostic::SettingSource::Configuration => "host configuration", provenant_records::diagnostic::SettingSource::ShippedDefault => "compiled default" })]
@@ -110,15 +129,25 @@ pub enum PermissionError {
 }
 
 impl PermissionError {
+    /// The host setting that controls a configurable permission limit.
+    pub fn setting_key(&self) -> Option<&'static str> {
+        match self {
+            Self::GrantLimitExceeded { .. } => Some(GRANT_LIMIT_SETTING_KEY),
+            Self::ProfileTooLarge { .. } => Some(PROFILE_LIMIT_SETTING_KEY),
+            _ => None,
+        }
+    }
+
     /// Classify only a boundary that the typed error itself establishes.
     /// Ambiguous guards stay unclassified until their caller supplies context.
     pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass as B;
         match self {
             Self::ConfigOrigin { source, .. } => source.boundary_class(),
-            Self::CredentialRoot | Self::CredentialRootAt { .. } | Self::CredentialGrant { .. } => {
-                B::Credentials
-            }
+            Self::CredentialRoot
+            | Self::CredentialRootAt { .. }
+            | Self::CredentialGrant { .. }
+            | Self::CredentialStore { .. } => B::Credentials,
             Self::GitControlEntriesExceeded { .. } => B::Integrity,
             Self::GitControlHardLinked(_)
             | Self::GitWriteAuthorityMissing
@@ -163,15 +192,22 @@ impl PermissionError {
     /// Add the refused path to a credential guard error.
     pub fn with_credential_path(self, path: &Path, home: Option<&Path>) -> Self {
         if matches!(self, Self::CredentialRoot) {
-            let env_home = std::env::var_os("HOME").map(PathBuf::from);
-            Self::credential_root_at(path, home.or(env_home.as_deref()))
+            Self::credential_root_at(path, home, "declared credential root")
         } else {
             self
         }
     }
 
+    pub fn credential_store(path: &Path, root: &provenant_core::CredentialRoot) -> Self {
+        Self::CredentialStore {
+            path: path.to_owned(),
+            root: root.path.clone(),
+            declaration_source: root.source.clone(),
+        }
+    }
+
     /// Preserve the requested path and identify the guard in user-facing refusals.
-    pub fn credential_root_at(path: &Path, home: Option<&Path>) -> Self {
+    pub fn credential_root_at(path: &Path, home: Option<&Path>, source: impl Into<String>) -> Self {
         let path = home
             .and_then(|home| path.strip_prefix(home).ok())
             .map(|relative| {
@@ -185,6 +221,7 @@ impl PermissionError {
         Self::CredentialRootAt {
             path,
             guard: "credential root",
+            declaration_source: source.into(),
         }
     }
 }
@@ -232,8 +269,11 @@ mod repository_error_tests {
 
     #[test]
     fn repository_refusal_names_the_underlying_reason() {
-        let message = PermissionError::from(RepoError::IdentityChanged).to_string();
-        assert!(message.contains("IdentityChanged"));
+        let error = PermissionError::from(RepoError::IdentityChanged);
+        assert!(matches!(
+            error,
+            PermissionError::Repository(RepoError::IdentityChanged)
+        ));
     }
 }
 
@@ -308,7 +348,7 @@ pub struct ProviderProfileSpec {
     pub runtime_reads: Vec<PathGrant>,
     /// Exact attempt-bound host Fabric mutation endpoint.
     pub fabric_socket: Option<PathGrant>,
-    /// State files the lane's Fabric MCP server reads. Mutations use the socket.
+    /// State files the lane's nested Provenant commands read. Mutations use the socket.
     pub fabric_state_reads: Vec<PathGrant>,
     /// Literal directory discovery; never the contents of provider config.
     pub discovery_reads: Vec<PathGrant>,
@@ -347,15 +387,14 @@ pub struct WorktreeWriteAuthority {
     pub git_grants_digest: [u8; 32],
     pub(super) cargo_cache: PathGrant,
     pub(super) publishing: bool,
-    /// Older records remain readable, but cannot launch without a verified binding.
-    #[serde(default)]
-    pub(super) common_git_dir: Option<PathBuf>,
+    /// Common Git directory from the verified repository binding.
+    pub(super) common_git_dir: PathBuf,
 }
 
 impl WorktreeWriteAuthority {
     /// Repository selected by the host, for the lane-private object alternate.
-    pub fn common_git_dir(&self) -> Option<&Path> {
-        self.common_git_dir.as_deref()
+    pub fn common_git_dir(&self) -> &Path {
+        &self.common_git_dir
     }
 
     pub fn set_publishing(&mut self, enabled: bool) {
@@ -371,22 +410,25 @@ impl WorktreeWriteAuthority {
         worktree: &VerifiedWorktree,
         selected_ref: &GitRefName,
         home: &Path,
+        credentials: &provenant_core::CredentialRoots,
     ) -> Result<Self, PermissionError> {
         worktree.repo().revalidate()?;
         let grants = WorktreeWriteGrants::derive(worktree, selected_ref);
-        grants.validate()?;
-        let cargo_cache = worktree_cargo_cache(home, worktree)?;
+        grants.validate(credentials)?;
+        let cargo_cache = worktree_cargo_cache(home, worktree, credentials)?;
         Ok(Self {
             git_grants_digest: grants.digest(&cargo_cache),
             cargo_cache,
             publishing: true,
-            common_git_dir: Some(worktree.repo().common_git_dir().to_path_buf()),
+            common_git_dir: worktree.repo().common_git_dir().to_path_buf(),
         })
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlanPermissions {
+    /// Complete host-declared credential boundaries for every grant check.
+    pub credential_roots: provenant_core::CredentialRoots,
     /// Host-resolved ambient policy; never decoded from lane input.
     pub policy: Option<LanePolicy>,
     pub read_only: Option<crate::plan::ReadOnlyGrants>,

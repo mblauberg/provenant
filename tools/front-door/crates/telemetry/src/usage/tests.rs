@@ -1,17 +1,10 @@
 use super::*;
-use provenant_core::{MonoTime, PathResolver, RootInputs, TimeError, WallTime};
+use provenant_core::{MonoTime, TimeError, WallTime};
+use provenant_test_support::{IdentityPathResolver, test_roots};
 use std::path::{Path, PathBuf};
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
-struct Resolver;
-impl PathResolver for Resolver {
-    fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
-        Ok(path.to_owned())
-    }
-}
 fn roots(path: &Path) -> Result<Roots> {
-    let mut inputs = RootInputs::new(path.join("home"), path.join("checkout"));
-    inputs.state_dir = Some(path.join("state"));
-    Ok(inputs.resolve(&Resolver)?)
+    Ok(test_roots(path)?.resolve(&IdentityPathResolver)?)
 }
 fn tempdir() -> Result<(tempfile::TempDir, PathBuf)> {
     let temp = tempfile::tempdir()?;
@@ -19,18 +12,42 @@ fn tempdir() -> Result<(tempfile::TempDir, PathBuf)> {
     Ok((temp, base))
 }
 fn inventory() -> Vec<(String, String)> {
-    vec![
-        (EVENT_KINDS[0].into(), "root".into()),
-        (EVENT_KINDS[1].into(), "fabric_context".into()),
-    ]
+    vec![(EVENT_KINDS[0].into(), "root".into())]
+}
+
+fn event_line(
+    unit: &str,
+    exit_code: u8,
+    timestamp: &str,
+    session: Option<&str>,
+    project: Option<ProjectId>,
+    wait: Option<bool>,
+) -> Result<String> {
+    let event = Event {
+        kind: EVENT_KINDS[0].into(),
+        unit: unit.into(),
+        exit_code: Some(exit_code),
+        outcome: None,
+        duration_ms: 1,
+        timestamp: timestamp.into(),
+        trace: project_trace(project),
+        account_identity: AccountIdentity::no_provider_account(),
+        session: session.map(str::to_owned),
+        config: None,
+        wait,
+        extra: Default::default(),
+    };
+    Ok(format!("{}\n", serde_json::to_string(&event)?))
 }
 
 #[test]
-fn usage_log_read_errors_include_the_os_cause() {
+fn usage_log_read_errors_preserve_os_errno() {
     let error = UsageError::Io(std::io::Error::from_raw_os_error(13));
-    let rendered = error.to_string();
     assert_eq!(error.code(), "io");
-    assert!(rendered.contains("os error 13"));
+    let errno = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .and_then(std::io::Error::raw_os_error);
+    assert_eq!(errno, Some(13));
 }
 
 /// A clock fixed at one wall time.
@@ -49,11 +66,50 @@ impl Clock for Fixed {
 }
 
 #[test]
+fn every_account_identity_case_round_trips() -> Result {
+    let cases = [
+        AccountIdentity {
+            identity: Identity::Known {
+                provider: "claude".into(),
+                account_key: "account-key".into(),
+            },
+            epoch: IdentityEpoch::Known { id: "epoch".into() },
+            evidence_source: IdentityEvidenceSource::Provider,
+        },
+        AccountIdentity::unknown(),
+        AccountIdentity::no_provider_account(),
+    ];
+    for identity in cases {
+        let bytes = serde_json::to_vec(&identity)?;
+        let decoded: AccountIdentity = serde_json::from_slice(&bytes)?;
+        assert_eq!(decoded, identity);
+    }
+    Ok(())
+}
+
+#[test]
+fn usage_event_retains_additive_fields_through_bounded_decode() -> Result {
+    let mut event: serde_json::Value = serde_json::from_str(&event_line(
+        "root",
+        0,
+        "2026-10-26T00:00:00Z",
+        Some("session"),
+        Some(ProjectId::from_bytes([1; 16])),
+        Some(true),
+    )?)?;
+    event["future_event"] = serde_json::json!(1);
+    event["trace"]["future_trace"] = serde_json::json!(2);
+    crate::assert_record_round_trip::<super::Event>(event);
+    Ok(())
+}
+
+#[test]
 fn recording_on_a_missing_root_creates_nothing() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
+    // The fixture creates the state root; remove the empty directory to model a missing one.
+    std::fs::remove_dir(roots.state.as_path())?;
     record_cli(&roots, CLOCK, "root", 0, 4, None);
-    record_tool(&roots, CLOCK, "fabric_context", "ok", 1, None);
     assert!(!roots.state.as_path().exists());
     Ok(())
 }
@@ -67,7 +123,16 @@ fn chair_observations_survive_rotation_and_respect_window_bounds() -> Result {
     record_chair(
         &roots,
         CLOCK,
-        "work",
+        AccountIdentity {
+            identity: Identity::Known {
+                provider: "claude".into(),
+                account_key: "account-work".into(),
+            },
+            epoch: IdentityEpoch::Known {
+                id: "epoch-1".into(),
+            },
+            evidence_source: IdentityEvidenceSource::Provider,
+        },
         "session",
         Some(project),
         Some(".claude-work"),
@@ -79,7 +144,7 @@ fn chair_observations_survive_rotation_and_respect_window_bounds() -> Result {
     record_chair(
         &roots,
         CLOCK,
-        "spare",
+        AccountIdentity::unknown(),
         "another-session",
         Some(project),
         None,
@@ -88,9 +153,12 @@ fn chair_observations_survive_rotation_and_respect_window_bounds() -> Result {
     let until = "2026-10-27T00:00:00Z".parse()?;
     let chairs = chair_sessions(&roots, since, until)?;
     assert_eq!(chairs.len(), 2);
-    assert_eq!(chairs[0].account, "work");
+    assert_eq!(
+        chairs[0].account_identity.account_key(),
+        "claude/account-work"
+    );
     assert_eq!(chairs[0].config.as_deref(), Some(".claude-work"));
-    assert_eq!(chairs[1].account, "spare");
+    assert_eq!(chairs[1].account_identity, AccountIdentity::unknown());
     assert_eq!(chairs[1].config, None);
     assert!(
         chairs
@@ -110,14 +178,13 @@ fn unattributed_events_omit_trace_from_json() -> Result {
     let roots = roots(&base)?;
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     record_cli(&roots, CLOCK, "root", 0, 4, None);
-    record_tool(&roots, CLOCK, "fabric_context", "ok", 1, None);
     assert!(roots.state.as_path().join(LOG).is_file());
     let log = std::fs::read_to_string(roots.state.as_path().join(LOG))?;
     let events = log
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert!(events.iter().all(|event| event.get("project_id").is_none()));
     assert!(events.iter().all(|event| event.get("trace").is_none()));
     assert!(
@@ -135,16 +202,14 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     let expected_id = ProjectId::from_bytes([1; 16]);
     record_cli(&roots, CLOCK, "root", 0, 4, Some(expected_id));
-    record_tool(&roots, CLOCK, "fabric_context", "ok", 1, Some(expected_id));
 
     let log = std::fs::read_to_string(roots.state.as_path().join(LOG))?;
     let events = log
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert_eq!(events[0]["kind"], "cli.verb");
-    assert_eq!(events[1]["kind"], "mcp.tool");
     assert!(
         events
             .iter()
@@ -158,9 +223,6 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
             && unit.project_id == Some(expected_id)
             && unit.scope == Some("project")
     }));
-    assert!(report.units.iter().any(|unit| {
-        unit.unit == "fabric_context" && unit.calls == 1 && unit.project_id == Some(expected_id)
-    }));
     assert!(
         report
             .units
@@ -171,15 +233,12 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
 }
 
 #[test]
-fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> Result {
+fn rotation_preserves_the_tail_and_reports_without_a_lock() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     record_cli(&roots, CLOCK, "root", 0, 4, None);
     let log = roots.state.as_path().join(LOG);
-    assert!(!roots.state.as_path().join(LOCK).exists());
-    let directory = Directory::open_anchor(roots.state.as_path())?;
-    let lock = directory.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
     let before = std::fs::read(&log)?;
     record_cli(&roots, CLOCK, "root", 0, 1, None);
     assert!(std::fs::read(&log)?.len() > before.len());
@@ -195,22 +254,13 @@ fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> R
         .open(&log)?
         .set_len(CAP)?;
     record_cli(&roots, CLOCK, "root", 0, 1, None);
-    assert!(std::fs::metadata(&log)?.len() > CAP);
-    // The report reads the newest CAP bytes. The first event, which lies before
-    // that window, is not counted; the second one starts it and is counted. The
-    // newest event follows zero-filled space and is counted too.
-    assert_eq!(count(report(&roots, inventory(), None, None)?), Some(2));
-    drop(lock);
-    // MCP logging only appends; existing workers perform rotation.
-    record_tool(&roots, CLOCK, "fabric_context", "ok", 1, None);
-    assert!(!roots.state.as_path().join(BACKUP).exists());
-    maintain_tools(&roots);
-    // Rotation is permitted again; the old log is retained as the backup.
-    record_cli(&roots, CLOCK, "root", 0, 1, None);
-    assert!(std::fs::metadata(roots.state.as_path().join(BACKUP))?.len() >= CAP);
+    assert_eq!(
+        std::fs::metadata(roots.state.as_path().join(BACKUP))?.len(),
+        CAP
+    );
     assert!(std::fs::metadata(&log)?.len() < LINE_CAP as u64);
-    // Only the newest backup event is in the window, plus the one in the new log.
-    assert_eq!(count(report(&roots, inventory(), None, None)?), Some(2));
+    assert_eq!(count(report(&roots, inventory(), None, None)?), Some(3));
+    assert!(!roots.state.as_path().join("usage.lock").exists());
     // A torn line is ignored, including an event appended to that line.
     std::fs::write(&log, b"{partial")?;
     record_cli(&roots, CLOCK, "root", 0, 1, None);
@@ -232,7 +282,10 @@ fn oversized_log_reads_recent_complete_events() -> Result {
     let roots = roots(&base)?;
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     let mut bytes = vec![b'x'; CAP as usize];
-    bytes.extend_from_slice(b"\n{\"kind\":\"cli.verb\",\"unit\":\"root\",\"duration_ms\":0,\"timestamp\":\"2026-10-26T00:00:00.000000Z\"}\n");
+    bytes.push(b'\n');
+    bytes.extend_from_slice(
+        event_line("root", 0, "2026-10-26T00:00:00.000000Z", None, None, None)?.as_bytes(),
+    );
     std::fs::write(roots.state.as_path().join(LOG), bytes)?;
     let report = report(&roots, inventory(), None, None)?;
     assert_eq!(
@@ -252,10 +305,11 @@ fn window_starting_on_a_record_start_keeps_that_record() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
-    let event = b"{\"kind\":\"cli.verb\",\"unit\":\"root\",\"duration_ms\":0,\"timestamp\":\"2026-10-26T00:00:00.000000Z\"}\n";
     // The newline before the event puts the window's start exactly on the event.
     let mut bytes = b"x\n".to_vec();
-    bytes.extend_from_slice(event);
+    bytes.extend_from_slice(
+        event_line("root", 0, "2026-10-26T00:00:00.000000Z", None, None, None)?.as_bytes(),
+    );
     bytes.resize(2 + CAP as usize, b'x');
     std::fs::write(roots.state.as_path().join(LOG), bytes)?;
     let report = report(&roots, inventory(), None, None)?;
@@ -276,18 +330,72 @@ fn failed_verb_retry_help_and_wait_poll_are_counted() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
-    // Native usage.jsonl format, with invented identities and values.
-    let log = concat!(
-        "{\"kind\":\"cli.verb\",\"unit\":\"run\",\"exit_code\":2,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:00Z\",\"session\":\"fixture-session\"}\n",
-        "{\"kind\":\"cli.verb\",\"unit\":\"help\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:01Z\",\"session\":\"fixture-session\"}\n",
-        "{\"kind\":\"cli.verb\",\"unit\":\"run\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:02Z\",\"session\":\"fixture-session\"}\n",
-        "{\"kind\":\"cli.verb\",\"unit\":\"status\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:03Z\",\"session\":\"fixture-session\",\"wait\":true}\n",
-        "{\"kind\":\"cli.verb\",\"unit\":\"status\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:04Z\",\"session\":\"fixture-session\",\"wait\":false}\n",
-        "{\"kind\":\"cli.verb\",\"unit\":\"status\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:05Z\"}\n"
-    );
-    let log = log.replace("\"session\":\"fixture-session\"", "\"session\":\"fixture-session\",\"trace\":{\"project\":\"01010101010101010101010101010101\"}")
-        + "{\"kind\":\"cli.verb\",\"unit\":\"run\",\"exit_code\":2,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:06Z\",\"session\":\"fixture-unscoped\"}\n"
-        + "{\"kind\":\"cli.verb\",\"unit\":\"run\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:07Z\",\"session\":\"fixture-unscoped\"}\n";
+    // Native usage.jsonl records are built from the current typed event shape.
+    let project = ProjectId::from_bytes([1; 16]);
+    let mut log = String::new();
+    for (unit, exit_code, timestamp, session, project, wait) in [
+        (
+            "run",
+            2,
+            "2026-10-01T00:00:00Z",
+            Some("fixture-session"),
+            Some(project),
+            None,
+        ),
+        (
+            "help",
+            0,
+            "2026-10-01T00:00:01Z",
+            Some("fixture-session"),
+            Some(project),
+            None,
+        ),
+        (
+            "run",
+            0,
+            "2026-10-01T00:00:02Z",
+            Some("fixture-session"),
+            Some(project),
+            None,
+        ),
+        (
+            "status",
+            0,
+            "2026-10-01T00:00:03Z",
+            Some("fixture-session"),
+            Some(project),
+            Some(true),
+        ),
+        (
+            "status",
+            0,
+            "2026-10-01T00:00:04Z",
+            Some("fixture-session"),
+            Some(project),
+            Some(false),
+        ),
+        ("status", 0, "2026-10-01T00:00:05Z", None, None, None),
+        (
+            "run",
+            2,
+            "2026-10-01T00:00:06Z",
+            Some("fixture-unscoped"),
+            None,
+            None,
+        ),
+        (
+            "run",
+            0,
+            "2026-10-01T00:00:07Z",
+            Some("fixture-unscoped"),
+            None,
+            None,
+        ),
+    ] {
+        log.push_str(&event_line(
+            unit, exit_code, timestamp, session, project, wait,
+        )?);
+    }
     std::fs::write(roots.state.as_path().join(LOG), log)?;
     let report = ergonomics(&roots, None, None, None)?;
     assert_eq!(report.help_calls, 1);

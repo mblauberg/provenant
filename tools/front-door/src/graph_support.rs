@@ -5,10 +5,47 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use provenant_cli::fabric::graph_relay::tier_route;
 
-/// The worktrees of the project `directory` belongs to, main checkout first,
-/// which a graph node may always read. Outside a repository the project is only
-/// its own directory.
-pub(crate) fn project_worktrees(directory: &Path) -> Vec<PathBuf> {
+/// Repository registration discovery has three outcomes so a damaged or
+/// unavailable inventory cannot masquerade as a one-worktree repository.
+pub(crate) enum ProjectWorktrees {
+    Registered(Vec<PathBuf>),
+    NotRepository,
+    Unavailable(String),
+}
+
+/// Whether a path has the structural markers of a working or bare repository.
+/// This probe only classifies a failed listing; Git remains the inventory owner.
+fn has_repository_markers(directory: &Path) -> Result<bool, String> {
+    use std::io::ErrorKind;
+    fn present(path: &Path) -> Result<bool, String> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(format!("{}: {error}", path.display())),
+        }
+    }
+    for parent in directory.ancestors() {
+        if present(&parent.join(".git"))? {
+            return Ok(true);
+        }
+        if present(&parent.join("HEAD"))?
+            && present(&parent.join("objects"))?
+            && present(&parent.join("refs"))?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Discover registrations main-checkout first. No repository is a supported
+/// state; an incomplete inventory is a distinct warning state.
+pub(crate) fn project_worktrees(directory: &Path) -> ProjectWorktrees {
+    match has_repository_markers(directory) {
+        Ok(false) => return ProjectWorktrees::NotRepository,
+        Err(reason) => return ProjectWorktrees::Unavailable(reason),
+        Ok(true) => {}
+    }
     let read = || -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
         let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
         let environment: Vec<_> = std::env::vars_os()
@@ -30,7 +67,10 @@ pub(crate) fn project_worktrees(directory: &Path) -> Vec<PathBuf> {
             )?,
         )
     };
-    read().unwrap_or_else(|_| vec![directory.to_path_buf()])
+    match read() {
+        Ok(paths) => ProjectWorktrees::Registered(paths),
+        Err(error) => ProjectWorktrees::Unavailable(error.to_string()),
+    }
 }
 
 /// Whether a read root is exactly one `${parameter}`, with nothing around it.
@@ -167,4 +207,30 @@ fn replace_path(text: &str, from: &str, to: &str) -> String {
 
 pub(crate) fn format_family_group(group_index: usize) -> String {
     format!("group-{group_index}")
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    #[test]
+    fn repository_discovery_classification_uses_git_markers() {
+        use super::*;
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("checkout/src");
+        std::fs::create_dir_all(&worktree).unwrap();
+        assert!(!has_repository_markers(&worktree).unwrap());
+        let git = temp.path().join("checkout/.git");
+        std::fs::create_dir(&git).unwrap();
+        assert!(has_repository_markers(&worktree).unwrap());
+        std::fs::remove_dir(&git).unwrap();
+        let bare = temp.path().join("bare");
+        std::fs::create_dir_all(bare.join("objects")).unwrap();
+        std::fs::create_dir(bare.join("refs")).unwrap();
+        std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert!(has_repository_markers(&bare).unwrap());
+        let linked = temp.path().join("linked");
+        std::fs::create_dir(&linked).unwrap();
+        symlink(git, linked.join(".git")).unwrap();
+        assert!(has_repository_markers(&linked).unwrap());
+    }
 }

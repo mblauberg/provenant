@@ -6,7 +6,8 @@ description: "Use to turn a rough or unsettled request into a spec, interview, s
 # Scope
 
 Scope settles intent and authority so a fresh agent can build and verify the
-work without asking.
+work without asking. The `deliver` skill's engineering stance records concerns,
+not specs: weigh alternatives, recommend the long-term structure and record the call.
 
 ## Digest
 
@@ -35,7 +36,7 @@ criterion as the owner's.
 
 A bug is repro, expected, observed and an invariant or minimal regression check. A task has 2 to 5
 criteria, a feature about 10. Anything larger is an epic: a `Done when` plus
-backlog lines. Over-specifying a small change is a defect.
+backlog lines. Size the detail to the risk; retain public-boundary invariants.
 
 State what and why, plus one-way-door constraints, and leave design to the
 implementer unless a decision has a rejected alternative. Write each criterion
@@ -45,16 +46,12 @@ implementation; test behaviour, not wording. Give each deletion or move one
 owner. A verification step beyond the stated outcome names the failure it
 prevents and how likely that is, or it is left out, because every later
 implementer must honour it. Boundaries cite a recorded real boundary or their
-reason.
+reason. Keep checks for public-boundary invariants.
 
 ## Modes
 
-- **Interview** (the user asks to be grilled): one question at a time, highest
-  leverage first, each with evidence and a recommendation. Answer from the
-  workspace instead of asking.
-- **Spike:** one falsifiable question, a timebox, kill criteria and a scratch
-  worktree. Harvest the answer into the spec and discard the code. See
-  [interview and spike](references/interview-and-spike.md).
+- **Interview or spike:** use [interview and spike](references/interview-and-spike.md)
+  to settle an open decision or test a falsifiable question.
 - **Kept prototype:** the repository file is the source, indexed through
   `engineering-docs`; a private artifact copy may present it.
 

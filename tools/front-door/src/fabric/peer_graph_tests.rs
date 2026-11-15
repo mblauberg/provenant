@@ -6,6 +6,16 @@ use serde_json::json;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+fn origin_key() -> provenant_records::WorkKey {
+    provenant_records::WorkKey::new(
+        provenant_core::ProjectId::from_bytes([77; 16]),
+        "origin-graph",
+        "parent",
+        1,
+    )
+    .unwrap()
+}
+
 fn receiver() -> TestResult<(crate::worktree_tests::support::TestRig, Factory)> {
     let rig = crate::worktree_tests::repository()?;
     provenant_os::fixture::private_state_dir(&rig.state)?;
@@ -20,7 +30,6 @@ fn receiver() -> TestResult<(crate::worktree_tests::support::TestRig, Factory)> 
         cwd: rig.project.clone(),
         assets: rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     Ok((rig, factory))
@@ -32,11 +41,12 @@ fn submit_parent(
     cancel: &CancelToken,
 ) -> TestResult<SubmissionReceipt> {
     let input = serde_json::from_value(json!({
-        "op":"submit", "operation_id":operation, "concurrency":1,
-        "tasks":[{"prompt":"Launch a child and collect its answer", "access":"read_only",
+        "op":"submit", "operation_id":operation,
+        "origin_work_key":origin_key(),
+        "task":{"prompt":"Launch a child and collect its answer", "access":"read_only",
             "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
             "timeout_seconds":30,
-            "context":{"graph_id":"origin-graph", "node_id":"parent"}}]
+            "context":{"graph_id":"origin-graph", "node_id":"parent", "attempt":1, "graph_template_launch":true}}
     }))?;
     Ok(provenant_cli::run::with_deferred_provider_launch(|| {
         super::super::peer::peer_submit_graph(
@@ -75,7 +85,9 @@ fn advance_receiver(
         cancel,
         &factory.clock,
     )?;
-    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None,
+    let mut owner = BoundGraphOwner {
+        writer_launch_budget: None,
+        admission_timeout: None,
         repo_facts: Default::default(),
         launch_warnings: Vec::new(),
         factory,
@@ -128,20 +140,24 @@ fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResu
     let (rig, factory) = receiver()?;
     let cancel = CancelToken::new();
     let receipt = submit_parent(&factory, "peer-parent-result", &cancel)?;
-    let graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph pointer")?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
     let parent = receipt.targets[0].attempt;
     assert_eq!(receipt.targets[0].host, Some(factory.context.identity.host));
     let replay = submit_parent(&factory, "peer-parent-result", &cancel)?;
     assert_eq!(replay.targets, receipt.targets);
-    assert_eq!(replay.extra["peer_graph"], receipt.extra["peer_graph"]);
+    assert_eq!(replay.peer_graph, receipt.peer_graph);
     let changed: SubmitInput = serde_json::from_value(json!({
-        "op":"submit", "operation_id":"peer-parent-result", "concurrency":1,
-        "tasks":[{"prompt":"A changed brief must not reuse the accepted operation", "access":"read_only",
+        "op":"submit", "operation_id":"peer-parent-result",
+        "origin_work_key":origin_key(),
+        "task":{"prompt":"A changed brief must not reuse the accepted operation", "access":"read_only",
             "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
             "timeout_seconds":30,
-            "context":{"graph_id":"origin-graph", "node_id":"parent"}}]
+            "context":{"graph_id":"origin-graph", "node_id":"parent", "attempt":1, "graph_template_launch":true}}
     }))?;
     assert!(matches!(
         super::super::peer::peer_submit_graph(
@@ -174,12 +190,10 @@ fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResu
         },
         &parent_call,
     )?;
-    let request = parent_store.request(parent_record.run_id, &parent_call)?;
-    assert_eq!(request.tasks[0].provider_timeout_seconds, 17);
-    let directory = provenant_os::fs::Directory::open_anchor(
-        &rig.state
-            .join(format!("runs/{}/attempts/{parent}", parent_record.run_id)),
-    )?;
+    let request = parent_store.request(parent_record.attempt_id, &parent_call)?;
+    assert_eq!(request.task.provider_timeout_seconds, 17);
+    let directory =
+        provenant_os::fs::Directory::open_anchor(&rig.state.join(format!("attempts/{parent}")))?;
     parent_store.admit(
         parent,
         &directory,
@@ -261,29 +275,87 @@ fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResu
     )?;
     assert_eq!(children["children"][0]["settled"], true);
     let pointer = super::super::peer::peer_graph_fields(&factory, parent)?;
-    assert_eq!(pointer["peer_graph"]["graph_id"], graph);
-    assert_eq!(pointer["peer_origin_context"]["graph_id"], "origin-graph");
+    assert_eq!(
+        pointer
+            .peer_graph
+            .as_ref()
+            .map(|graph| graph.graph_id.as_str()),
+        Some(graph)
+    );
+    assert_eq!(
+        pointer
+            .peer_origin_context
+            .as_ref()
+            .and_then(|context| context.graph_id.as_deref()),
+        Some("origin-graph")
+    );
+    assert!(super::super::peer::peer_origin_matches(
+        &pointer,
+        &origin_key()
+    ));
+    let execution = FileJournal::execution(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+    )?
+    .ok_or("receiver graph document")?;
+    assert_eq!(
+        execution.document.peer_origin_work_key.as_ref(),
+        Some(&origin_key())
+    );
+    for wrong in [
+        provenant_records::WorkKey::new(
+            factory.context.identity.project,
+            "origin-graph",
+            "parent",
+            1,
+        )?,
+        provenant_records::WorkKey::new(origin_key().project(), "other-graph", "parent", 1)?,
+        provenant_records::WorkKey::new(origin_key().project(), "origin-graph", "other-node", 1)?,
+        origin_key().next_attempt().ok_or("next origin attempt")?,
+    ] {
+        assert!(!super::super::peer::peer_origin_matches(&pointer, &wrong));
+    }
     let page = super::super::peer::peer_graph_fields_page(&factory, parent, 1)?;
     assert_eq!(
-        page["peer_subtree"]["checkpoint"]["nodes"]
-            .as_array()
-            .ok_or("node page")?
+        page.peer_subtree
+            .as_ref()
+            .ok_or("subtree")?
+            .checkpoint
+            .nodes
             .len(),
         1
     );
     assert_eq!(
-        page["peer_subtree"]["checkpoint"]["nodes"][0]["id"],
+        page.peer_subtree
+            .as_ref()
+            .ok_or("subtree")?
+            .checkpoint
+            .nodes[0]
+            .id,
         "parent--child"
     );
-    assert!(page["peer_subtree"]["next_node"].is_null());
+    assert!(
+        page.peer_subtree
+            .as_ref()
+            .ok_or("subtree")?
+            .next_node
+            .is_none()
+    );
     assert!(matches!(
         super::super::peer::peer_graph_fields_page(&factory, parent, 3),
         Err(FacadeError::InvalidInput { .. })
     ));
 
     assert_eq!(
-        pointer["peer_subtree"]["checkpoint"]["nodes"][1]["state"],
-        "succeeded"
+        pointer
+            .peer_subtree
+            .as_ref()
+            .ok_or("subtree")?
+            .checkpoint
+            .nodes[1]
+            .state,
+        graph::NodeState::Succeeded
     );
     let result = owner.output(
         OutputInput::Read {
@@ -320,9 +392,12 @@ fn peer_hosted_lane_cancellation_stops_parent_and_child() -> TestResult {
     let (_rig, factory) = receiver()?;
     let cancel = CancelToken::new();
     let receipt = submit_parent(&factory, "peer-parent-cancel", &cancel)?;
-    let graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph pointer")?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
     let parent = receipt.targets[0].attempt;
     add_child(&factory, parent, "add-child", &cancel)?;
     let running = advance_receiver(&factory, graph, &cancel)?;
@@ -385,9 +460,12 @@ fn peer_hosted_lane_cancellation_reaches_child_after_parent_settles() -> TestRes
     let (rig, factory) = receiver()?;
     let cancel = CancelToken::new();
     let receipt = submit_parent(&factory, "peer-settled-parent-cancel", &cancel)?;
-    let graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph pointer")?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
     let parent = receipt.targets[0].attempt;
     add_child(&factory, parent, "add-child", &cancel)?;
     let running = advance_receiver(&factory, graph, &cancel)?;
@@ -458,9 +536,12 @@ fn peer_hosted_lane_subtree_pages_are_bounded_complete_and_private() -> TestResu
     let (rig, factory) = receiver()?;
     let cancel = CancelToken::new();
     let receipt = submit_parent(&factory, "peer-subtree-pages", &cancel)?;
-    let graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph pointer")?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
     let parent = receipt.targets[0].attempt;
     let expected = {
         let mut journal = FileJournal::open(
@@ -533,26 +614,23 @@ fn peer_hosted_lane_subtree_pages_are_bounded_complete_and_private() -> TestResu
         assert!(size < MAX_FRAME / 2);
         bytes += size;
         pages += 1;
-        let subtree = &fields["peer_subtree"];
-        for row in subtree["checkpoint"]["nodes"]
-            .as_array()
-            .ok_or("node page")?
-        {
-            let id = row["id"].as_str().ok_or("node id")?.to_owned();
-            assert!(unique.insert(id.clone()));
-            observed.push(id);
-            assert!(row["worktree"].is_null());
-            assert!(row.get("prompt").is_none());
-            assert!(row.get("source_path").is_none());
-            for attempt in row["attempts"].as_array().ok_or("attempt metadata")? {
-                assert!(attempt.get("prompt").is_none());
-                assert!(attempt.get("source_path").is_none());
+        let subtree = fields.peer_subtree.as_ref().ok_or("subtree")?;
+        for row in &subtree.checkpoint.nodes {
+            assert!(unique.insert(row.id.clone()));
+            observed.push(row.id.clone());
+            assert!(row.worktree.is_none());
+            let projected = serde_json::to_value(row)?;
+            assert!(projected.get("prompt").is_none());
+            assert!(projected.get("source_path").is_none());
+            for attempt in &row.attempts {
+                let projected = serde_json::to_value(attempt)?;
+                assert!(projected.get("prompt").is_none());
+                assert!(projected.get("source_path").is_none());
             }
         }
-        let Some(next) = subtree["next_node"].as_u64() else {
+        let Some(next) = subtree.next_node else {
             break;
         };
-        let next = usize::try_from(next)?;
         assert!(next > after && next < expected.len());
         after = next;
     }
@@ -572,9 +650,12 @@ fn peer_hosted_lane_collection_preserves_origin_status() -> TestResult {
     let (rig, factory) = receiver()?;
     let cancel = CancelToken::new();
     let receipt = submit_parent(&factory, "peer-collected-status", &cancel)?;
-    let graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph pointer")?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
     let parent = receipt.targets[0].attempt;
     let owner = BinaryRunOwner {
         factory: &factory,
@@ -620,10 +701,14 @@ fn peer_hosted_lane_collection_preserves_origin_status() -> TestResult {
         .is_none()
     );
     let fields = super::super::peer::peer_graph_fields(&factory, parent)?;
-    assert_eq!(fields["peer_graph_collected"], true);
-    assert_eq!(fields["peer_graph"], receipt.extra["peer_graph"]);
+    assert_eq!(fields.peer_graph_collected, Some(true));
+    assert!(super::super::peer::peer_origin_matches(
+        &fields,
+        &origin_key()
+    ));
+    assert_eq!(fields.peer_graph, receipt.peer_graph);
     let mut record = store.record(parent, &call)?;
-    record.extra.extend(fields);
+    record.peer.merge(fields);
     let peer = factory.context.identity.host;
     let mut local = provenant_core::HostId::from_bytes([0; 16]);
     if local == peer {
@@ -669,16 +754,24 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
             _: &str,
             _: &provenant_run::LaunchPaths,
             _: Option<&provenant_run::AttemptRecord>,
-        ) -> Result<provenant_run::PreparedLaunch, provenant_run::PrepareRefusal> {
+        ) -> Result<provenant_run::PreparedLaunch, Box<provenant_run::PrepareRefusal>> {
             let mut route = provenant_records::run::SkippedRoute {
+                skipped_accounts: Vec::new(),
                 extra: Default::default(),
                 route: "fixture/model".into(),
                 kind: provenant_records::run::SkipKind::Unavailable,
+                plan_error: None,
+                guard_boundary: None,
+                guard_resource: None,
+                confinement_guard: None,
                 cause: Some(provenant_records::RouteExclusionReason::PacingReserve),
                 detail: "PRIVATE_PACING_SENTINEL".into(),
             };
             route.set_guard_facts(None, Some(self.0)).unwrap();
-            let mut refusal = provenant_run::PrepareRefusal::from("PRIVATE_PACING_SENTINEL");
+            let mut refusal = provenant_run::PrepareRefusal::boxed(
+                provenant_records::run::TerminalCause::RouteResolutionRefused,
+                "PRIVATE_PACING_SENTINEL",
+            );
             refusal.skipped_routes.push(route);
             Err(refusal)
         }
@@ -696,9 +789,12 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
     let cancel = CancelToken::new();
     let operation: provenant_core::OperationId = "peer-paced-parent".parse()?;
     let receipt = submit_parent(&factory, operation.as_str(), &cancel)?;
-    let graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph pointer")?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let mut journal = FileJournal::open(
         &factory.context.roots.state,
@@ -709,12 +805,6 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
         &factory.clock,
     )?;
     let mut checkpoint = journal.load(graph)?.ok_or("receiver graph")?;
-    let mut unreplied = checkpoint.clone();
-    unreplied.nodes[0].attempts[0].attempt_ref = None;
-    assert!(matches!(
-        super::super::peer::peer_graph_receipt(&factory, operation.clone(), graph, &unreplied),
-        Err(FacadeError::LaunchUnknown { operation_id }) if operation_id == operation
-    ));
     let root = &checkpoint.nodes[0].attempts[0];
     let owner = BinaryRunOwner {
         factory: &factory,
@@ -730,13 +820,14 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
         setting: PacingReserveSetting::AdapterFiveHour,
         origin: PacingSettingSource::Configuration,
     };
-    let started =
-        session
-            .store
-            .start(record.run_id, &Pacing(fact), &|_, _| Ok(Vec::new()), &call)?;
-    let run = session.store.run(record.run_id, &call)?;
+    let started = session.store.start(
+        record.attempt_id,
+        &Pacing(fact),
+        &|_, _| Ok(Vec::new()),
+        &call,
+    )?;
     let first = owner
-        .receipt(&session, operation.clone(), &run, &started, &call)
+        .receipt(&session, operation.clone(), &record, &started, &call)
         .unwrap_err();
     // Recreate the reply-loss boundary: the host sealed the refusal, while the
     // graph has not yet recorded an attempt reference.
@@ -805,15 +896,25 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
             _: &str,
             _: &provenant_run::LaunchPaths,
             _: Option<&provenant_run::AttemptRecord>,
-        ) -> Result<provenant_run::PreparedLaunch, provenant_run::PrepareRefusal> {
-            let mut refusal = provenant_run::PrepareRefusal::from("allowance spent");
-            refusal.skipped_routes.push(provenant_records::run::SkippedRoute {
-                extra: Default::default(),
-                route: "codex/gpt".into(),
-                kind: provenant_records::run::SkipKind::Unavailable,
-                cause: None,
-                detail: "allowance spent".into(),
-            });
+        ) -> Result<provenant_run::PreparedLaunch, Box<provenant_run::PrepareRefusal>> {
+            let mut refusal = provenant_run::PrepareRefusal::boxed(
+                provenant_records::run::TerminalCause::RouteResolutionRefused,
+                "allowance spent",
+            );
+            refusal
+                .skipped_routes
+                .push(provenant_records::run::SkippedRoute {
+                    skipped_accounts: Vec::new(),
+                    extra: Default::default(),
+                    route: "codex/gpt".into(),
+                    kind: provenant_records::run::SkipKind::Unavailable,
+                    plan_error: None,
+                    guard_boundary: None,
+                    guard_resource: None,
+                    confinement_guard: None,
+                    cause: None,
+                    detail: "allowance spent".into(),
+                });
             Err(refusal)
         }
         fn decode(
@@ -829,9 +930,12 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
     let (_rig, factory) = receiver()?;
     let cancel = CancelToken::new();
     let receipt = submit_parent(&factory, "refused-allowance-parent", &cancel)?;
-    let graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph pointer")?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let mut journal = FileJournal::open(
         &factory.context.roots.state,
@@ -855,7 +959,7 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
         let record = session.store.record(attempt, &call)?;
         let _ = session
             .store
-            .start(record.run_id, &Allowance, &|_, _| Ok(Vec::new()), &call);
+            .start(record.attempt_id, &Allowance, &|_, _| Ok(Vec::new()), &call);
     }
     let mut result = json!({"checkpoint":{"nodes":[{
         "id":"parent", "advance_error_code":"preparation_refused",
@@ -866,6 +970,19 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
     let message = result["checkpoint"]["nodes"][0]["advance_error"]
         .as_str()
         .ok_or("advance_error")?;
-    assert!(message.contains("codex/gpt: allowance spent"), "{message}");
+    let route = provenant_records::run::SkippedRoute {
+        skipped_accounts: Vec::new(),
+        extra: Default::default(),
+        route: "codex/gpt".into(),
+        kind: provenant_records::run::SkipKind::Unavailable,
+        plan_error: None,
+        guard_boundary: None,
+        guard_resource: None,
+        confinement_guard: None,
+        cause: None,
+        detail: "allowance spent".into(),
+    };
+    assert!(message.contains(&route.describe()), "{message}");
+    assert!(!message.contains(&route.detail), "{message}");
     Ok(())
 }

@@ -65,7 +65,7 @@ impl Fixture {
     }
 }
 fn config() -> crate::config::FabricConfig {
-    serde_json::from_value(serde_json::json!({"agent_label":"chair","client_label":"test","home_hosts":{},"peers":{},"limits":{"body_bytes":65536,"input_frame_bytes":1048576,"json_depth":64,"page_rows":100,"output_lines":500,"output_bytes":65536,"result_bytes":1048576,"lease_seconds":3600,"peer_seconds":30,"graph_timeout_seconds":14400}})).unwrap()
+    serde_json::from_value(serde_json::json!({"agent_label":"chair","client_label":"test","home_hosts":{},"peers":{},"limits":{"body_bytes":65536,"input_frame_bytes":1048576,"json_depth":64,"page_rows":100,"output_lines":500,"output_bytes":65536,"result_bytes":1048576,"peer_seconds":30,"graph_timeout_seconds":14400}})).unwrap()
 }
 fn op(text: &str) -> Option<OperationId> {
     Some(OperationId::parse(text).unwrap())
@@ -851,8 +851,8 @@ fn request_correlation_saves_exact_coverage_once_and_requires_host_lookup() {
     let mut input = ask(RequestKind::Question, "linked");
     let work = RequestWork {
         extra: Default::default(),
-        run_id: provenant_core::RunId::from_bytes([3; 16]),
-        task_id: Some(provenant_core::TaskId::from_bytes([4; 16])),
+        graph: "lane-graph".into(),
+        node: Some("node".into()),
         attempt_id: None,
         repository: None,
         head: None,
@@ -931,8 +931,8 @@ fn request_correlation_v2_survives_answer_close_and_acknowledgement() {
     let f = Fixture::new();
     let work = RequestWork {
         extra: Default::default(),
-        run_id: provenant_core::RunId::from_bytes([3; 16]),
-        task_id: Some(provenant_core::TaskId::from_bytes([4; 16])),
+        graph: "lane-graph".into(),
+        node: Some("node".into()),
         attempt_id: None,
         repository: None,
         head: None,
@@ -1023,8 +1023,8 @@ fn request_correlation_lookup_never_holds_fabric_write_lock() {
     if let InboxInput::Ask { request, .. } = &mut input {
         request.work = Some(RequestWork {
             extra: Default::default(),
-            run_id: provenant_core::RunId::from_bytes([3; 16]),
-            task_id: None,
+            graph: "lane-graph".into(),
+            node: None,
             attempt_id: None,
             repository: None,
             head: None,
@@ -1105,8 +1105,8 @@ fn request_correlation_repository_bound_counts_encoded_wire_bytes() {
         if let InboxInput::Ask { request, .. } = &mut input {
             request.work = Some(RequestWork {
                 extra: Default::default(),
-                run_id: provenant_core::RunId::from_bytes([3; 16]),
-                task_id: None,
+                graph: "lane-graph".into(),
+                node: None,
                 attempt_id: None,
                 repository: Some(provenant_records::AbsolutePath::new(&path).unwrap()),
                 head: None,
@@ -1146,8 +1146,8 @@ fn replacement_work_mismatch_leaves_original_open_and_unindexed_is_saved() {
     if let InboxInput::Ask { request, .. } = &mut input {
         request.work = Some(RequestWork {
             extra: Default::default(),
-            run_id: provenant_core::RunId::from_bytes([3; 16]),
-            task_id: None,
+            graph: "lane-graph".into(),
+            node: None,
             attempt_id: None,
             repository: None,
             head: None,
@@ -1436,6 +1436,31 @@ fn hook_offers_retry_idempotently_without_hiding_later_queued_answers() {
     assert!(retried.items.iter().all(|item| item.delivery.attempts == 1));
 }
 
+#[test]
+fn graph_steer_context_round_trips_and_rejects_malformed_values() {
+    let context = super::GraphSteerContext {
+        launch_actor: ActorId::from_bytes([4; 16]),
+        launch_operation: OperationId::parse("graph-steer-op").unwrap(),
+        origin_work_key: provenant_records::WorkKey::new(
+            provenant_core::ProjectId::from_bytes([5; 16]),
+            "g-steer",
+            "node",
+            1,
+        )
+        .unwrap(),
+    };
+    let encoded = serde_json::to_value(&context).unwrap();
+    assert_eq!(
+        serde_json::from_value::<super::GraphSteerContext>(encoded.clone()).unwrap(),
+        context
+    );
+    for field in ["launch_actor", "launch_operation", "origin_work_key"] {
+        let mut malformed = encoded.clone();
+        malformed[field] = serde_json::json!(false);
+        assert!(serde_json::from_value::<super::GraphSteerContext>(malformed).is_err());
+    }
+}
+
 fn chair_message(session: &str, text: &str, id: &str) -> InboxInput {
     InboxInput::ChairMessage {
         extra: Default::default(),
@@ -1448,6 +1473,7 @@ fn chair_message(session: &str, text: &str, id: &str) -> InboxInput {
 fn steer(text: &str, id: &str) -> InboxInput {
     InboxInput::Steer {
         extra: Default::default(),
+        graph_context: None,
         attempt: provenant_core::AttemptId::from_bytes([7; 16]),
         text: text.into(),
         operation_id: op(id),
@@ -1544,6 +1570,7 @@ fn chair_mail_is_isolated_to_its_exact_session() {
         &f.root,
         f.identity.project,
         f.identity.inbox.actor,
+        crate::test_support::observation_settings(),
         &f.clock,
         &ThreadPause,
         &f.cancel,
@@ -1643,4 +1670,79 @@ fn control_is_refused_inside_a_lane_and_without_a_lookup() {
         f.call(input),
         Err(InboxError::Mutation { ref source, .. }) if source.code() == "inbox_unavailable"
     ));
+}
+
+#[test]
+fn listing_metadata_round_trips_and_rejects_malformed_values() {
+    let host = HostId::from_bytes([7; 16]);
+    let result = InboxResult::Listed {
+        extra: Default::default(),
+        items: Vec::new(),
+        next_cursor: None,
+        truncated: false,
+        coverage: "local_only".into(),
+        projects: std::collections::BTreeMap::from([
+            (
+                "local-null-path".into(),
+                InboxProject {
+                    label: None,
+                    path: InboxProjectPath::Unavailable,
+                    host: None,
+                },
+            ),
+            (
+                "local-path".into(),
+                InboxProject {
+                    label: Some("repo".into()),
+                    path: InboxProjectPath::Local("/repo".into()),
+                    host: None,
+                },
+            ),
+            (
+                "peer-path-omitted".into(),
+                InboxProject {
+                    label: Some("peer repo".into()),
+                    path: InboxProjectPath::Omitted,
+                    host: Some(host),
+                },
+            ),
+        ]),
+        peers: [
+            (InboxPeerState::Complete, None),
+            (InboxPeerState::Partial, Some("invalid_page")),
+            (InboxPeerState::Unreachable, Some("timeout")),
+            (InboxPeerState::Unsupported, None),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (state, reason))| InboxPeerCoverage {
+            host,
+            label: "peer".into(),
+            state,
+            included: index,
+            invalid_rows: index + 1,
+            duplicate_rows: index + 2,
+            truncated: index % 2 == 0,
+            reason: reason.map(str::to_owned),
+        })
+        .collect(),
+    };
+    let value = serde_json::to_value(&result).unwrap();
+    assert_eq!(
+        value["projects"]["local-null-path"]["path"],
+        serde_json::Value::Null
+    );
+    assert!(value["projects"]["peer-path-omitted"].get("path").is_none());
+    assert_eq!(
+        serde_json::from_value::<InboxResult>(value.clone()).unwrap(),
+        result
+    );
+
+    let mut malformed_project = value.clone();
+    malformed_project["projects"]["local-path"]["label"] = serde_json::json!(7);
+    assert!(serde_json::from_value::<InboxResult>(malformed_project).is_err());
+
+    let mut malformed_peer = value;
+    malformed_peer["peers"][0]["state"] = serde_json::json!("pending");
+    assert!(serde_json::from_value::<InboxResult>(malformed_peer).is_err());
 }

@@ -15,6 +15,8 @@ fn usage_fetch_failure_is_unknown_and_does_not_wedge_graph() {
         result_path: None,
         branch: None,
         commit: None,
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        stop: None,
     };
     for policy in [
         crate::config::UnknownUsage::Warn,
@@ -74,6 +76,8 @@ fn cost_unknown_reason_is_recorded() {
             result_path: None,
             branch: None,
             commit: None,
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            stop: None,
         }]),
         usage: AttemptUsage {
             cost_unknown_reason: Some("config/telemetry-prices.toml: missing".into()),
@@ -170,7 +174,7 @@ fn settled_graph_never_saves_a_new_structural_pause() {
         journal
             .saves
             .iter()
-            .all(|checkpoint| checkpoint.pause_reason.is_none())
+            .all(|checkpoint| checkpoint.pause.is_none())
     );
 }
 
@@ -214,13 +218,13 @@ fn structural_limit_pauses_and_host_limit_change_resumes() {
     .unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
     assert_eq!(
-        paused.checkpoint.pause_code.as_deref(),
-        Some("structural_limit")
+        paused.checkpoint.pause_cause(),
+        Some(PauseCause::StructuralLimit)
     );
     let reason = limits.nodes_bound().refusal(2).unwrap();
     assert_eq!(document.admit(&limits).unwrap_err().to_string(), reason);
     assert_eq!(
-        paused.checkpoint.pause_reason.as_deref(),
+        paused.checkpoint.pause_reason(),
         Some(reason.as_str())
     );
     assert!(owner.calls.is_empty());
@@ -268,14 +272,14 @@ fn fan_out_and_depth_pause_before_launch() {
         .unwrap();
         assert_eq!(run.status, GraphStatus::Paused);
         assert_eq!(
-            run.checkpoint.pause_code.as_deref(),
-            Some("structural_limit")
+            run.checkpoint.pause_cause(),
+            Some(PauseCause::StructuralLimit)
         );
         if limits.expansion_depth == 1 {
             let reason = limits.expansion_depth_bound().refusal(2).unwrap();
             assert_eq!(document.admit(&limits).unwrap_err().to_string(), reason);
             assert_eq!(
-                run.checkpoint.pause_reason.as_deref(),
+                run.checkpoint.pause_reason(),
                 Some(reason.as_str())
             );
         }
@@ -298,6 +302,8 @@ fn final_budget_exhaustion_still_delivers() {
             result_path: None,
             branch: None,
             commit: None,
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            stop: None,
         }]),
         usage: AttemptUsage {
             tokens: Some(10),
@@ -347,6 +353,8 @@ fn budget_pause_stops_admission_and_extension_resumes() {
         result_path: None,
         branch: None,
         commit: None,
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        stop: None,
     };
     let mut owner = FakeOwner {
         observations: VecDeque::from([observation(), observation()]),
@@ -395,6 +403,8 @@ fn unknown_usage_warns_or_pauses_and_events_are_idempotent() {
         result_path: None,
         branch: None,
         commit: None,
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        stop: None,
     };
     for policy in [
         crate::config::UnknownUsage::Warn,
@@ -471,6 +481,8 @@ fn graph_wall_budget_sums_provider_time_and_preserves_partial_lower_bound() {
             result_path: None,
             branch: None,
             commit: None,
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+            stop: None,
         }]),
         usage: AttemptUsage {
             tokens: Some(12),
@@ -498,8 +510,8 @@ fn graph_wall_budget_sums_provider_time_and_preserves_partial_lower_bound() {
     .unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("budget_exceeded")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::BudgetExceeded)
     );
     let mut checkpoint = run.checkpoint;
     let wall_budget = crate::config::GraphBudget {

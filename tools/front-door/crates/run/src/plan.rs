@@ -9,18 +9,38 @@ impl RunStore {
     /// Provider temporary files live below this attempt, never in a
     /// shared system temporary directory. Settlement removes it best-effort.
     pub fn temporary_path(&self, id: AttemptId, call: &Request<'_>) -> Result<PathBuf> {
-        let record = self.record(id, call)?;
-        let directory = self.attempt_dir(record.run_id, id, false)?;
+        self.record(id, call)?;
+        let directory = self.attempt_dir(id, false)?;
         subdir(&directory, OsStr::new("tmp"), true)?;
         Ok(self
             .context
             .state_root
             .as_path()
-            .join("runs")
-            .join(record.run_id.to_string())
             .join("attempts")
             .join(id.to_string())
             .join("tmp"))
+    }
+
+    /// The provider availability this attempt's preparation published, as
+    /// stored; `None` when preparation published none.
+    pub fn published_availability(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<Option<Vec<u8>>> {
+        const NAME: &str = "availability.json";
+        const LIMIT: u64 = 1024 * 1024;
+        self.record(id, call)?;
+        let directory = self.attempt_dir(id, false)?;
+        let metadata = match directory.metadata_at(OsStr::new(NAME), false) {
+            Ok(metadata) => metadata,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(check) = PathCheck::file(metadata) {
+            return Err(RunError::unsafe_entry(&directory, OsStr::new(NAME), check));
+        }
+        Ok(Some(directory.read_bounded(OsStr::new(NAME), LIMIT)?))
     }
 
     /// The run-plan edge reads policy from host state and resolves all grants
@@ -134,7 +154,7 @@ mod tests {
     use provenant_os::exec::SystemExecutor;
     use provenant_os::exec::Termination;
 
-    use std::{path::Path, time::Duration};
+    use std::time::Duration;
 
     #[test]
     fn run_plan_loads_only_its_bound_projects_policy_and_uses_attempt_temp()
@@ -150,15 +170,7 @@ mod tests {
         let home = base.join("home");
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))?;
-        let git = [
-            "/opt/homebrew/bin/git",
-            "/usr/local/bin/git",
-            "/usr/bin/git",
-        ]
-        .iter()
-        .map(Path::new)
-        .find(|p| p.is_file())
-        .ok_or("git missing")?;
+        let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
         let executor = SystemExecutor::new(2)?;
         let argv = [
             git.as_os_str().to_owned(),
@@ -173,7 +185,7 @@ mod tests {
         let mut options = ExecOptions::new(&argv, &base, Duration::from_secs(10));
         options.env = Some(&env);
         assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
-        let runtime = UtilityRuntime::new(git, &home)?;
+        let runtime = UtilityRuntime::new(&git, &home, context.state_root.as_path())?;
         let repo = runtime.open_read_repo(
             &executor,
             &repo_path,
@@ -191,7 +203,7 @@ mod tests {
         let store = RunStore::open(&context, &call)?;
         let run = input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         std::fs::create_dir_all(repo_path.join(".agent-run/locks"))?;
         let policy_path = context
             .state_root
@@ -205,6 +217,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                credential_roots: roots.credential_roots().clone(),
                 policy: None,
                 read_only: None,
                 mode: AccessMode::ReadOnly,

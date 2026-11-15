@@ -6,12 +6,14 @@ use serde_json::{Value, json};
 pub(super) struct Context<'a> {
     pub cwd: &'a Path,
     pub home: &'a Path,
+    pub credential_roots: &'a provenant_core::CredentialRoots,
     pub state_root: &'a Path,
     pub common_git: Option<&'a Path>,
     pub worktree_gitdir: Option<&'a Path>,
     pub writer: bool,
     pub settings: Option<&'a crate::domains::ProjectLanesConfig>,
     pub project: &'a str,
+    pub policy: &'a provenant_records::policy::Policy,
 }
 
 fn display_path(path: &Path, primary: &Path, home: &Path) -> String {
@@ -33,6 +35,44 @@ fn display_path(path: &Path, primary: &Path, home: &Path) -> String {
 
 fn overlaps(root: &Path, other: &Path) -> bool {
     root.starts_with(other) || other.starts_with(root)
+}
+
+fn agent_configuration_overlaps(path: &Path, primary: &Path) -> Vec<(PathBuf, String)> {
+    provenant_core::PROJECT_AGENT_CONFIG_DIRECTORIES
+        .iter()
+        .copied()
+        .filter_map(|name| {
+            let config = primary.join(name);
+            (overlaps(path, &config) && std::fs::symlink_metadata(&config).is_ok()).then(|| {
+                (
+                    config,
+                    format!("project-local agent configuration ({name})"),
+                )
+            })
+        })
+        .collect()
+}
+
+fn credential_source(
+    entry: &Path,
+    exec: bool,
+    primary: &Path,
+    context: &Context<'_>,
+) -> Option<String> {
+    let path = entry.strip_prefix("~").map_or_else(
+        |_| primary.join(entry),
+        |relative| context.home.join(relative),
+    );
+    let path = std::fs::canonicalize(path).ok()?;
+    let scope = if path.is_dir() {
+        provenant_core::CredentialScope::Subtree
+    } else {
+        provenant_core::CredentialScope::Exact
+    };
+    context
+        .credential_roots
+        .refusal(&path, scope, exec)
+        .map(|root| root.source.clone())
 }
 
 fn resolve(
@@ -73,7 +113,7 @@ fn resolve(
     {
         return Err("git_directory");
     }
-    if provenant_confinement::refuses_lane_root(&path, exec, Some(context.home)) {
+    if provenant_confinement::refuses_lane_root(&path, exec, context.credential_roots) {
         return Err("credential_root");
     }
     if plan
@@ -101,7 +141,7 @@ pub(super) fn apply(
     spec: &mut provenant_providers::LaunchSpec,
     plan: &ConfinedPlan,
     context: Context<'_>,
-) -> Value {
+) -> Result<Value, provenant_providers::ProviderError> {
     // Resolve against a copy of the current profile, then transfer only the
     // validated additions to the provider-owned requirements resolver.
     let mut candidate = provenant_confinement::permissions::ProviderProfile {
@@ -111,7 +151,6 @@ pub(super) fn apply(
     let read_start = candidate.spec.runtime_reads.len();
     let exec_start = candidate.spec.tool_exec_roots.len();
     let write_start = candidate.spec.tool_writes.len();
-    let home = context.home;
     let cwd = context.cwd;
     let receipt = apply_to(&mut spec.env, &mut candidate, plan, context);
     spec.set_project_requirements(
@@ -120,10 +159,11 @@ pub(super) fn apply(
         candidate.spec.tool_writes[write_start..].to_vec(),
         receipt,
     );
-    spec.complete_tool_requirements(plan, home, cwd);
-    spec.project_requirements_receipt()
+    spec.complete_tool_requirements(plan, cwd)?;
+    Ok(spec
+        .project_requirements_receipt()
         .cloned()
-        .unwrap_or(serde_json::Value::Null)
+        .unwrap_or(serde_json::Value::Null))
 }
 
 fn apply_to(
@@ -138,7 +178,7 @@ fn apply_to(
         .and_then(Path::parent)
         .unwrap_or(context.cwd);
     env.push((
-        "PROVENANT_PRIMARY_CHECKOUT".into(),
+        provenant_core::consumer_env::PRIMARY_CHECKOUT.into(),
         primary.as_os_str().to_owned(),
     ));
     if let Some(gitdir) = context
@@ -146,7 +186,7 @@ fn apply_to(
         .filter(|gitdir| context.writer || Some(*gitdir) != context.common_git)
     {
         env.push((
-            "PROVENANT_WORKTREE_GITDIR".into(),
+            provenant_core::consumer_env::WORKTREE_GITDIR.into(),
             gitdir.as_os_str().to_owned(),
         ));
         profile.spec.runtime_reads.push(PathGrant {
@@ -209,6 +249,14 @@ fn apply_to(
                 });
                 match result {
                     Ok(grant) => {
+                        for (config, source) in agent_configuration_overlaps(&grant.path, primary) {
+                            warnings.push(json!({
+                                "code": "project_agent_configuration_overlap",
+                                "source": source,
+                                "key": key,
+                                "path": display_path(&config, primary, context.home),
+                            }));
+                        }
                         let record = json!({"path": display_path(&grant.path, primary, context.home), "source": key});
                         if is_exec {
                             profile.spec.runtime_reads.push(grant.clone());
@@ -219,12 +267,29 @@ fn apply_to(
                             shared.push(record);
                         }
                     }
-                    Err(reason) => warnings.push(json!({
-                        "code": if is_exec { "exec_root_ignored" } else { "shared_path_ignored" },
-                        "key": key,
-                        "reason": reason,
-                        "path": display_path(entry, primary, context.home),
-                    })),
+                    Err(reason) => {
+                        if let provenant_records::policy::Effect::Warn(message) =
+                            context.policy.check(
+                                "PROJECT_PATHS_RESOLVE_NONE",
+                                provenant_records::policy::Facts::violation(format!(
+                                    "configured project path {key} was omitted: {reason}"
+                                )),
+                            )
+                        {
+                            warnings.push(json!({
+                                "code": if is_exec { "exec_root_ignored" } else { "shared_path_ignored" },
+                                "policy_code": "PROJECT_PATHS_RESOLVE_NONE",
+                                "source": format!("{:?}", context.policy.rule("PROJECT_PATHS_RESOLVE_NONE").source),
+                                "key": key,
+                                "reason": reason,
+                                "policy_message": message,
+                                "credential_source": (reason == "credential_root")
+                                    .then(|| credential_source(entry, is_exec, primary, &context))
+                                    .flatten(),
+                                "path": display_path(entry, primary, context.home),
+                            }));
+                        }
+                    }
                 }
             }
         }
@@ -251,6 +316,7 @@ mod tests {
             &home,
             &admin,
             &cwd,
+            &primary.join(".claude"),
             &primary.join(".agent-run/locks"),
             &primary.join(".local-tools"),
             &primary.join(".ssh"),
@@ -261,6 +327,7 @@ mod tests {
             std::fs::create_dir_all(path)?;
         }
         std::os::unix::fs::symlink(home.join("shared"), primary.join("escape"))?;
+        let credential_roots = provenant_core::CredentialRoots::for_home(&home);
         let grant = |path: PathBuf| PathGrant {
             path,
             scope: PathScope::Subtree,
@@ -271,6 +338,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                credential_roots: credential_roots.clone(),
                 policy: None,
                 mode: AccessMode::ReadOnly,
                 read_only: None,
@@ -288,6 +356,7 @@ mod tests {
         })?;
         let settings = crate::domains::ProjectLanesConfig {
             shared_paths: vec![
+                ".claude".into(),
                 ".agent-run/locks".into(),
                 "~/shared".into(),
                 ".git".into(),
@@ -335,49 +404,80 @@ mod tests {
                 Context {
                     cwd: &cwd,
                     home: &home,
+                    credential_roots: &credential_roots,
                     state_root: &root.join("state"),
                     common_git: Some(&common),
                     worktree_gitdir: Some(&admin),
                     writer,
                     settings: Some(&settings),
                     project: "example",
+                    policy: &provenant_records::policy::Policy::default(),
                 },
             );
             assert_eq!(
                 profile.spec.tool_exec_roots,
-                [grant(primary.join(".local-tools"))]
+                [
+                    grant(primary.join(".local-tools")),
+                    grant(primary.join(".ssh"))
+                ]
             );
             assert_eq!(record["exec_roots"][0]["path"], "./.local-tools");
-            assert_eq!(profile.spec.tool_writes.len(), if writer { 2 } else { 0 });
+            assert_eq!(!profile.spec.tool_writes.is_empty(), writer);
             assert_eq!(
                 record["shared_paths"].as_array().ok_or("array")?.len(),
                 profile.spec.tool_writes.len()
             );
             assert!(env.contains(&(
-                "PROVENANT_PRIMARY_CHECKOUT".into(),
+                provenant_core::consumer_env::PRIMARY_CHECKOUT.into(),
                 primary.as_os_str().to_owned()
             )));
             assert!(env.contains(&(
-                "PROVENANT_WORKTREE_GITDIR".into(),
+                provenant_core::consumer_env::WORKTREE_GITDIR.into(),
                 admin.as_os_str().to_owned()
             )));
             assert!(profile.spec.runtime_reads.contains(&grant(admin.clone())));
             let serialized = serde_json::to_string(&record)?;
             assert!(!serialized.contains(root.to_str().ok_or("utf8")?));
             let warnings = record["warnings"].as_array().ok_or("warnings")?;
-            assert_eq!(warnings.len(), if writer { 10 } else { 6 });
+            if writer {
+                assert!(warnings.iter().any(|warning| {
+                    warning["code"] == "project_agent_configuration_overlap"
+                        && warning["source"] == "project-local agent configuration (.claude)"
+                        && warning["path"] == "./.claude"
+                }));
+                assert!(
+                    profile
+                        .spec
+                        .tool_writes
+                        .iter()
+                        .any(|grant| grant.path == primary.join(".claude"))
+                );
+            }
             for (index, reason) in [
                 (1, "outside_primary_checkout"),
                 (2, "outside_primary_checkout"),
                 (3, "outside_primary_checkout"),
                 (4, "missing_or_unreadable"),
-                (5, "credential_root"),
                 (6, "protected_path"),
             ] {
                 assert!(warnings.iter().any(|warning| warning["key"]
                     == format!("domains.lanes.projects.example.exec_roots[{index}]")
                     && warning["reason"] == reason
                     && warning["code"] == "exec_root_ignored"));
+            }
+            // Shared paths are write grants; a read-only lane evaluates none.
+            let credential_warning = warnings
+                .iter()
+                .find(|warning| warning["key"] == "domains.lanes.projects.example.shared_paths[4]");
+            assert_eq!(credential_warning.is_some(), writer);
+            if let Some(credential_warning) = credential_warning {
+                let declared_source = credential_roots
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.path == home.join(".ssh"))
+                    .map(|entry| entry.source.as_str())
+                    .ok_or("SSH credential declaration")?;
+                assert_eq!(credential_warning["credential_source"], declared_source);
             }
             assert!(
                 profile
@@ -407,6 +507,7 @@ mod tests {
                         warning["key"]
                             .as_str()
                             .is_some_and(|key| key.contains(".shared_paths["))
+                            && warning["code"] == "shared_path_ignored"
                     })
                     .collect();
                 assert!(
@@ -436,17 +537,19 @@ mod tests {
             Context {
                 cwd: &primary,
                 home: &home,
+                credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                 state_root: &root.join("state"),
                 common_git: Some(&common),
                 worktree_gitdir: Some(&common),
                 writer: false,
                 settings: None,
                 project: "example",
+                policy: &provenant_records::policy::Policy::default(),
             },
         );
         assert!(
             !env.iter()
-                .any(|(key, _)| key == "PROVENANT_WORKTREE_GITDIR")
+                .any(|(key, _)| key == provenant_core::consumer_env::WORKTREE_GITDIR)
         );
         assert!(!profile.spec.runtime_reads.contains(&grant(common.clone())));
         Ok(())
@@ -474,6 +577,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                credential_roots: provenant_core::CredentialRoots::for_home(&home),
                 policy: None,
                 mode: AccessMode::ReadOnly,
                 read_only: None,
@@ -524,17 +628,28 @@ mod tests {
                 Context {
                     cwd: &primary,
                     home: &home,
+                    credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                     state_root: &root,
                     common_git: Some(&common),
                     worktree_gitdir: None,
                     writer,
                     settings: Some(&settings),
                     project: "example",
+                    policy: &provenant_records::policy::Policy::default(),
                 },
             );
             assert!(profile.spec.tool_exec_roots.is_empty());
-            assert_eq!(receipt["warnings"][0]["reason"], "writable_root");
-            assert_eq!(receipt["warnings"][1]["reason"], "not_directory");
+            let warnings = receipt["warnings"].as_array().ok_or("warnings")?;
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning["reason"] == "writable_root")
+            );
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning["reason"] == "not_directory")
+            );
         }
         Ok(())
     }
@@ -563,6 +678,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                credential_roots: provenant_core::CredentialRoots::for_home(&home),
                 policy: None,
                 mode: AccessMode::ReadOnly,
                 read_only: None,
@@ -593,12 +709,14 @@ mod tests {
             Context {
                 cwd: &primary,
                 home: &home,
+                credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                 state_root: &root,
                 common_git: None,
                 worktree_gitdir: None,
                 writer: false,
                 settings: Some(&settings),
                 project: "example",
+                policy: &provenant_records::policy::Policy::default(),
             },
         );
         assert!(profile.spec.tool_exec_roots.is_empty());
@@ -655,6 +773,14 @@ mod tests {
             exec_roots: vec![".local-tools".into()],
             ..Default::default()
         };
+        let state = root.join("state");
+        let mut mandatory =
+            provenant_confinement::permissions::MandatoryRoots::new(&home, &state, &primary)?;
+        // The host keeps the primary checkout immutable; the configured
+        // executable root must not widen that authority in either mode.
+        mandatory.add_protected(grant(primary.clone()))?;
+        let host_policy = provenant_confinement::run_config::RunConfig::default()
+            .policy_for_launch(&state, mandatory);
         for writer in [false, true] {
             let mode = if writer {
                 AccessMode::WorktreeWrite(Box::new(
@@ -672,7 +798,8 @@ mod tests {
                 extensions: ExtensionPolicy::Deny,
                 agy_state: None,
                 permissions: PlanPermissions {
-                    policy: None,
+                    credential_roots: provenant_core::CredentialRoots::for_home(&home),
+                    policy: Some(host_policy.clone()),
                     mode,
                     read_only: None,
                     scratch: grant(scratch.clone()),
@@ -702,12 +829,14 @@ mod tests {
                 Context {
                     cwd: &primary,
                     home: &home,
+                    credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                     state_root: &root,
                     common_git: Some(&common),
                     worktree_gitdir: None,
                     writer,
                     settings: Some(&settings),
                     project: "example",
+                    policy: &provenant_records::policy::Policy::default(),
                 },
             );
             assert_eq!(receipt["exec_roots"].as_array().ok_or("roots")?.len(), 1);
@@ -733,7 +862,8 @@ mod tests {
             assert_eq!(
                 result.termination,
                 Termination::Exit(0),
-                "{}",
+                "writer={writer}, writable={}, stderr={}",
+                tools.join("write-probe").exists(),
                 String::from_utf8_lossy(&result.stderr.bytes)
             );
             assert!(!tools.join("write-probe").exists());
@@ -796,7 +926,7 @@ mod tests {
             state.join("config.toml"),
             "schema_version = 1\n[domains.lanes.projects.example]\nshared_paths = ['.agent-run/locks']\n",
         )?;
-        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let config = crate::config_reads::read_for(&roots, "run")?;
         let settings = config
             .domains
             .lanes
@@ -813,6 +943,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                credential_roots: provenant_core::CredentialRoots::for_home(&home),
                 policy: None,
                 mode: AccessMode::WorktreeWrite(Box::new(serde_json::from_value::<
                     WorktreeWriteAuthority,
@@ -848,12 +979,14 @@ mod tests {
             Context {
                 cwd: &cwd,
                 home: &home,
+                credential_roots: &provenant_core::CredentialRoots::for_home(&home),
                 state_root: &state,
                 common_git: Some(&common),
                 worktree_gitdir: Some(&admin),
                 writer: true,
                 settings: Some(settings),
                 project: "example",
+                policy: &provenant_records::policy::Policy::default(),
             },
         );
         assert_eq!(record["shared_paths"][0]["path"], "./.agent-run/locks");

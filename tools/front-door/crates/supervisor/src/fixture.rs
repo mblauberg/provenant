@@ -8,19 +8,11 @@ use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-/// Resume orphaned build identities through the production recovery path.
-pub fn resume_orphaned_builds(
-    attempt: &provenant_os::fs::Directory,
-    scope: crate::custody::Scope,
-) -> crate::custody::Result<()> {
-    crate::custody::resume_orphaned_builds_with(attempt, scope, &RecordedBootObserver)
-}
-
 /// Inject native boot observation for reboot recovery tests only.
 pub fn after_reboot_with(
     recovery: crate::custody::Recovery,
     attempt: &provenant_os::fs::Directory,
-    scope: crate::custody::Scope,
+    scope: provenant_records::custody::Scope,
     observer: &dyn ProcessObserver,
 ) -> crate::custody::Result<Option<crate::custody::RebootRecovery>> {
     recovery.after_reboot_with(attempt, scope, observer)
@@ -30,7 +22,7 @@ pub fn after_reboot_with(
 pub fn acquire_reboot_recovery_with(
     directory: provenant_os::fs::Directory,
     attempt: &provenant_os::fs::Directory,
-    scope: crate::custody::Scope,
+    scope: provenant_records::custody::Scope,
     budget: provenant_core::WaitBudget,
     cancel: &provenant_core::CancelToken,
     clock: &dyn provenant_core::Clock,
@@ -1178,7 +1170,7 @@ impl crate::census::ProcessObserver for RecordedBootObserver {
 /// Fixture-only injection at the boot observation seam.
 pub fn acquire_writer(
     directory: provenant_os::fs::Directory,
-    scope: crate::custody::Scope,
+    scope: provenant_records::custody::Scope,
     budget: provenant_core::WaitBudget,
     cancel: &provenant_core::CancelToken,
     clock: &dyn provenant_core::Clock,
@@ -1206,7 +1198,7 @@ pub fn acquire_writer(
 #[doc(hidden)]
 pub fn acquire_writer_with_binding(
     directory: provenant_os::fs::Directory,
-    scope: crate::custody::Scope,
+    scope: provenant_records::custody::Scope,
     binding: crate::custody::WriterBinding,
     budget: provenant_core::WaitBudget,
     cancel: &provenant_core::CancelToken,

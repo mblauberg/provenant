@@ -16,6 +16,7 @@ pub fn decide(
         Publication::RestOrdered => Ok(PublishDecision {
             mode: PublishMode::RestOrdered,
             reason: "land.publish explicitly selects rest_ordered".into(),
+            extra: Default::default(),
         }),
         Publication::FastForward => {
             if method != MergeMethod::Merge {
@@ -32,6 +33,7 @@ pub fn decide(
                 mode: PublishMode::FastForward,
                 reason: "land.publish explicitly selects fast_forward and direct push is permitted"
                     .into(),
+                extra: Default::default(),
             })
         }
         Publication::Auto => {
@@ -39,17 +41,20 @@ pub fn decide(
                 return Ok(PublishDecision {
                     mode: PublishMode::RestOrdered,
                     reason: "the requested merge method requires forge publication".into(),
+                    extra: Default::default(),
                 });
             }
             if forge.may_push_directly(target)? {
                 Ok(PublishDecision {
                     mode: PublishMode::FastForward,
                     reason: "direct push is permitted".into(),
+                    extra: Default::default(),
                 })
             } else {
                 Ok(PublishDecision {
                     mode: PublishMode::RestOrdered,
                     reason: "direct push is not permitted".into(),
+                    extra: Default::default(),
                 })
             }
         }
@@ -70,31 +75,69 @@ pub fn decide_candidate(
             return Ok(PublishDecision {
                 mode: PublishMode::RestOrdered,
                 reason: "stack members require asynchronous forge publication".into(),
+                extra: Default::default(),
             });
         }
     }
     decide(forge, target, requested, method)
 }
+/// Backend authority comes only from the effective landing port. Strategy remains
+/// the candidate/ordering plan and cannot enable a disabled publication backend.
+pub fn decide_strategy(
+    forge: &mut dyn Forge,
+    target: &str,
+    settings: &provenant_cli::domains::LandSettings,
+    candidate: &Candidate,
+    port: &provenant_config::LandPort,
+) -> Result<PublishDecision, LandingError> {
+    let (backend, _) = provenant_config::land_backend(port);
+    provenant_config::dispatch_port_backend(
+        &backend.backend,
+        || match settings.strategy.declaration().execution {
+            provenant_records::landing::Execution::Builtin => {
+                decide_candidate(forge, target, settings.publish, settings.method, candidate)
+            }
+            provenant_records::landing::Execution::Unavailable => Err(LandingError::Unimplemented(
+                "strategy execution follows in 2.1",
+            )),
+        },
+        |_| {
+            Ok(PublishDecision {
+                mode: PublishMode::Command,
+                reason: format!("land command port (source: {:?})", port.source),
+                extra: Default::default(),
+            })
+        },
+        || {
+            Err(LandingError::PortUnavailable {
+                port_source: port.source,
+            })
+        },
+    )
+}
+
 /// Return PRs whose pinned head or approval changed immediately before publication.
 pub fn revalidate(
     forge: &mut dyn Forge,
     approver: &mut Approver<'_, '_>,
     candidate: &Candidate,
 ) -> Result<Vec<EligiblePr>, LandingError> {
-    Ok(revalidate_with_reasons(forge, approver, candidate)?
-        .into_iter()
-        .map(|(pr, _)| pr)
-        .collect())
+    Ok(
+        revalidate_with_reasons(forge, approver, &mut candidate.clone())?
+            .into_iter()
+            .map(|(pr, _)| pr)
+            .collect(),
+    )
 }
 
 pub fn revalidate_with_reasons(
     forge: &mut dyn Forge,
     approver: &mut Approver<'_, '_>,
-    candidate: &Candidate,
+    candidate: &mut Candidate,
 ) -> Result<Vec<(EligiblePr, String)>, LandingError> {
     let mut excluded = Vec::new();
-    for step in &candidate.steps {
-        let pr = &step.pr;
+    for step in &mut candidate.steps {
+        let pr = &mut step.pr;
         let head = forge.head(pr.number)?;
         let info = forge.pull_request(pr.number)?;
         let reason = if info.base_branch != pr.base_branch {
@@ -103,8 +146,10 @@ pub fn revalidate_with_reasons(
             Some("head changed".to_owned())
         } else {
             match approver.decide(forge, pr.number, &pr.head, &info.author)? {
-                Decision::Approved(approved) if approved.reference == pr.approval => None,
-                Decision::Approved(_) => Some("approval for the pinned head changed".to_owned()),
+                Decision::Approved(approved) => {
+                    pr.extend_approval_evidence(approved.evidence);
+                    None
+                }
                 Decision::Refused(reason) => Some(reason),
             }
         };
@@ -230,28 +275,11 @@ mod tests {
     use crate::pr::landing::{
         fakes::{FakeForge, FakeRepo},
         ports::Approval,
+        test_support::LandingFixture,
     };
 
     fn candidate() -> Candidate {
-        let step = |number, head: &str, commit: &str| CandidateStep {
-            pr: EligiblePr {
-                number,
-                head: head.into(),
-                approval: format!("approval-{number}"),
-                carried_paths: Vec::new(),
-                accepted: None,
-                base_branch: "main".into(),
-            },
-            commit: commit.into(),
-            tree: format!("tree-{number}"),
-        };
-        Candidate {
-            base: "base".into(),
-            steps: vec![step(1, "head-1", "step-1"), step(2, "head-2", "candidate")],
-            commit: "candidate".into(),
-            tree: "tree-2".into(),
-            ref_name: "land/test".into(),
-        }
+        LandingFixture::ordered_candidate()
     }
     fn prepare(forge: &mut FakeForge) {
         use crate::pr::landing::ports::{PullRequestInfo, PullRequestState};
@@ -381,6 +409,64 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn approval_evidence_unions_across_source_and_arrival_orders() -> Result<(), LandingError> {
+        use crate::pr::landing::{fakes::FakeReviews, ports::ReviewRecord};
+        use provenant_cli::domains::ApprovalSource;
+        for sources in [
+            vec![ApprovalSource::ProvenantReview, ApprovalSource::Forge],
+            vec![ApprovalSource::Forge, ApprovalSource::ProvenantReview],
+        ] {
+            for review_first in [false, true] {
+                let mut forge = FakeForge::default();
+                prepare(&mut forge);
+                let mut repo = FakeRepo::default();
+                let mut reviews = FakeReviews::default();
+                let mut c = candidate();
+                c.steps.truncate(1);
+                let pr = c.steps[0].pr.clone();
+                let review = ReviewRecord {
+                    reference: "provenant-review".into(),
+                    reviewer: "independent".into(),
+                    head: pr.head.clone(),
+                    verdict: provenant_records::workflow::ReviewVerdict::Approve,
+                    independent: true,
+                };
+                if review_first {
+                    forge.approvals_at_head.clear();
+                    reviews.records.insert(pr.number, vec![review.clone()]);
+                }
+                assert!(
+                    revalidate_with_reasons(
+                        &mut forge,
+                        &mut Approvals::new(&sources, &reviews).at(&mut repo, ""),
+                        &mut c
+                    )?
+                    .is_empty()
+                );
+                let initial = c.steps[0].pr.approval_evidence.clone();
+                reviews.records.insert(pr.number, vec![review]);
+                prepare(&mut forge);
+                assert!(
+                    revalidate_with_reasons(
+                        &mut forge,
+                        &mut Approvals::new(&sources, &reviews).at(&mut repo, ""),
+                        &mut c
+                    )?
+                    .is_empty()
+                );
+                let evidence = &c.steps[0].pr.approval_evidence;
+                assert!(sources.iter().all(|source| {
+                    evidence
+                        .iter()
+                        .any(|proof| proof.source == *source && proof.head == pr.head)
+                }));
+                assert!(initial.iter().all(|proof| evidence.contains(proof)));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn revalidation_excludes_changed_head_and_lost_approval() -> Result<(), LandingError> {
         let mut forge = FakeForge::default();
         prepare(&mut forge);
@@ -429,10 +515,10 @@ mod tests {
         );
         Ok(())
     }
-    /// A receipt whose proof cannot be read at revalidation withdraws its pull
-    /// request from publication, with the reason; the provable one stays.
+    /// A review on an older head withdraws its pull request from publication;
+    /// the exact-head approval stays.
     #[test]
-    fn revalidation_excludes_a_receipt_whose_proof_cannot_be_read() -> Result<(), LandingError> {
+    fn revalidation_excludes_a_review_on_an_older_head() -> Result<(), LandingError> {
         use crate::pr::landing::{approval::Approvals, fakes::FakeReviews, ports::ReviewRecord};
         use provenant_cli::domains::ApprovalSource;
         let mut forge = FakeForge::default();
@@ -453,7 +539,8 @@ mod tests {
             reference: format!("approval-{number}"),
             reviewer: "reviewer".into(),
             head: head.into(),
-            base: "fork".into(),
+            verdict: provenant_records::workflow::ReviewVerdict::Approve,
+            independent: true,
         };
         let reviews = FakeReviews::of(std::collections::BTreeMap::from([
             (1, vec![record(1, "head-1")]),
@@ -462,16 +549,11 @@ mod tests {
         let c = candidate();
         let excluded = revalidate_with_reasons(
             &mut forge,
-            &mut Approvals::new(ApprovalSource::Receipt, &reviews).at(&mut repo, "base"),
-            &c,
+            &mut Approvals::new(&[ApprovalSource::ProvenantReview], &reviews).at(&mut repo, "base"),
+            &mut c.clone(),
         )?;
         assert_eq!(excluded.len(), 1, "{excluded:?}");
         assert_eq!(excluded[0].0, c.steps[1].pr);
-        assert!(
-            excluded[0].1.starts_with("unprovable: approval-2"),
-            "{}",
-            excluded[0].1
-        );
         Ok(())
     }
     #[test]
@@ -496,20 +578,25 @@ mod tests {
         ));
         Ok(())
     }
-    fn ordered_revalidation_rejects(change: &str) {
+    #[derive(Clone, Copy)]
+    enum RevalidationChange {
+        Head,
+        Approval,
+        Base,
+    }
+    fn ordered_revalidation_rejects(change: RevalidationChange) {
         let mut forge = FakeForge::default();
         prepare(&mut forge);
         match change {
-            "head" => {
+            RevalidationChange::Head => {
                 forge.heads.insert(2, "new-head".into());
             }
-            "approval" => {
+            RevalidationChange::Approval => {
                 forge.approvals_at_head.remove(&(2, "head-2".into()));
             }
-            "base" => {
+            RevalidationChange::Base => {
                 forge.pull_requests.get_mut(&2).unwrap().base_branch = "other".into();
             }
-            _ => unreachable!(),
         }
         let mut repo = FakeRepo {
             target: "base".into(),
@@ -536,16 +623,14 @@ mod tests {
     }
 
     #[test]
-    fn ordered_revalidates_head() {
-        ordered_revalidation_rejects("head");
-    }
-    #[test]
-    fn ordered_revalidates_approval() {
-        ordered_revalidation_rejects("approval");
-    }
-    #[test]
-    fn ordered_revalidates_base() {
-        ordered_revalidation_rejects("base");
+    fn ordered_revalidation_rejects_every_changed_input_before_the_next_merge() {
+        for change in [
+            RevalidationChange::Head,
+            RevalidationChange::Approval,
+            RevalidationChange::Base,
+        ] {
+            ordered_revalidation_rejects(change);
+        }
     }
 
     #[test]

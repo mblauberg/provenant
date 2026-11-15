@@ -15,6 +15,9 @@ pub(super) fn write_grants_fixture() -> (PlanPermissions, ProviderProfile) {
         scope,
     };
     let plan = PlanPermissions {
+        credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+            "/fixture/home",
+        )),
         policy: None,
         read_only: Some(crate::plan::ReadOnlyGrants::for_test(
             "/fixture/repo".into(),
@@ -98,7 +101,7 @@ fn write_grants_list_every_write_source() {
     plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
         git_grants_digest: [7; 32],
         publishing: true,
-        common_git_dir: Some("/fixture/git".into()),
+        common_git_dir: "/fixture/git".into(),
         cargo_cache: PathGrant {
             path: "/fixture/cache".into(),
             scope: PathScope::Subtree,
@@ -166,16 +169,21 @@ pub(super) fn worktree_grants_fixture() -> WorktreeWriteGrants {
 #[cfg(target_os = "macos")]
 #[test]
 fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn std::error::Error>> {
+    use super::render::{
+        RuleAction, has_rule_atoms, rule_facts, rule_index, rule_index_with_targets,
+        rule_index_without_strings,
+    };
+
     let (mut plan, profile) = write_grants_fixture();
-    let scratch = "/fixture/runs/run/attempts/own/tmp/candidate-0";
+    let scratch = "/fixture/attempts/own/tmp/candidate-0";
     plan.scratch.path = scratch.into();
-    let private_state = "/fixture/runs/run/attempts/own/provider-state/candidate-0";
+    let private_state = "/fixture/attempts/own/provider-state/candidate-0";
     plan.private_state.as_mut().expect("private state").path = private_state.into();
     plan.policy = Some(crate::run_config::RunConfig::default().policy_for_launch(
-        Path::new("/fixture/runs"),
+        Path::new("/fixture/attempts"),
         MandatoryRoots::new(
             Path::new("/fixture/home"),
-            Path::new("/fixture/runs"),
+            Path::new("/fixture/attempts"),
             Path::new("/fixture/repo"),
         )?,
     ));
@@ -186,7 +194,7 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
             plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                 git_grants_digest: [7; 32],
                 publishing: true,
-                common_git_dir: Some("/fixture/git".into()),
+                common_git_dir: "/fixture/git".into(),
                 cargo_cache: PathGrant {
                     path: "/fixture/cache".into(),
                     scope: PathScope::Subtree,
@@ -201,9 +209,10 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
             writer.then_some(&git),
             Path::new("/fixture/home"),
         )?)?;
-        // Ordinary database IPC is ambient; legacy grant flags add no denial.
-        assert!(rendered.contains("(allow default)"));
-        assert!(!rendered.contains("(deny ipc-sysv-"));
+        // Ordinary database IPC is ambient and has no grant flags.
+        assert!(rule_index(&rendered, RuleAction::Allow, "default", None).is_some());
+        assert!(rule_index(&rendered, RuleAction::Deny, "ipc-sysv-shm", None).is_none());
+        assert!(rule_index(&rendered, RuleAction::Deny, "ipc-sysv-sem", None).is_none());
         let mut database = ProviderProfile {
             spec: profile.spec.clone(),
             observations: BTreeMap::new(),
@@ -217,35 +226,75 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
             writer.then_some(&git),
             Path::new("/fixture/home"),
         )?)?;
-        assert!(opted_in.contains("(allow ipc-sysv-shm)\n(allow ipc-sysv-sem)\n"));
-        assert!(!rendered.contains("SYS_shmget") && !rendered.contains("SYS_msgget"));
+        assert!(rule_index(&opted_in, RuleAction::Allow, "ipc-sysv-shm", None).is_some());
+        assert!(rule_index(&opted_in, RuleAction::Allow, "ipc-sysv-sem", None).is_some());
         assert_eq!(
-            rendered.lines().any(|line| line == "(allow process-exec)"),
+            rule_index_without_strings(&rendered, RuleAction::Allow, "process-exec").is_some(),
             writer
         );
-        assert!(rendered.contains(&format!("(allow file-read* (subpath \"{scratch}\"))")));
+        assert!(rule_index(&rendered, RuleAction::Allow, "file-read*", Some(scratch)).is_some());
         for operation in ["file-read*", "file-write*", "process-exec"] {
-            let denial = format!(
-                "(deny {operation} (require-all (subpath \"/fixture/runs\") (require-not (subpath \"{scratch}\")) (require-not (subpath \"{private_state}\"))))"
-            );
             assert!(
-                rendered.contains(&denial),
-                "attempt-private state denial: {denial}"
+                rule_index_with_targets(
+                    &rendered,
+                    RuleAction::Deny,
+                    operation,
+                    &["/fixture/attempts", scratch, private_state],
+                )
+                .is_some()
             );
         }
-        assert!(rendered.contains("(deny signal)"));
-        let signals: Vec<_> = rendered
-            .lines()
-            .filter(|line| line.starts_with("(allow signal"))
-            .collect();
-        assert_eq!(signals, ["(allow signal (target same-sandbox))"]);
-        assert!(rendered.contains("(deny sysctl-read (sysctl-name-prefix \"kern.procargs\"))"));
-        assert!(!rendered.contains("(sysctl-name-prefix \"kern.proc.\")"));
-        assert!(rendered.contains("(allow process-info*)"));
-        assert!(!rendered.contains("(deny process-info*)"));
-        assert!(rendered.contains("(deny process-info-setcontrol process-info-dirtycontrol)"));
-        assert!(rendered.contains(
-            "(allow process-info-setcontrol process-info-dirtycontrol (target same-sandbox))"
+        assert!(rule_index(&rendered, RuleAction::Deny, "signal", None).is_some());
+        assert!(has_rule_atoms(
+            &rendered,
+            RuleAction::Allow,
+            "signal",
+            &["same-sandbox"]
+        ));
+        assert!(
+            rule_facts(&rendered)
+                .iter()
+                .filter(|rule| {
+                    rule.action == RuleAction::Allow
+                        && rule.operations.iter().any(|name| name == "signal")
+                })
+                .all(|rule| rule.atoms.iter().any(|atom| atom == "same-sandbox"))
+        );
+        assert!(
+            rule_index(
+                &rendered,
+                RuleAction::Deny,
+                "sysctl-read",
+                Some("kern.procargs")
+            )
+            .is_some()
+        );
+        assert!(
+            rule_index(
+                &rendered,
+                RuleAction::Deny,
+                "sysctl-read",
+                Some("kern.proc.")
+            )
+            .is_none()
+        );
+        assert!(rule_index(&rendered, RuleAction::Allow, "process-info*", None).is_some());
+        assert!(rule_index(&rendered, RuleAction::Deny, "process-info*", None).is_none());
+        assert!(rule_index(&rendered, RuleAction::Deny, "process-info-setcontrol", None).is_some());
+        assert!(
+            rule_index(
+                &rendered,
+                RuleAction::Allow,
+                "process-info-setcontrol",
+                None
+            )
+            .is_some()
+        );
+        assert!(has_rule_atoms(
+            &rendered,
+            RuleAction::Allow,
+            "process-info-setcontrol",
+            &["process-info-dirtycontrol", "same-sandbox"]
         ));
     }
     Ok(())
@@ -266,7 +315,7 @@ fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::err
             plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                 git_grants_digest: [7; 32],
                 publishing: true,
-                common_git_dir: Some("/fixture/git".into()),
+                common_git_dir: "/fixture/git".into(),
                 cargo_cache: subtree("/fixture/cache"),
             }));
         }
@@ -335,7 +384,7 @@ fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
     let authority = WorktreeWriteAuthority {
         git_grants_digest: [0; 32],
         publishing: true,
-        common_git_dir: Some("/fixture/git".into()),
+        common_git_dir: "/fixture/git".into(),
         cargo_cache: PathGrant {
             path: "/fixture/home/Library/Caches/provenant-lane-cargo/fixture".into(),
             scope: PathScope::Subtree,
@@ -349,7 +398,11 @@ fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
         worktree: None,
     };
     assert!(matches!(
-        verify_worktree_authority(&authority, &anchors),
+        verify_worktree_authority(
+            &authority,
+            &anchors,
+            &provenant_core::CredentialRoots::for_home(anchors.home)
+        ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
 }
@@ -359,6 +412,7 @@ fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
 fn concurrent_writers_prepare_their_caches_in_one_home() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = crate::test_support::Fixture::new()?;
     let home = provenant_os::fs::canonicalize(&fixture.home)?;
+    let credentials = provenant_core::CredentialRoots::for_home(&home);
     let writers = (0..8)
         .map(|index| -> Result<_, Box<dyn std::error::Error>> {
             let branch = format!("concurrent-cache-{index}");
@@ -372,7 +426,8 @@ fn concurrent_writers_prepare_their_caches_in_one_home() -> Result<(), Box<dyn s
             ])?;
             let worktree = crate::repo::verify_worktree(&fixture.repo, &path)?;
             let branch = GitRefName::branch(&branch)?;
-            let authority = WorktreeWriteAuthority::for_worktree(&worktree, &branch, &home)?;
+            let authority =
+                WorktreeWriteAuthority::for_worktree(&worktree, &branch, &home, &credentials)?;
             Ok((worktree, branch, authority))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -390,9 +445,10 @@ fn concurrent_writers_prepare_their_caches_in_one_home() -> Result<(), Box<dyn s
                 .map(|(worktree, branch, authority)| {
                     let ready = &ready;
                     let home = &home;
+                    let credentials = &credentials;
                     scope.spawn(move || {
                         ready.wait();
-                        prepare_writer_directories(worktree, branch, authority, home)
+                        prepare_writer_directories(worktree, branch, authority, home, credentials)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -440,7 +496,12 @@ fn writer_cache_is_private_and_bound_to_repository_and_worktree_identity()
     let path = fixture._temp.path().join("package");
     let linked = add(&fixture, &path, "cache-test")?;
     let home = provenant_os::fs::canonicalize(&fixture.home)?;
-    let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home)?;
+    let authority = WorktreeWriteAuthority::for_worktree(
+        &linked,
+        &selected_ref,
+        &home,
+        &provenant_core::CredentialRoots::for_home(&home),
+    )?;
     let cache = &authority.cargo_cache.path;
     assert_eq!(
         cache.parent(),
@@ -449,28 +510,55 @@ fn writer_cache_is_private_and_bound_to_repository_and_worktree_identity()
     assert_eq!(cache.file_name().ok_or("cache name")?.len(), 64);
     assert_eq!(
         authority,
-        WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home)?
+        WorktreeWriteAuthority::for_worktree(
+            &linked,
+            &selected_ref,
+            &home,
+            &provenant_core::CredentialRoots::for_home(&home)
+        )?
     );
 
     let other_linked = add(&other, &other._temp.path().join("package"), "cache-test")?;
     assert_ne!(
         *cache,
-        WorktreeWriteAuthority::for_worktree(&other_linked, &selected_ref, &home)?
-            .cargo_cache
-            .path
+        WorktreeWriteAuthority::for_worktree(
+            &other_linked,
+            &selected_ref,
+            &home,
+            &provenant_core::CredentialRoots::for_home(&home)
+        )?
+        .cargo_cache
+        .path
     );
     let sibling_path = fixture._temp.path().join("nested/package");
     std::fs::create_dir(sibling_path.parent().ok_or("parent")?)?;
     let sibling = add(&fixture, &sibling_path, "sibling")?;
     assert_ne!(
         *cache,
-        WorktreeWriteAuthority::for_worktree(&sibling, &GitRefName::branch("sibling")?, &home)?
-            .cargo_cache
-            .path
+        WorktreeWriteAuthority::for_worktree(
+            &sibling,
+            &GitRefName::branch("sibling")?,
+            &home,
+            &provenant_core::CredentialRoots::for_home(&home)
+        )?
+        .cargo_cache
+        .path
     );
 
-    prepare_writer_directories(&linked, &selected_ref, &authority, &home)?;
-    prepare_writer_directories(&linked, &selected_ref, &authority, &home)?;
+    prepare_writer_directories(
+        &linked,
+        &selected_ref,
+        &authority,
+        &home,
+        &provenant_core::CredentialRoots::for_home(&home),
+    )?;
+    prepare_writer_directories(
+        &linked,
+        &selected_ref,
+        &authority,
+        &home,
+        &provenant_core::CredentialRoots::for_home(&home),
+    )?;
     let mut metadata = Directory::open_anchor(cache)?.metadata()?;
     verify_cache_metadata(&metadata)?;
     metadata.uid = metadata.uid.wrapping_add(1);
@@ -482,7 +570,13 @@ fn writer_cache_is_private_and_bound_to_repository_and_worktree_identity()
         std::fs::set_permissions(cache, std::fs::Permissions::from_mode(mode))?;
         assert!(
             matches!(
-                prepare_writer_directories(&linked, &selected_ref, &authority, &home),
+                prepare_writer_directories(
+                    &linked,
+                    &selected_ref,
+                    &authority,
+                    &home,
+                    &provenant_core::CredentialRoots::for_home(&home)
+                ),
                 Err(PermissionError::AnchorMismatch)
             ),
             "mode {mode:o}"
@@ -492,7 +586,13 @@ fn writer_cache_is_private_and_bound_to_repository_and_worktree_identity()
     let namespace = cache.parent().ok_or("namespace")?;
     std::fs::set_permissions(namespace, std::fs::Permissions::from_mode(0o755))?;
     assert!(matches!(
-        prepare_writer_directories(&linked, &selected_ref, &authority, &home),
+        prepare_writer_directories(
+            &linked,
+            &selected_ref,
+            &authority,
+            &home,
+            &provenant_core::CredentialRoots::for_home(&home)
+        ),
         Err(PermissionError::AnchorMismatch)
     ));
     std::fs::set_permissions(namespace, std::fs::Permissions::from_mode(0o700))?;
@@ -507,9 +607,14 @@ fn writer_cache_is_private_and_bound_to_repository_and_worktree_identity()
     let recreated = add(&fixture, &path, "recreated")?;
     assert_ne!(
         *cache,
-        WorktreeWriteAuthority::for_worktree(&recreated, &GitRefName::branch("recreated")?, &home)?
-            .cargo_cache
-            .path
+        WorktreeWriteAuthority::for_worktree(
+            &recreated,
+            &GitRefName::branch("recreated")?,
+            &home,
+            &provenant_core::CredentialRoots::for_home(&home)
+        )?
+        .cargo_cache
+        .path
     );
     Ok(())
 }
@@ -543,12 +648,16 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
     let private = linked.repo().private_git_dir().to_owned();
     let common = linked.repo().common_git_dir().to_owned();
     assert_ne!(private, common);
+    let grants = WorktreeWriteGrants::derive(&linked, &selected_ref);
+    assert_eq!(grants.worktree.path, linked.path());
+    assert_eq!(grants.private_git_dir.path, private);
+    assert_eq!(grants.common_git_dir.path, common);
+    assert!(grants.iter().all(|grant| grant.scope == PathScope::Subtree));
 
-    let authority = WorktreeWriteAuthority::for_worktree(
-        &linked,
-        &selected_ref,
-        &provenant_os::fs::canonicalize(&fixture.home)?,
-    )?;
+    let home = provenant_os::fs::canonicalize(&fixture.home)?;
+    let credentials = provenant_core::CredentialRoots::for_home(&home);
+    let authority =
+        WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home, &credentials)?;
     fixture.run(&["pack-refs", "--all"])?;
     let missing_parent = common.join("refs/heads/s3");
     if missing_parent.exists() {
@@ -556,12 +665,7 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
     }
     assert!(!missing_parent.exists());
 
-    prepare_writer_directories(
-        &linked,
-        &selected_ref,
-        &authority,
-        &provenant_os::fs::canonicalize(&fixture.home)?,
-    )?;
+    prepare_writer_directories(&linked, &selected_ref, &authority, &home, &credentials)?;
     let grants = WorktreeWriteGrants::derive(&linked, &selected_ref);
     assert_eq!(
         authority.git_grants_digest,
@@ -604,43 +708,26 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         ..anchors
     };
     assert!(matches!(
-        verify_worktree_authority(&authority, &wrong_home),
+        verify_worktree_authority(
+            &authority,
+            &wrong_home,
+            &provenant_core::CredentialRoots::for_home(wrong_home.home)
+        ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
-    let verified_grants = verify_worktree_authority(&authority, &anchors)?;
-    let mut source = String::new();
-    push_worktree_rule(&mut source, &verified_grants)?;
-    assert!(source.contains("(require-not (subpath "));
-    for directory in [&common, &private] {
-        assert!(source.contains(&format!(
-            "(deny file-write* (subpath \"{}\"))",
-            directory.display()
-        )));
-    }
-    let git_writes: Vec<_> = source
-        .lines()
-        .filter(|line| line.starts_with("(allow file-write* (literal "))
-        .collect();
-    assert!(git_writes.is_empty());
-    for relative in [
-        "config",
-        "config.lock",
-        "packed-refs",
-        "refs/heads/main",
-        "refs/remotes",
-        "refs/remotes/origin/s3/authority",
-        "refs/remotes/origin/s3/authority.lock",
-        "refs/remotes/upstream",
-        "logs/refs/remotes",
-        "logs/refs/remotes/origin/s3/authority",
-        "logs/refs/remotes/origin/s3/authority.lock",
-        "hooks",
-    ] {
-        assert!(
-            !source.contains(&format!("\"{}\"", common.join(relative).display())),
-            "{relative}"
-        );
-    }
+    let verified_grants = verify_worktree_authority(
+        &authority,
+        &anchors,
+        &provenant_core::CredentialRoots::for_home(anchors.home),
+    )?;
+    assert_eq!(verified_grants.worktree.path, linked.path());
+    assert_eq!(verified_grants.private_git_dir.path, private);
+    assert_eq!(verified_grants.common_git_dir.path, common);
+    assert!(
+        verified_grants
+            .iter()
+            .all(|grant| grant.scope == PathScope::Subtree)
+    );
 
     let other_ref = GitRefName::branch("s3/other")?;
     let mismatched = Anchors {
@@ -649,41 +736,58 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         worktree: Some((&linked, &other_ref)),
     };
     assert!(matches!(
-        verify_worktree_authority(&authority, &mismatched),
+        verify_worktree_authority(
+            &authority,
+            &mismatched,
+            &provenant_core::CredentialRoots::for_home(mismatched.home)
+        ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
 
     let mut tampered = authority.clone();
     tampered.git_grants_digest[0] ^= 1;
     assert!(matches!(
-        verify_worktree_authority(&tampered, &anchors),
+        verify_worktree_authority(
+            &tampered,
+            &anchors,
+            &provenant_core::CredentialRoots::for_home(anchors.home)
+        ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
 
-    for common_git_dir in [None, Some(fixture._temp.path().join("other-git"))] {
-        let mut tampered = authority.clone();
-        tampered.common_git_dir = common_git_dir;
-        assert!(matches!(
-            verify_worktree_authority(&tampered, &anchors),
-            Err(PermissionError::GitWriteAuthorityMissing)
-        ));
-    }
+    let mut tampered = authority.clone();
+    tampered.common_git_dir = fixture._temp.path().join("other-git");
+    assert!(matches!(
+        verify_worktree_authority(
+            &tampered,
+            &anchors,
+            &provenant_core::CredentialRoots::for_home(anchors.home)
+        ),
+        Err(PermissionError::GitWriteAuthorityMissing)
+    ));
+    let mut missing = serde_json::to_value(&authority)?;
+    missing
+        .as_object_mut()
+        .ok_or("authority fields")?
+        .remove("common_git_dir");
+    assert!(serde_json::from_value::<WorktreeWriteAuthority>(missing).is_err());
 
     let original_head = std::fs::read(private.join("HEAD"))?;
     std::fs::write(private.join("HEAD"), b"ref: refs/heads/s3/other\n")?;
     assert!(matches!(
         verify_worktree_authority(
-            &WorktreeWriteAuthority::for_worktree(
-                &linked,
-                &selected_ref,
-                &provenant_os::fs::canonicalize(&fixture.home)?
-            )?,
-            &anchors
+            &WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home, &credentials)?,
+            &anchors,
+            &credentials
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
     std::fs::write(private.join("HEAD"), original_head)?;
-    verify_worktree_authority(&authority, &anchors)?;
+    verify_worktree_authority(
+        &authority,
+        &anchors,
+        &provenant_core::CredentialRoots::for_home(anchors.home),
+    )?;
     Ok(())
 }
 

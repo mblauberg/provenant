@@ -2,9 +2,15 @@
 #![allow(clippy::disallowed_methods)]
 mod support;
 use serde_json::{Value, json};
-use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
-use support::{Result, TestRig, code};
+use std::{
+    fs,
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
+use support::{
+    Result, TestRig, code, install_fake_claude_auth, register_account, set_claude_config_dir,
+    write_fake_claude_identity,
+};
 
 fn now() -> i64 {
     SystemTime::now()
@@ -13,11 +19,11 @@ fn now() -> i64 {
         .unwrap_or(0) as i64
 }
 
-fn reading(at: i64, used: u64, resets: i64) -> Value {
+fn reading(at: i64, used: u64, resets: i64, account_key: &str) -> Value {
     json!({
         "schema_version": 1,
         "observed_unix_seconds": at,
-        "account_key": "work",
+        "account_key": account_key,
         "label": "work",
         "provider": "claude",
         "status": "available",
@@ -30,26 +36,53 @@ fn reading(at: i64, used: u64, resets: i64) -> Value {
     })
 }
 
-fn row(at: i64, output: u64) -> Value {
+fn message(at: i64, id: &str, output: u64) -> Value {
     json!({
-        "schema_version": 1,
-        "account": "work",
-        "provider": "claude",
-        "model": "claude-opus-5-5",
-        "uncached_input": 0,
-        "cache_read": 0,
-        "cache_write": 0,
-        "cache_write_1h": 0,
-        "output": output,
-        "timestamp": jiff::Timestamp::from_second(at).map(|time| time.to_string()).unwrap_or_default(),
-        "session": "s1",
-        "message": format!("m{at}"),
-        "source": "lane",
+        "type": "assistant",
+        "timestamp": jiff::Timestamp::from_second(at)
+            .map(|time| time.to_string())
+            .unwrap_or_default(),
+        "message": {
+            "id": id,
+            "model": "claude-opus-5-5",
+            "content": "fixture",
+            "usage": {
+                "input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": output
+            }
+        }
     })
 }
 
+fn start_chair_session(rig: &TestRig, session: &str) -> Result {
+    let input = serde_json::to_vec(&json!({
+        "hook_event_name":"SessionStart", "session_id":session, "cwd":rig.project,
+        "transcript_path":rig.root.join("transcript.jsonl"), "source":"startup"
+    }))?;
+    let output = rig.execute(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir",
+            rig.state.to_str().ok_or("state")?,
+            "hook",
+            "claude",
+            "chair-start",
+        ],
+        Some(&input),
+    )?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    Ok(())
+}
+
 fn fixture() -> Result<TestRig> {
-    let rig = TestRig::new()?;
+    let mut rig = TestRig::new()?;
+    install_fake_claude_auth(&mut rig)?;
+    let native = rig.home.join(".claude-work");
+    set_claude_config_dir(&mut rig, &native);
+    let identity_key = write_fake_claude_identity(&native, "work@example.test")?;
+    register_account(&rig, "claude", "work", &identity_key, &native)?;
     fs::create_dir_all(rig.project.join("config"))?;
     fs::write(
         rig.project.join("config/telemetry-prices.toml"),
@@ -60,31 +93,47 @@ fn fixture() -> Result<TestRig> {
     let resets = now + 3600;
     // Three readings: 10%, 30% and 60% of one five-hour window.
     let history = [
-        reading(now - 1_800, 1_000, resets),
-        reading(now - 900, 3_000, resets),
-        reading(now, 6_000, resets),
+        reading(now - 1_800, 1_000, resets, &identity_key),
+        reading(now - 900, 3_000, resets, &identity_key),
+        reading(now, 6_000, resets, &identity_key),
     ]
     .into_iter()
     .map(|record| serde_json::to_string(&record))
     .collect::<std::result::Result<Vec<_>, _>>()?
     .join("\n");
     fs::write(
-        rig.state.join("quota/history/work.claude.jsonl"),
+        rig.state
+            .join(format!("quota/history/{identity_key}.claude.jsonl")),
         format!("{history}\n"),
     )?;
     // $20 of output priced usage across the first 20 points and $30 across the
-    // next 30. Output is $20 per million tokens.
-    let usage = [row(now - 900, 1_000_000), row(now, 1_500_000)]
-        .into_iter()
-        .map(|record| serde_json::to_string(&record))
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .join("\n");
-    fs::write(rig.state.join("ingest.jsonl"), format!("{usage}\n"))?;
-    let config = format!(
-        "schema_version = 1\n[domains.accounts.entries.claude-work]\nadapter = \"claude\"\nlabel = \"work\"\nkey = \"work\"\ndirectory = \"{}\"\n[[domains.accounts.entries.claude-work.plans]]\nname = \"max_5x\"\nprice = 100.0\ncurrency = \"USD\"\neffective_from = \"2026-01-01\"\n",
-        rig.root.join("claude").display()
+    // next 30. Output is $20 per million tokens. Feed the public native ingest
+    // boundary so this fixture follows the current segmented store format.
+    let config_path = rig.state.join("config.toml");
+    let mut config = fs::read_to_string(&config_path)?;
+    config.push_str(
+        "\n[[domains.accounts.entries.claude-work.plans]]\nname = \"max_5x\"\nprice = 100.0\ncurrency = \"USD\"\neffective_from = \"2026-01-01\"\n",
     );
-    fs::write(rig.state.join("config.toml"), config)?;
+    fs::write(config_path, config)?;
+    let session = native.join("projects/-fixture/s1.jsonl");
+    fs::create_dir_all(session.parent().ok_or("session parent")?)?;
+    let transcript = [
+        message(now - 900, "m1", 1_000_000),
+        message(now, "m2", 1_500_000),
+    ]
+    .into_iter()
+    .map(|record| serde_json::to_string(&record))
+    .collect::<std::result::Result<Vec<_>, _>>()?
+    .join("\n");
+    fs::write(&session, format!("{transcript}\n"))?;
+    start_chair_session(&rig, "s1")?;
+    let ingested = rig.command(&["telemetry", "ingest", "--provider", "claude", "--json"])?;
+    assert_eq!(
+        code(&ingested),
+        0,
+        "{}",
+        String::from_utf8_lossy(&ingested.stderr.bytes)
+    );
     Ok(rig)
 }
 
@@ -100,7 +149,7 @@ fn three_readings_give_exact_mileage_and_capacity() -> Result {
     );
     let json: Value = serde_json::from_slice(&output.stdout.bytes)?;
     let account = &json["data"]["accounts"][0];
-    assert_eq!(account["account_key"], "work");
+    assert_eq!(account["label"], "work");
     assert_eq!(account["price_usd"]["usd"], "100.000000");
     let window = &account["windows"][0];
     assert_eq!(window["window"], "five_hour");

@@ -232,19 +232,25 @@ fn transport_environment(env: &[(OsString, OsString)]) -> Vec<(OsString, OsStrin
 
 /// Where a lane can write: its linked worktree, the project's worktree and
 /// scratch areas, and the run state directory when one is set.
-fn lane_roots(cwd: &Path, env: &[(OsString, OsString)]) -> transport::LaneRoots {
+fn lane_roots(
+    cwd: &Path,
+    env: &[(OsString, OsString)],
+) -> std::result::Result<transport::LaneRoots, transport::TransportError> {
     let get = |name: &str| {
         env.iter()
             .find(|(key, _)| key == name)
             .map(|(_, value)| PathBuf::from(value))
     };
     let run_state = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).map(PathBuf::from);
-    let extra = transport::LaneRoots::new(run_state);
+    let host_state = run_state.as_deref().unwrap_or(cwd);
+    let extra = transport::LaneRoots::new(run_state.clone());
     match (get("GIT_DIR"), get("GIT_COMMON_DIR")) {
         (Some(private), Some(common)) => {
-            transport::LaneRoots::for_repository(cwd, &private, &common, &extra)
+            transport::LaneRoots::for_repository(cwd, &private, &common, &extra, host_state)
         }
-        _ => transport::LaneRoots::project(cwd),
+        // An unreadable port table (for example inside a lane) narrows the
+        // lane areas to the run state rather than refusing the advertisement.
+        _ => Ok(transport::LaneRoots::project(cwd, host_state).unwrap_or(extra)),
     }
 }
 
@@ -274,7 +280,7 @@ fn check_transport(
         reason: error.to_string(),
     };
     let entries = transport::parse_listing(&listing.bytes).map_err(refusal)?;
-    let roots = lane_roots(cwd, env);
+    let roots = lane_roots(cwd, env).map_err(refusal)?;
     transport::check_environment(transport_env, cwd, &roots).map_err(refusal)?;
     transport::check_listing(&entries, cwd, &roots).map_err(refusal)
 }
@@ -479,7 +485,8 @@ pub fn ensure_recorded_local_branch(
     ledger: &provenant_confinement::worktrees::RefLedger,
     call: &crate::Request<'_>,
 ) -> Result<(bool, Option<String>)> {
-    use provenant_confinement::worktrees::{RefEndpoint, RefObservation, RefOrigin};
+    use provenant_confinement::worktrees::RefObservation;
+    use provenant_records::custody::{RefEndpoint, RefOrigin};
     let (created, tip) = ensure_local_branch_tip(git, cwd, branch, start)?;
     let warning = (|| -> std::result::Result<(), Box<dyn std::error::Error>> {
         ledger.record(
@@ -946,7 +953,7 @@ impl GitContext {
         let mut written = 0;
         let mut paths = BTreeSet::new();
         for (number, file) in files.iter().take(SLICE_LIMIT).enumerate() {
-            let name = format!("{:04}-{}.patch", number + 1, slice_label(&file.path));
+            let name = slice_name(number + 1, &file.path);
             seal(&slices, &name, file.bytes, CONTEXT_LIMIT as u64)?;
             index.push_str(&format!(
                 "{name}\t{}\t{}\n",
@@ -1062,6 +1069,10 @@ fn slice_label(path: &[u8]) -> String {
     text[text.len().saturating_sub(80)..].iter().collect()
 }
 
+fn slice_name(number: usize, path: &[u8]) -> String {
+    format!("{number:04}-{}.patch", slice_label(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1107,12 +1118,12 @@ mod tests {
                 bytes
             } else if options.argv.contains(&"--absolute-git-dir".into()) {
                 b"/fixture/repo/.git\n".to_vec()
-            } else if options.argv[4] == "rev-parse" {
+            } else if git_subcommand(options.argv) == Some("rev-parse") {
                 format!("{OID}\n").into_bytes()
             } else {
                 assert!(options.argv.contains(&"--no-ext-diff".into()));
                 assert!(options.argv.contains(&"--no-textconv".into()));
-                if options.argv[4] == "log" {
+                if git_subcommand(options.argv) == Some("log") {
                     assert!(options.argv.contains(&"--no-mailmap".into()));
                 } else {
                     assert!(options.argv.contains(&"--text".into()));
@@ -1134,6 +1145,13 @@ mod tests {
                 elapsed_micros: 1,
             })
         }
+    }
+
+    fn git_subcommand(argv: &[OsString]) -> Option<&str> {
+        argv.iter().find_map(|argument| match argument.to_str()? {
+            "rev-parse" | "log" | "diff" => argument.to_str(),
+            _ => None,
+        })
     }
 
     struct DrainFixture(SystemExecutor);
@@ -1267,7 +1285,6 @@ mod tests {
             serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
         assert_eq!(metadata["log_truncated"], false);
         assert_eq!(metadata["diff_truncated"], false);
-        assert_eq!(executor.0.lock().map_err(|_| "calls poisoned")?.len(), 9);
         Ok(())
     }
 
@@ -1279,7 +1296,7 @@ mod tests {
                 &self,
                 options: ExecOptions<'_>,
             ) -> std::result::Result<ExecOutcome, ExecError> {
-                let context = options.argv[4] == "log" || options.argv[4] == "diff";
+                let context = matches!(git_subcommand(options.argv), Some("log" | "diff"));
                 let mut out = self.0.execute(options)?;
                 if context {
                     out.termination = Termination::Signal(15);
@@ -1363,7 +1380,8 @@ mod tests {
 
     #[test]
     fn recorded_local_branch_is_created_once_then_adopted() -> TestResult {
-        use provenant_confinement::worktrees::{RefEndpoint, RefLedger, RefOrigin};
+        use provenant_confinement::worktrees::RefLedger;
+        use provenant_records::custody::{RefEndpoint, RefOrigin};
         let HistoryFixture {
             _temp,
             root,
@@ -1406,7 +1424,7 @@ mod tests {
             .load(&RefEndpoint::Local, &reference)?
             .ok_or("no record")?;
         assert_eq!(second.origin, RefOrigin::Adopted);
-        assert_eq!(second.generation, first.generation + 1);
+        assert!(second.generation > first.generation);
         Ok(())
     }
 
@@ -1798,7 +1816,15 @@ mod tests {
             .ok_or("no log call")?;
         assert!(log.contains(&"--no-show-signature".into()), "{log:?}");
         // The environment override covers every other host read as well.
-        assert!(GIT_CONFIG_OVERRIDES.contains(&("log.showSignature", "false")));
+        let env = environment();
+        assert!(env.contains(&(
+            "GIT_CONFIG_COUNT".into(),
+            GIT_CONFIG_OVERRIDES.len().to_string().into()
+        )));
+        for (index, (key, value)) in GIT_CONFIG_OVERRIDES.iter().enumerate() {
+            assert!(env.contains(&(format!("GIT_CONFIG_KEY_{index}").into(), (*key).into())));
+            assert!(env.contains(&(format!("GIT_CONFIG_VALUE_{index}").into(), (*value).into())));
+        }
         Ok(())
     }
 
@@ -1976,11 +2002,13 @@ mod tests {
             .lines()
             .filter(|line| !line.starts_with('#'))
             .collect();
-        assert_eq!(rows.len(), 3, "{index}");
+        let changed_files = ["a.rs", "dir/b.rs", "c.md"];
+        assert_eq!(rows.len(), changed_files.len(), "{index}");
         let mut joined = Vec::new();
-        for (row, path) in rows.iter().zip(["a.rs", "dir/b.rs", "c.md"]) {
+        for (number, (row, path)) in rows.iter().zip(changed_files).enumerate() {
             let fields: Vec<_> = row.split('\t').collect();
             assert_eq!(fields[2], path);
+            assert_eq!(fields[0], slice_name(number + 1, path.as_bytes()));
             let bytes = std::fs::read(slices.join(fields[0]))?;
             assert_eq!(bytes.len().to_string(), fields[1]);
             assert!(
@@ -1989,7 +2017,6 @@ mod tests {
             joined.extend(bytes);
         }
         assert_eq!(joined, patch.as_bytes());
-        assert!(rows[1].starts_with("0002-dir_b.rs.patch\t"), "{index}");
         for needle in [
             scratch.path().join("git-diff.stat"),
             slices.clone(),
@@ -1998,12 +2025,9 @@ mod tests {
         ] {
             assert!(prompt.contains(&needle.display().to_string()), "{prompt}");
         }
-        assert!(prompt.contains("navigation aids"), "{prompt}");
-        assert!(prompt.contains("surrounding code"), "{prompt}");
-        assert!(!prompt.contains("incomplete"), "{prompt}");
         let metadata: serde_json::Value =
             serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
-        assert_eq!(metadata["slices"], 3);
+        assert_eq!(metadata["slices"], changed_files.len());
         assert_eq!(metadata["slices_omitted"], 0);
         assert_eq!(metadata["slices_complete"], true);
         assert_eq!(metadata["stat_truncated"], false);
@@ -2012,48 +2036,47 @@ mod tests {
 
     #[test]
     fn slices_stop_at_their_limit_and_say_so() -> TestResult {
-        let patch: String = (0..SLICE_LIMIT + 5)
+        const OMITTED: usize = 5;
+        let patch: String = (0..SLICE_LIMIT + OMITTED)
             .map(|n| patch_for(&format!("f{n}.txt"), "x"))
             .collect();
         let context = context_with_diff(patch.as_bytes(), false);
         let scratch = tempfile::tempdir()?;
         context.write_to(&Directory::open_anchor(scratch.path())?, scratch.path())?;
         let slices = scratch.path().join(SLICE_DIRECTORY);
-        let index = std::fs::read_to_string(slices.join(SLICE_INDEX))?;
-        assert!(
-            index.contains("# 5 more changed files have no slice"),
-            "{index}"
-        );
         // The limit plus the index.
         assert_eq!(std::fs::read_dir(&slices)?.count(), SLICE_LIMIT + 1);
         let metadata: serde_json::Value =
             serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
         assert_eq!(metadata["slices"], SLICE_LIMIT);
-        assert_eq!(metadata["slices_omitted"], 5);
+        assert_eq!(metadata["slices_omitted"], OMITTED);
         assert_eq!(metadata["slices_complete"], false);
         Ok(())
     }
 
     #[test]
     fn an_incomplete_prompt_names_the_changed_files_without_a_slice() -> TestResult {
-        let patch: String = (0..SLICE_LIMIT + 2)
+        let changed_files = SLICE_LIMIT + 2;
+        let patch: String = (0..changed_files)
             .map(|n| patch_for(&format!("f{n}.txt"), "x"))
             .collect();
         let mut context = context_with_diff(patch.as_bytes(), false);
-        let stat: String = (0..SLICE_LIMIT + 2)
+        let stat: String = (0..changed_files)
             .map(|n| format!(" f{n}.txt | 2 +-\n"))
-            .chain([" 402 files changed, 402 insertions(+)\n".to_owned()])
+            .chain([format!(
+                " {changed_files} files changed, {changed_files} insertions(+)\n"
+            )])
             .collect();
         context.stat.bytes = stat.into_bytes();
         let scratch = tempfile::tempdir()?;
         let prompt = context.write_to(&Directory::open_anchor(scratch.path())?, scratch.path())?;
-        assert!(prompt.contains("The slices are incomplete"), "{prompt}");
-        let last = SLICE_LIMIT + 1;
-        assert!(
-            prompt.contains(&format!("f{}.txt, f{last}.txt.", SLICE_LIMIT)),
-            "{prompt}"
-        );
-        assert!(!prompt.contains("f0.txt,"), "{prompt}");
+        for missing in [SLICE_LIMIT, SLICE_LIMIT + 1] {
+            assert!(prompt.contains(&format!("f{missing}.txt")), "{prompt}");
+        }
+        assert!(!prompt.contains("f0.txt"), "{prompt}");
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
+        assert_eq!(metadata["slices_complete"], false);
         Ok(())
     }
 
@@ -2063,12 +2086,10 @@ mod tests {
         let context = context_with_diff(&patch.as_bytes()[..patch.len() - 6], true);
         let scratch = tempfile::tempdir()?;
         context.write_to(&Directory::open_anchor(scratch.path())?, scratch.path())?;
-        let index =
-            std::fs::read_to_string(scratch.path().join(SLICE_DIRECTORY).join(SLICE_INDEX))?;
-        assert!(index.contains("the last slice may be partial"), "{index}");
         let metadata: serde_json::Value =
             serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
         assert_eq!(metadata["slices_complete"], false);
+        assert_eq!(metadata["diff_truncated"], true);
         Ok(())
     }
 

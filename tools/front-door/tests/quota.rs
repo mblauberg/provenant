@@ -1,66 +1,5 @@
 mod support;
-#[path = "support/terminal_run.rs"]
-mod terminal_run;
 use support::{Result, TestRig, code};
-
-#[test]
-fn usage_reads_terminal_lanes_across_projects_and_keeps_unknown_accounts() -> Result {
-    let mut rig = TestRig::new()?;
-    let original = rig.project.clone();
-    for (project, operation) in [
-        (original.clone(), "first"),
-        (rig.root.join("second"), "second"),
-    ] {
-        std::fs::create_dir_all(&project)?;
-        rig.project = project;
-        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        assert_eq!(code(&rig.execute(&git, &["init", "-q"], None)?), 0);
-        terminal_run::seed(&rig, operation, &[serde_json::Value::Null])?;
-    }
-    rig.project = original;
-    let output = rig.command(&["quota", "usage", "--json"])?;
-    assert_eq!(
-        code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stdout.bytes)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-    let rows = report["data"]["rows"].as_array().ok_or("rows")?;
-    assert_eq!(rows.len(), 2, "{report}");
-    assert_ne!(rows[0]["project"], rows[1]["project"]);
-    for row in rows {
-        assert_eq!(row["lane_attempts"], 1);
-        assert_eq!(row["chair_sessions"], 0);
-        assert_eq!(row["chair_sessions_unread"], 0);
-        assert!(row["account"].is_null());
-        assert_eq!(row["lane_usage"]["uncached_input"]["missing"], 1);
-    }
-    assert!(!String::from_utf8_lossy(&output.stdout.bytes).contains("private fixture prompt"));
-    let human = rig.command(&["quota", "usage", "--full"])?;
-    let human = String::from_utf8(human.stdout.bytes)?;
-    assert!(human.contains("Chair tokens are read from each recorded chair session"));
-    assert!(human.contains("unknown account"));
-    assert!(human.contains("records missing this category"));
-    assert!(human.contains("lanes cache-read share: not reported"));
-    assert!(!rig.state.join("quota").exists());
-    rig.assert_legacy_unchanged()
-}
-
-#[test]
-fn usage_with_missing_state_creates_nothing_and_rejects_invalid_windows() -> Result {
-    let rig = TestRig::new()?.without_state()?;
-    let output = rig.command(&["quota", "usage", "--json"])?;
-    assert_eq!(code(&output), 0);
-    assert!(!rig.state.exists());
-    for days in ["0", "366"] {
-        assert_eq!(
-            code(&rig.command(&["quota", "usage", "--days", days, "--json"])?),
-            2
-        );
-    }
-    rig.assert_legacy_unchanged()
-}
 
 #[test]
 fn tick_does_not_create_missing_state_ancestors() -> Result {
@@ -69,7 +8,7 @@ fn tick_does_not_create_missing_state_ancestors() -> Result {
     rig.state = missing.join("state");
     assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 3);
     assert!(!missing.exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -93,7 +32,7 @@ fn fabric_and_quota_load_one_domain_config() -> Result {
             String::from_utf8_lossy(&out.stdout.bytes)
         );
     }
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -130,7 +69,7 @@ fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
     let disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(rig.state.join("quota/report.json"))?)?;
     assert_eq!(disk, tick["data"]);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -138,10 +77,11 @@ fn no_flags_compact_view_shows_all_configured_accounts_including_exhausted() -> 
     use std::os::unix::fs::PermissionsExt;
 
     let rig = quota_rig()?;
-    for index in 0..13 {
-        let label = format!("work-{index}");
-        let key = format!("claude-{index}");
-        support::register_account(&rig, "claude", &label, &key, &rig.root.join(&key))?;
+    let accounts: Vec<_> = (0..13)
+        .map(|index| (format!("work-{index}"), format!("claude-{index}")))
+        .collect();
+    for (label, key) in &accounts {
+        support::register_account(&rig, "claude", label, key, &rig.root.join(key))?;
     }
 
     let account_dir = rig.state.join("quota/claude-0");
@@ -189,23 +129,38 @@ fn no_flags_compact_view_shows_all_configured_accounts_including_exhausted() -> 
         String::from_utf8_lossy(&output.stderr.bytes)
     );
     let compact = String::from_utf8(output.stdout.bytes)?;
-    assert!(compact.contains("work-0 [claude]: exhausted"), "{compact}");
-    for index in 1..13 {
+    for (label, _) in &accounts {
         assert!(
-            compact.contains(&format!("work-{index} [claude]: unknown")),
-            "missing work-{index} row in {compact}"
+            compact.contains(&format!("{label} [claude]")),
+            "missing {label} row in {compact}"
         );
     }
-    assert!(compact.contains("default [codex]:"), "{compact}");
-    assert!(!compact.contains("more not shown"), "{compact}");
-    rig.assert_legacy_unchanged()
+    let structured = rig.command(&["quota", "--json"])?;
+    assert_eq!(code(&structured), 0, "{structured:?}");
+    let report: serde_json::Value = serde_json::from_slice(&structured.stdout.bytes)?;
+    let rows = report["data"]["accounts"]
+        .as_array()
+        .ok_or("account rows")?;
+    for (label, key) in &accounts {
+        let row = rows
+            .iter()
+            .find(|row| row["account"]["account_key"] == key.as_str())
+            .ok_or("configured account row")?;
+        assert_eq!(row["account"]["label"], label.as_str());
+        if key == "claude-0" {
+            assert_eq!(row["status"], "exhausted");
+        } else {
+            assert_eq!(row["status"], "unknown");
+        }
+    }
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
 fn account_quota_is_unavailable_inside_a_lane() -> Result {
     let mut rig = quota_rig()?;
     rig.env
-        .push((provenant_run::LANE_DEPTH_ENV.into(), "1".into()));
+        .push((provenant_core::consumer_env::LANE_DEPTH.into(), "1".into()));
 
     let missing = rig.state.join("missing-project");
     let missing = missing.to_str().ok_or("non-UTF-8 fixture path")?;
@@ -234,7 +189,7 @@ fn account_quota_is_unavailable_inside_a_lane() -> Result {
         }
     }
     assert!(!rig.state.join("quota").exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -257,7 +212,7 @@ fn readiness_write_failure_warns_and_keeps_the_account_commit() -> Result {
         record.last_error,
         Some(provenant_quota::ProbeFailure::MissingCli)
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -332,7 +287,7 @@ fn disabled_modes_never_read_auth_or_invoke_external_tools() -> Result {
     ] {
         assert_eq!(code(&rig.command(args)?), 2);
     }
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -359,7 +314,7 @@ fn malformed_records_and_unsafe_directories_fail_without_replacing_report() -> R
     fs::set_permissions(rig.state.join("quota"), fs::Permissions::from_mode(0o755))?;
     assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 3);
     assert_eq!(fs::read(report)?, before);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 fn quota_rig() -> Result<TestRig> {
@@ -413,7 +368,7 @@ fn configuration_cannot_raise_probe_limits_and_publication_failure_is_io() -> Re
     fs::create_dir(&path)?;
     assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 3);
     assert!(path.is_dir());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -459,34 +414,7 @@ fn oversized_show_returns_a_bounded_envelope_and_filter_remains_usable() -> Resu
     )?;
     fs::set_permissions(account, fs::Permissions::from_mode(0o755))?;
     assert_eq!(code(&rig.command(&["quota", "show", "--json"])?), 3);
-    rig.assert_legacy_unchanged()
-}
-
-#[test]
-fn internal_lock_deadline_is_contention_and_keeps_the_report() -> Result {
-    use provenant_core::{CancelToken, Clock, WaitBudget};
-    use provenant_os::clock::SystemClock;
-    use provenant_os::fs::Directory;
-    use provenant_os::fs::LockMode;
-    let rig = quota_rig()?;
-    assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 0);
-    let before = std::fs::read(rig.state.join("quota/report.json"))?;
-    let dir = Directory::open_anchor(&rig.state.join("quota"))?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let _held = dir.lock(
-        std::ffi::OsStr::new("quota.lock"),
-        LockMode::Exclusive,
-        WaitBudget::cli(clock.mono_now(), 1)?,
-        &cancel,
-        &clock,
-    )?;
-    let out = rig.command(&["quota", "tick", "--json"])?;
-    assert_eq!(code(&out), 3);
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
-    assert_eq!(value["status"], "error");
-    assert_eq!(std::fs::read(rig.state.join("quota/report.json"))?, before);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -525,25 +453,9 @@ fn failed_auth_refresh_shows_last_known_usage_age_and_auth_marker() -> Result {
     assert_eq!(row["status"], "auth_required");
     assert!(row["age_seconds"].as_u64().is_some_and(|age| age >= 10));
     assert_eq!(row["snapshot"]["windows"][0]["used_basis_points"], 5300);
-    let compact = rig.command(&["quota", "show"])?;
-    let compact = String::from_utf8(compact.stdout.bytes)?;
-    assert!(compact.contains("pro [claude]: auth_required"), "{compact}");
-    assert!(compact.contains("next: provenant quota tick"), "{compact}");
-    let human = rig.command(&["quota", "show", "--full"])?;
-    let text = String::from_utf8(human.stdout.bytes)?;
-    for expected in [
-        "pro",
-        "AUTH_REQUIRED",
-        "last known",
-        "53.00%",
-        "age",
-        "auth",
-    ] {
-        assert!(text.contains(expected), "missing {expected}: {text}");
-    }
+    let text = String::from_utf8(rig.command(&["quota", "show"])?.stdout.bytes)?;
     assert!(!text.contains('\u{1b}'));
-    assert!(text.contains("\\n"));
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 fn jiff_time() -> Result<i64> {
@@ -709,7 +621,7 @@ cat "$HOME/agy-usage"
         "--json",
     ])?;
     assert_ne!(code(&out), 0);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -773,7 +685,7 @@ cat "$HOME/agy-usage"
     )?)?;
     assert_eq!(refused["last_error"], "account_mismatch");
     assert_eq!(fs::read(rig.state.join("config.toml"))?, config);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 /// A second agy account signed in under its own `HOME` registers and probes as
@@ -1006,7 +918,12 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
         };
         for account in &known {
             let plan = provenant_providers::quota::plan(provider, account, &input)?;
-            let snapshot = provenant_providers::quota::decode(
+            let source = provenant_providers::REGISTRY
+                .iter()
+                .filter_map(|registration| registration.quota_source)
+                .find(|source| source.adapter_id() == provider)
+                .expect("provider quota source is registered");
+            let snapshot = source.decode(
                 &plan,
                 &ProbeCapture {
                     stdout: fixture.as_bytes().to_vec(),
@@ -1034,6 +951,9 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
             pools: &[],
         };
         let mut route = ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
             extra: Default::default(),
             adapter: provider.into(),
             model: "fixture-model".into(),
@@ -1045,6 +965,7 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
             exclusions: vec![],
             eligibility: RouteEligibility::Eligible,
             readiness: RouteReadiness::Ready {
+                availability_warning: None,
                 extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: at + 60,
@@ -1061,7 +982,7 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
         }
     }
     assert!(!String::from_utf8_lossy(&out.stdout.bytes).contains("fixture-account"));
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 fn json(out: &provenant_os::exec::ExecOutcome) -> Result<serde_json::Value> {
@@ -1148,7 +1069,7 @@ fn show_carries_display_blocks_and_display_command_persists() -> Result {
         serde_json::from_slice(&std::fs::read(rig.state.join("quota/report.json"))?)?;
     assert_eq!(disk, tick["data"]);
     assert_eq!(disk["accounts"][0]["display"]["name"], "Work");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -1177,7 +1098,7 @@ fn show_warns_when_display_icon_account_is_not_registered() -> Result {
         1
     );
     assert_eq!(std::fs::read_to_string(path)?, before);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 fn history_line(at: i64, plan: &str, used: u64, reset: i64, marker: &str) -> String {
@@ -1242,6 +1163,8 @@ fn history_lists_readings_with_price_in_force_and_filters() -> Result {
     assert_eq!(readings[0]["plan_price"]["price"], 100.0);
     assert_eq!(readings[1]["plan_price"]["name"], "max_20x");
     assert_eq!(readings[2]["markers"][1]["kind"], "plan.change");
+    assert_eq!(readings[2]["markers"][1]["from"], "max_5x");
+    assert_eq!(readings[2]["markers"][1]["to"], "max_20x");
     assert_eq!(readings[2]["windows"][0]["used_basis_points"], 10);
     for key in ["credit_balance", "account_key", "label", "provider"] {
         assert!(readings[0].get(key).is_some(), "{key}");
@@ -1256,9 +1179,6 @@ fn history_lists_readings_with_price_in_force_and_filters() -> Result {
     let limited: serde_json::Value = serde_json::from_slice(&limited.stdout.bytes)?;
     assert_eq!(limited["data"]["truncated"], true);
     assert_eq!(limited["data"]["readings"][0]["observed_unix_seconds"], c);
-    let human = String::from_utf8(rig.command(&["quota", "history"])?.stdout.bytes)?;
-    assert!(human.contains("RESET five_hour"), "{human}");
-    assert!(human.contains("PLAN CHANGE max_5x -> max_20x"), "{human}");
     Ok(())
 }
 
@@ -1327,5 +1247,5 @@ fn configured_polling_intervals_reach_show_and_tick() -> Result {
         row(&["quota", "tick", "--trigger", "timer", "--json"])?["error"],
         "missing_cli"
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }

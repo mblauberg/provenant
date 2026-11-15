@@ -2,21 +2,24 @@
 //!
 //! A loop at exhaustion, a decide node and a non-loop pause each raise one
 //! inbox decision, keyed by an ask ID that is unique in the checkpoint, so
-//! several can be open at once. The checkpoint stores the rendered ask, so a
-//! replay sends the identical request, and it records the answer and who gave
-//! it, or the default taken at the deadline. `wake_at` on the checkpoint is
-//! the earliest open deadline, for a host tick; running CI gates and nodes
-//! waiting on a bounded launch retry also owe the tick a wake. Until one
-//! exists, every advance checks the deadline itself.
+//! several can be open at once. The inbox is the one store for the question and
+//! its answer. The checkpoint keeps only a link from the node to the request:
+//! the ask ID, the session, the request ID the inbox returned and the deadline
+//! the request carries. Filing is idempotent by the graph instance and ask ID,
+//! and the link is saved straight after, so a crash between the two replays the
+//! same request instead of filing a second. `wake_at` on the checkpoint is the
+//! earliest open deadline, for a host tick; running CI gates and nodes waiting
+//! on a bounded launch retry also owe the tick a wake. Until one exists, every
+//! advance checks the deadline itself.
 use super::*;
 use provenant_core::{DurationMicros, WallTime};
 
-/// Closed pause asks kept as history. Older ones are dropped.
-pub(super) const MAX_PAUSE_ASKS: usize = 8;
 /// Canonical bytes of stored reply text. A longer reply is recorded as rejected.
 pub(super) const ANSWER_BYTES: usize = 1_024;
 /// Canonical bytes of a stored option ID; inbox option IDs are shorter.
 pub(super) const OPTION_BYTES: usize = 128;
+/// Canonical bytes of an inbox request ID a link names.
+pub(super) const REQUEST_ID_BYTES: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -37,38 +40,47 @@ pub struct AskOption {
     pub description: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AnswerSource {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AnswerSource {
     Answered,
     Default,
 }
 
-/// The decision an ask settled on, kept as graph history.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AskAnswer {
-    #[serde(flatten)]
-    pub extra: provenant_records::ExtraFields,
+/// The decision an ask settled on, while the graph applies it. The inbox keeps
+/// the answer; the checkpoint does not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Answer {
     pub source: AnswerSource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub option: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// Who answered. A default has no actor.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub at: Option<WallTime>,
     /// Why the answer could not be applied.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected: Option<String>,
-    /// Stable reason code when an answer could not be applied.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rejection_code: Option<String>,
 }
 
+/// One question as the inbox will show it. Rendered when the ask is raised and
+/// filed once; the checkpoint keeps no copy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskRequest {
+    pub ask_id: String,
+    pub kind: AskKind,
+    pub node: Option<String>,
+    /// The exhausted round count a loop ask decides on.
+    pub rounds: Option<usize>,
+    pub session: String,
+    pub title: String,
+    pub body: String,
+    pub options: Vec<AskOption>,
+    pub default: Option<String>,
+    pub wake_at: Option<WallTime>,
+    pub timeout: Option<DecideTimeout>,
+}
+
+/// The link from a node to its open inbox request, which is all the graph
+/// checkpoint keeps of an ask.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NodeAsk {
+pub struct AskLink {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     pub ask_id: String,
@@ -79,29 +91,41 @@ pub struct NodeAsk {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rounds: Option<usize>,
     pub session: String,
-    pub title: String,
-    pub body: String,
-    pub options: Vec<AskOption>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default: Option<String>,
+    /// The deadline the request carries, when the question has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_at: Option<WallTime>,
-    pub resolved: bool,
-    pub closed: bool,
+    /// Effective decide deadline and where its seconds came from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub answer: Option<AskAnswer>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inbox_error: Option<String>,
+    pub timeout: Option<DecideTimeout>,
+    /// The inbox request ID the host returned when it filed the question.
+    pub request: String,
 }
 
-/// One ask as the host's inbox sees it. `actor` is the checkpoint's ask actor,
-/// recorded before the first ask, so a resume under another client replays it.
+/// An ask to file. `actor` is the checkpoint's ask actor, recorded before the
+/// first ask, so a resume under another client files under the same actor.
 #[derive(Clone, Copy, Debug)]
-pub struct AskScope<'a> {
+pub struct AskFiling<'a> {
     pub graph_id: &'a str,
     pub instance_id: &'a str,
     pub actor: &'a str,
-    pub ask: &'a NodeAsk,
+    pub ask: &'a AskRequest,
+}
+
+/// What the host returns for a filed ask.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskFiled {
+    pub request: String,
+    /// The deadline the request carries; a replay keeps the first one.
+    pub deadline: Option<WallTime>,
+    /// The request was closed with no answer before this filing found it.
+    pub closed: bool,
+}
+
+/// A link as the host reads and closes its request.
+#[derive(Clone, Copy, Debug)]
+pub struct AskScope<'a> {
+    pub actor: &'a str,
+    pub ask: &'a AskLink,
 }
 
 /// An answer read from the inbox.
@@ -115,12 +139,34 @@ pub struct AskReply {
 
 /// A human decision point. The chosen option ID becomes the node's verdict,
 /// so downstream verdict gates route on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnansweredDisposition {
+    BlockDependants,
+    SkipDependants,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecideTimeoutSource {
+    Graph,
+    Configured,
+    DomainDefault,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecideTimeout {
+    pub seconds: u64,
+    pub source: DecideTimeoutSource,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecideSpec {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     pub question: String,
     pub options: Vec<AskOption>,
+    pub on_unanswered: UnansweredDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,9 +191,8 @@ pub(super) fn ask(
     session: &str,
     title: String,
     body: String,
-) -> NodeAsk {
-    NodeAsk {
-        extra: Default::default(),
+) -> AskRequest {
+    AskRequest {
         ask_id,
         kind,
         node: None,
@@ -158,16 +203,13 @@ pub(super) fn ask(
         options: Vec::new(),
         default: None,
         wake_at: None,
-        resolved: false,
-        closed: false,
-        answer: None,
-        inbox_error: None,
+        timeout: None,
     }
 }
 
 pub(super) const LOOP_ANSWER_HELP: &str = "loop answer must choose stop, extend (one round) or accept; to extend by K positive rounds, reply with {\"decision\":\"extend\",\"rounds\":K}";
 
-pub fn loop_ask(graph_id: &str, node: &str, rounds: usize, session: &str) -> NodeAsk {
+pub fn loop_ask(graph_id: &str, node: &str, rounds: usize, session: &str) -> AskRequest {
     let mut ask = ask(
         format!("{node}.rounds-{rounds}"),
         AskKind::Loop,
@@ -201,14 +243,52 @@ pub fn loop_ask(graph_id: &str, node: &str, rounds: usize, session: &str) -> Nod
 
 const PREVIOUS_ANSWER: &str = "\n\nThe previous answer was not applied: ";
 
+fn decide_default(spec: &DecideSpec) -> Option<String> {
+    spec.default.clone()
+}
+
+fn unanswered_disposition_text(disposition: UnansweredDisposition) -> &'static str {
+    match disposition {
+        UnansweredDisposition::BlockDependants => "block_dependants",
+        UnansweredDisposition::SkipDependants => "skip_dependants",
+    }
+}
+
+/// The longest rendered timeout, for byte bounds computed before a deadline.
+pub(super) const WORST_DECIDE_TIMEOUT: DecideTimeout = DecideTimeout {
+    seconds: u64::MAX,
+    source: DecideTimeoutSource::Configured,
+};
+
+fn timeout_source_text(source: DecideTimeoutSource) -> &'static str {
+    match source {
+        DecideTimeoutSource::Graph => "the decide declaration",
+        DecideTimeoutSource::Configured => "domains.fabric.graph.decide_timeout_seconds",
+        DecideTimeoutSource::DomainDefault => "the Fabric graph domain default",
+    }
+}
+
 /// The rendered decide request body. A rejected previous answer is noted at
 /// the end, shortened to keep the body within the inbox limit.
-fn decide_body(graph_id: &str, node_id: &str, spec: &DecideSpec, previous: Option<&str>) -> String {
-    let fallback = match (&spec.default, spec.timeout_seconds) {
-        (Some(default), Some(seconds)) => {
-            format!("\n\nWith no answer within {seconds} seconds, the graph takes {default}.")
-        }
-        _ => String::new(),
+fn decide_body(
+    graph_id: &str,
+    node_id: &str,
+    spec: &DecideSpec,
+    timeout: DecideTimeout,
+    previous: Option<&str>,
+) -> String {
+    let fallback = match decide_default(spec) {
+        Some(default) => format!(
+            "\n\nWith no answer within {} seconds (from {}), the graph takes {default}.",
+            timeout.seconds,
+            timeout_source_text(timeout.source),
+        ),
+        None => format!(
+            "\n\nWith no answer within {} seconds (from {}), the decision is unanswered and follows {:?}.",
+            timeout.seconds,
+            timeout_source_text(timeout.source),
+            unanswered_disposition_text(spec.on_unanswered),
+        ),
     };
     let mut body = format!(
         "Graph {graph_id}, node {node_id}.\n\n{}{fallback}\n\nThe chosen option becomes this node's verdict. This decision does not replace review or grant new authority.",
@@ -223,9 +303,24 @@ fn decide_body(graph_id: &str, node_id: &str, spec: &DecideSpec, previous: Optio
     body
 }
 
+/// The part of an ask ID that names the node's retry generation, empty for a
+/// node that was never retried. A retry resets the node, so its first ask would
+/// otherwise repeat an ID the inbox already holds, answered, and the old answer
+/// would be consumed again.
+pub(super) fn retry_suffix(progress: &NodeProgress) -> String {
+    match retry_generation(progress) {
+        0 => String::new(),
+        generation => format!(".retry-{generation}"),
+    }
+}
+
+pub(super) fn retry_generation(progress: &NodeProgress) -> u64 {
+    progress.retry_generation.unwrap_or_default()
+}
+
 /// The ID sequence of a decide ask, so a replacement never reuses an ID.
-fn decide_sequence(ask: &NodeAsk, node_id: &str) -> Option<u64> {
-    let identity = ask.ask_id.strip_prefix(node_id)?.strip_prefix(".ask-")?;
+fn decide_sequence(ask_id: &str, node_id: &str) -> Option<u64> {
+    let identity = ask_id.strip_prefix(node_id)?.strip_prefix(".ask-")?;
     let sequence = if let Some((sequence, generation)) = identity.split_once(".retry-") {
         generation
             .parse::<u64>()
@@ -238,6 +333,7 @@ fn decide_sequence(ask: &NodeAsk, node_id: &str) -> Option<u64> {
     sequence.parse().ok().filter(|sequence| *sequence > 0)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn decide_ask(
     graph_id: &str,
     node: &PlannedNode,
@@ -245,8 +341,9 @@ pub(super) fn decide_ask(
     session: &str,
     sequence: u64,
     wake_at: Option<WallTime>,
+    timeout: DecideTimeout,
     previous: Option<&str>,
-) -> NodeAsk {
+) -> AskRequest {
     let mut ask = ask(
         format!("{}.ask-{sequence}", node.id),
         AskKind::Decide,
@@ -255,12 +352,13 @@ pub(super) fn decide_ask(
             "Graph decision: {}",
             prefix(node.title.as_deref().unwrap_or(&node.id), 200)
         ),
-        decide_body(graph_id, &node.id, spec, previous),
+        decide_body(graph_id, &node.id, spec, timeout, previous),
     );
     ask.node = Some(node.id.clone());
     ask.options = spec.options.clone();
-    ask.default = spec.default.clone();
+    ask.default = decide_default(spec);
     ask.wake_at = wake_at;
+    ask.timeout = Some(timeout);
     ask
 }
 
@@ -270,7 +368,7 @@ pub(super) fn pause_ask(
     session: &str,
     reason: &str,
     previous: Option<&str>,
-) -> NodeAsk {
+) -> AskRequest {
     let previous = previous
         .map(|reason| format!("\n\nThe previous answer was not applied: {reason}"))
         .unwrap_or_default();
@@ -332,13 +430,15 @@ pub(super) fn validate_decide(
     {
         return Err("decide needs a question and 2 to 16 options with inbox-safe IDs and labels");
     }
+    if node.repair_scope_gate && spec.default.is_some() {
+        return Err("repair-scope decide must not declare a timeout default");
+    }
     if spec
         .default
         .as_ref()
         .is_some_and(|default| !ids.contains(default.as_str()))
-        || spec.timeout_seconds.is_some() && spec.default.is_none()
     {
-        return Err("decide default must name an option, and a timeout needs a default");
+        return Err("decide default must name an option");
     }
     // A timeout must be a representable duration that fits the wall-time
     // range at all; the deadline itself is checked when the ask is raised.
@@ -351,13 +451,23 @@ pub(super) fn validate_decide(
     }) {
         return Err("decide timeout_seconds must be positive and end within the wall-time range");
     }
-    if decide_body(graph_id, &node.id, spec, None).len()
+    let timeout = spec.timeout_seconds.map_or(
+        DecideTimeout {
+            seconds: crate::config::MAX_DECIDE_TIMEOUT_SECONDS,
+            source: DecideTimeoutSource::Configured,
+        },
+        |seconds| DecideTimeout {
+            seconds,
+            source: DecideTimeoutSource::Graph,
+        },
+    );
+    if decide_body(graph_id, &node.id, spec, timeout, None).len()
         > provenant_records::inbox::REQUEST_BODY_BYTES
     {
         return Err("decide question makes the request body longer than the inbox's 8192 bytes");
     }
     if decide_session(spec, decision_session)
-        .or_else(|| repair_scope_gate(node.extra.get("repair_scope_gate")).then_some(graph_id))
+        .or_else(|| node.repair_scope_gate.then_some(graph_id))
         .is_none_or(|s| crate::inbox::session_id(s).is_err())
     {
         return Err("decide needs a valid session or graph decision_session");
@@ -365,7 +475,7 @@ pub(super) fn validate_decide(
     Ok(())
 }
 
-/// Assign the ask identity once, before the first ask is saved.
+/// Assign the ask identity once, before the first ask is filed.
 pub(super) fn identity<R: AttemptOwner, J: Error + 'static>(
     checkpoint: &mut GraphCheckpoint,
     owner: &R,
@@ -389,7 +499,6 @@ fn next_wake(checkpoint: &GraphCheckpoint) -> Option<WallTime> {
     checkpoint
         .asks
         .iter()
-        .filter(|ask| !ask.resolved)
         .filter_map(|ask| ask.wake_at)
         .chain(
             checkpoint
@@ -413,58 +522,222 @@ fn next_wake(checkpoint: &GraphCheckpoint) -> Option<WallTime> {
         .min()
 }
 
-/// Read an answer. An inbox failure is kept on the ask and returned.
-pub(super) fn poll<R: AttemptOwner>(
+/// File a question and return the link to keep. The identity is saved before
+/// the request exists, so a replay files under the same instance and ask ID.
+/// The host files idempotently by that key: a crash before the caller saves the
+/// link finds the same request again, never a second. The flag says the request
+/// was already closed without an answer.
+pub(super) fn file<R: AttemptOwner, J: GraphJournal>(
     checkpoint: &mut GraphCheckpoint,
+    owner: &mut R,
+    journal: &mut J,
+    request: &AskRequest,
+) -> Result<(AskLink, bool), GraphError<R::Error, J::Error>> {
+    if checkpoint.instance_id.is_none() || checkpoint.ask_actor.is_none() {
+        identity::<R, J::Error>(checkpoint, owner)?;
+        journal.save(checkpoint).map_err(GraphError::Journal)?;
+    }
+    let (Some(instance_id), Some(actor)) = (&checkpoint.instance_id, &checkpoint.ask_actor) else {
+        return Err(GraphError::BadCheckpoint {
+            node: request.node.clone().unwrap_or_default(),
+            invariant: "an ask needs the saved graph identity",
+        });
+    };
+    let filed = owner
+        .file_ask(AskFiling {
+            graph_id: &checkpoint.graph_id,
+            instance_id,
+            actor,
+            ask: request,
+        })
+        .map_err(GraphError::Run)?;
+    let link = AskLink {
+        extra: Default::default(),
+        ask_id: request.ask_id.clone(),
+        kind: request.kind,
+        node: request.node.clone(),
+        rounds: request.rounds,
+        session: request.session.clone(),
+        wake_at: filed.deadline,
+        timeout: request.timeout,
+        request: bounded(&filed.request, REQUEST_ID_BYTES),
+    };
+    Ok((link, filed.closed))
+}
+
+/// Read an answer. An inbox failure is returned and the ask stays open, so the
+/// next advance reads it again.
+pub(super) fn poll<R: AttemptOwner>(
+    checkpoint: &GraphCheckpoint,
     position: usize,
     owner: &mut R,
 ) -> Result<Option<AskReply>, String> {
-    let result = match (&checkpoint.instance_id, &checkpoint.ask_actor) {
-        (Some(instance), Some(actor)) => owner
-            .node_ask(AskScope {
-                graph_id: &checkpoint.graph_id,
-                instance_id: instance,
-                actor,
-                ask: &checkpoint.asks[position],
-            })
-            .map_err(|error| error.to_string()),
-        _ => Err("graph has no ask identity".into()),
+    let Some(actor) = &checkpoint.ask_actor else {
+        return Err("graph has no ask identity".into());
     };
-    checkpoint.asks[position].inbox_error = result.as_ref().err().map(|error| {
-        bounded(
-            &format!("inbox unavailable: {error}"),
-            MAX_ADVANCE_ERROR_BYTES,
-        )
-    });
-    result
+    owner
+        .node_ask(AskScope {
+            actor,
+            ask: &checkpoint.asks[position],
+        })
+        .map_err(|error| error.to_string())
 }
 
-pub(super) fn answered(reply: AskReply) -> AskAnswer {
+pub(super) fn answered(reply: AskReply) -> Answer {
     let rejected = reply
         .text
         .as_ref()
         .filter(|text| encoded_len(text) > ANSWER_BYTES + 2)
         .map(|_| format!("reply longer than {ANSWER_BYTES} bytes"));
-    AskAnswer {
-        extra: Default::default(),
+    Answer {
         source: AnswerSource::Answered,
         option: reply.option.map(|option| bounded(&option, OPTION_BYTES)),
         text: reply.text.filter(|_| rejected.is_none()),
         actor: Some(bounded(&reply.actor, HOST_ID_BYTES)),
-        at: reply.at,
-        rejection_code: rejected.as_ref().map(|_| "answer_too_large".into()),
         rejected,
     }
 }
 
-fn due(ask: &NodeAsk, now: Option<WallTime>) -> bool {
+fn due(ask: &AskLink, now: Option<WallTime>) -> bool {
     ask.wake_at
         .zip(now)
         .is_some_and(|(wake_at, now)| now >= wake_at)
 }
 
-/// Raise, poll and settle a decide node. The ask, its answer and the node's
-/// outputs are saved together, so no crash leaves a decision half applied.
+fn effective_decide_timeout<R: AttemptOwner, J: Error + 'static>(
+    spec: &DecideSpec,
+    owner: &R,
+) -> Result<DecideTimeout, GraphError<R::Error, J>> {
+    let timeout = match spec.timeout_seconds {
+        Some(seconds) => DecideTimeout {
+            seconds,
+            source: DecideTimeoutSource::Graph,
+        },
+        None => owner.decide_timeout().map_err(GraphError::Run)?,
+    };
+    let representable = DurationMicros::from_seconds(timeout.seconds)
+        .ok()
+        .and_then(|duration| WallTime::from_micros(0).ok()?.checked_add(duration).ok())
+        .is_some();
+    if timeout.seconds == 0 || !representable {
+        return Err(GraphError::Refused(
+            "effective decide timeout is not a positive representable duration".into(),
+        ));
+    }
+    Ok(timeout)
+}
+
+/// The deadline of a decide ask, fixed before the ask exists. Without a clock
+/// the advance is refused and retried, so the timeout is never lost.
+fn decide_deadline<R: AttemptOwner, J: Error + 'static>(
+    node: &PlannedNode,
+    timeout: DecideTimeout,
+    owner: &R,
+) -> Result<Option<WallTime>, GraphError<R::Error, J>> {
+    let seconds = timeout.seconds;
+    let now = owner.wall_now().ok_or_else(|| {
+        GraphError::Refused(format!(
+            "node {}: no wall clock to set its decide deadline; retry the advance",
+            node.id
+        ))
+    })?;
+    DurationMicros::from_seconds(seconds)
+        .ok()
+        .and_then(|duration| now.checked_add(duration).ok())
+        .map(Some)
+        .ok_or_else(|| {
+            GraphError::Refused(format!(
+                "node {}: decide deadline passes the last representable wall time; lower timeout_seconds",
+                node.id
+            ))
+        })
+}
+
+/// The decide request for one sequence number. A replacement for a rejected
+/// answer names the reason in its body.
+#[allow(clippy::too_many_arguments)]
+fn decide_request(
+    index: usize,
+    node: &PlannedNode,
+    spec: &DecideSpec,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    session: &str,
+    sequence: u64,
+    wake_at: Option<WallTime>,
+    timeout: DecideTimeout,
+    previous: Option<&str>,
+) -> AskRequest {
+    let mut ask = decide_ask(
+        &plan.graph_id,
+        node,
+        spec,
+        session,
+        sequence,
+        wake_at,
+        timeout,
+        previous,
+    );
+    ask.ask_id.push_str(&retry_suffix(&checkpoint.nodes[index]));
+    if node.repair_scope_gate
+        && let Some(report) = node.depends_on.iter().find_map(|id| {
+            checkpoint
+                .nodes
+                .iter()
+                .find(|progress| &progress.id == id)
+                .and_then(|progress| progress.outputs.as_ref())
+                .and_then(|outputs| outputs.result.as_ref())
+        })
+    {
+        ask.body = bounded(
+            &format!("{}\n\nPrincipal report:\n{}", ask.body, report.excerpt),
+            provenant_records::inbox::REQUEST_BODY_BYTES,
+        );
+    }
+    ask
+}
+
+/// The most closed requests one decide node may leave behind before a new raise
+/// is refused.
+const MAX_DECIDE_SEQUENCE: u64 = 1_000;
+
+/// File a decide request under `sequence`, or the next free one. A request that
+/// an earlier cancel closed keeps its ask ID, so a raise after a resume files
+/// under a new one rather than waiting on a request nobody can answer.
+#[allow(clippy::too_many_arguments)]
+fn file_decide<R: AttemptOwner, J: GraphJournal>(
+    index: usize,
+    node: &PlannedNode,
+    spec: &DecideSpec,
+    plan: &PlannedGraph,
+    checkpoint: &mut GraphCheckpoint,
+    owner: &mut R,
+    journal: &mut J,
+    session: &str,
+    first: u64,
+    timeout: DecideTimeout,
+    previous: Option<&str>,
+) -> Result<AskLink, GraphError<R::Error, J::Error>> {
+    let wake_at = decide_deadline::<R, J::Error>(node, timeout, owner)?;
+    for sequence in first..first.saturating_add(MAX_DECIDE_SEQUENCE) {
+        let request = decide_request(
+            index, node, spec, plan, checkpoint, session, sequence, wake_at, timeout, previous,
+        );
+        let (link, closed) = file(checkpoint, owner, journal, &request)?;
+        if !closed {
+            return Ok(link);
+        }
+    }
+    Err(GraphError::Refused(format!(
+        "node {}: {MAX_DECIDE_SEQUENCE} decide requests are already closed; retry the node",
+        node.id
+    )))
+}
+
+/// Raise, poll and settle a decide node. The link and the node's running state
+/// are saved together, and so are the node's outputs and the link's removal, so
+/// no crash leaves a decision half applied. A rejected answer is replaced by a
+/// new request that says why.
 pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
     index: usize,
     node: &PlannedNode,
@@ -474,137 +747,80 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
     owner: &mut R,
     journal: &mut J,
 ) -> Result<(), GraphError<R::Error, J::Error>> {
-    if repair_scope_gate(node.extra.get("repair_scope_gate"))
-        && repair_scope(index, node, spec, plan, checkpoint, owner, journal)?
+    if node.repair_scope_gate && repair_scope(index, node, spec, plan, checkpoint, owner, journal)?
     {
         return Ok(());
     }
-    let mine = |ask: &NodeAsk| ask.node.as_deref() == Some(node.id.as_str());
-    let latest = checkpoint.asks.iter().rposition(mine);
-    let position = match latest {
-        Some(position) if !checkpoint.asks[position].resolved => position,
-        // A withdrawn ask is replaced once its inbox request is closed.
-        Some(position) if !checkpoint.asks[position].closed => return Ok(()),
-        _ => {
-            if checkpoint.pause_reason.is_some() {
+    let mine = |ask: &AskLink| ask.node.as_deref() == Some(node.id.as_str());
+    let position = match checkpoint.asks.iter().rposition(mine) {
+        Some(position) => position,
+        None => {
+            if checkpoint.pause.is_some() {
                 return Ok(());
             }
             let session = decide_session(spec, plan.decision_session.as_deref())
-                .or_else(|| {
-                    repair_scope_gate(node.extra.get("repair_scope_gate"))
-                        .then_some(plan.graph_id.as_str())
-                })
+                .or_else(|| node.repair_scope_gate.then_some(plan.graph_id.as_str()))
                 .ok_or_else(|| GraphError::BadCheckpoint {
                     node: node.id.clone(),
                     invariant: "decision must name an inbox session",
                 })?
                 .to_owned();
-            // A deadline is fixed before the ask exists. Without a clock the
-            // advance is refused and retried, so the timeout is never lost.
-            let wake_at = match spec.timeout_seconds {
-                None => None,
-                Some(seconds) => {
-                    let now = owner.wall_now().ok_or_else(|| {
-                        GraphError::Refused(format!(
-                            "node {}: no wall clock to set its decide deadline; retry the advance",
-                            node.id
-                        ))
-                    })?;
-                    let deadline = DurationMicros::from_seconds(seconds)
-                        .ok()
-                        .and_then(|duration| now.checked_add(duration).ok())
-                        .ok_or_else(|| {
-                            GraphError::Refused(format!(
-                                "node {}: decide deadline passes the last representable wall time; lower timeout_seconds",
-                                node.id
-                            ))
-                        })?;
-                    Some(deadline)
-                }
-            };
-            identity::<R, J::Error>(checkpoint, owner)?;
-            let previous = latest.map(|position| &checkpoint.asks[position]);
-            let sequence = previous
-                .and_then(|ask| decide_sequence(ask, &node.id))
-                .unwrap_or(0)
-                .saturating_add(1);
-            let rejected = previous
-                .and_then(|ask| ask.answer.as_ref())
-                .and_then(|answer| answer.rejected.as_deref());
-            let mut ask = decide_ask(
-                &plan.graph_id,
-                node,
-                spec,
-                &session,
-                sequence,
-                wake_at,
-                rejected,
-            );
-            if repair_scope_gate(node.extra.get("repair_scope_gate"))
-                && let Some(generation) = checkpoint.nodes[index]
-                    .extra
-                    .get("retry_generation")
-                    .and_then(serde_json::Value::as_u64)
-                    .filter(|generation| *generation > 0)
-            {
-                ask.ask_id.push_str(&format!(".retry-{generation}"));
-            }
-            if repair_scope_gate(node.extra.get("repair_scope_gate"))
-                && let Some(report) = node.depends_on.iter().find_map(|id| {
-                    checkpoint
-                        .nodes
-                        .iter()
-                        .find(|progress| &progress.id == id)
-                        .and_then(|progress| progress.outputs.as_ref())
-                        .and_then(|outputs| outputs.result.as_ref())
-                })
-            {
-                ask.body = bounded(
-                    &format!("{}\n\nPrincipal report:\n{}", ask.body, report.excerpt),
-                    provenant_records::inbox::REQUEST_BODY_BYTES,
-                );
-            }
-            checkpoint.asks.retain(|ask| !mine(ask));
-            checkpoint.asks.push(ask);
+            let timeout = effective_decide_timeout::<R, J::Error>(spec, owner)?;
+            let link = file_decide(
+                index, node, spec, plan, checkpoint, owner, journal, &session, 1, timeout, None,
+            )?;
+            checkpoint.asks.push(link);
             checkpoint.nodes[index].state = NodeState::Running;
             refresh_wake(checkpoint);
             journal.save(checkpoint).map_err(GraphError::Journal)?;
             checkpoint.asks.len() - 1
         }
     };
-    let before = checkpoint.asks[position].inbox_error.clone();
+    let timeout = checkpoint.asks[position]
+        .timeout
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "a decide ask must retain its effective timeout",
+        })?;
     let reply = poll(checkpoint, position, owner);
     let now = owner.wall_now();
-    let ask = &checkpoint.asks[position];
+    let link = &checkpoint.asks[position];
     let answer = match reply {
         Ok(Some(reply)) => Some(answered(reply)),
-        _ if due(ask, now) => Some(AskAnswer {
-            extra: Default::default(),
+        Ok(None) if due(link, now) => Some(Answer {
             source: AnswerSource::Default,
-            option: ask.default.clone(),
+            option: decide_default(spec),
             text: None,
             actor: None,
-            at: now,
             rejected: None,
-            rejection_code: None,
         }),
         _ => None,
     };
     let Some(mut answer) = answer else {
-        if checkpoint.asks[position].inbox_error != before {
-            journal.save(checkpoint).map_err(GraphError::Journal)?;
-        }
         return Ok(());
     };
+    // Silence cannot grant a change of scope or a one-way-door authority.
+    // An unanswered decide follows its declared disposition for every node.
+    if answer.source == AnswerSource::Default && answer.option.is_none() {
+        let state = match spec.on_unanswered {
+            UnansweredDisposition::BlockDependants => NodeState::Failed,
+            UnansweredDisposition::SkipDependants => NodeState::Skipped,
+        };
+        let progress = &mut checkpoint.nodes[index];
+        progress.state = state;
+        progress.outputs = Some(decision_outputs(&link.ask_id, DecideOutcome::Unanswered));
+        checkpoint.asks.remove(position);
+        refresh_wake(checkpoint);
+        return journal.save(checkpoint).map_err(GraphError::Journal);
+    }
     let chosen = answer
         .option
         .clone()
         .or_else(|| answer.text.as_deref().map(|text| text.trim().to_owned()))
-        .filter(|id| ask.options.iter().any(|option| &option.id == id));
-    let ask_id = ask.ask_id.clone();
+        .filter(|id| spec.options.iter().any(|option| &option.id == id));
+    let ask_id = link.ask_id.clone();
     if answer.rejected.is_none() && chosen.is_none() {
-        answer.rejection_code = Some("invalid_decide_option".into());
-        let ids: Vec<_> = ask
+        let ids: Vec<_> = spec
             .options
             .iter()
             .map(|option| option.id.as_str())
@@ -614,35 +830,90 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
             MAX_ADVANCE_ERROR_BYTES,
         ));
     }
-    // A rejected answer keeps the node open: once its request is closed, the
-    // next advance asks again under a new ask ID and says why.
     if let (None, Some(chosen)) = (&answer.rejected, chosen) {
         let progress = &mut checkpoint.nodes[index];
         progress.state = NodeState::Succeeded;
-        progress.outputs = Some(decision_outputs(&ask_id, &chosen, &answer));
-        answer.option = Some(chosen);
+        let outcome = match answer.source {
+            AnswerSource::Default => DecideOutcome::AnsweredByDefault {
+                option: chosen.clone(),
+            },
+            AnswerSource::Answered => DecideOutcome::Answered {
+                option: chosen.clone(),
+                actor: answer
+                    .actor
+                    .clone()
+                    .ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "an owner decide answer must retain its actor",
+                    })?,
+            },
+        };
+        progress.outputs = Some(decision_outputs(&ask_id, outcome));
+        checkpoint.asks.remove(position);
+        refresh_wake(checkpoint);
+        return journal.save(checkpoint).map_err(GraphError::Journal);
     }
-    let ask = &mut checkpoint.asks[position];
-    ask.answer = Some(answer);
-    ask.resolved = true;
+    // A rejected answer keeps the node open: the request is replaced under the
+    // next ask ID, which says why.
+    if checkpoint.pause.is_some() {
+        return Ok(());
+    }
+    let previous = &checkpoint.asks[position];
+    let session = previous.session.clone();
+    let sequence = decide_sequence(&previous.ask_id, &node.id)
+        .unwrap_or(0)
+        .saturating_add(1);
+    let link = file_decide(
+        index,
+        node,
+        spec,
+        plan,
+        checkpoint,
+        owner,
+        journal,
+        &session,
+        sequence,
+        timeout,
+        answer.rejected.as_deref(),
+    )?;
+    checkpoint.asks[position] = link;
     refresh_wake(checkpoint);
     journal.save(checkpoint).map_err(GraphError::Journal)
 }
 
-fn decision_outputs(ask_id: &str, option: &str, answer: &AskAnswer) -> NodeOutputs {
+const APPROVED_SCOPE_RULE: &str = "approved_repair_scope";
+
+fn decision_outputs(ask_id: &str, outcome: DecideOutcome) -> NodeOutputs {
     let excerpt = bounded(
-        &match (answer.source, &answer.actor) {
-            (AnswerSource::Answered, Some(actor)) => {
+        &match &outcome {
+            DecideOutcome::Answered { option, actor } => {
                 format!("decision {ask_id}: {option}, answered by {actor}")
             }
-            _ => format!("decision {ask_id}: {option}, the default at the deadline"),
+            DecideOutcome::AnsweredByDefault { option } => {
+                format!("decision {ask_id}: {option}, the declared default at the deadline")
+            }
+            DecideOutcome::AnsweredByPolicy { option, rule } => {
+                format!("decision {ask_id}: {option}, applied policy {rule}")
+            }
+            DecideOutcome::Unanswered => format!("decision {ask_id}: unanswered at the deadline"),
         },
         OUTPUT_FIELD_BYTES,
     );
+    let verdict = outcome.option().map(str::to_owned);
     NodeOutputs {
         extra: Default::default(),
+        repair_design: None,
+        partial: false,
+        risk_tier: None,
+        repair_items: None,
+        spec_concerns: None,
+        spec_concern_count: None,
+        spec_defect_count: None,
+        artifact_findings: None,
+        compact_disposition_findings: None,
         verdict_error: None,
         schema_version: 2,
+        decide_outcome: Some(outcome.clone()),
         result: Some(ResultOutput {
             extra: Default::default(),
             digest: CanonicalV1::file_digest(excerpt.as_bytes()).to_string(),
@@ -650,12 +921,20 @@ fn decision_outputs(ask_id: &str, option: &str, answer: &AskAnswer) -> NodeOutpu
             truncated: false,
             path: None,
         }),
-        verdict: Some(option.to_owned()),
+        verdict,
         findings: Vec::new(),
         findings_available: None,
         branch: None,
         commit: None,
-        warnings: Vec::new(),
+        warnings: match outcome {
+            DecideOutcome::Answered { .. } | DecideOutcome::AnsweredByPolicy { .. } => Vec::new(),
+            DecideOutcome::AnsweredByDefault { option } => vec![format!(
+                "decide timeout: applied declared default {option}; no answer arrived before the deadline"
+            )],
+            DecideOutcome::Unanswered => {
+                vec!["decide timeout: no answer or declared default; recorded unanswered".into()]
+            }
+        },
         plan: None,
         remaining: None,
     }
@@ -675,7 +954,7 @@ enum PauseReply {
 }
 
 fn pause_action(
-    answer: &AskAnswer,
+    answer: &Answer,
     document: &GraphDocument,
     checkpoint: &GraphCheckpoint,
     plan: &PlannedGraph,
@@ -718,7 +997,8 @@ fn pause_action(
 }
 
 /// Raise or poll the ask for a non-loop pause. Returns true when an answer
-/// was applied and the caller should advance again.
+/// was applied and the caller should advance again. An answer that cannot be
+/// applied is replaced by a new request that says why.
 pub(super) fn pause<R: AttemptOwner, J: GraphJournal>(
     document: &GraphDocument,
     plan: &PlannedGraph,
@@ -727,54 +1007,46 @@ pub(super) fn pause<R: AttemptOwner, J: GraphJournal>(
     journal: &mut J,
     budget: &crate::config::GraphBudget,
 ) -> Result<bool, GraphError<R::Error, J::Error>> {
-    let (Some(session), Some(reason)) = (&plan.decision_session, checkpoint.pause_reason.clone())
-    else {
+    let (Some(session), Some(reason)) = (
+        &plan.decision_session,
+        checkpoint.pause_reason().map(str::to_owned),
+    ) else {
         return Ok(false);
     };
     if checkpoint.cancelled || loop_pause(checkpoint) {
         return Ok(false);
     }
-    let pauses = |ask: &NodeAsk| ask.kind == AskKind::Pause;
+    let pauses = |ask: &AskLink| ask.kind == AskKind::Pause;
     let position = match checkpoint.asks.iter().rposition(pauses) {
-        Some(position) if !checkpoint.asks[position].resolved => position,
-        Some(position) if !checkpoint.asks[position].closed => return Ok(false),
-        latest => {
-            identity::<R, J::Error>(checkpoint, owner)?;
-            let previous = latest
-                .and_then(|position| checkpoint.asks[position].answer.as_ref())
-                .and_then(|answer| answer.rejected.clone());
-            checkpoint.pause_asks += 1;
-            let ask = pause_ask(
+        Some(position) => position,
+        None => {
+            let request = pause_ask(
                 &checkpoint.graph_id,
-                checkpoint.pause_asks,
+                checkpoint.pause_asks + 1,
                 session,
                 &reason,
-                previous.as_deref(),
+                None,
             );
-            checkpoint.asks.push(ask);
+            let (link, _) = file(checkpoint, owner, journal, &request)?;
+            checkpoint.pause_asks += 1;
+            checkpoint.asks.push(link);
             journal.save(checkpoint).map_err(GraphError::Journal)?;
             checkpoint.asks.len() - 1
         }
     };
-    let before = checkpoint.asks[position].inbox_error.clone();
     let reply = match poll(checkpoint, position, owner) {
         Ok(Some(reply)) => reply,
-        _ => {
-            if checkpoint.asks[position].inbox_error != before {
-                journal.save(checkpoint).map_err(GraphError::Journal)?;
-            }
-            return Ok(false);
-        }
+        _ => return Ok(false),
     };
-    let mut answer = answered(reply);
+    let answer = answered(reply);
     let action = match &answer.rejected {
         Some(reason) => Err(("answer_too_large", reason.clone())),
         None => pause_action(&answer, document, checkpoint, plan, budget),
     };
-    let applied = match action {
+    match action {
         Ok(PauseAction::Cancel) => {
             checkpoint.cancelled = true;
-            true
+            checkpoint.asks.remove(position);
         }
         Ok(PauseAction::Resume(extensions)) => {
             for extension in extensions {
@@ -783,28 +1055,33 @@ pub(super) fn pause<R: AttemptOwner, J: GraphJournal>(
                 }
             }
             checkpoint.deactivate_expansion_pauses();
-            checkpoint.pause_reason = None;
-            checkpoint.pause_code = None;
-            true
+            checkpoint.pause = None;
+            checkpoint.asks.remove(position);
         }
-        Err((code, reason)) => {
-            answer.rejection_code = Some(code.into());
-            answer.rejected = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
-            false
+        Err((_, note)) => {
+            let note = bounded(&note, MAX_ADVANCE_ERROR_BYTES);
+            let request = pause_ask(
+                &checkpoint.graph_id,
+                checkpoint.pause_asks + 1,
+                session,
+                &reason,
+                Some(&note),
+            );
+            let (link, _) = file(checkpoint, owner, journal, &request)?;
+            checkpoint.pause_asks += 1;
+            checkpoint.asks[position] = link;
+            journal.save(checkpoint).map_err(GraphError::Journal)?;
+            return Ok(false);
         }
-    };
-    let ask = &mut checkpoint.asks[position];
-    ask.answer = Some(answer);
-    ask.resolved = true;
+    }
     journal.save(checkpoint).map_err(GraphError::Journal)?;
-    Ok(applied)
+    Ok(true)
 }
 
 pub(super) fn loop_pause(checkpoint: &GraphCheckpoint) -> bool {
     checkpoint
-        .pause_code
-        .as_deref()
-        .and_then(NodeDecisionCause::from_loop_code)
+        .pause_cause()
+        .and_then(NodeDecisionCause::from_pause)
         .is_some()
 }
 
@@ -822,97 +1099,69 @@ fn loop_rounds(checkpoint: &GraphCheckpoint, loop_id: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// Resolve asks whose question has gone away, then close their inbox
-/// requests. A close failure stays on its ask and is retried next advance.
+/// Whether cancelling the graph withdraws this node's asks. A node detached
+/// from graph cancellation keeps its own.
+pub(super) fn withdrawn(checkpoint: &GraphCheckpoint, node_id: &str) -> bool {
+    checkpoint.cancelled
+        && !checkpoint
+            .nodes
+            .iter()
+            .any(|node| node.id == node_id && node.detached_from_graph_cancel)
+}
+
+/// Whether an ask's question has gone away: its node settled, the graph was
+/// cancelled, its loop moved on or its pause ended.
+fn gone(checkpoint: &GraphCheckpoint, ask: &AskLink) -> bool {
+    let settled = ask.node.as_ref().is_none_or(|id| {
+        checkpoint
+            .nodes
+            .iter()
+            .find(|n| &n.id == id)
+            .is_none_or(|n| n.state.settled())
+    });
+    let withdrawn = match &ask.node {
+        Some(id) => withdrawn(checkpoint, id),
+        None => checkpoint.cancelled,
+    };
+    withdrawn
+        || match ask.kind {
+            AskKind::Loop => {
+                settled
+                    || ask.rounds.unwrap_or(0)
+                        < loop_rounds(checkpoint, ask.node.as_deref().unwrap_or_default())
+            }
+            AskKind::Decide | AskKind::Land => settled,
+            AskKind::Pause => checkpoint.pause.is_none() || loop_pause(checkpoint),
+        }
+}
+
+/// Close the inbox requests of asks whose question has gone away, then drop
+/// their links. The request closes first, so a crash between the two leaves a
+/// link whose close is a no-op on the next advance. A close failure keeps the
+/// link, and the next advance retries it. An answered request stays answered.
 pub fn close_resolved_asks<R: AttemptOwner, J: GraphJournal>(
     checkpoint: &mut GraphCheckpoint,
     owner: &mut R,
     journal: &mut J,
 ) -> Result<(), GraphError<R::Error, J::Error>> {
-    let mut changed = false;
-    for index in 0..checkpoint.asks.len() {
-        let ask = &checkpoint.asks[index];
-        if ask.resolved {
-            continue;
-        }
-        let settled = ask.node.as_ref().is_none_or(|id| {
-            checkpoint
-                .nodes
-                .iter()
-                .find(|n| &n.id == id)
-                .is_none_or(|n| n.state.settled())
-        });
-        let protected = ask.node.as_ref().is_some_and(|id| {
-            checkpoint.nodes.iter().any(|node| {
-                &node.id == id
-                    && node.extra.get(super::relay::DETACHED_FROM_GRAPH_CANCEL)
-                        == Some(&serde_json::Value::Bool(true))
-            })
-        });
-        let gone = (checkpoint.cancelled && !protected)
-            || match ask.kind {
-                AskKind::Loop => {
-                    settled
-                        || ask.rounds.unwrap_or(0)
-                            < loop_rounds(checkpoint, ask.node.as_deref().unwrap_or_default())
-                }
-                AskKind::Decide | AskKind::Land => settled,
-                AskKind::Pause => checkpoint.pause_reason.is_none() || loop_pause(checkpoint),
-            };
-        if gone {
-            checkpoint.asks[index].resolved = true;
-            changed = true;
-        }
-    }
-    let closed_pauses = checkpoint
-        .asks
-        .iter()
-        .filter(|ask| ask.kind == AskKind::Pause && ask.closed)
-        .count();
-    if closed_pauses > MAX_PAUSE_ASKS {
-        let mut drop = closed_pauses - MAX_PAUSE_ASKS;
-        checkpoint.asks.retain(|ask| {
-            let old = drop > 0 && ask.kind == AskKind::Pause && ask.closed;
-            drop -= usize::from(old);
-            !old
-        });
-        changed = true;
-    }
-    if changed {
-        refresh_wake(checkpoint);
-        journal.save(checkpoint).map_err(GraphError::Journal)?;
-    }
-    let (Some(instance), Some(actor)) =
-        (checkpoint.instance_id.clone(), checkpoint.ask_actor.clone())
-    else {
+    let Some(actor) = checkpoint.ask_actor.clone() else {
         return Ok(());
     };
-    for index in 0..checkpoint.asks.len() {
-        if !checkpoint.asks[index].resolved || checkpoint.asks[index].closed {
-            continue;
+    let mut closed = Vec::new();
+    for ask in checkpoint.asks.iter().filter(|ask| gone(checkpoint, ask)) {
+        if owner
+            .close_node_ask(AskScope { actor: &actor, ask })
+            .is_ok()
+        {
+            closed.push(ask.ask_id.clone());
         }
-        let result = owner.close_node_ask(AskScope {
-            graph_id: &checkpoint.graph_id,
-            instance_id: &instance,
-            actor: &actor,
-            ask: &checkpoint.asks[index],
-        });
-        let ask = &mut checkpoint.asks[index];
-        match result {
-            Ok(()) => {
-                ask.closed = true;
-                ask.inbox_error = None;
-            }
-            Err(error) => {
-                ask.inbox_error = Some(bounded(
-                    &format!("close ask: {error}"),
-                    MAX_ADVANCE_ERROR_BYTES,
-                ));
-            }
-        }
-        journal.save(checkpoint).map_err(GraphError::Journal)?;
     }
-    Ok(())
+    if closed.is_empty() {
+        return Ok(());
+    }
+    checkpoint.asks.retain(|ask| !closed.contains(&ask.ask_id));
+    refresh_wake(checkpoint);
+    journal.save(checkpoint).map_err(GraphError::Journal)
 }
 
 /// Checkpoint-level ask invariants. Node-level state is checked beside each kind.
@@ -934,15 +1183,11 @@ pub(super) fn validate(checkpoint: &GraphCheckpoint, plan: &PlannedGraph) -> Res
         };
         let session = Some(ask.session.as_str());
         let valid = ids.insert(ask.ask_id.as_str())
-            && (ask.resolved || !ask.closed)
-            && (ask.resolved || ask.answer.is_none())
-            && ask
-                .default
-                .as_ref()
-                .is_none_or(|default| ask.options.iter().any(|o| &o.id == default))
+            && !ask.request.is_empty()
             && match (ask.kind, node) {
                 (AskKind::Loop, Some(node)) => {
-                    ask.rounds.is_some_and(|rounds| rounds > 0)
+                    ask.timeout.is_none()
+                        && ask.rounds.is_some_and(|rounds| rounds > 0)
                         && node
                             .loop_body
                             .as_ref()
@@ -950,17 +1195,21 @@ pub(super) fn validate(checkpoint: &GraphCheckpoint, plan: &PlannedGraph) -> Res
                             == session
                 }
                 (AskKind::Decide, Some(node)) => {
-                    decide_sequence(ask, &node.id).is_some()
+                    decide_sequence(&ask.ask_id, &node.id).is_some()
+                        && ask.wake_at.is_some()
+                        && ask.timeout.is_some_and(|timeout| timeout.seconds > 0)
                         && node.decide.as_ref().is_some_and(|spec| {
                             decide_session(spec, plan.decision_session.as_deref()).or_else(|| {
-                                repair_scope_gate(node.extra.get("repair_scope_gate"))
-                                    .then_some(plan.graph_id.as_str())
+                                node.repair_scope_gate.then_some(plan.graph_id.as_str())
                             }) == session
                         })
                 }
-                (AskKind::Pause, None) => plan.decision_session.as_deref() == session,
+                (AskKind::Pause, None) => {
+                    ask.timeout.is_none() && plan.decision_session.as_deref() == session
+                }
                 (AskKind::Land, Some(node)) => {
-                    land::sequence(ask, &node.id).is_some()
+                    ask.timeout.is_none()
+                        && land::parse(&ask.ask_id, &node.id).is_some()
                         && node
                             .land
                             .as_ref()
@@ -989,35 +1238,59 @@ pub(super) fn validate_progress(
         && progress.ci.is_none()
         && (progress.advance_error.is_none() || progress.state == NodeState::Failed)
         && match progress.state {
-            NodeState::Pending | NodeState::Blocked | NodeState::Skipped => {
-                progress.outputs.is_none()
-            }
-            NodeState::Running => progress.outputs.is_none() && latest.is_some(),
+            NodeState::Pending | NodeState::Blocked => progress.outputs.is_none(),
+            NodeState::Skipped => progress.outputs.is_none() || unanswered_progress(progress, node),
+            // A running decision without a link raises its ask again.
+            NodeState::Running => progress.outputs.is_none(),
             NodeState::Succeeded => {
-                (repair_scope_gate(node.extra.get("repair_scope_gate"))
+                (node.repair_scope_gate
                     && approved_repair_scope(node, checkpoint)
-                    && progress.extra.get("owner_notified") == Some(&serde_json::Value::Bool(true))
-                    && progress
-                        .outputs
-                        .as_ref()
-                        .and_then(|outputs| outputs.verdict.as_deref())
-                        == Some("approve")
+                    && progress.owner_notified
+                    && progress.outputs.as_ref().is_some_and(|outputs| {
+                        outputs.verdict.as_deref() == Some("approve")
+                            && matches!(
+                                outputs.decide_outcome,
+                                Some(DecideOutcome::AnsweredByPolicy { ref option, ref rule })
+                                    if option == "approve" && rule == APPROVED_SCOPE_RULE
+                            )
+                    })
                     && latest.is_none())
-                    || latest
-                        .and_then(|ask| ask.answer.as_ref())
-                        .is_some_and(|answer| {
-                            answer.rejected.is_none()
-                                && progress.outputs.as_ref().and_then(|o| o.verdict.as_ref())
-                                    == answer.option.as_ref()
-                        })
+                    // The answer is the inbox's. The checkpoint keeps the
+                    // verdict it produced, which must be one of the options.
+                    || progress.outputs.as_ref().is_some_and(|outputs| {
+                        let declared_option = outputs
+                            .decide_outcome
+                            .as_ref()
+                            .filter(|outcome| matches!(outcome,
+                                DecideOutcome::Answered { .. } | DecideOutcome::AnsweredByDefault { .. }))
+                            .and_then(DecideOutcome::option);
+                        declared_option
+                            .zip(outputs.verdict.as_deref())
+                            .zip(node.decide.as_ref())
+                            .is_some_and(|((option, verdict), spec)| {
+                                option == verdict
+                                    && spec.options.iter().any(|candidate| candidate.id == option)
+                            })
+
+                    })
             }
-            NodeState::Failed => progress.outputs.is_none(),
+            NodeState::Failed => progress.outputs.is_none() || unanswered_progress(progress, node),
         };
     if valid { Ok(()) } else { Err(()) }
 }
 
-fn repair_scope_gate(value: Option<&serde_json::Value>) -> bool {
-    value == Some(&serde_json::Value::Bool(true))
+fn unanswered_progress(progress: &NodeProgress, node: &PlannedNode) -> bool {
+    node.decide.as_ref().is_some_and(|spec| {
+        let expected = match spec.on_unanswered {
+            UnansweredDisposition::BlockDependants => NodeState::Failed,
+            UnansweredDisposition::SkipDependants => NodeState::Skipped,
+        };
+        progress.state == expected
+            && progress.outputs.as_ref().is_some_and(|outputs| {
+                outputs.decide_outcome == Some(DecideOutcome::Unanswered)
+                    && outputs.verdict.is_none()
+            })
+    })
 }
 
 fn approved_repair_scope(node: &PlannedNode, checkpoint: &GraphCheckpoint) -> bool {
@@ -1030,17 +1303,8 @@ fn approved_repair_scope(node: &PlannedNode, checkpoint: &GraphCheckpoint) -> bo
                 .find(|progress| &progress.id == id)
                 .and_then(|progress| progress.outputs.as_ref())
         })
-        .and_then(|outputs| outputs.extra.get("repair_design"))
-        .is_some_and(|design| {
-            design
-                .get("within_scope")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-                && design
-                    .get("one_way_door")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(false)
-        })
+        .and_then(|outputs| outputs.repair_design.as_ref())
+        .is_some_and(|design| design.within_scope && !design.one_way_door)
 }
 
 /// The host owns notification and the scope barrier. Principal prose and a
@@ -1062,16 +1326,12 @@ fn repair_scope<R: AttemptOwner, J: GraphJournal>(
             .and_then(|progress| progress.outputs.as_ref())
     });
     let approved_scope = approved_repair_scope(node, checkpoint);
-    if checkpoint.nodes[index].extra.get("owner_notified") != Some(&serde_json::Value::Bool(true)) {
+    if !checkpoint.nodes[index].owner_notified {
         let report = design
             .and_then(|outputs| outputs.result.as_ref())
             .map(|result| result.excerpt.as_str())
             .unwrap_or("Principal report unavailable");
-        let generation = checkpoint.nodes[index]
-            .extra
-            .get("retry_generation")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
+        let generation = checkpoint.nodes[index].retry_generation.unwrap_or_default();
         let notice_id = if generation == 0 {
             format!("{}.owner-notification", node.id)
         } else {
@@ -1111,7 +1371,7 @@ fn repair_scope<R: AttemptOwner, J: GraphJournal>(
             });
         };
         let notified = owner
-            .notify_owner(AskScope {
+            .notify_owner(AskFiling {
                 graph_id: &plan.graph_id,
                 instance_id: instance,
                 actor,
@@ -1121,27 +1381,17 @@ fn repair_scope<R: AttemptOwner, J: GraphJournal>(
         if !notified {
             return Ok(true);
         }
-        checkpoint.nodes[index]
-            .extra
-            .insert("owner_notified".into(), true.into());
+        checkpoint.nodes[index].owner_notified = true;
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     }
     if approved_scope {
         checkpoint.nodes[index].state = NodeState::Succeeded;
-        let answer = AskAnswer {
-            extra: Default::default(),
-            source: AnswerSource::Answered,
-            option: Some("approve".into()),
-            text: None,
-            actor: Some("host:approved-scope".into()),
-            at: owner.wall_now(),
-            rejected: None,
-            rejection_code: None,
-        };
         checkpoint.nodes[index].outputs = Some(decision_outputs(
             &format!("{}.approved-scope", node.id),
-            "approve",
-            &answer,
+            DecideOutcome::AnsweredByPolicy {
+                option: "approve".into(),
+                rule: APPROVED_SCOPE_RULE.into(),
+            },
         ));
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     }

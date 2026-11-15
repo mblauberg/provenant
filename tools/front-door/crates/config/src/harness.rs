@@ -2,7 +2,8 @@
 use crate::managed::{self, InstallError, SelectorChange, Snapshot, Targets, Value};
 use crate::{Harness, Release};
 use provenant_records::{
-    AbsolutePath, InstallReceipt, Limits, OwnedEntry, OwnedValue, ResolvedHarnessTarget,
+    AbsolutePath, CapabilitySupport, InstallReceipt, Limits, OwnedEntry, OwnedValue,
+    ResolvedHarnessTarget,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
@@ -11,97 +12,26 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const OPENCODE_INSTRUCTION_ASSETS: [&str; 1] = [managed::INSTRUCTION_ASSET];
-
-pub(crate) const CLAUDE_CONFIG_LIMIT: u64 = 16 * 1024 * 1024;
-
-fn limits(harness: Harness) -> Limits {
-    Limits {
-        max_bytes: if harness == Harness::Claude {
-            CLAUDE_CONFIG_LIMIT
-        } else {
-            Limits::CONFIG.max_bytes
-        },
-        ..Limits::CONFIG
+pub(crate) fn default_config(h: Harness, home: &Path, base: &Path) -> PathBuf {
+    let Some(install) = h.spec().install else {
+        return PathBuf::new();
+    };
+    if let Some(default_home_config) = install.default_home_config
+        && base == home.join(install.home)
+    {
+        return home.join(default_home_config);
     }
-}
-
-pub(crate) fn default_mcp(h: Harness, home: &Path, base: &Path) -> PathBuf {
-    match h {
-        // Claude Code keeps `.claude.json` beside `CLAUDE_CONFIG_DIR` when set.
-        Harness::Claude if base == home.join(".claude") => home.join(".claude.json"),
-        Harness::Claude => base.join(".claude.json"),
-        Harness::Codex => base.join("config.toml"),
-        Harness::Cursor => base.join("mcp.json"),
-        Harness::Agy => base.join("config/mcp_config.json"),
-        Harness::Opencode => base.join("opencode.jsonc"),
-        // An adapter without a managed configuration has no default path.
-        _ => PathBuf::new(),
-    }
+    base.join(install.config)
 }
 pub(crate) fn default_hooks(h: Harness, base: &Path) -> Option<PathBuf> {
-    match h {
-        Harness::Claude => Some(base.join("settings.json")),
-        Harness::Codex => Some(base.join("hooks.json")),
-        _ => None,
-    }
+    let install = h.spec().install?;
+    (install.hooks.is_supported())
+        .then_some(install.hook_file)
+        .flatten()
+        .map(|path| base.join(path))
 }
-pub(crate) fn name(h: Harness) -> &'static str {
-    h.spec().name
-}
-fn selector(h: Harness) -> &'static str {
-    match h {
-        Harness::Codex => "toml:mcp_servers.fabric",
-        Harness::Opencode => "json:/mcp/fabric",
-        _ => "json:/mcpServers/fabric",
-    }
-}
-fn mcp(h: Harness, targets: &Targets) -> Result<Json, InstallError> {
-    mcp_entry(
-        h,
-        &targets.bin_dir.join("provenant"),
-        targets.roots.state.as_path(),
-    )
-}
-
-/// The installer and confined lanes use the same stdio registration.
-pub fn mcp_entry(h: Harness, binary: &Path, state: &Path) -> Result<Json, InstallError> {
-    let binary = binary
-        .to_str()
-        .ok_or(InstallError::InvalidConfig("MCP command requires UTF-8"))?;
-    let state = state
-        .to_str()
-        .ok_or(InstallError::InvalidConfig("MCP state path requires UTF-8"))?;
-    let args = ["--state-dir", state, "fabric", "mcp", "--client", name(h)];
-    Ok(if h == Harness::Opencode {
-        let mut command = vec![binary];
-        command.extend(args);
-        json!({"type":"local","command":command,"environment":{},"enabled":true})
-    } else if h == Harness::Claude {
-        json!({"type":"stdio","command":binary,"args":args,"env":{}})
-    } else {
-        json!({"command":binary,"args":args,"env":{}})
-    })
-}
-fn json_path(selector: &str) -> Result<Vec<&str>, InstallError> {
-    let path = selector
-        .strip_prefix("json:/")
-        .ok_or(InstallError::InvalidConfig("unknown selector"))?;
-    Ok(path.split('/').collect())
-}
-fn toml_document(bytes: &[u8], limits: Limits) -> Result<toml_edit::DocumentMut, InstallError> {
-    if bytes.len() as u64 > limits.max_bytes {
-        return Err(InstallError::InvalidConfig("config byte bound"));
-    }
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| InstallError::InvalidConfig("config is not UTF-8"))?;
-    text.parse()
-        .map_err(|_| InstallError::InvalidConfig("malformed TOML"))
-}
-fn get_for(bytes: &[u8], sel: &str, harness: Harness) -> Result<Option<Json>, InstallError> {
-    get_with_limits(bytes, sel, limits(harness))
-}
-fn get_with_limits(bytes: &[u8], sel: &str, limits: Limits) -> Result<Option<Json>, InstallError> {
+fn get_selector(bytes: &[u8], sel: &str) -> Result<Option<Json>, InstallError> {
+    let limits = Limits::CONFIG;
     if sel.starts_with("hook:") {
         return crate::hooks::get(bytes, sel);
     }
@@ -122,38 +52,32 @@ fn get_with_limits(bytes: &[u8], sel: &str, limits: Limits) -> Result<Option<Jso
         }
         return Ok(found.first().map(|v| (*v).clone()));
     }
-    if let Some(sel) = sel.strip_prefix("toml:") {
-        let doc = toml_document(bytes, limits)?;
-        let mut item = doc.as_item();
-        for key in sel.split('.') {
-            match item.get(key) {
-                Some(next) => item = next,
-                None => return Ok(None),
-            }
-        }
-        let mut table = toml_edit::Table::new();
-        table.insert("value", item.clone());
-        let parsed: Json = toml_edit::de::from_document(toml_edit::DocumentMut::from(table))
-            .map_err(|_| InstallError::InvalidConfig("unsupported TOML selector"))?;
-        Ok(parsed.get("value").cloned())
-    } else {
-        crate::splice::get_with_limits(bytes, &json_path(sel)?, limits)
+    if let Some(path) = sel.strip_prefix("json:/") {
+        let path: Vec<_> = path.split('/').collect();
+        return crate::splice::get_with_limits(bytes, &path, limits);
     }
+    if let Some(path) = sel.strip_prefix("toml:") {
+        let Some((parent, key)) = path.split_once('.') else {
+            return Err(InstallError::InvalidConfig("invalid TOML selector"));
+        };
+        if key.contains('.') {
+            return Err(InstallError::InvalidConfig("invalid TOML selector"));
+        }
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| InstallError::InvalidConfig("invalid TOML harness configuration"))?;
+        let document = text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| InstallError::InvalidConfig("invalid TOML harness configuration"))?;
+        return Ok(document
+            .get(parent)
+            .and_then(toml_edit::Item::as_table_like)
+            .filter(|table| table.contains_key(key))
+            .map(|_| json!("present")));
+    }
+    Err(InstallError::InvalidConfig("unknown selector"))
 }
-fn set_for(
-    bytes: &[u8],
-    sel: &str,
-    value: Option<&Json>,
-    harness: Harness,
-) -> Result<Vec<u8>, InstallError> {
-    set_with_limits(bytes, sel, value, limits(harness))
-}
-fn set_with_limits(
-    bytes: &[u8],
-    sel: &str,
-    value: Option<&Json>,
-    limits: Limits,
-) -> Result<Vec<u8>, InstallError> {
+fn set_selector(bytes: &[u8], sel: &str, value: Option<&Json>) -> Result<Vec<u8>, InstallError> {
+    let limits = Limits::CONFIG;
     if sel.starts_with("hook:") {
         return crate::hooks::set(bytes, sel, value);
     }
@@ -176,163 +100,132 @@ fn set_with_limits(
         }
         return Ok(bytes.to_vec());
     }
-
-    if let Some(sel) = sel.strip_prefix("toml:") {
-        let mut doc = toml_document(bytes, limits)?;
-        let keys: Vec<_> = sel.split('.').collect();
-        let (last, parents) = keys
-            .split_last()
-            .ok_or(InstallError::InvalidConfig("empty selector"))?;
-        let mut table: &mut dyn toml_edit::TableLike = doc.as_table_mut();
-        for key in parents {
-            if !table.contains_key(key) {
-                let mut parent = toml_edit::Table::new();
-                parent.set_implicit(true);
-                table.insert(key, toml_edit::Item::Table(parent));
-            }
-            table = table
-                .get_mut(key)
-                .and_then(toml_edit::Item::as_table_like_mut)
-                .ok_or(InstallError::InvalidConfig(
-                    "selector parent is not a table",
-                ))?;
-        }
-        if let Some(value) = value {
-            let mut encoded = toml_edit::ser::to_document(&json!({"value":value}))
-                .map_err(|_| InstallError::InvalidConfig("cannot encode TOML selector"))?;
-            let mut item = encoded
-                .remove("value")
-                .ok_or(InstallError::InvalidConfig("cannot encode TOML selector"))?;
-            if matches!(table.get(last), Some(toml_edit::Item::Table(_))) {
-                item = toml_edit::Item::Table(
-                    item.into_table()
-                        .map_err(|_| InstallError::InvalidConfig("cannot encode TOML table"))?,
-                );
-            }
-            if let Some(previous) = table.get(last).and_then(item_decor).cloned() {
-                set_item_decor(&mut item, previous);
-            }
-            table.insert(last, item);
-        } else {
-            let source = doc.to_string();
-            let mut comments = Vec::new();
-            remove_toml_path(doc.as_table_mut(), &keys, &source, &mut comments)?;
-            if !comments.is_empty() {
-                append_root_comments(doc.as_table_mut(), &comments, &source);
-            }
-        }
-        let out = doc.to_string().into_bytes();
-        toml_document(&out, limits)?;
-        Ok(out)
-    } else {
-        crate::splice::set_with_limits(bytes, &json_path(sel)?, value, limits)
+    if let Some(path) = sel.strip_prefix("json:/") {
+        let path: Vec<_> = path.split('/').collect();
+        return crate::splice::set_with_limits(bytes, &path, value, limits);
     }
-}
-fn item_decor(item: &toml_edit::Item) -> Option<&toml_edit::Decor> {
-    match item {
-        toml_edit::Item::Table(table) => Some(table.decor()),
-        toml_edit::Item::Value(toml_edit::Value::InlineTable(table)) => Some(table.decor()),
-        _ => None,
-    }
-}
-fn set_item_decor(item: &mut toml_edit::Item, decor: toml_edit::Decor) {
-    match item {
-        toml_edit::Item::Table(table) => *table.decor_mut() = decor,
-        toml_edit::Item::Value(toml_edit::Value::InlineTable(table)) => {
-            *table.decor_mut() = decor;
-        }
-        _ => {}
-    }
-}
-fn decor_text(decor: Option<&toml_edit::Decor>, source: &str) -> Option<String> {
-    let raw = decor?.prefix()?;
-    raw.as_str().map(str::to_owned).or_else(|| {
-        raw.span()
-            .and_then(|span| source.get(span).map(str::to_owned))
-    })
-}
-fn item_prefix(item: &toml_edit::Item, source: &str) -> Option<String> {
-    match item {
-        toml_edit::Item::Table(table) => decor_text(Some(table.decor()), source),
-        toml_edit::Item::Value(toml_edit::Value::InlineTable(table)) => {
-            decor_text(Some(table.decor()), source)
-        }
-        _ => None,
-    }
-}
-fn remove_toml_path(
-    table: &mut dyn toml_edit::TableLike,
-    keys: &[&str],
-    source: &str,
-    comments: &mut Vec<String>,
-) -> Result<(), InstallError> {
-    let (key, tail) = keys
-        .split_first()
-        .ok_or(InstallError::InvalidConfig("empty selector"))?;
-    if tail.is_empty() {
-        if let Some(item) = table.get(key)
-            && let Some(prefix) = item_prefix(item, source)
-            && prefix.contains('#')
-        {
-            comments.push(prefix);
-        }
-        table.remove(key);
-        return Ok(());
-    }
-    let empty = {
-        let Some(child) = table.get_mut(key) else {
-            return Ok(());
+    if value.is_none()
+        && let Some(path) = sel.strip_prefix("toml:")
+    {
+        let Some((parent, key)) = path.split_once('.') else {
+            return Err(InstallError::InvalidConfig("invalid TOML selector"));
         };
-        let child = child
-            .as_table_like_mut()
-            .ok_or(InstallError::InvalidConfig(
-                "selector parent is not a table",
-            ))?;
-        remove_toml_path(child, tail, source, comments)?;
-        child.iter().next().is_none()
-    };
-    if empty {
-        if let Some(item) = table.get(key)
-            && let Some(prefix) = item_prefix(item, source)
-            && prefix.contains('#')
-        {
-            comments.push(prefix);
+        if key.contains('.') {
+            return Err(InstallError::InvalidConfig("invalid TOML selector"));
         }
-        table.remove(key);
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| InstallError::InvalidConfig("invalid TOML harness configuration"))?;
+        let mut document = text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| InstallError::InvalidConfig("invalid TOML harness configuration"))?;
+        let removed = match document.get_mut(parent) {
+            Some(item) => item
+                .as_table_like_mut()
+                .ok_or(InstallError::InvalidConfig(
+                    "invalid TOML harness configuration",
+                ))?
+                .remove(key)
+                .is_some(),
+            None => false,
+        };
+        return Ok(if removed {
+            document.to_string().into_bytes()
+        } else {
+            bytes.to_vec()
+        });
     }
-    Ok(())
+    Err(InstallError::InvalidConfig("unknown selector"))
 }
-fn append_root_comments(root: &mut toml_edit::Table, comments: &[String], source: &str) {
-    let mut suffix = root
-        .decor()
-        .suffix()
-        .and_then(|raw| {
-            raw.as_str().map(str::to_owned).or_else(|| {
-                raw.span()
-                    .and_then(|span| source.get(span).map(str::to_owned))
-            })
-        })
-        .unwrap_or_default();
-    for comment in comments {
-        suffix.push_str(comment);
+
+fn json_legacy_selector(harness: Harness, selector: &str) -> bool {
+    harness != Harness::Codex && selector.starts_with("json:/")
+}
+fn toml_legacy_selector(harness: Harness, selector: &str) -> bool {
+    harness == Harness::Codex && selector.starts_with("toml:")
+}
+
+fn remove_legacy_selectors(
+    harness: Harness,
+    bytes: &[u8],
+) -> Result<(Vec<u8>, Vec<SelectorChange>), InstallError> {
+    let mut updated = bytes.to_vec();
+    let mut changes = Vec::new();
+    for artifact in crate::LEGACY_1X_ARTIFACTS {
+        let crate::LegacyArtifact::HarnessSelector {
+            selector,
+            disposition: crate::ArtifactDisposition::Remove,
+        } = artifact
+        else {
+            continue;
+        };
+        if !json_legacy_selector(harness, selector) && !toml_legacy_selector(harness, selector) {
+            continue;
+        }
+        let Some(before) = get_selector(&updated, selector)? else {
+            continue;
+        };
+        updated = set_selector(&updated, selector, None)?;
+        changes.push(SelectorChange {
+            selector: (*selector).into(),
+            before: Some(before),
+            after: None,
+        });
     }
-    root.decor_mut().set_suffix(suffix);
+    Ok((updated, changes))
+}
+
+/// Inspect declared legacy MCP names in all default adapter configs and
+/// registered account configs. No receipt or 1.x state is opened.
+pub fn legacy_harness_selectors(
+    roots: &provenant_core::Roots,
+    home: &Path,
+    accounts: &[crate::AccountHome],
+) -> Result<Vec<(PathBuf, &'static str)>, InstallError> {
+    let harnesses: Vec<_> = provenant_records::ADAPTER_SPECS
+        .iter()
+        .map(|spec| spec.id)
+        .filter(|harness| harness.spec().install.is_some())
+        .collect();
+    let mut targets = Targets::new(roots.clone(), home, &harnesses);
+    targets.accounts = accounts.to_vec();
+    let mut seen = BTreeSet::new();
+    let mut found = Vec::new();
+    for target in targets
+        .harnesses
+        .iter()
+        .cloned()
+        .chain(targets.accounts.iter().map(|account| account.target(home)))
+    {
+        if target.config_file.as_os_str().is_empty() || !seen.insert(target.config_file.clone()) {
+            continue;
+        }
+        let Some(Snapshot {
+            value: Value::File { bytes, .. },
+            ..
+        }) = managed::snapshot(&target.config_file)?
+        else {
+            continue;
+        };
+        for artifact in crate::LEGACY_1X_ARTIFACTS {
+            let crate::LegacyArtifact::HarnessSelector {
+                selector,
+                disposition: crate::ArtifactDisposition::Remove,
+            } = artifact
+            else {
+                continue;
+            };
+            if (json_legacy_selector(target.harness, selector)
+                || toml_legacy_selector(target.harness, selector))
+                && get_selector(&bytes, selector)?.is_some()
+            {
+                found.push((target.config_file.clone(), *selector));
+            }
+        }
+    }
+    Ok(found)
 }
 fn file(snapshot: &Option<Snapshot>, path: &Path) -> Result<(Vec<u8>, u64), InstallError> {
-    file_with_limits(snapshot, path, Limits::CONFIG)
-}
-fn file_for(
-    snapshot: &Option<Snapshot>,
-    path: &Path,
-    harness: Harness,
-) -> Result<(Vec<u8>, u64), InstallError> {
-    file_with_limits(snapshot, path, limits(harness))
-}
-fn file_with_limits(
-    snapshot: &Option<Snapshot>,
-    path: &Path,
-    limits: Limits,
-) -> Result<(Vec<u8>, u64), InstallError> {
+    let limits = Limits::CONFIG;
     match snapshot {
         None => Ok((b"{}\n".to_vec(), 0o600)),
         Some(Snapshot {
@@ -363,24 +256,6 @@ fn capture_one(
     Ok(s)
 }
 
-fn expected_previous(
-    receipt: Option<&InstallReceipt>,
-    path: &AbsolutePath,
-    sel: &str,
-    current: &Json,
-) -> bool {
-    receipt.is_some_and(|r| {
-        r.entries.iter().any(|e| {
-            &e.path == path
-                && e.selector == sel
-                && e.expected
-                    == OwnedValue::Selector {
-                        extra: Default::default(),
-                        value: current.clone(),
-                    }
-        })
-    })
-}
 pub(crate) fn capture(
     release: &Release,
     targets: &Targets,
@@ -388,71 +263,43 @@ pub(crate) fn capture(
     previous: Option<&InstallReceipt>,
 ) -> Result<HarnessPlan, InstallError> {
     let mut plan = HarnessPlan::default();
+    plan.findings.extend(capability_findings(targets)?);
     let root = managed::release_root(
         targets.roots.state.as_path(),
         release.manifest().source_digest,
     );
     for target in &targets.harnesses {
-        let path = &target.mcp_file;
-        let snap = capture_one(path, entries)?;
-        let (mut bytes, mode) = file_for(&snap, path, target.harness)?;
-        if snap.is_none() && target.harness == Harness::Codex {
-            bytes.clear();
-        }
-        let sel = selector(target.harness);
-        let before = get_for(&bytes, sel, target.harness)?;
-        let wire = AbsolutePath::new(path)?;
-        let initial = bytes.clone();
-        if targets.fabric_mcp {
-            let want = mcp(target.harness, targets)?;
-            if before.as_ref() != Some(&want) {
-                if let Some(current) = &before
-                    && !expected_previous(previous, &wire, sel, current)
-                    && (!targets.adopt_existing || !safe_adoption(current))
-                {
-                    return Err(InstallError::Conflict(path.clone()));
+        let path = &target.config_file;
+        if !path.as_os_str().is_empty() {
+            let snap = capture_one(path, entries)?;
+            if let Some(Snapshot {
+                value: Value::File { bytes, mode },
+                ..
+            }) = &snap
+            {
+                let (updated, changes) = remove_legacy_selectors(target.harness, bytes)?;
+                if updated != *bytes {
+                    plan.files.insert(
+                        path.clone(),
+                        Value::File {
+                            bytes: updated,
+                            mode: *mode,
+                        },
+                    );
+                    plan.changes
+                        .entry(path.clone())
+                        .or_default()
+                        .extend(changes);
                 }
-                bytes = set_for(&bytes, sel, Some(&want), target.harness)?;
-                plan.changes
-                    .entry(path.clone())
-                    .or_default()
-                    .push(SelectorChange {
-                        selector: sel.into(),
-                        before,
-                        after: Some(want.clone()),
-                    });
             }
-            plan.owned.push(OwnedEntry {
-                extra: Default::default(),
-                path: wire,
-                harness: Some(target.harness),
-                selector: sel.into(),
-                expected: OwnedValue::Selector {
-                    extra: Default::default(),
-                    value: want,
-                },
-            });
-        } else if let Some(current) = before
-            && expected_previous(previous, &wire, sel, &current)
-        {
-            // The server is opt-in. Only an owned entry still as recorded is
-            // removed; a foreign or edited one stays.
-            bytes = set_for(&bytes, sel, None, target.harness)?;
-            plan.changes
-                .entry(path.clone())
-                .or_default()
-                .push(SelectorChange {
-                    selector: sel.into(),
-                    before: Some(current),
-                    after: None,
-                });
         }
         // Hooks are one choice for every target of a harness. A target whose
         // account directory has none yet follows the targets that do.
         let inherited_hooks = !targets.remove_hooks
             && previous.is_some_and(|receipt| {
                 receipt.entries.iter().any(|entry| {
-                    entry.harness == Some(target.harness) && entry.selector.starts_with("hook:")
+                    entry.harness == Some(target.harness)
+                        && (entry.selector.starts_with("hook:") || entry.selector == "hook-plugin")
                 })
             });
         let hooks = targets.hooks || inherited_hooks;
@@ -468,112 +315,186 @@ pub(crate) fn capture(
         }
         if let Some(hook) = &target.hook_file
             && (hooks || targets.remove_hooks)
-            && target.harness == Harness::Claude
         {
             let hook_snapshot = capture_one(hook, entries)?;
-            let (old, hook_mode) = file(&hook_snapshot, hook)?;
-            let mut base = Value::File {
-                bytes: old.clone(),
-                mode: hook_mode,
-            };
-            let mut removed_changes = Vec::new();
-            let mut inherited = BTreeSet::new();
-            let mut had_own_hooks = false;
-            if let Some(previous) = previous {
-                for entry in &previous.entries {
-                    if entry.harness != Some(target.harness)
-                        || !entry.path.to_path_buf().is_ok_and(|path| &path == hook)
-                        || !entry.selector.starts_with("hook:")
-                    {
-                        continue;
+            let protocol = target
+                .harness
+                .spec()
+                .install
+                .and_then(|install| install.hook_protocol)
+                .ok_or(InstallError::Manifest("hook protocol missing"))?;
+            if matches!(protocol, provenant_records::HookProtocol::OpenCodePlugin) {
+                let old_owned = previous
+                    .into_iter()
+                    .flat_map(|receipt| &receipt.entries)
+                    .find(|entry| {
+                        entry.harness == Some(target.harness)
+                            && entry.selector == "hook-plugin"
+                            && entry.path.to_path_buf().is_ok_and(|path| path == *hook)
+                    });
+                if hooks {
+                    let (old, mode) = file(&hook_snapshot, hook)?;
+                    let generated = crate::hooks::hook_plugin_source(
+                        &targets.bin_dir.join("provenant"),
+                        targets.roots.state.as_path(),
+                    )?;
+                    let write_allowed = if let Some(entry) = old_owned {
+                        if !managed::matches_owned(
+                            &Value::File {
+                                bytes: old.clone(),
+                                mode,
+                            },
+                            &entry.expected,
+                        ) {
+                            add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
+                            plan.relinquished.insert(target.id());
+                            false
+                        } else {
+                            true
+                        }
+                    } else if hook_snapshot.is_some() {
+                        return Err(InstallError::Conflict(hook.clone()));
+                    } else {
+                        true
+                    };
+                    if write_allowed {
+                        let value = Value::File {
+                            bytes: generated,
+                            mode: if hook_snapshot.is_some() { mode } else { 0o600 },
+                        };
+                        plan.owned.push(OwnedEntry {
+                            extra: Default::default(),
+                            path: AbsolutePath::new(hook)?,
+                            harness: Some(target.harness),
+                            selector: "hook-plugin".into(),
+                            expected: managed::owned(&value)?,
+                        });
+                        if hook_snapshot
+                            .as_ref()
+                            .is_none_or(|snapshot| snapshot.value != value)
+                        {
+                            plan.files.insert(hook.clone(), value);
+                        }
                     }
-                    had_own_hooks = true;
-                    if hooks && !targets.hooks && !entry_matches(&base, entry)? {
-                        add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
-                        continue;
-                    }
-                    inherited.insert(entry.selector.clone());
-                    // Keep current registrations in place so re-install is a no-op.
-                    let still_desired = hooks
-                        && targets.hook_specs.iter().any(|spec| {
-                            spec.harness == Some(target.harness)
-                                && crate::hooks::value(spec, targets).is_ok_and(|value| {
-                                    value.get("command").and_then(Json::as_str).is_some_and(
-                                        |command| {
-                                            crate::hooks::selector(
-                                                spec.event,
-                                                spec.matcher,
-                                                command,
-                                            )
-                                            .is_ok_and(|selector| selector == entry.selector)
-                                        },
-                                    ) && entry.expected
-                                        == OwnedValue::Selector {
+                } else if targets.remove_hooks && old_owned.is_some() {
+                    plan.relinquished.insert(target.id());
+                }
+            } else {
+                let (old, hook_mode) = file(&hook_snapshot, hook)?;
+                let mut base = Value::File {
+                    bytes: old.clone(),
+                    mode: hook_mode,
+                };
+                let mut removed_changes = Vec::new();
+                let mut inherited = BTreeSet::new();
+                let mut had_own_hooks = false;
+                if let Some(previous) = previous {
+                    for entry in &previous.entries {
+                        if entry.harness != Some(target.harness)
+                            || !entry.path.to_path_buf().is_ok_and(|path| &path == hook)
+                            || !entry.selector.starts_with("hook:")
+                        {
+                            continue;
+                        }
+                        had_own_hooks = true;
+                        if hooks && !targets.hooks && !entry_matches(&base, entry)? {
+                            add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
+                            continue;
+                        }
+                        inherited.insert(entry.selector.clone());
+                        // Keep current registrations in place so re-install is a no-op.
+                        let still_desired = hooks
+                            && targets.hook_specs.iter().any(|spec| {
+                                if spec.harness != target.harness {
+                                    return false;
+                                }
+                                let Ok(value) = crate::hooks::value(spec, targets) else {
+                                    return false;
+                                };
+                                let Some(command) = value.get("command").and_then(Json::as_str)
+                                else {
+                                    return false;
+                                };
+                                crate::hooks::selector(spec, command)
+                                    .is_ok_and(|selector| selector == entry.selector)
+                                    && entry.expected
+                                        == (OwnedValue::Selector {
                                             extra: Default::default(),
                                             value,
-                                        }
-                                })
-                        });
-                    if !still_desired {
-                        if let Some((value, changes)) = remove_selector(&base, entry)? {
-                            base = value;
-                            removed_changes.extend(changes);
-                        } else {
-                            add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
+                                        })
+                            });
+                        if !still_desired {
+                            if let Some((value, changes)) = remove_selector(&base, entry)? {
+                                base = value;
+                                removed_changes.extend(changes);
+                            } else {
+                                add_finding(
+                                    &mut plan.findings,
+                                    "relinquished_modified_entry",
+                                    hook,
+                                )?;
+                            }
                         }
                     }
                 }
-            }
-            let Value::File { bytes: base, .. } = base else {
-                return Err(InstallError::ConfigFile(hook.clone()));
-            };
-            let (mut updated, mut changes, owned) = if hooks && target.harness == Harness::Claude {
-                // A target with no hooks of its own yet takes the full set its
-                // siblings own; an established target keeps what it relinquished.
-                // One that removed them all (`hooks_relinquished`) stays without.
-                let follows_siblings =
-                    inherited_hooks && inherited.is_empty() && !had_own_hooks && !was_relinquished;
-                let registration =
-                    crate::hooks::register(&base, targets, &inherited, follows_siblings)?;
-                if registration.relinquished_modified {
-                    add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
-                }
-                if !targets.hooks
-                    && registration.owned.is_empty()
-                    && (had_own_hooks || was_relinquished)
-                {
-                    plan.relinquished.insert(target.id());
-                }
-                (registration.bytes, registration.changes, registration.owned)
-            } else {
-                (base, Vec::new(), Vec::new())
-            };
-            changes.extend(removed_changes);
-            for (selector, value) in owned {
-                plan.owned.push(OwnedEntry {
-                    extra: Default::default(),
-                    path: AbsolutePath::new(hook)?,
-                    harness: Some(target.harness),
-                    selector,
-                    expected: OwnedValue::Selector {
+                let Value::File { bytes: base, .. } = base else {
+                    return Err(InstallError::ConfigFile(hook.clone()));
+                };
+                let (mut updated, mut changes, owned) = if hooks {
+                    // A target with no hooks of its own yet takes the full set its
+                    // siblings own; an established target keeps what it relinquished.
+                    // One that removed them all (`hooks_relinquished`) stays without.
+                    let follows_siblings = inherited_hooks
+                        && inherited.is_empty()
+                        && !had_own_hooks
+                        && !was_relinquished;
+                    let registration = crate::hooks::register(
+                        target.harness,
+                        &base,
+                        targets,
+                        &inherited,
+                        follows_siblings,
+                    )?;
+                    if registration.relinquished_modified {
+                        add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
+                    }
+                    if !targets.hooks
+                        && registration.owned.is_empty()
+                        && (had_own_hooks || was_relinquished)
+                    {
+                        plan.relinquished.insert(target.id());
+                    }
+                    (registration.bytes, registration.changes, registration.owned)
+                } else {
+                    (base, Vec::new(), Vec::new())
+                };
+                changes.extend(removed_changes);
+                for (selector, value) in owned {
+                    plan.owned.push(OwnedEntry {
                         extra: Default::default(),
-                        value,
-                    },
-                });
-            }
-            if updated != old {
-                updated = crate::splice::pretty_json(&updated)?;
-                plan.files.insert(
-                    hook.clone(),
-                    Value::File {
-                        bytes: updated,
-                        mode: hook_mode,
-                    },
-                );
-                plan.changes
-                    .entry(hook.clone())
-                    .or_default()
-                    .extend(changes);
+                        path: AbsolutePath::new(hook)?,
+                        harness: Some(target.harness),
+                        selector,
+                        expected: OwnedValue::Selector {
+                            extra: Default::default(),
+                            value,
+                        },
+                    });
+                }
+                if updated != old {
+                    updated = crate::splice::pretty_json(&updated)?;
+                    plan.files.insert(
+                        hook.clone(),
+                        Value::File {
+                            bytes: updated,
+                            mode: hook_mode,
+                        },
+                    );
+                    plan.changes
+                        .entry(hook.clone())
+                        .or_default()
+                        .extend(changes);
+                }
             }
         }
         if let Some(settings) = &targets.shared_settings
@@ -653,49 +574,54 @@ pub(crate) fn capture(
             }
         }
         if target.harness == Harness::Opencode {
+            let snap = capture_one(path, entries)?;
+            let (mut bytes, mode) = match plan.files.get(path) {
+                Some(Value::File { bytes, mode }) => (bytes.clone(), *mode),
+                _ => file(&snap, path)?,
+            };
+            let initial = bytes.clone();
             bytes = rewrite_instruction_array(&bytes, release, targets, previous, &mut plan, path)?;
             if let Some(array) = crate::splice::get(&bytes, &["instructions"])? {
                 let array = array
                     .as_array()
                     .ok_or(InstallError::InvalidConfig("instructions must be an array"))?;
-                for asset in OPENCODE_INSTRUCTION_ASSETS.map(PathBuf::from) {
-                    let path_value = root.join(&asset);
-                    let text = path_value.to_str().ok_or(InstallError::InvalidConfig(
-                        "instruction path requires UTF-8",
-                    ))?;
-                    let count = array.iter().filter(|v| v.as_str() == Some(text)).count();
-                    if count > 1 {
-                        return Err(InstallError::InvalidConfig("duplicate owned instruction"));
+                let asset = PathBuf::from(managed::INSTRUCTION_ASSET);
+                let path_value = root.join(&asset);
+                let text = path_value.to_str().ok_or(InstallError::InvalidConfig(
+                    "instruction path requires UTF-8",
+                ))?;
+                let count = array.iter().filter(|v| v.as_str() == Some(text)).count();
+                if count > 1 {
+                    return Err(InstallError::InvalidConfig("duplicate owned instruction"));
+                }
+                if count == 1 {
+                    if !release.files.contains_key(&asset) {
+                        return Err(InstallError::Manifest("missing instruction asset"));
                     }
-                    if count == 1 {
-                        if !release.files.contains_key(&asset) {
-                            return Err(InstallError::Manifest("missing instruction asset"));
-                        }
-                        plan.owned.push(OwnedEntry {
+                    plan.owned.push(OwnedEntry {
+                        extra: Default::default(),
+                        path: AbsolutePath::new(path)?,
+                        harness: Some(target.harness),
+                        selector: format!("array:{text}"),
+                        expected: OwnedValue::Selector {
                             extra: Default::default(),
-                            path: AbsolutePath::new(path)?,
-                            harness: Some(target.harness),
-                            selector: format!("array:{text}"),
-                            expected: OwnedValue::Selector {
-                                extra: Default::default(),
-                                value: json!(text),
-                            },
-                        });
-                    }
+                            value: json!(text),
+                        },
+                    });
                 }
             }
-        }
-        if snap.is_none() && !targets.fabric_mcp && bytes == initial {
-            continue;
-        }
-        if snap.as_ref().is_none_or(|s| {
-            s.value
-                != Value::File {
-                    bytes: bytes.clone(),
-                    mode,
-                }
-        }) {
-            plan.files.insert(path.clone(), Value::File { bytes, mode });
+            if snap.is_none() && bytes == initial {
+                continue;
+            }
+            if snap.as_ref().is_none_or(|s| {
+                s.value
+                    != Value::File {
+                        bytes: bytes.clone(),
+                        mode,
+                    }
+            }) {
+                plan.files.insert(path.clone(), Value::File { bytes, mode });
+            }
         }
     }
     Ok(plan)
@@ -703,39 +629,28 @@ pub(crate) fn capture(
 fn same_file(a: &Path, b: &Path) -> bool {
     crate::shared_settings::canonical(a) == crate::shared_settings::canonical(b)
 }
-fn safe_adoption(value: &Json) -> bool {
-    let Some(obj) = value.as_object() else {
-        return false;
-    };
-    obj.keys().all(|key| {
-        matches!(
-            key.as_str(),
-            "command" | "args" | "type" | "enabled" | "env" | "environment"
-        )
-    }) && ["env", "environment"].iter().all(|k| {
-        obj.get(*k)
-            .is_none_or(|v| v.as_object().is_some_and(|m| m.is_empty()))
-    })
-}
 pub(crate) fn permitted_selector(
     entry: &OwnedEntry,
     target: &ResolvedHarnessTarget,
 ) -> Result<bool, InstallError> {
     if entry.selector.starts_with("hook:") {
-        return Ok(
-            target.harness == Harness::Claude && target.hook_file.as_ref() == Some(&entry.path)
-        );
+        return Ok(target.hook_file.as_ref() == Some(&entry.path)
+            && crate::hooks::belongs_to(&entry.selector, target.harness)?
+            && target.harness.spec().install.is_some_and(|install| {
+                install.hooks.is_supported()
+                    && !matches!(
+                        install.hook_protocol,
+                        Some(provenant_records::HookProtocol::OpenCodePlugin)
+                    )
+            }));
     }
     if let Some(key) = entry.selector.strip_prefix(crate::shared_settings::PREFIX) {
         return Ok(target.harness == Harness::Claude
             && target.hook_file.as_ref() == Some(&entry.path)
             && crate::shared_settings::check_key(key).is_ok());
     }
-    if entry.path != target.mcp_file {
+    if entry.path != target.config_file {
         return Ok(false);
-    }
-    if entry.selector == selector(target.harness) {
-        return Ok(true);
     }
     Ok(target.harness == Harness::Opencode
         && matches!(&entry.expected,OwnedValue::Selector{value:Json::String(value), .. } if entry.selector==format!("array:{value}")))
@@ -748,13 +663,7 @@ pub(crate) fn entry_matches(value: &Value, entry: &OwnedEntry) -> Result<bool, I
         let Value::File { bytes, .. } = value else {
             return Err(InstallError::ConfigFile(entry.path.to_path_buf()?));
         };
-        Ok(get_for(
-            bytes,
-            &entry.selector,
-            entry.harness.unwrap_or(Harness::Codex),
-        )?
-        .as_ref()
-            == Some(expected))
+        Ok(get_selector(bytes, &entry.selector)?.as_ref() == Some(expected))
     } else {
         Ok(managed::matches_owned(value, &entry.expected))
     }
@@ -769,9 +678,8 @@ pub(crate) fn remove_selector(
     let Value::File { bytes, mode } = value else {
         return Ok(None);
     };
-    let harness = entry.harness.unwrap_or(Harness::Codex);
-    let before = get_for(bytes, &entry.selector, harness)?;
-    let out = set_for(bytes, &entry.selector, None, harness)?;
+    let before = get_selector(bytes, &entry.selector)?;
+    let out = set_selector(bytes, &entry.selector, None)?;
     Ok(Some((
         Value::File {
             bytes: out,
@@ -802,16 +710,17 @@ fn rewrite_instruction_array(
     let array = array
         .as_array()
         .ok_or(InstallError::InvalidConfig("instructions must be an array"))?;
-    let assets = OPENCODE_INSTRUCTION_ASSETS.map(PathBuf::from);
     let old_root = previous
         .map(|receipt| managed::release_root(targets.roots.state.as_path(), receipt.source_digest));
     let mut out = bytes.to_vec();
     // Reverse order keeps recorded array indices valid for removals.
     for (i, value) in array.iter().enumerate().rev() {
-        let mut asset = None;
-        if let (Some(receipt), Some(old_root), Some(text)) =
-            (previous, old_root.as_ref(), value.as_str())
-            && receipt.entries.iter().any(|entry| {
+        let text = value.as_str();
+        let name_owned = text.and_then(|text| managed::release_instruction_asset(Path::new(text)));
+        let receipt_owned = text.and_then(|text| {
+            let receipt = previous?;
+            let old_root = old_root.as_ref()?;
+            if !receipt.entries.iter().any(|entry| {
                 entry
                     .path
                     .to_path_buf()
@@ -823,29 +732,30 @@ fn rewrite_instruction_array(
                             extra: Default::default(),
                             value: value.clone(),
                         })
-            })
-        {
-            if array.iter().filter(|candidate| *candidate == value).count() > 1 {
-                return Err(InstallError::InvalidConfig("duplicate owned instruction"));
+            }) {
+                return None;
             }
-            // Any owned instructions asset is recognised, including one a
-            // later release retired, so an upgrade can remove it.
-            asset = Path::new(text)
+            Path::new(text)
                 .strip_prefix(old_root)
                 .ok()
                 .filter(|relative| relative.parent() == Some(Path::new("instructions")))
-                .map(Path::to_path_buf);
+                .map(Path::to_path_buf)
+        });
+        if (name_owned.is_some() || receipt_owned.is_some())
+            && array.iter().filter(|candidate| *candidate == value).count() > 1
+        {
+            return Err(InstallError::InvalidConfig("duplicate owned instruction"));
         }
-        if let Some(asset) = asset {
+        if let Some(asset) = name_owned.or(receipt_owned) {
             let retired = !release.files.contains_key(&asset);
-            if retired && assets.contains(&asset) {
-                return Err(InstallError::Manifest("missing instruction asset"));
-            }
             let new_path = root.join(&asset);
             let new_text = new_path.to_str().ok_or(InstallError::InvalidConfig(
                 "instruction path requires UTF-8",
             ))?;
-            let duplicate_new = array
+            let current_array = crate::splice::get(&out, &["instructions"])?
+                .and_then(|array| array.as_array().cloned())
+                .ok_or(InstallError::InvalidConfig("instructions must be an array"))?;
+            let duplicate_new = current_array
                 .iter()
                 .enumerate()
                 .any(|(index, candidate)| index != i && candidate.as_str() == Some(new_text));
@@ -955,7 +865,7 @@ impl Targets {
                 if !self.configured_homes.contains(&target.harness)
                     && !self.configured_configs.contains(&target.harness)
                 {
-                    target.mcp_file = default_mcp(target.harness, &self.home, base);
+                    target.config_file = default_config(target.harness, &self.home, base);
                 }
             }
         }
@@ -983,7 +893,6 @@ pub fn apply_install_config_with_domains<T: serde::de::DeserializeOwned + Serial
     let settings = crate::load_with_domains(&targets.roots, Some(bytes.as_slice()), sections)?;
     {
         settings.install.validate()?;
-        targets.fabric_mcp = settings.fabric_mcp_server();
         if let Some(bin) = settings.install.bin_dir {
             targets.bin_dir = bin;
         }
@@ -998,11 +907,11 @@ pub fn apply_install_config_with_domains<T: serde::de::DeserializeOwned + Serial
                         .as_ref()
                         .and_then(|p| p.file_name())
                         .map(|n| base.join(n));
-                    target.mcp_file = default_mcp(target.harness, &targets.home, base);
+                    target.config_file = default_config(target.harness, &targets.home, base);
                 }
                 if let Some(config) = &settings.config {
                     targets.configured_configs.insert(target.harness);
-                    target.mcp_file = config.clone();
+                    target.config_file = config.clone();
                 }
             }
         }
@@ -1029,35 +938,100 @@ fn add_finding(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::set_with_limits;
-    use provenant_records::Limits;
-    use serde_json::json;
-
-    #[test]
-    fn fabric_table_comments_survive_replacement_and_removal_without_empty_tables() {
-        let before = b"# fabric table note\n[mcp_servers.fabric]\ncommand = 'old'\n[mcp_servers.fabric.env]\n[mcp_servers.other]\ncommand = 'keep'\n";
-        let replacement = json!({"command": "/new/provenant", "env": {}});
-        let replaced = set_with_limits(
-            before,
-            "toml:mcp_servers.fabric",
-            Some(&replacement),
-            Limits::CONFIG,
-        )
-        .expect("selector replacement should preserve valid TOML");
-        let replaced = String::from_utf8(replaced).expect("TOML remains UTF-8");
-        assert!(replaced.contains("# fabric table note"));
-        assert!(replaced.contains("[mcp_servers.fabric]"));
-        assert!(replaced.contains("[mcp_servers.other]"));
-        assert!(!replaced.contains("[mcp_servers.fabric.env]"));
-
-        let removed = set_with_limits(before, "toml:mcp_servers.fabric", None, Limits::CONFIG)
-            .expect("selector removal should preserve valid TOML");
-        let removed = String::from_utf8(removed).expect("TOML remains UTF-8");
-        assert!(removed.contains("# fabric table note"));
-        assert!(removed.contains("[mcp_servers.other]"));
-        assert!(!removed.contains("[mcp_servers.fabric"));
-        assert!(!removed.contains("[mcp_servers]"));
+pub(crate) fn capability_findings(
+    targets: &Targets,
+) -> Result<Vec<managed::InstallFinding>, InstallError> {
+    fn unsupported(capability: CapabilitySupport) -> Option<(&'static str, &'static str)> {
+        match capability {
+            CapabilitySupport::Supported => None,
+            CapabilitySupport::Unsupported { reason, source } => Some((reason, source)),
+        }
     }
+
+    let mut findings = Vec::new();
+    for target in &targets.harnesses {
+        let Some(install) = target.harness.spec().install else {
+            continue;
+        };
+        let path = target.hook_file.as_deref().unwrap_or(&target.config_file);
+        for (name, support) in [
+            ("instructions", install.instructions),
+            ("answer delivery", install.answer_delivery),
+        ] {
+            if let Some((reason, source)) = unsupported(support) {
+                findings.push(managed::InstallFinding {
+                    rule: crate::NATIVE_CAPABILITY_UNAVAILABLE.into(),
+                    path: AbsolutePath::new(path)?,
+                    detail: Some(format!("{name}: {reason} (source: {source})")),
+                });
+            }
+        }
+        let has_precompact_event = install.hook_events.iter().any(|event| {
+            matches!(
+                event,
+                provenant_records::HookEvent::Supported {
+                    action: provenant_records::HookAction::PreCompact,
+                    ..
+                }
+            )
+        });
+        if has_precompact_event
+            && let Some((reason, source)) = unsupported(install.precompact_context)
+        {
+            findings.push(managed::InstallFinding {
+                rule: crate::NATIVE_CAPABILITY_UNAVAILABLE.into(),
+                path: AbsolutePath::new(path)?,
+                detail: Some(format!(
+                    "pre-compaction model context: {reason} (source: {source})"
+                )),
+            });
+        }
+        if !install.hooks.is_supported() {
+            if let Some((reason, source)) = unsupported(install.hooks) {
+                findings.push(managed::InstallFinding {
+                    rule: crate::NATIVE_CAPABILITY_UNAVAILABLE.into(),
+                    path: AbsolutePath::new(path)?,
+                    detail: Some(format!("hooks: {reason} (source: {source})")),
+                });
+            }
+        } else {
+            let unsupported_actions = install
+                .hook_events
+                .iter()
+                .filter_map(|event| match event {
+                    provenant_records::HookEvent::Unsupported {
+                        action,
+                        reason,
+                        source,
+                    } if !matches!(
+                        action,
+                        provenant_records::HookAction::ChairPrompt
+                            | provenant_records::HookAction::ChairStart
+                            | provenant_records::HookAction::ChairStop
+                            | provenant_records::HookAction::PreToolUse
+                    ) =>
+                    {
+                        Some(format!(
+                            "{}: {} (source: {})",
+                            action.command(),
+                            reason,
+                            source
+                        ))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !unsupported_actions.is_empty() {
+                findings.push(managed::InstallFinding {
+                    rule: crate::NATIVE_CAPABILITY_UNAVAILABLE.into(),
+                    path: AbsolutePath::new(path)?,
+                    detail: Some(format!(
+                        "native hooks unavailable: {}",
+                        unsupported_actions.join("; ")
+                    )),
+                });
+            }
+        }
+    }
+    Ok(findings)
 }

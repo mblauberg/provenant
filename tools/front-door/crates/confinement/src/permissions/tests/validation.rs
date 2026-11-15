@@ -9,15 +9,18 @@ use std::collections::BTreeMap;
 #[cfg(target_os = "macos")]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+fn fixture_credentials() -> provenant_core::CredentialRoots {
+    provenant_core::CredentialRoots::for_home(Path::new("/Users/alice"))
+}
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
 #[test]
 fn git_control_link_refusal_names_the_file_and_the_recovery() {
-    let error = PermissionError::GitControlHardLinked("/repo/.git/config".into());
-    let message = error.to_string();
-    assert!(message.contains("/repo/.git/config"));
-    assert!(message.contains("samefile"));
+    let path = Path::new("/repo/.git/config");
+    let error = PermissionError::GitControlHardLinked(path.to_owned());
+    assert!(matches!(error, PermissionError::GitControlHardLinked(ref refused) if refused == path));
 }
 
 #[cfg(target_os = "macos")]
@@ -45,6 +48,23 @@ fn only_git_control_files_are_checked_for_other_names() -> Result<(), Box<dyn st
             matches!(&error, PermissionError::GitControlHardLinked(path) if path == &git_dir.join(control)),
             "{control}: {error}"
         );
+        let policy = provenant_records::policy::Policy::default();
+        let rule = policy.rule("VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION");
+        assert_eq!(
+            rule.rule.boundary,
+            provenant_records::policy::Boundary::GitIsolation
+        );
+        assert_eq!(
+            rule.rule.strength,
+            provenant_records::policy::Strength::Refuse
+        );
+        assert!(matches!(
+            policy.check(
+                "VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION",
+                provenant_records::policy::Facts::violation("guard failed"),
+            ),
+            provenant_records::policy::Effect::Refuse(_)
+        ));
         std::fs::remove_file(alias)?;
         verify_git_control_links(&fixture.repo)?;
     }
@@ -168,51 +188,71 @@ fn invalid_path_error_names_the_refused_path() {
         "/opt/homebrew/bin/../Cellar/opencode-v2/2.0.32",
     ] {
         let error = validate_absolute(Path::new(path)).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            format!("path is not a permitted absolute, normalised path: {path:?}")
-        );
+        assert!(matches!(
+            error,
+            PermissionError::InvalidPath(ref refused) if refused == Path::new(path)
+        ));
     }
 }
 
 #[test]
 fn codex_standalone_package_is_read_exec_only() {
-    let grant = |path: &str| PathGrant {
-        path: PathBuf::from(path),
+    use provenant_core::CredentialKind;
+
+    let credentials = fixture_credentials();
+    let grant = |path: PathBuf| PathGrant {
+        path,
         scope: PathScope::Subtree,
     };
-    let release = "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin";
-    for path in [release, &format!("{release}/bin/codex")] {
-        assert!(validate_read_exec_grant(&grant(path)).is_ok(), "{path}");
+    let codex = credentials
+        .entries()
+        .iter()
+        .find(|root| root.kind == CredentialKind::CodexHome)
+        .expect("default Codex home is declared");
+    let release = codex
+        .path
+        .join("packages/standalone/releases/0.163.0-aarch64-apple-darwin");
+    for path in [release.clone(), release.join("bin/codex")] {
+        assert!(validate_read_exec_grant(&grant(path.clone()), &credentials).is_ok());
         assert!(
             matches!(
-                validate_noncredential_grant(&grant(path)),
-                Err(PermissionError::CredentialRoot)
+                validate_noncredential_grant(&grant(path), &credentials),
+                Err(PermissionError::CredentialRoot | PermissionError::CredentialStore { .. })
             ),
-            "writes stay strict: {path}"
+            "writes stay strict"
         );
     }
-    for path in [
-        "/Users/alice/.codex",
-        "/Users/alice/.codex/auth.json",
-        "/Users/alice/.codex/config.toml",
-        "/Users/alice/.codex/sessions",
-        "/Users/alice/.codex/packages",
-        "/Users/alice/.codex/packages/standalone",
-        "/Users/alice/.codex/packages/standalone/releases",
-        "/Users/alice/.codex/packages/standalone/current",
-        "/Users/alice/.codex/packages/other/releases/1",
-        "/Users/alice/.codex/packages/standalone/releases/1/.codex/auth.json",
-        "/Users/alice/.claude/packages/standalone/releases/1",
-        "/tmp/x/.codex/packages/standalone/releases/1",
+    for relative in [
+        "",
+        "auth.json",
+        "config.toml",
+        "sessions",
+        "packages",
+        "packages/standalone",
+        "packages/standalone/releases",
+        "packages/standalone/current",
+        "packages/other/releases/1",
     ] {
-        assert!(
-            matches!(
-                validate_read_exec_grant(&grant(path)),
-                Err(PermissionError::CredentialRoot | PermissionError::BroadRoot)
-            ),
-            "{path}"
-        );
+        let path = if relative.is_empty() {
+            codex.path.clone()
+        } else {
+            codex.path.join(relative)
+        };
+        assert!(matches!(
+            validate_read_exec_grant(&grant(path), &credentials),
+            Err(PermissionError::CredentialRoot
+                | PermissionError::CredentialStore { .. }
+                | PermissionError::BroadRoot)
+        ));
+    }
+    for path in [
+        release.join(".codex/auth.json"),
+        PathBuf::from("/tmp/x/.claude/packages/standalone/releases/1"),
+        PathBuf::from("/tmp/x/.codex/packages/standalone/releases/1"),
+        PathBuf::from("/Users/alice/project/.claude"),
+    ] {
+        assert!(validate_read_exec_grant(&grant(path.clone()), &credentials).is_ok());
+        assert!(!refuses_lane_root(&path, true, &credentials));
     }
 }
 
@@ -236,7 +276,13 @@ fn profile_family_limits_follow_configured_grant_limit() {
         native_controls: (0..65).map(|index| format!("fixture-{index}")).collect(),
         ..ProviderProfileSpec::default()
     };
-    let error = validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 64).unwrap_err();
+    let error = validate_profile_spec_with_home(
+        &spec,
+        Path::new("/fixture/home"),
+        &provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
+        64,
+    )
+    .unwrap_err();
     assert!(matches!(
         &error,
         PermissionError::GrantLimitExceeded {
@@ -244,8 +290,16 @@ fn profile_family_limits_follow_configured_grant_limit() {
             limit: 64
         }
     ));
-    assert!(error.to_string().contains("domains.run.grant_limit"));
-    assert!(validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 65).is_ok());
+    assert_eq!(error.setting_key(), Some(GRANT_LIMIT_SETTING_KEY));
+    assert!(
+        validate_profile_spec_with_home(
+            &spec,
+            Path::new("/fixture/home"),
+            &provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
+            65
+        )
+        .is_ok()
+    );
     spec.native_controls.clear();
     spec.authentication.push(AuthenticationProfile {
         keychain: None,
@@ -253,10 +307,26 @@ fn profile_family_limits_follow_configured_grant_limit() {
         roots: vec![grant("/fixture/auth/extra", PathScope::Exact)],
         in_place_writes: vec![],
     });
-    assert!(validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 17).is_err());
+    assert!(
+        validate_profile_spec_with_home(
+            &spec,
+            Path::new("/fixture/home"),
+            &provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
+            17
+        )
+        .is_err()
+    );
     spec.authentication.truncate(2);
     spec.native_controls = vec!["first".into(), "second".into()];
-    assert!(validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 1).is_ok());
+    assert!(
+        validate_profile_spec_with_home(
+            &spec,
+            Path::new("/fixture/home"),
+            &provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
+            1
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -273,24 +343,23 @@ fn exact_tool_exec_grants_validate_without_allowing_credential_paths() {
         }],
         ..Default::default()
     };
-    assert!(validate_profile_spec(&spec).is_ok());
-    for path in [
-        "/Users/fixture/.config/gh/token",
-        "/Users/fixture/Library/Application Support/GitHub CLI/token",
-        "/Users/fixture/Library/Keychains/login.keychain-db",
-        "/Users/fixture/.ssh/key",
-        "/Users/fixture/.config/gcloud/token",
-    ] {
-        spec.tool_exec_roots[0].path = path.into();
-        assert!(matches!(
-            validate_profile_spec(&spec),
-            Err(PermissionError::CredentialRoot)
-        ));
+    let credentials = fixture_credentials();
+    assert!(validate_profile_spec(&spec, &credentials).is_ok());
+    for root in credentials.entries() {
+        spec.tool_exec_roots[0].path = root.path.clone();
+        assert!(
+            matches!(
+                validate_profile_spec(&spec, &credentials),
+                Err(PermissionError::CredentialRoot | PermissionError::CredentialStore { .. })
+            ),
+            "{}",
+            root.path.display()
+        );
     }
 }
 
 #[test]
-fn broad_home_tmp_and_credential_roots_are_refused() {
+fn broad_write_grant_roots_are_rejected() {
     for path in [
         "/",
         "/Users/alice",
@@ -309,173 +378,133 @@ fn broad_home_tmp_and_credential_roots_are_refused() {
         };
         assert!(grant.validate().is_err(), "{path}");
     }
-    for path in [
-        "/Users/alice/.ssh",
-        "/Users/alice/.config/gh",
-        "/Users/alice/.kube",
-        "/Users/alice/.secrets/tokens",
-        "/Users/alice/Monero",
-        "/Users/alice/Archives/git-preservation/repo",
-    ] {
-        let grant = PathGrant {
-            path: PathBuf::from(path),
-            scope: PathScope::Subtree,
-        };
-        assert!(
-            matches!(
-                validate_noncredential_grant(&grant),
-                Err(PermissionError::CredentialRoot)
-            ),
-            "{path}"
-        );
-        // A shared tool store under a credential root is refused too.
-        let spec = ProviderProfileSpec {
-            process_executables: vec![PathGrant {
-                path: PathBuf::from("/usr/bin/true"),
-                scope: PathScope::Exact,
-            }],
-            tool_writes: vec![grant],
-            ..ProviderProfileSpec::default()
-        };
-        assert!(validate_profile_spec(&spec).is_err(), "{path}");
-    }
-    for path in [
-        "/private/tmp/scoped",
-        "/private/var/tmp/scoped",
-        "/var/tmp/scoped",
-    ] {
-        let grant = PathGrant {
-            path: PathBuf::from(path),
-            scope: PathScope::Subtree,
-        };
-        assert!(grant.validate().is_ok(), "{path}");
-    }
 }
 
 #[test]
-fn grants_enclosing_a_credential_root_are_refused() {
-    let grant = |path: &str, scope| PathGrant {
-        path: PathBuf::from(path),
-        scope,
-    };
-    for path in [
-        "/Users/alice/.config",
-        "/Users/alice/Library",
-        "/Users/alice/Library/Application Support",
-        "/Users/alice/Archives",
-    ] {
-        for validate in [validate_read_exec_grant, validate_noncredential_grant] {
-            assert!(
-                matches!(
-                    validate(&grant(path, PathScope::Subtree)),
-                    Err(PermissionError::CredentialRoot)
-                ),
-                "{path}"
-            );
+fn every_declared_credential_root_protects_grants_and_enclosing_paths() {
+    use provenant_core::{CredentialKind, CredentialScope};
+
+    let home = Path::new("/Users/alice");
+    let mut credentials = provenant_core::CredentialRoots::for_home(home);
+    credentials.add(
+        home.join(".claude-registered-account"),
+        CredentialScope::Subtree,
+        "account registry: claude account directory",
+        CredentialKind::Store,
+    );
+    for root in credentials.entries() {
+        let scope = match root.scope {
+            CredentialScope::Exact => PathScope::Exact,
+            CredentialScope::Subtree => PathScope::Subtree,
+        };
+        let grant = PathGrant {
+            path: root.path.clone(),
+            scope,
+        };
+        for result in [
+            validate_read_exec_grant(&grant, &credentials),
+            validate_noncredential_grant(&grant, &credentials),
+        ] {
+            assert!(result.is_err());
         }
-        // An exact grant exposes the directory entry, not what it holds.
-        assert!(validate_read_exec_grant(&grant(path, PathScope::Exact)).is_ok());
-    }
-    for path in [
-        "/Users/alice/.config/cursor",
-        "/Users/alice/.config/opencode",
-        "/Users/alice/Library/pnpm",
-        "/Users/alice/Library/Caches/pnpm",
-        "/Users/alice/project/.config",
-        "/Users/alice/project/Archives",
-        "/Library/Developer/CommandLineTools",
-        "/srv/work/.config",
-    ] {
-        assert!(
-            validate_read_exec_grant(&grant(path, PathScope::Subtree)).is_ok(),
-            "{path}"
-        );
-    }
-    // An unconventional home is checked against the host's own path.
-    let home = Path::new("/srv/alice");
-    for path in [
-        "/srv",
-        "/srv/alice",
-        "/srv/alice/.config",
-        "/srv/alice/Library",
-    ] {
-        assert!(
-            encloses_home_credentials(&grant(path, PathScope::Subtree), home),
-            "{path}"
-        );
-    }
-    for path in ["/srv/alice/project", "/srv/alice/project/.config"] {
-        assert!(
-            !encloses_home_credentials(&grant(path, PathScope::Subtree), home),
-            "{path}"
-        );
-    }
-}
+        assert!(refuses_lane_root(&grant.path, true, &credentials));
+        assert!(refuses_lane_root(&grant.path, false, &credentials));
+        assert!(!root.source.is_empty());
 
-#[test]
-fn lane_root_table_agrees_with_compiler_checks() {
-    let standalone =
-        "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin";
-    let home = Path::new("/fixture/host-home");
-    for (path, read_allowed, write_allowed) in [
-        ("/Users/alice/.ssh", false, false),
-        ("/Users/alice/.config", false, false),
-        (standalone, true, false),
-        ("/Users/alice/project", true, true),
-    ] {
+        if scope == PathScope::Subtree {
+            let worktree = PathGrant {
+                path: root.path.join(".worktrees/lane"),
+                scope: PathScope::Subtree,
+            };
+            assert!(validate_read_exec_grant(&worktree, &credentials).is_err());
+            assert!(validate_noncredential_grant(&worktree, &credentials).is_err());
+        }
+        if let Some(parent) = root.path.parent() {
+            let enclosing = PathGrant {
+                path: parent.to_owned(),
+                scope: PathScope::Subtree,
+            };
+            assert!(validate_read_exec_grant(&enclosing, &credentials).is_err());
+            assert!(validate_noncredential_grant(&enclosing, &credentials).is_err());
+        }
+    }
+
+    for path in [home.to_owned(), home.parent().unwrap().to_owned()] {
+        assert!(refuses_lane_root(&path, true, &credentials));
+        assert!(refuses_lane_root(&path, false, &credentials));
+    }
+
+    for name in provenant_core::PROJECT_AGENT_CONFIG_DIRECTORIES
+        .iter()
+        .copied()
+        .chain([".ssh"])
+    {
+        let project_local = PathBuf::from("/Users/alice/project").join(name);
         let grant = PathGrant {
-            path: PathBuf::from(path),
+            path: project_local.clone(),
             scope: PathScope::Subtree,
         };
-        assert_eq!(
-            validate_read_exec_grant(&grant).is_ok(),
-            read_allowed,
-            "read {path}"
-        );
-        assert_eq!(
-            validate_noncredential_grant(&grant).is_ok(),
-            write_allowed,
-            "write {path}"
-        );
-        assert_eq!(
-            !refuses_lane_root(Path::new(path), true, Some(home)),
-            read_allowed,
-            "entry read {path}"
-        );
-        assert_eq!(
-            !refuses_lane_root(Path::new(path), false, Some(home)),
-            write_allowed,
-            "entry write {path}"
-        );
+        assert!(validate_read_exec_grant(&grant, &credentials).is_ok());
+        assert!(validate_noncredential_grant(&grant, &credentials).is_ok());
+        assert!(!refuses_lane_root(&project_local, false, &credentials));
     }
-    // An injected nonconventional home is refused at entry exactly as the
-    // compiler refuses it, without consulting this host's HOME.
-    let home = Path::new("/srv/team/alice");
-    for (path, read_allowed, write_allowed) in [
-        ("/srv/team", false, false),
-        ("/srv/team/alice", false, false),
-        ("/srv/team/alice/.config", false, false),
-        ("/srv/team/alice/project", true, true),
-    ] {
-        assert_eq!(
-            !refuses_lane_root(Path::new(path), true, Some(home)),
-            read_allowed,
-            "entry read {path}"
-        );
-        assert_eq!(
-            !refuses_lane_root(Path::new(path), false, Some(home)),
-            write_allowed,
-            "entry write {path}"
-        );
-    }
+
+    let codex = credentials
+        .entries()
+        .iter()
+        .find(|root| root.kind == CredentialKind::CodexHome)
+        .expect("default Codex home is declared");
+    let release = codex
+        .path
+        .join("packages/standalone/releases/current/bin/codex");
+    assert!(credentials.is_codex_standalone_package(&release));
+    assert!(
+        validate_read_exec_grant(
+            &PathGrant {
+                path: release.clone(),
+                scope: PathScope::Subtree,
+            },
+            &credentials,
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_noncredential_grant(
+            &PathGrant {
+                path: release,
+                scope: PathScope::Subtree,
+            },
+            &credentials,
+        )
+        .is_err()
+    );
+
+    let overlapping_store = codex
+        .path
+        .join("packages/standalone/releases/current/registered-store");
+    credentials.add(
+        overlapping_store.clone(),
+        CredentialScope::Subtree,
+        "account registry: nested credential store",
+        CredentialKind::Store,
+    );
+    assert!(
+        validate_read_exec_grant(
+            &PathGrant {
+                path: overlapping_store,
+                scope: PathScope::Subtree,
+            },
+            &credentials,
+        )
+        .is_err()
+    );
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn compiler_refuses_grants_of_or_around_an_unconventional_host_home() {
-    // Static grant checks know only /Users and /home; the compiler must
-    // still refuse the host's actual home and any root that encloses it.
+fn compiler_uses_the_declared_table_for_an_unconventional_home() {
     let home = Path::new("/srv/team/alice");
+    let credentials = provenant_core::CredentialRoots::for_home(home);
     let grant = |path: &Path| PathGrant {
         path: path.to_owned(),
         scope: PathScope::Subtree,
@@ -491,6 +520,7 @@ fn compiler_refuses_grants_of_or_around_an_unconventional_host_home() {
         observations: BTreeMap::new(),
     };
     let plan = |read_roots: Vec<PathGrant>, write_roots: Vec<PathGrant>| PlanPermissions {
+        credential_roots: credentials.clone(),
         policy: None,
         read_only: None,
         mode: AccessMode::ReadOnly,
@@ -516,13 +546,17 @@ fn compiler_refuses_grants_of_or_around_an_unconventional_host_home() {
             plan(vec![grant(root)], Vec::new()),
             plan(Vec::new(), vec![grant(root)]),
         ] {
-            assert!(validate_read_exec_grant(&grant(root)).is_ok(), "{root:?}");
+            assert!(
+                validate_read_exec_grant(&grant(root), &credentials).is_err(),
+                "{root:?}"
+            );
             assert!(
                 matches!(
                     compile_sbpl(&plan, &profile, &anchors),
-                    Err(PermissionError::CredentialRoot)
+                    Err(PermissionError::CredentialRoot | PermissionError::CredentialStore { .. })
                 ),
-                "{root:?}"
+                "{root:?}: {:?}",
+                compile_sbpl(&plan, &profile, &anchors).err()
             );
         }
     }
@@ -601,8 +635,19 @@ fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
     ])?;
     let linked = crate::repo::verify_worktree(&fixture.repo, &project)?;
     let selected_ref = GitRefName::branch("discovery")?;
-    let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home)?;
-    prepare_writer_directories(&linked, &selected_ref, &authority, &home)?;
+    let authority = WorktreeWriteAuthority::for_worktree(
+        &linked,
+        &selected_ref,
+        &home,
+        &provenant_core::CredentialRoots::for_home(&home),
+    )?;
+    prepare_writer_directories(
+        &linked,
+        &selected_ref,
+        &authority,
+        &home,
+        &provenant_core::CredentialRoots::for_home(&home),
+    )?;
     let scratch = root.join("scratch");
     std::fs::create_dir(&scratch)?;
     std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))?;
@@ -631,6 +676,9 @@ fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
         observations: BTreeMap::new(),
     };
     let mut plan = PlanPermissions {
+        credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+            "/fixture/home",
+        )),
         policy: None,
         mode: AccessMode::ReadOnly,
         read_only: None,
@@ -745,7 +793,7 @@ fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
 fn provider_profile_without_a_declared_executable_is_refused() {
     let spec = ProviderProfileSpec::default();
     assert!(matches!(
-        validate_profile_spec(&spec),
+        validate_profile_spec(&spec, &fixture_credentials()),
         Err(PermissionError::ProcessPolicyMissing)
     ));
 }
@@ -772,28 +820,38 @@ fn credential_writes_stay_inside_auth_roots_and_state_stays_outside() {
     };
     let auth = grant("/Users/fixture/.provider/auth.json", PathScope::Exact);
     let transcript = grant("/Users/fixture/.provider/projects/p", PathScope::Subtree);
-    assert!(validate_profile_spec(&spec(auth.clone(), transcript.clone())).is_ok());
+    assert!(
+        validate_profile_spec(
+            &spec(auth.clone(), transcript.clone()),
+            &fixture_credentials()
+        )
+        .is_ok()
+    );
     for in_place in [
         grant("/Users/fixture/.provider/other.json", PathScope::Exact),
         grant("/Users/fixture/.provider", PathScope::Subtree),
     ] {
         assert!(matches!(
-            validate_profile_spec(&spec(in_place, transcript.clone())),
+            validate_profile_spec(&spec(in_place, transcript.clone()), &fixture_credentials()),
             Err(PermissionError::InvalidFixture)
         ));
     }
     assert!(matches!(
-        validate_profile_spec(&spec(
-            auth,
-            grant("/Users/fixture/.provider", PathScope::Subtree)
-        )),
-        Err(PermissionError::CredentialRoot)
+        validate_profile_spec(
+            &spec(auth, grant("/Users/fixture/.provider", PathScope::Subtree)),
+            &fixture_credentials()
+        ),
+        Err(PermissionError::CredentialRoot | PermissionError::CredentialStore { .. })
     ));
 }
 
 #[test]
 fn invalid_native_control_labels_are_omitted() {
-    use super::super::validation::filtered_native_controls;
+    use super::super::validation::{
+        filtered_native_controls, filtered_native_controls_with_policy,
+    };
+    use provenant_records::policy::{Effect, Facts, Policy, Source, Strength};
+    use std::collections::BTreeMap;
     let mut spec = ProviderProfileSpec {
         process_executables: vec![PathGrant {
             path: "/fixture/provider".into(),
@@ -806,12 +864,32 @@ fn invalid_native_control_labels_are_omitted() {
         super::super::validation::validate_profile_spec_with_home(
             &spec,
             Path::new("/fixture/home"),
+            &provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
             64
         )
         .is_ok()
     );
     assert_eq!(
         filtered_native_controls(&spec.native_controls),
+        ["valid.control"]
+    );
+    let mut policy = Policy::default();
+    let code = "RENDER_FILTERED_NATIVE_CONTROLS_NONE";
+    assert_eq!(policy.rule(code).rule.strength, Strength::Warn);
+    assert!(matches!(
+        policy.check(code, Facts::violation("predicate observed")),
+        Effect::Warn(_)
+    ));
+    policy.overlay(
+        &BTreeMap::from([(code.to_owned(), Strength::Off)]),
+        Source::Host,
+    );
+    assert_eq!(
+        policy.check(code, Facts::violation("predicate observed")),
+        Effect::Proceed
+    );
+    assert_eq!(
+        filtered_native_controls_with_policy(&spec.native_controls, &policy),
         ["valid.control"]
     );
     spec.native_controls = filtered_native_controls(&spec.native_controls);

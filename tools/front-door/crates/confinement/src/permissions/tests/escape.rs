@@ -12,6 +12,7 @@ use std::time::Duration;
 #[cfg(target_os = "macos")]
 #[test]
 fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::Error>> {
+    use super::render::{RuleAction, rule_facts, rule_index, rule_index_without_strings};
     use crate::repo::{GitRefName, verify_worktree};
     use crate::utility::{GitMutation, execute_git_mutation};
     use std::os::unix::fs::symlink;
@@ -21,7 +22,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     let home = root.join("home");
     let state = root.join("state");
     let xdg = root.join("xdg");
-    let provider_state = state.join("runs/r/attempts/a/provider-state/candidate-0");
+    let provider_state = state.join("attempts/a/provider-state/candidate-0");
     for path in [&home, &state, &xdg, &provider_state] {
         std::fs::create_dir_all(path)?;
     }
@@ -46,18 +47,12 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     )?;
     assert_eq!(added.termination, Termination::Exit(0));
     let linked = verify_worktree(&fixture.repo, &worktree_path)?;
-    let authority = WorktreeWriteAuthority::for_worktree(
-        &linked,
-        &selected_ref,
-        &provenant_os::fs::canonicalize(&fixture.home)?,
-    )?;
-    prepare_writer_directories(
-        &linked,
-        &selected_ref,
-        &authority,
-        &provenant_os::fs::canonicalize(&fixture.home)?,
-    )?;
-    let scratch = state.join("runs/r/attempts/a/tmp/candidate-0");
+    let home = provenant_os::fs::canonicalize(&fixture.home)?;
+    let credentials = provenant_core::CredentialRoots::for_home(&home);
+    let authority =
+        WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home, &credentials)?;
+    prepare_writer_directories(&linked, &selected_ref, &authority, &home, &credentials)?;
+    let scratch = state.join("attempts/a/tmp/candidate-0");
     std::fs::create_dir_all(&scratch)?;
     #[cfg(unix)]
     {
@@ -219,8 +214,8 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
             scope: PathScope::Subtree,
         })?;
     }
-    let prompt = state.join("runs/r/attempts/a/prompt");
-    let skills = state.join("runs/r/attempts/a/tmp/candidate-0-skills-snapshot");
+    let prompt = state.join("attempts/a/prompt");
+    let skills = state.join("attempts/a/tmp/candidate-0-skills-snapshot");
     let release = state.join("releases/fixture-digest");
     std::fs::write(&prompt, "#!/bin/sh\nexit 0\n")?;
     {
@@ -250,6 +245,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         }
     }
     let plan = PlanPermissions {
+        credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+            "/fixture/home",
+        )),
         policy: Some(
             crate::run_config::RunConfig::default().policy_for_launch(&state, mandatory.clone()),
         ),
@@ -348,6 +346,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     let backend = MacOsSandboxBackend {
         ready: true,
         limits: ProfileLimits::default(),
+        policy: provenant_records::policy::Policy::default(),
     };
     // Existing hard links in the scratch, the worktree and its ignored
     // build and dependency trees do not refuse the launch: the sandbox
@@ -368,11 +367,18 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     }
     let compiled = backend.compile(&plan, &profile, &anchors)?;
     let sbpl = String::from_utf8(compiled.profile)?;
-    assert!(!sbpl.contains("hardlink-probe"));
-    for alias in &aliases {
-        assert!(!sbpl.contains(&alias.display().to_string()));
-    }
-    assert!(sbpl.contains("file-write-unlink"));
+    let rules = rule_facts(&sbpl);
+    assert!(rules.iter().all(|rule| {
+        rule.strings.iter().all(|value| {
+            value != "hardlink-probe"
+                && aliases
+                    .iter()
+                    .all(|alias| value != alias.to_string_lossy().as_ref())
+        })
+    }));
+    assert!(rule_index(&sbpl, RuleAction::Deny, "file-link", None).is_some());
+    assert!(rule_index(&sbpl, RuleAction::Allow, "sysctl-read", None).is_some());
+    assert!(rule_index_without_strings(&sbpl, RuleAction::Allow, "process-exec").is_some());
     std::fs::remove_file(alias)?;
     // A second name for a Git control file is the one link that refuses.
     // (Repository revalidation already refuses a second name for `config`.)
@@ -387,13 +393,13 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     ));
     std::fs::remove_file(hook_alias)?;
     std::fs::remove_file(hook)?;
-    assert!(sbpl.contains("(deny file-link)"));
-    assert!(sbpl.contains("(allow sysctl-read)"));
-    // Writers may execute binaries they build in any readable write root.
-    // The native build-script and scratch probes below exercise this rule.
-    assert!(sbpl.lines().any(|line| line == "(allow process-exec)"));
+    // The native probes below exercise the compiled policy's link, execution
+    // and process-inspection boundaries through the sandbox itself.
     // A read-only lane over the same grants, for the agent socket probe.
     let read_only_plan = PlanPermissions {
+        credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+            "/fixture/home",
+        )),
         mode: AccessMode::ReadOnly,
         ..plan.clone()
     };
@@ -457,6 +463,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     let mut socket_profiles = Vec::new();
     for writer in [false, true] {
         let open_plan = PlanPermissions {
+            credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+                "/fixture/home",
+            )),
             network: NetworkAccess::Open,
             mode: if writer {
                 plan.mode.clone()
@@ -668,6 +677,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         }
     }))?;
     let host_plan = PlanPermissions {
+        credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+            "/fixture/home",
+        )),
         policy: Some(host_config.policy_for_launch(&state, mandatory.clone())),
         ..plan.clone()
     };
@@ -716,6 +728,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
             in_place_writes: vec![selected_grant],
         }];
         let selected_plan = PlanPermissions {
+            credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+                "/fixture/home",
+            )),
             selected_authentication: Some("fixture-selected".into()),
             ..plan.clone()
         };
@@ -781,6 +796,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     }
     for writer in [false, true] {
         let open_plan = PlanPermissions {
+            credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+                "/fixture/home",
+            )),
             mode: if writer {
                 plan.mode.clone()
             } else {
@@ -799,6 +817,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
             (NetworkAccess::Open, true, false),
         ] {
             let gh_plan = PlanPermissions {
+                credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+                    "/fixture/home",
+                )),
                 network,
                 ..open_plan.clone()
             };
@@ -824,10 +845,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
             }
         }
     }
-    for relative in [
-        "host-index",
-        "runs/other/attempts/other/provider-state/secret",
-    ] {
+    for relative in ["host-index", "attempts/other/provider-state/secret"] {
         let path = state.join(relative);
         std::fs::create_dir_all(path.parent().ok_or("state file parent")?)?;
         std::fs::write(&path, "host-private")?;

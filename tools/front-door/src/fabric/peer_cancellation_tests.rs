@@ -14,12 +14,10 @@ fn submission_cancellation_drains_only_attached_work() -> TestResult {
     let cancel = CancelToken::new();
     let actor = factory.context.identity.inbox.actor;
     let operation: provenant_core::OperationId = "detached-cancel".parse()?;
-    let digest =
-        provenant_records::CanonicalV1::record_digest("peer-subgraph", 1, &(actor, &operation))?;
-    let graph = format!("peer-{}", &provenant_core::hex(digest.as_bytes())[..48]);
+    let graph = crate::fabric::peer::peer_graph_name(actor, &operation)?;
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let mut checkpoint: graph::GraphCheckpoint = serde_json::from_value(json!({
-        "schema_version":1, "graph_id":graph, "plan_digest":"digest", "cancelled":true,
+        "schema_version":2, "graph_id":graph, "plan_digest":"digest", "cancelled":true,
         "nodes":[
             {"id":"parent", "state":"skipped", "worktree":null, "attempts":[]},
             {"id":"parent--child", "state":"running", "worktree":null, "attempts":[]}
@@ -27,17 +25,8 @@ fn submission_cancellation_drains_only_attached_work() -> TestResult {
     }))?;
     for state in [graph::NodeState::Pending, graph::NodeState::Running] {
         checkpoint.nodes[1].state = state;
-        for marker in [
-            None,
-            Some(json!(false)),
-            Some(json!("true")),
-            Some(json!(true)),
-        ] {
-            let key = "detached_from_graph_cancel";
-            checkpoint.nodes[1].extra.remove(key);
-            if let Some(value) = marker.clone() {
-                checkpoint.nodes[1].extra.insert(key.into(), value);
-            }
+        for marker in [false, true] {
+            checkpoint.nodes[1].detached_from_graph_cancel = marker;
             let mut journal = FileJournal::open(
                 &factory.context.roots.state,
                 factory.context.identity.project,
@@ -47,9 +36,11 @@ fn submission_cancellation_drains_only_attached_work() -> TestResult {
                 &factory.clock,
             )?;
             journal.bind(graph::GraphExecution {
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
-                integration_base: None,
-                review_base: None,
+                bases: None,
                 directory: rig.project.clone(),
                 document: serde_json::from_value(json!({
                     "schema_version":1, "graph_id":graph,
@@ -63,8 +54,8 @@ fn submission_cancellation_drains_only_attached_work() -> TestResult {
                 super::super::super::peer::peer_cancel_submission(
                     &factory, actor, &operation, false, budget, &cancel,
                 )?,
-                marker == Some(json!(true)),
-                "state={state:?}, detached marker={marker:?}"
+                marker,
+                "state={state:?}, detached marker={marker}"
             );
         }
     }
@@ -83,15 +74,21 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
     let cancel = CancelToken::new();
     let key = AttemptKey {
         extra: Default::default(),
+        retry_generation: None,
+        previous_attempt_ref: None,
         graph_id: "origin-cancel".into(),
         node_id: "parent".into(),
         route_index: 0,
+        attempt: 1,
     };
     let operation = graph_operation("graph-attempt-operation", &key)?;
     let receipt = submit_parent(&receiver_factory, operation.as_str(), &cancel)?;
-    let receiver_graph = receipt.extra["peer_graph"]["graph_id"]
-        .as_str()
-        .ok_or("graph")?;
+    let receiver_graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph")?
+        .graph_id
+        .as_str();
     let parent = receipt.targets[0].attempt;
     add_child(&receiver_factory, parent, "lost-reply-child", &cancel)?;
     let receiver_run = advance_receiver(&receiver_factory, receiver_graph, &cancel)?;
@@ -156,7 +153,6 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
             cwd: origin_rig.project.clone(),
             assets: origin_rig.project.clone(),
             host_launch: None,
-            mcp_project: None,
             workers: &FreeWorkers,
         })
     };
@@ -174,23 +170,30 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
         .attempt
         .get_or_insert_with(Default::default)
         .host = Some("removed-old-alias".into());
-    execution.document.extra.remove("submission_patch");
+    execution.document.submission_patch = None;
     graph::patch::submission(
         &mut execution.document,
         "origin-lost-reply",
         &origin.context.config.graph.limits,
+        origin.context.port_table.worktree_layout.clone(),
     )?;
     struct LostReplyOwner {
         actor: String,
-        host: String,
+        host: provenant_core::HostId,
     }
     impl graph::AttemptOwner for LostReplyOwner {
         type Error = FacadeError;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
         fn actor(&self) -> String {
             self.actor.clone()
         }
-        fn placement_host_id(&self, _name: &str) -> Result<Option<String>, Self::Error> {
-            Ok(Some(self.host.clone()))
+        fn placement_host_id(
+            &self,
+            _name: &str,
+        ) -> Result<Option<provenant_core::HostId>, Self::Error> {
+            Ok(Some(self.host))
         }
         fn observe_or_start(
             &mut self,
@@ -217,7 +220,7 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
         journal.bind(execution.clone())?;
         let mut owner = LostReplyOwner {
             actor: receiver_factory.context.identity.inbox.actor.to_string(),
-            host: remote_host.to_string(),
+            host: remote_host,
         };
         let run = graph::advance_with_budget(
             &execution.document,
@@ -228,8 +231,8 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
         )?;
         assert!(run.checkpoint.nodes[0].attempts[0].attempt_ref.is_none());
         assert_eq!(
-            run.checkpoint.nodes[0].attempts[0].extra["placement_host_id"],
-            json!(remote_host)
+            run.checkpoint.nodes[0].attempts[0].placement_host_id,
+            Some(remote_host)
         );
     }
     // Offline cancellation must persist the fence, never mistake the empty

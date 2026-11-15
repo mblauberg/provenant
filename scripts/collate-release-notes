@@ -25,7 +25,7 @@ Git and safety
 Accounts, quota and routing
 Pipelines and graphs
 Chair, inbox and console
-Fabric and MCP
+Fabric
 Telemetry and providers'
 
 normalise() {
@@ -57,7 +57,7 @@ area_of() {
     'accounts, quota and routing') printf '%s\n' 'Accounts, quota and routing' ;;
     'pipelines and graphs') printf '%s\n' 'Pipelines and graphs' ;;
     'chair, inbox and console') printf '%s\n' 'Chair, inbox and console' ;;
-    'fabric and mcp') printf '%s\n' 'Fabric and MCP' ;;
+    'fabric') printf '%s\n' 'Fabric' ;;
     'telemetry and providers') printf '%s\n' 'Telemetry and providers' ;;
     *) ;;
   esac

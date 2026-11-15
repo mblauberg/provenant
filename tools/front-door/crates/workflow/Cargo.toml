@@ -1,10 +1,18 @@
 [package]
 name = "provenant-workflow"
-version = "1.11.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
+
+[features]
+fixture = [
+    "provenant-os/fixture",
+    "provenant-core/fixture",
+    "provenant-records/fixture",
+    "provenant-sqlite/fixture",
+]
 
 [dependencies]
 provenant-os = { workspace = true }
@@ -20,6 +28,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 provenant-os = { workspace = true, features = ["fixture"] }
+provenant-test-support = { path = "../test-support" }
 tempfile = { workspace = true }
 
 [lints]

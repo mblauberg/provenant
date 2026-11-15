@@ -106,7 +106,7 @@ fn run_writer_fixture(base: &Path, socket_path: &Path) -> String {
     inputs.state_dir = Some(PathBuf::from(
         std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).unwrap(),
     ));
-    let root = StateRoot::resolve(&inputs, &Resolver).unwrap();
+    let root = StateRoot::resolve(&inputs, &provenant_test_support::IdentityPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let delivery = DeliveryId::from_bytes([2; 16]);
     let store = ReceiptStore::new(root, project, delivery);

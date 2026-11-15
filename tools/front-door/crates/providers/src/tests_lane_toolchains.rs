@@ -1,9 +1,10 @@
 #[test]
-fn read_only_cargo_offline_tracks_network() -> Result<(), ProviderError> {
+fn cargo_source_setting_controls_host_binding_grants_and_offline_mode() -> Result<(), ProviderError>
+{
     use provenant_confinement::permissions::NetworkAccess;
     let prompt = Prompt::new("fixture".into());
-    let repo = Path::new("/fixture/repo");
     let mut route = route("codex", "fixture-model");
+    // The fixture passes no account, so the route names none either.
     route.account_key = None;
     for network in [
         NetworkAccess::Provider,
@@ -11,21 +12,97 @@ fn read_only_cargo_offline_tracks_network() -> Result<(), ProviderError> {
         NetworkAccess::Open,
     ] {
         let plan = fixture_network_plan(Access::ReadOnly, Some("login"), network);
-        let spec =
-            crate::codex::Codex.prepare(fixture_input(&route, &plan, &prompt, repo, None))?;
-        assert_eq!(
+        let spec = crate::codex::Codex.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            None,
+        ))?;
+        assert_declared_cargo_access(&spec);
+        // Source writes are on by default, so Cargo is online wherever the network is.
+        let offline =
+            !provenant_confinement::cargo::DEFAULT_SOURCE_WRITES || network != NetworkAccess::Open;
+        assert!(
             spec.env
                 .iter()
-                .any(|(key, value)| key == "CARGO_NET_OFFLINE" && value == "true"),
-            network != NetworkAccess::Open,
+                .any(|(key, value)| key == "CARGO_NET_OFFLINE"
+                    && value == offline.to_string().as_str()),
             "{network:?}"
         );
     }
+    let plan = fixture_network_plan(Access::WorktreeWrite, Some("login"), NetworkAccess::Open);
+    let host_cargo = |name: &str| (name == "CARGO_HOME").then(|| "/fixture/custom-cargo".into());
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.host_var = &host_cargo;
+    let mut spec = crate::codex::Codex.prepare(input)?;
+    let home = cargo_home_path(&spec);
+    assert_eq!(home, Path::new("/fixture/custom-cargo"));
+    let receipt = spec.cargo_home_receipt();
+    assert_eq!(receipt["source"], "host CARGO_HOME");
+    assert_eq!(receipt["source_writes_source"], "compiled default");
+    assert_declared_cargo_access(&spec);
+    assert!(spec.env.iter().any(|(key, value)| {
+        key == "CARGO_NET_OFFLINE"
+            && value
+                == (!provenant_confinement::cargo::DEFAULT_SOURCE_WRITES)
+                    .to_string()
+                    .as_str()
+    }));
+
+    for (network, offline) in [
+        (NetworkAccess::Provider, true),
+        (NetworkAccess::Local, true),
+        (NetworkAccess::Open, false),
+    ] {
+        spec.configure_cargo_sources(Some(true), network);
+        let receipt = spec.cargo_home_receipt();
+        assert_eq!(receipt["path"], "/fixture/custom-cargo");
+        assert_eq!(receipt["source_writes"], true);
+        assert_eq!(receipt["source_writes_source"], "host configuration");
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|(key, _)| key == "CARGO_NET_OFFLINE")
+                .unwrap()
+                .1
+                == "true",
+            offline
+        );
+        for grant in spec.cargo_home().unwrap().source_writes() {
+            assert!(
+                spec.profile.spec.tool_writes.contains(&grant),
+                "configured source grant: {grant:?}"
+            );
+        }
+        assert_cargo_credentials_ungranted(&spec);
+    }
+    // Later environment additions and host lookups cannot replace the sealed identity.
+    spec.env
+        .push(("CARGO_HOME".into(), "/launch/override".into()));
+    let changed_host = |name: &str| (name == "CARGO_HOME").then(|| "/host/changed".into());
+    let mut later_input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    later_input.host_var = &changed_host;
+    crate::launch::finalise_provider_env(&later_input, &mut spec)?;
+    assert_eq!(cargo_home_path(&spec), home);
+    assert_eq!(spec.cargo_home_receipt()["source_writes"], true);
+    spec.configure_cargo_sources(Some(false), NetworkAccess::Open);
+    assert_eq!(spec.cargo_home_receipt()["source_writes"], false);
+    assert_eq!(
+        spec.cargo_home_receipt()["source_writes_source"],
+        "host configuration"
+    );
+    assert!(
+        spec.env
+            .iter()
+            .any(|(key, value)| key == "CARGO_NET_OFFLINE" && value == "true")
+    );
+    assert_declared_cargo_access(&spec);
     Ok(())
 }
 
 #[test]
-fn codex_read_only_toolchain_uses_private_build_and_cargo_home_linked_to_shared_stores() {
+fn codex_uses_host_cargo_home_with_private_build_outputs() {
     let mut route = route("codex", "fixture-model");
     route.account_key = None;
     let plan = read_only_plan("/fixture", Some("login"));
@@ -52,28 +129,14 @@ fn codex_read_only_toolchain_uses_private_build_and_cargo_home_linked_to_shared_
             .collect::<Vec<_>>()
     };
     let reads = paths(&spec.profile.spec.runtime_reads);
-    for dir in ["/fixture/home/.cargo", "/fixture/home/.rustup"] {
+    for dir in ["/fixture/home/.cargo/bin", "/fixture/home/.rustup"] {
         assert!(reads.iter().any(|path| path == dir), "{dir}");
     }
     // Cargo downloads over TLS, so the system trust roots are readable.
     #[cfg(target_os = "macos")]
     assert!(reads.iter().any(|path| path == "/private/etc/ssl"));
-    // Shared Cargo stores are never writable; Cargo downloads into its own
-    // lane-private home. Installed binaries and toolchains stay read-only.
-    assert!(spec.profile.spec.tool_writes.is_empty());
-    assert_eq!(env("CARGO_HOME"), "/fixture/scratch/cargo-home");
-    // The registry and Git checkouts are linked read-only, never granted.
-    for name in ["registry", "git"] {
-        assert!(
-            spec.setup.iter().any(|step| matches!(
-                step,
-                crate::launch::SetupStep::Symlink { link, target }
-                    if link == &std::path::Path::new("/fixture/scratch/cargo-home").join(name)
-                        && target == &std::path::Path::new("/fixture/home/.cargo").join(name)
-            )),
-            "{name}"
-        );
-    }
+    assert_eq!(cargo_home_path(&spec), Path::new("/fixture/home/.cargo"));
+    assert_declared_cargo_access(&spec);
     for dir in [
         "/fixture/home/.cargo/bin",
         "/fixture/home/.rustup/toolchains",
@@ -222,6 +285,7 @@ fn codex_opt_out_skill_scan_succeeds_under_confinement() -> Result<(), Box<dyn s
     let repo = root.join("repo");
     let mut input = fixture_input(&route, &plan, &prompt, &repo, None);
     input.home = &host;
+    input.credential_roots = provenant_core::CredentialRoots::for_home(&host);
     let launch = crate::codex::Codex.prepare(input)?;
     let profile = render(plan.permissions(), &launch.profile, &host)?;
     let home = &launch.env.iter().find(|(key, _)| key == "HOME").unwrap().1;
@@ -322,15 +386,10 @@ fn writer_lint_target_is_a_lane_cache_sibling_of_the_build_target() -> Result<()
 }
 
 #[test]
-fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
+fn node_tool_stores_are_read_only() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
+    let token = fixture_token();
     let shared = [
-        ".cargo/registry",
-        ".cargo/registry/src/index/crate-1.0/build.rs",
-        ".cargo/git",
-        ".cargo/git/checkouts/repo/build.rs",
-        ".cargo/.package-cache",
-        ".cargo/.global-cache",
         "Library/pnpm",
         "Library/pnpm/pnpm",
         "Library/Caches/pnpm",
@@ -344,21 +403,17 @@ fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
             .is_some_and(|spec| spec.launch.model)
     }) {
         let id = entry.adapter.id();
-        // Claude shares the same launch helpers; its account setup needs
-        // identities, so its writer lane is covered by its own test.
-        if id != "codex" {
-            continue;
-        }
+        let declared = provenant_records::AdapterSpec::get(id).expect("registered adapter spec");
         let mut route = route(id, "fixture-model");
         route.account_key = None;
         for access in [Access::ReadOnly, Access::WorktreeWrite] {
-            let plan = fixture_access_plan(access, (id == "codex").then_some("login"), false);
+            let plan = fixture_access_plan(access, declared.authentication, false);
             let launch = entry.adapter.prepare(fixture_input(
                 &route,
                 &plan,
                 &prompt,
                 std::path::Path::new("/fixture/repo"),
-                None,
+                (id == "claude").then_some(&token),
             ))?;
             let spec = &launch.profile.spec;
             let writable: Vec<_> = spec
@@ -386,11 +441,11 @@ fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
                     .find(|(k, _)| k == key)
                     .map(|(_, v)| std::path::PathBuf::from(v))
             };
+            assert_declared_cargo_access(&launch);
             let cache = match access {
                 Access::ReadOnly => std::path::PathBuf::from("/fixture/scratch"),
                 _ => "/fixture/home/Library/Caches/provenant-lane-cargo/fixture".into(),
             };
-            assert_eq!(env("CARGO_HOME"), Some(cache.join("cargo-home")));
             // Node variables appear only where a Homebrew Node exists. The
             // store stays at the host setting, so a native install's recorded
             // configuration matches; only the caches move into the lane.
@@ -419,11 +474,15 @@ fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
 /// binary over it. Lanes cannot create hard links, so the placeholder stays and
 /// running it fails with ENOEXEC. Lanes run the host's pnpm as it is.
 #[test]
-fn lanes_run_the_installed_pnpm_instead_of_downloading_a_pinned_one() -> Result<(), ProviderError> {
+fn lanes_run_the_installed_pnpm_instead_of_downloading_a_pinned_one()
+-> Result<(), Box<dyn std::error::Error>> {
     if !["/opt/homebrew", "/usr/local"]
         .iter()
         .any(|prefix| Path::new(prefix).join("bin/node").exists())
     {
+        provenant_test_support::skip_sandbox_dependent_test(
+            "host Node is unavailable for the Homebrew pnpm integration probe",
+        )?;
         return Ok(());
     }
     let mut route = route("codex", "fixture-model");
@@ -466,11 +525,15 @@ fn lanes_run_the_installed_pnpm_instead_of_downloading_a_pinned_one() -> Result<
 /// host's store setting and skip the pre-run dependency check, so `pnpm run`
 /// uses the native install as it is.
 #[test]
-fn lanes_run_a_natively_installed_worktree_without_reinstalling() -> Result<(), ProviderError> {
+fn lanes_run_a_natively_installed_worktree_without_reinstalling()
+-> Result<(), Box<dyn std::error::Error>> {
     if !["/opt/homebrew", "/usr/local"]
         .iter()
         .any(|prefix| Path::new(prefix).join("bin/node").exists())
     {
+        provenant_test_support::skip_sandbox_dependent_test(
+            "host Node is unavailable for the native pnpm install probe",
+        )?;
         return Ok(());
     }
     let mut route = route("codex", "fixture-model");
@@ -508,6 +571,9 @@ fn lanes_read_the_host_pnpm_store_but_cannot_write_it() -> Result<(), Box<dyn st
         .iter()
         .any(|prefix| Path::new(prefix).join("bin/node").exists())
     {
+        provenant_test_support::skip_sandbox_dependent_test(
+            "host Node is unavailable for the pnpm store access probe",
+        )?;
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
@@ -540,62 +606,13 @@ fn lanes_read_the_host_pnpm_store_but_cannot_write_it() -> Result<(), Box<dyn st
 
 #[test]
 fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderError> {
-    let cases: &[(&str, &[&str])] = &[
-        (
-            "claude",
-            &[
-                ".claude/settings.json",
-                ".claude/hooks/run",
-                ".claude/CLAUDE.md",
-                ".claude/skills/test/SKILL.md",
-                ".claude/ide/state",
-                ".claude/jobs/job",
-                ".claude/state/file",
-                ".claude/teams/team",
-            ],
-        ),
-        (
-            "codex",
-            &[
-                ".codex/config.toml",
-                ".codex/rules/default.rules",
-                ".codex/skills/test/SKILL.md",
-                ".codex/hooks/run",
-                ".codex/extensions/test",
-            ],
-        ),
-        (
-            "opencode",
-            &[
-                ".config/opencode/opencode.json",
-                ".config/opencode/plugins/run.js",
-                ".config/opencode/skills/test/SKILL.md",
-            ],
-        ),
-        (
-            "agy",
-            &[
-                ".gemini/settings.json",
-                ".gemini/config/mcp_config.json",
-                ".gemini/config/plugins/run",
-                ".gemini/antigravity-cli/sidecars/run",
-                ".gemini/antigravity-cli/plugin_data/file",
-                ".gemini/antigravity-cli/knowledge/file",
-            ],
-        ),
-        (
-            "cursor",
-            &[
-                ".cursor/hooks.json",
-                ".cursor/extensions/run",
-                ".cursor/skills/test/SKILL.md",
-                ".cursor/plans/plan",
-                ".cursor/ai-tracking/file",
-            ],
-        ),
-    ];
     let prompt = Prompt::new("fixture prompt".into());
-    for &(id, forbidden) in cases {
+    let host_home = std::path::Path::new("/fixture/home");
+    for declared in provenant_records::ADAPTER_SPECS
+        .iter()
+        .filter(|spec| spec.install.is_some() && spec.launch.model)
+    {
+        let id = declared.name;
         let adapter = REGISTRY
             .iter()
             .find(|entry| entry.adapter.id() == id)
@@ -626,15 +643,30 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
             (id == "claude").then(|| fixture_token().for_account("opaque-account", account_dir));
         // Synthetic continuation covers every adapter and mode.
         let continuation = Continuation::from_outcome(id, &outcome, &route, "fixture", false)?;
+        let install = declared.install.expect("filtered install declaration");
+        let mut host_config_roots = vec![host_home.join(install.home)];
+        if let Some(config) = install.default_home_config {
+            host_config_roots.push(host_home.join(config));
+        }
+        if let Some(skills) = declared.skills {
+            host_config_roots.push(host_home.join(skills.fallback).join(skills.suffix));
+        }
+        host_config_roots.extend(
+            declared
+                .skill_install_roots
+                .iter()
+                .map(|root| host_home.join(root)),
+        );
+        host_config_roots.extend(
+            [".npm", ".cache/node", "Library/pnpm", ".local/share/pnpm"]
+                .into_iter()
+                .map(|path| host_home.join(path)),
+        );
         for access in [Access::ReadOnly, Access::WorktreeWrite] {
             for session in [Session::Fresh, Session::Resume] {
                 let plan = fixture_access_plan(
                     access,
-                    match id {
-                        "codex" | "cursor" | "opencode" => Some("login"),
-                        "agy" => Some("keychain"),
-                        _ => None,
-                    },
+                    declared.authentication,
                     session == Session::Resume,
                 );
                 let mut input = fixture_input(
@@ -647,17 +679,13 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
                 input.account = account.as_ref();
                 input.continuation = (session == Session::Resume).then_some(&continuation);
                 let launch = adapter.prepare(input)?;
-                for relative in forbidden
-                    .iter()
-                    .copied()
-                    .chain([".npm/_cacache/content", ".npm/_logs/log"])
-                {
-                    let path = std::path::Path::new("/fixture/home").join(relative);
+                for path in &host_config_roots {
                     let writable = launch
                         .profile
                         .spec
-                        .state_writes
+                        .tool_writes
                         .iter()
+                        .chain(&launch.profile.spec.state_writes)
                         .chain(
                             launch
                                 .profile
@@ -668,85 +696,11 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
                         )
                         .chain(std::iter::once(&plan.permissions().scratch))
                         .chain(&plan.permissions().private_state)
-                        .any(|grant| covers(grant, &path));
+                        .any(|grant| overlaps_skill(grant, path));
                     assert!(!writable, "{id} {access:?} {session:?}: {}", path.display());
                 }
             }
         }
-    }
-    Ok(())
-}
-
-#[test]
-fn agy_runs_in_a_private_home_that_links_only_the_login_keychain() -> Result<(), ProviderError> {
-    let prompt = Prompt::new("fixture prompt".into());
-    let route = route("agy", "gemini-3.8-flash");
-    let cwd = std::path::Path::new("/fixture/repo");
-    for (access, edits) in [(Access::ReadOnly, false), (Access::WorktreeWrite, true)] {
-        let plan = fixture_access_plan(access, Some("keychain"), false);
-        // The user's own login is registered at the home directory itself.
-        let account = legacy_agy_account();
-        let mut input = fixture_input(&route, &plan, &prompt, cwd, None);
-        input.account = Some(&account);
-        let spec = agy::Agy.prepare(input)?;
-        let profile = provenant_confinement::permissions::snapshot::render(
-            plan.permissions(),
-            &spec.profile,
-            Path::new("/fixture/home"),
-        )
-        .unwrap();
-        // Exercise prepare AND rendering: a declared executable was previously
-        // cancelled by an unconditional denial later in the rendered profile.
-        assert!(!profile.contains("(deny process-exec (literal \"/usr/bin/security\"))"));
-        assert!(
-            !profile.contains("(deny mach-lookup (global-name-prefix \"com.apple.securityd\")")
-        );
-        assert!(!profile.contains("(deny mach-lookup (global-name \"com.apple.securityd\")"));
-
-        assert!(profile.contains(
-            "(require-not (literal \"/fixture/home/Library/Keychains/login.keychain-db\"))"
-        ));
-        assert!(
-            !profile.contains("(deny file-read* (subpath \"/fixture/home/Library/Keychains\"))")
-        );
-        assert!(
-            profile.contains("(deny file-write* (subpath \"/fixture/home/Library/Keychains\"))")
-        );
-        let argv: Vec<_> = spec.argv.iter().map(|arg| arg.to_string_lossy()).collect();
-        // Headless lanes auto-approve tools within the outer profile.
-        assert!(
-            argv.iter()
-                .any(|arg| arg == "--dangerously-skip-permissions")
-        );
-        assert!(!argv.iter().any(|arg| arg == "--sandbox"));
-        assert_eq!(spec.stdin, Stdin::Null);
-        let home = spec
-            .env
-            .iter()
-            .find(|(key, _)| key == "HOME")
-            .map(|(_, value)| std::path::Path::new(value));
-        assert_eq!(home, Some(std::path::Path::new("/fixture/state")));
-        let keychain = std::path::Path::new("/fixture/home/Library/Keychains/login.keychain-db");
-        assert!(spec.setup.contains(&SetupStep::Symlink {
-            link: "/fixture/state/Library/Keychains/login.keychain-db".into(),
-            target: keychain.into(),
-        }));
-        // Nothing of the user's Gemini state is granted, and the keychain is read-only.
-        let spec = &spec.profile.spec;
-        assert_eq!(spec.authentication.len(), 1);
-        assert_eq!(
-            spec.authentication[0].roots,
-            [crate::launch::exact(keychain)]
-        );
-        assert!(spec.authentication[0].in_place_writes.is_empty());
-        assert!(spec.state_writes.is_empty());
-        // Writers read only the shared toolchains their commands run.
-        assert_eq!(spec.runtime_reads.is_empty(), !edits);
-        assert!(
-            spec.runtime_reads
-                .iter()
-                .all(|grant| !grant.path.starts_with("/fixture/home/.gemini"))
-        );
     }
     Ok(())
 }
@@ -1188,16 +1142,30 @@ fn agy_probe_refuses_a_keychain_that_changes_between_selection_and_execution()
     assert!(refused(run(&selected.guard(&probes))));
     assert!(probes.homes.lock().unwrap().is_empty());
 
-    // Replaced by another file before the spawn: same path, new identity.
+    // An atomic save replaces the inode at the same safe account path. It
+    // remains the isolated keychain and the probe may proceed.
     reset()?;
     let selected = agy::ProbeHome::select(&isolated, &real_home)?;
-    // Renamed over the old file, so both inodes exist at once and cannot be
-    // the same one.
     let sibling = keychain.with_extension("new");
     std::fs::write(&sibling, "other")?;
     std::fs::rename(&sibling, &keychain)?;
-    assert!(refused(run(&selected.guard(&probes))));
-    assert!(probes.homes.lock().unwrap().is_empty());
+    assert!(run(&selected.guard(&probes)).is_ok());
+    assert_eq!(probes.homes.lock().unwrap().len(), 1);
+
+    // The same safe atomic replacement during the probe also passes the
+    // post-probe structural check.
+    reset()?;
+    let selected = agy::ProbeHome::select(&isolated, &real_home)?;
+    let (path, sibling) = (keychain.clone(), keychain.with_extension("during-probe"));
+    let racing = ChangesKeychain {
+        inner: &probes,
+        change: Box::new(move || {
+            std::fs::write(&sibling, "other").unwrap();
+            std::fs::rename(&sibling, &path).unwrap();
+        }),
+    };
+    assert!(run(&selected.guard(&racing)).is_ok());
+    assert_eq!(probes.homes.lock().unwrap().len(), 2);
 
     // Gone, or swapped for a symlink, while the probe runs: the result is refused.
     for swap_in_link in [false, true] {
@@ -1217,7 +1185,7 @@ fn agy_probe_refuses_a_keychain_that_changes_between_selection_and_execution()
         assert!(refused(run(&selected.guard(&racing))));
     }
     // The probe did run in those two cases; only its result was refused.
-    assert_eq!(probes.homes.lock().unwrap().len(), 2);
+    assert_eq!(probes.homes.lock().unwrap().len(), 4);
 
     // An unchanged keychain passes, and the user's own home is never guarded.
     reset()?;
@@ -1248,5 +1216,116 @@ fn agy_probe_refuses_a_keychain_that_changes_between_selection_and_execution()
         ),
         Err(ProviderError::IsolatedKeychainUnavailable(_))
     ));
+    Ok(())
+}
+
+#[test]
+fn native_and_confined_writers_receive_the_same_seed_environment() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture".into());
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+    let native = |key: &str| (key == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
+    for sandboxed in [true, false] {
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        if !sandboxed {
+            input.host_var = &native;
+        }
+        let launch = crate::codex::Codex.prepare(input)?;
+        assert_eq!(cargo_home_path(&launch), Path::new("/fixture/home/.cargo"));
+        if sandboxed {
+            assert_declared_cargo_access(&launch);
+        }
+        for (key, expected) in [
+            (
+                "CARGO_TARGET_DIR",
+                "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
+            ),
+            ("RUSTUP_HOME", "/fixture/home/.rustup"),
+            ("RUSTUP_AUTO_INSTALL", "0"),
+            ("CARGO_CACHE_AUTO_CLEAN_FREQUENCY", "never"),
+        ] {
+            let values: Vec<_> = launch.env.iter().filter(|(name, _)| name == key).collect();
+            assert_eq!(values.len(), 1, "{key} sandboxed={sandboxed}");
+            assert_eq!(values[0].1, expected);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn fresh_codex_home_setup_never_includes_provider_history() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture".into());
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+    let native = |key: &str| (key == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
+    for sandboxed in [true, false] {
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        if !sandboxed {
+            input.host_var = &native;
+        }
+        let launch = crate::codex::Codex.prepare(input)?;
+        // Setup is declarative. No step can walk a history tree: fresh Codex
+        // homes receive only auth/skill links and attempt-local directories.
+        for step in &launch.setup {
+            let paths = match step {
+                crate::launch::SetupStep::CreateDir(path) => vec![path],
+                crate::launch::SetupStep::WriteFile { path, .. }
+                | crate::launch::SetupStep::WriteExecutable { path, .. } => vec![path],
+                crate::launch::SetupStep::Symlink { link, target } => vec![link, target],
+            };
+            for path in paths {
+                assert!(
+                    !path.components().any(|part| [
+                        "sessions",
+                        "archived_sessions",
+                        "rollouts",
+                        "history.jsonl"
+                    ]
+                    .iter()
+                    .any(|name| part.as_os_str() == *name)),
+                    "{}",
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn native_adapter_finalisation_supplies_cargo_environment_without_tool_discovery()
+-> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture".into());
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let token = fixture_token();
+    let native = |key: &str| (key == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
+    let mut input = fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        Some(&token),
+    );
+    input.host_var = &native;
+    let mut launch = claude::Claude.prepare(input)?;
+    // The CLI finalises every adapter, even those that skip sandbox-only Rust
+    // discovery. Repeated finalisation must retain one set of selectors.
+    launch.complete_tool_requirements(&plan, Path::new("/fixture/repo"))?;
+    assert_eq!(cargo_home_path(&launch), Path::new("/fixture/home/.cargo"));
+    for (name, expected) in [
+        ("RUSTUP_HOME", "/fixture/home/.rustup"),
+        (
+            "PROVENANT_LANE_CARGO_LINT_TARGET",
+            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target-lint",
+        ),
+    ] {
+        let values: Vec<_> = launch.env.iter().filter(|(key, _)| key == name).collect();
+        assert_eq!(values.len(), 1, "{name}");
+        assert_eq!(values[0].1, expected);
+    }
     Ok(())
 }

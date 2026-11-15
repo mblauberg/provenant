@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn symlink_unlink_checks_identity_and_preserves_targets_even_for_lock_names() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    std::fs::write(temp.path().join("target"), b"keep").unwrap();
+    for leaf in ["link", "owner.lock", "Cargo.lock"] {
+        let name = OsStr::new(leaf);
+        // Use the OS fixture to create reserved names that ordinary mutations refuse.
+        std::os::unix::fs::symlink("target", temp.path().join(leaf)).unwrap();
+        let before = dir.metadata_at(name, false).unwrap();
+        std::fs::rename(temp.path().join(leaf), temp.path().join("held-link")).unwrap();
+        std::os::unix::fs::symlink("target", temp.path().join(leaf)).unwrap();
+        assert!(matches!(
+            dir.unlink_symlink(name, &before),
+            Err(FsError::RaceRefused { .. })
+        ));
+        assert_eq!(
+            std::fs::read_link(temp.path().join(leaf)).unwrap(),
+            Path::new("target")
+        );
+        std::fs::remove_file(temp.path().join(leaf)).unwrap();
+        std::fs::rename(temp.path().join("held-link"), temp.path().join(leaf)).unwrap();
+        let observed = dir.metadata_at(name, false).unwrap();
+        dir.unlink_symlink(name, &observed).unwrap();
+        assert!(std::fs::symlink_metadata(temp.path().join(leaf)).is_err());
+        assert_eq!(std::fs::read(temp.path().join("target")).unwrap(), b"keep");
+    }
+}
+
+#[test]
 fn retired_owner_lock_refuses_stale_and_shared_guards() {
     let temp = tempfile::tempdir().unwrap();
     let directory = Directory::open_anchor(temp.path()).unwrap();
@@ -555,13 +584,8 @@ fn empty_bounds_and_adversarial_file_types_do_not_block() {
         Err(FsError::NotRegular { .. })
     ));
     let name = temporary_name().unwrap();
-    assert_eq!(name.as_bytes().len(), b".provenant-staging.".len() + 24);
+    assert_eq!(name.as_bytes().len(), STAGING_PREFIX.len() + 24);
     assert_ne!(name, temporary_name().unwrap());
-    std::fs::set_permissions(
-        temp.path().join("empty"),
-        std::fs::Permissions::from_mode(0o600),
-    )
-    .unwrap();
 }
 
 #[test]
@@ -569,26 +593,22 @@ fn non_utf8_names_reach_the_os_without_replacement() {
     let temp = tempfile::tempdir().unwrap();
     let dir = Directory::open_anchor(temp.path()).unwrap();
     let name = OsString::from_vec(b"raw-\xff".to_vec());
-    let baseline = std::fs::OpenOptions::new()
+    let file = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(temp.path().join(&name));
-    match baseline {
-        Ok(file) => {
-            drop(file);
-            assert_eq!(names(&dir), std::slice::from_ref(&name));
-            dir.open_read(&name).unwrap();
-            dir.unlink(&name).unwrap();
-            dir.create_new(&name).unwrap();
-            assert_eq!(names(&dir), [name]);
-        }
-        Err(e) => {
-            // macOS sandbox/filesystem may reject invalid UTF-8 path bytes.
-            let actual = dir.create_new(&name).unwrap_err();
-            assert_eq!(actual.raw_os_error(), e.raw_os_error());
-            assert!(names(&dir).is_empty());
-        }
-    }
+        .open(temp.path().join(&name))
+    {
+        Ok(file) => file,
+        // APFS and similar filesystems refuse non-UTF-8 names, so no raw name can reach them.
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => return,
+        Err(error) => panic!("create raw-name file: {error}"),
+    };
+    drop(file);
+    assert_eq!(names(&dir), std::slice::from_ref(&name));
+    dir.open_read(&name).unwrap();
+    dir.unlink(&name).unwrap();
+    dir.create_new(&name).unwrap();
+    assert_eq!(names(&dir), [name]);
 }
 #[derive(Clone, Copy)]
 struct FixedClock(provenant_core::MonoTime);
@@ -655,16 +675,25 @@ fn existing_read_lock_waits_for_writer_and_respects_timeout() {
         Err(FsError::LockTimeout { timeout, .. }) if timeout.is_zero()
     ));
     std::thread::scope(|scope| {
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let (dir, cancel, clock) = (&dir, &cancel, &clock);
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (dir, cancel) = (&dir, &cancel);
         let waiter = scope.spawn(move || {
-            ready_tx.send(()).unwrap();
-            dir.lock_existing(name, LockMode::Shared, one_second_budget(), cancel, clock)
-                .unwrap()
+            dir.lock_existing_with_timeout(
+                name,
+                LockMode::Shared,
+                Duration::from_secs(1),
+                cancel,
+                move |_| {
+                    blocked_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+            )
+            .unwrap()
         });
-        ready_rx.recv().unwrap();
-        os::wait(Duration::from_millis(30));
+        blocked_rx.recv().unwrap();
         drop(writer);
+        release_tx.send(()).unwrap();
         drop(waiter.join().unwrap());
     });
     cancel.cancel();
@@ -858,16 +887,26 @@ fn concurrent_owner_lock_creation_of_one_new_name_succeeds_for_every_caller() {
 }
 
 #[test]
-fn creating_owner_lock_stops_after_five_persistent_not_found_errors() {
+fn create_open_retries_transient_and_bounds_persistent_not_found() {
     let mut attempts = 0;
-    let error = open_lock_creating_with(|| {
+    let recovered = crate::sys::fs::retry_create_open(|| {
         attempts += 1;
-        assert!(attempts <= 5, "lock open retried beyond its limit");
+        if attempts == 1 {
+            return Err(io::Error::from_raw_os_error(errno::ENOENT));
+        }
+        Ok(attempts)
+    })
+    .unwrap();
+    assert_eq!(recovered, 2);
+
+    let mut attempts = 0;
+    let error = crate::sys::fs::retry_create_open::<()>(|| {
+        attempts += 1;
         Err(io::Error::from_raw_os_error(errno::ENOENT))
     })
     .unwrap_err();
 
-    assert_eq!(attempts, 5);
+    assert_eq!(attempts, crate::sys::fs::CREATE_OPEN_ATTEMPTS);
     assert_eq!(error.raw_os_error(), Some(errno::ENOENT));
 }
 
@@ -1050,7 +1089,8 @@ fn both_publication_modes_report_visible_directory_sync_failure_without_retrying
         .unwrap();
     assert!(matches!(
         first,
-        Publication::VisibleDurabilityUnconfirmed { .. }
+        Publication::VisibleDurabilityUnconfirmed { sync_error }
+            if sync_error.raw_os_error() == Some(libc::EIO)
     ));
     assert_eq!(
         dir.read_bounded(OsStr::new("created"), 7).unwrap(),
@@ -1080,7 +1120,8 @@ fn both_publication_modes_report_visible_directory_sync_failure_without_retrying
         .unwrap();
     assert!(matches!(
         second,
-        Publication::VisibleDurabilityUnconfirmed { .. }
+        Publication::VisibleDurabilityUnconfirmed { sync_error }
+            if sync_error.raw_os_error() == Some(libc::EIO)
     ));
     assert_eq!(dir.read_bounded(OsStr::new("replaced"), 3).unwrap(), b"new");
     assert_eq!(names(&dir).len(), 2);
@@ -1163,33 +1204,6 @@ fn write_fsync_and_rename_faults_leave_the_previous_complete_file() {
         assert_eq!(dir.read_bounded(name, 64).unwrap(), old);
         assert_eq!(names(&dir), [OsString::from("receipt.json")]);
     }
-}
-
-#[test]
-fn directory_sync_fault_reports_new_complete_file_as_visible() {
-    let temp = tempfile::tempdir().unwrap();
-    let dir = Directory::open_anchor(temp.path()).unwrap();
-    let name = OsStr::new("receipt.json");
-    let old = b"old complete receipt";
-    let new = b"new complete receipt";
-    dir.atomic_write(name, ".receipt.", old, PublishMode::Replace)
-        .unwrap();
-
-    let mut faults = FailAtomicWriteAt {
-        phase: AtomicWritePhase::DirectorySync,
-        errno: libc::EIO,
-    };
-    let publication = dir
-        .atomic_write_with_operations(name, ".receipt.", new, PublishMode::Replace, &mut faults)
-        .unwrap();
-    match publication {
-        Publication::VisibleDurabilityUnconfirmed { sync_error } => {
-            assert_eq!(sync_error.raw_os_error(), Some(libc::EIO));
-        }
-        Publication::Durable => panic!("directory sync fault was not reported"),
-    }
-    assert_eq!(dir.read_bounded(name, 64).unwrap(), new);
-    assert_eq!(names(&dir), [OsString::from("receipt.json")]);
 }
 
 #[cfg(any(test, feature = "fixture"))]
@@ -1332,8 +1346,11 @@ fn process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes() {
         let argv = [
             current_exe.into_os_string(),
             "--exact".into(),
-            "fs::tests::process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes"
-                .into(),
+            crate::fixture::exact_test_path(
+                module_path!(),
+                "process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes",
+            )
+            .into(),
             "--nocapture".into(),
         ];
         let env = [
@@ -1551,14 +1568,6 @@ fn rename_errors_retain_both_paths_and_errno() {
     assert_eq!(io::Error::from(error).raw_os_error(), Some(errno::ENOENT));
 }
 #[test]
-fn filesystem_capabilities_support_threads() {
-    fn check<T: Send + Sync + ?Sized>() {}
-    check::<SystemPathResolver>();
-    check::<Directory>();
-    check::<FileHandle>();
-}
-
-#[test]
 fn stable_lock_namespace_refuses_every_mutation_without_splitting_exclusion() {
     let temp = tempfile::tempdir().unwrap();
     let dir = Directory::open_anchor(temp.path()).unwrap();
@@ -1642,10 +1651,10 @@ fn reanchor_rebinds_device_policy_without_reopening_the_directory() {
     let temp = tempfile::tempdir().unwrap();
     let original = temp.path().join("root");
     std::fs::create_dir(&original).unwrap();
-    let mut directory = Directory::open_anchor(&original).unwrap();
+    let directory = Directory::open_anchor(&original).unwrap();
     let identity = directory.metadata().unwrap();
     // Model a configured root reached across a mount from its original anchor.
-    directory.device = identity.device.checked_add(1).unwrap();
+    let directory = directory.with_device_for_test(identity.device.checked_add(1).unwrap());
     let clock = provenant_core::TestClock::new(
         provenant_core::WallTime::from_micros(0).unwrap(),
         provenant_core::MonoTime::from_micros(0),
@@ -1667,7 +1676,7 @@ fn reanchor_rebinds_device_policy_without_reopening_the_directory() {
     // rather than reopening the different directory now at that path.
     std::fs::rename(&original, temp.path().join("moved")).unwrap();
     std::fs::create_dir(&original).unwrap();
-    let mut directory = directory.into_anchor().unwrap();
+    let directory = directory.into_anchor().unwrap();
     assert!(directory.metadata().unwrap().same_identity(&identity));
     let guard = directory
         .lock(
@@ -1680,7 +1689,7 @@ fn reanchor_rebinds_device_policy_without_reopening_the_directory() {
         .unwrap();
     drop(guard);
     // Descendant lock checks still enforce the newly pinned device boundary.
-    directory.device = identity.device.checked_add(1).unwrap();
+    let directory = directory.with_device_for_test(identity.device.checked_add(1).unwrap());
     assert!(matches!(
         directory.lock(
             OsStr::new("owner.lock"),

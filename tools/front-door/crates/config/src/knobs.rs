@@ -30,6 +30,7 @@ pub(crate) enum Kind {
     CensusIgnoreList,
     Enum,
     Int,
+    Fraction,
 }
 #[derive(Deserialize)]
 pub(crate) struct Spec {
@@ -50,12 +51,12 @@ pub(crate) struct Spec {
     #[serde(default)]
     safe: Option<Value>,
     #[serde(default)]
-    host_only: bool,
+    pub(crate) host_only: bool,
 }
 #[derive(Deserialize)]
 pub(crate) struct Preset {
     #[serde(default)]
-    knobs: BTreeMap<String, Value>,
+    pub(crate) knobs: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -88,14 +89,6 @@ impl<D> crate::ResolvedConfig<D> {
             .get(name)
             .and_then(|knob| knob.value.as_bool())
             .ok_or_else(|| invalid(name, "type"))
-    }
-
-    /// Whether `fabric.mcp_server` opts the Fabric MCP server in. Off when unreadable.
-    pub fn fabric_mcp_server(&self) -> bool {
-        self.knobs
-            .get("fabric.mcp_server")
-            .and_then(|knob| knob.value.as_bool())
-            .unwrap_or(false)
     }
 
     /// Host-owned process exceptions. Never read from a task/profile stamp.
@@ -148,23 +141,108 @@ impl<D> crate::ResolvedConfig<D> {
                 },
             );
         }
+        let launch_overrides: std::collections::BTreeSet<&str> = overrides
+            .iter()
+            .filter_map(|entry| entry.split_once('=').map(|(name, _)| name))
+            .collect();
+        // The layer that set every effective knob. A knob absent from the
+        // map took its registry default, so the map stays small.
+        let knob_sources = knobs
+            .iter()
+            .filter_map(|(name, knob)| {
+                let source = layer(knob.source, launch_overrides.contains(name.as_str()));
+                (source != provenant_records::LimitSource::Default).then(|| (name.clone(), source))
+            })
+            .collect();
         Ok(provenant_records::run::HarnessProfile {
             name: profile_name(self.profile).into(),
+            // Sealed records carry no floats, so a fraction travels as its
+            // decimal text; readers parse it back.
             knobs: knobs
                 .into_iter()
-                .map(|(name, knob)| (name, knob.value))
+                .map(|(name, knob)| {
+                    let value = match knob.value {
+                        Value::Number(number)
+                            if registry
+                                .knobs
+                                .get(&name)
+                                .is_some_and(|spec| spec.kind == Kind::Fraction) =>
+                        {
+                            Value::String(number.to_string())
+                        }
+                        value => value,
+                    };
+                    (name, value)
+                })
                 .collect(),
             overrides: overrides.to_vec(),
+            knob_sources,
             ..Default::default()
         })
     }
+}
+
+/// The layer a lane reports for a knob: a launch override, host
+/// configuration (its `[knobs]` table or the profile preset it selected), or
+/// the registry default.
+fn layer(source: KnobSource, launched: bool) -> provenant_records::LimitSource {
+    use provenant_records::LimitSource::{Default, Host, Launch};
+    match source {
+        KnobSource::Override if launched => Launch,
+        KnobSource::Override | KnobSource::Profile => Host,
+        KnobSource::Default => Default,
+    }
+}
+
+/// The layer that set knob `name` for a sealed profile, as
+/// [`crate::ResolvedConfig::dispatch_profile`] recorded it. Every limit,
+/// receipt and status line reads its source here.
+pub fn knob_source(
+    profile: &provenant_records::run::HarnessProfile,
+    name: &str,
+) -> provenant_records::LimitSource {
+    profile
+        .knob_sources
+        .get(name)
+        .copied()
+        .unwrap_or(provenant_records::LimitSource::Default)
 }
 
 /// Parsed once; the embedded text is immutable.
 pub(crate) fn registry() -> Result<&'static Registry, ConfigError> {
     static PARSED: OnceLock<Option<Registry>> = OnceLock::new();
     PARSED
-        .get_or_init(|| serde_json::from_str(REGISTRY).ok())
+        .get_or_init(|| {
+            let mut registry: Registry = serde_json::from_str(REGISTRY).ok()?;
+            for rule in provenant_records::policy::table()
+                .iter()
+                .filter(|rule| rule.knob.is_some())
+            {
+                let values = rule
+                    .strengths()
+                    .into_iter()
+                    .map(|strength| match strength {
+                        provenant_records::policy::Strength::Refuse => "refuse".to_owned(),
+                        provenant_records::policy::Strength::Warn => "warn".to_owned(),
+                        provenant_records::policy::Strength::Off => "off".to_owned(),
+                    })
+                    .collect();
+                registry.knobs.insert(
+                    rule.knob.clone()?,
+                    Spec {
+                        kind: Kind::Enum,
+                        min: None,
+                        max: None,
+                        values,
+                        default: serde_json::to_value(rule.strength).ok()?,
+                        strict: false,
+                        safe: None,
+                        host_only: false,
+                    },
+                );
+            }
+            Some(registry)
+        })
         .as_ref()
         .ok_or(ConfigError::KnobRegistry)
 }
@@ -200,13 +278,6 @@ pub(crate) fn nearest<'a>(name: &str, known: impl Iterator<Item = &'a str>) -> V
         .take(3)
         .map(|(_, known)| known.to_owned())
         .collect()
-}
-/// Registry knob names closest to `name`.
-pub(crate) fn nearest_knobs(name: &str) -> Vec<String> {
-    registry().map_or_else(
-        |_| Vec::new(),
-        |registry| nearest(name, registry.knobs.keys().map(String::as_str)),
-    )
 }
 fn distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
@@ -269,6 +340,17 @@ fn check(spec: &Spec, value: &Value) -> Result<(), &'static str> {
                 Ok(())
             }
         }
+        Value::Number(number) if spec.kind == Kind::Fraction => {
+            let value = number.as_f64().ok_or("type")?;
+            if !value.is_finite()
+                || spec.min.is_some_and(|min| value < min as f64)
+                || spec.max.is_some_and(|max| value > max as f64)
+            {
+                Err("outside_allowed_range")
+            } else {
+                Ok(())
+            }
+        }
         _ => Err("type"),
     }
 }
@@ -286,6 +368,9 @@ fn from_toml(item: &Item) -> Option<Value> {
             .collect::<Option<serde_json::Map<_, _>>>()
             .map(Value::Object),
         toml_edit::Value::Integer(n) => Some(Value::from(*n.value())),
+        toml_edit::Value::Float(n) => serde_json::Number::from_f64(*n.value())
+            .map(Value::Number)
+            .or(Some(Value::Null)),
         toml_edit::Value::String(s) => Some(Value::from(s.value().as_str())),
         _ => None,
     }
@@ -299,6 +384,12 @@ fn parse_cli(spec: &Spec, text: &str) -> Result<Value, &'static str> {
     }
     if spec.kind == Kind::Int {
         return text.parse::<i64>().map(Value::from).map_err(|_| "type");
+    }
+    if spec.kind == Kind::Fraction {
+        let value = text.parse::<f64>().map_err(|_| "type")?;
+        return serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .ok_or("type");
     }
     Ok(Value::from(text))
 }
@@ -472,6 +563,9 @@ fn apply(doc: &mut DocumentMut, edit: KnobEdit) -> Result<(), ConfigError> {
                     }
                     toml_edit::value(array)
                 }
+                Value::Number(n) if spec.kind == Kind::Fraction => {
+                    toml_edit::value(n.as_f64().ok_or_else(|| invalid(name, "type"))?)
+                }
                 Value::Number(n) => toml_edit::value(n.as_i64().unwrap_or_default()),
                 Value::String(s) => toml_edit::value(s.as_str()),
                 Value::Null | Value::Object(_) => return Err(invalid(name, "type")),
@@ -556,6 +650,38 @@ mod ceiling_tests {
             registry["provider_updates"]["runtime_deadline_seconds"]["max"],
             provenant_core::MAX_LANE_RUNTIME_SECONDS
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod policy_action_tests {
+    use super::*;
+
+    #[test]
+    fn generated_policy_knobs_offer_only_supported_strengths() {
+        let registry = registry().unwrap();
+        for rule in provenant_records::policy::table()
+            .iter()
+            .filter(|rule| rule.knob.is_some())
+        {
+            let name = rule.knob.as_deref().unwrap();
+            let expected: std::collections::BTreeSet<_> = rule
+                .strengths()
+                .into_iter()
+                .map(|strength| match strength {
+                    provenant_records::policy::Strength::Refuse => "refuse",
+                    provenant_records::policy::Strength::Warn => "warn",
+                    provenant_records::policy::Strength::Off => "off",
+                })
+                .collect();
+            let actual: std::collections::BTreeSet<_> = registry.knobs[name]
+                .values
+                .iter()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(actual, expected, "{}", rule.code);
+        }
     }
 }
 

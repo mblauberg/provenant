@@ -22,6 +22,8 @@ mod dates;
 mod release;
 #[derive(Debug, Subcommand)]
 pub enum Check {
+    /// Check every configured provider route without launching a lane
+    Providers(Providers),
     /// Check configuration files
     Config(Page),
     /// Check the installed release
@@ -54,6 +56,20 @@ pub enum Check {
         #[command(flatten)]
         page: Page,
     },
+}
+
+/// Provider smoke checks use ordinary read-only lanes and consume provider quota.
+#[derive(Debug, clap::Args)]
+pub struct Providers {
+    /// Launch one tiny read-only lane per route; consumes quota like any lane
+    #[arg(long)]
+    pub live: bool,
+    /// Exact ADAPTER/ACCOUNT/MODEL (MODEL may contain slashes); repeatable
+    #[arg(long = "route", value_name = "ROUTE")]
+    pub routes: Vec<String>,
+    /// Override timeout_seconds (default 60) or concurrency (default 2); repeatable
+    #[arg(long = "set", value_name = "NAME=VALUE")]
+    pub set: Vec<String>,
 }
 
 #[derive(Debug, Error)]
@@ -250,6 +266,7 @@ fn next_cursor<T>(page: &CheckPage<T>) -> Result<Option<String>, CheckError> {
 }
 
 pub struct GitContext<'a> {
+    pub host_state: &'a Path,
     pub repo: &'a ReadOnlyRepo,
     pub runtime: &'a UtilityRuntime,
     pub executor: &'a dyn Executor,
@@ -462,22 +479,15 @@ pub fn config_page(
             ConfigError::Schema { location, .. } | ConfigError::CollectionLimit { location } => (
                 "config.schema",
                 location.line,
-                "configuration violates the typed TOML schema; repair: delete the line or run `provenant config migrate`".to_owned(),
+                "configuration violates the typed TOML schema; run `provenant config check` and edit the reported key".to_owned(),
             ),
             ConfigError::Domain {
                 location, source, ..
             } => {
-                let repair = if source.code.starts_with("moved_to_schedule.")
-                    || source.code.starts_with("retired.")
-                {
-                    "; repair: run `provenant config migrate`"
-                } else {
-                    ""
-                };
                 (
                     "config.schema",
                     location.line,
-                    format!("{}: {}{repair}", source.field, source.detail.unwrap_or(source.code)),
+                    format!("{}: {}", source.field, source.detail.unwrap_or(source.code)),
                 )
             }
             _ => return Err(CheckError::Evidence("config inspection failed")),
@@ -499,6 +509,7 @@ pub fn install_page(
     page: &Page,
 ) -> Result<CheckPage, CheckError> {
     let mut scan = Scan::default();
+    let mut warnings = Vec::new();
     scan.evidence
         .push(("install".into(), inspection.input_digest));
     if inspection.error.is_some() {
@@ -510,6 +521,14 @@ pub fn install_page(
         )?;
     }
     for finding in inspection.findings {
+        if finding.is_advisory()
+            && let Some(detail) = &finding.detail
+        {
+            if !warnings.contains(detail) {
+                warnings.push(detail.clone());
+            }
+            continue;
+        }
         let path = finding.path.to_path_buf()?;
         let (prefix, relative) = if let Ok(p) = path.strip_prefix(state) {
             ("state", p)
@@ -572,7 +591,9 @@ pub fn install_page(
             &message,
         )?;
     }
-    paginate(scan, selector, page)
+    let mut result = paginate(scan, selector, page)?;
+    result.warnings = warnings;
+    Ok(result)
 }
 /// Resolve a user-given revision to the commit it names.
 pub fn resolve_revision(git: &GitContext<'_>, revision: &str) -> Result<GitOid, CheckError> {
@@ -603,8 +624,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_check_domain_errors_include_field_code_and_migration_repair()
+    fn declared_native_limits_are_provenance_warnings_not_install_drift()
     -> Result<(), Box<dyn std::error::Error>> {
+        for spec in provenant_records::ADAPTER_SPECS {
+            let Some(install) = spec.install else {
+                continue;
+            };
+            for support in [
+                install.instructions,
+                install.answer_delivery,
+                install.precompact_context,
+            ] {
+                let provenant_records::CapabilitySupport::Unsupported { reason, source } = support
+                else {
+                    continue;
+                };
+                let detail = format!("{}: {reason} (source: {source})", spec.name);
+                let inspection = provenant_config::InstallInspection {
+                    error: None,
+                    findings: vec![provenant_config::InstallFinding {
+                        rule: provenant_config::NATIVE_CAPABILITY_UNAVAILABLE.into(),
+                        path: provenant_records::AbsolutePath::new(Path::new("/fixture/harness"))?,
+                        detail: Some(detail.clone()),
+                    }],
+                    input_digest: CanonicalV1::file_digest(detail.as_bytes()),
+                };
+                let page = install_page(
+                    inspection,
+                    Path::new("/fixture"),
+                    Path::new("/fixture/state"),
+                    &[],
+                    "native-capabilities",
+                    &Page {
+                        limit: 100,
+                        cursor: None,
+                    },
+                )?;
+                assert_eq!(page.outcome(), Outcome::Ok);
+                assert!(page.findings.is_empty());
+                assert!(page.warnings.contains(&detail));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn config_check_domain_errors_include_field_and_code() -> Result<(), Box<dyn std::error::Error>>
+    {
         let path = provenant_records::PathWire::from_relative(
             &provenant_core::RelativePath::parse("config.toml")?,
         )?;
@@ -644,7 +710,6 @@ mod tests {
         let message = &page.findings[0].message;
         assert!(message.contains("limits.bundle_bytes"), "{message}");
         assert!(message.contains("retired.bundle_bytes"), "{message}");
-        assert!(message.contains("provenant config migrate"), "{message}");
         Ok(())
     }
 

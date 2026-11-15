@@ -105,25 +105,41 @@ impl LaneRoots {
         Self(all)
     }
 
-    /// The lane areas of a project checkout: its worktrees and scratch.
-    pub fn project(root: &Path) -> Self {
-        Self::new([".worktrees", ".provenant", ".agent-run"].map(|name| root.join(name)))
+    /// The lane areas of a project checkout: its configured worktrees and scratch.
+    pub fn project(root: &Path, host_state: &Path) -> Result<Self, TransportError> {
+        let ports = provenant_config::PortTable::read_for(Some(root), host_state)
+            .map_err(|_| TransportError::Unreadable)?;
+        let mut roots = ports.worktree_roots_under(root);
+        roots.extend([".provenant", ".agent-run"].map(|name| root.join(name)));
+        Ok(Self::new(roots))
     }
 
     /// The lane areas for a repository whose private and common Git
     /// directories are known. A linked worktree is itself lane-writable, and
-    /// the project that owns the common directory contributes its lane areas.
-    pub fn for_repository(root: &Path, private: &Path, common: &Path, extra: &Self) -> Self {
+    /// the project that owns the common directory contributes its declared areas.
+    pub fn for_repository(
+        root: &Path,
+        private: &Path,
+        common: &Path,
+        extra: &Self,
+        host_state: &Path,
+    ) -> Result<Self, TransportError> {
         let mut roots = extra.0.clone();
         if private != common {
             roots.push(root.to_path_buf());
         }
-        if common.file_name().is_some_and(|name| name == ".git")
-            && let Some(project) = common.parent()
-        {
-            roots.extend(Self::project(project).0);
-        }
-        Self::new(roots)
+        let project = common
+            .file_name()
+            .is_some_and(|name| name == ".git")
+            .then(|| common.parent())
+            .flatten()
+            .unwrap_or(root);
+        roots.extend(Self::project(project, host_state)?.0);
+        Ok(Self::new(roots))
+    }
+
+    pub fn into_paths(self) -> Vec<PathBuf> {
+        self.0
     }
 
     pub fn is_empty(&self) -> bool {
@@ -358,7 +374,7 @@ pub fn program_paths(value: &str) -> Vec<String> {
 
 fn expand(word: &str, base: &Path) -> PathBuf {
     if let Some(rest) = word.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
+        && let Some(home) = std::env::var_os(provenant_core::consumer_env::HOME)
     {
         return Path::new(&home).join(rest);
     }
@@ -470,45 +486,68 @@ mod tests {
     }
 
     #[test]
-    fn lane_roots_resolve_links_and_missing_tails() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let root = std::fs::canonicalize(temp.path())?;
-        std::fs::create_dir_all(root.join("lane"))?;
-        std::os::unix::fs::symlink(root.join("lane"), root.join("alias"))?;
-        let roots = LaneRoots::new([root.join("lane")]);
-        assert!(roots.contains(&root.join("lane/a/b")));
-        assert!(roots.contains(&root.join("alias/not/yet/created")));
-        assert!(roots.contains(&root.join("other/../lane/x")));
-        assert!(!roots.contains(&root.join("laneish")));
-        assert!(!roots.contains(Path::new("relative/lane")));
-        Ok(())
-    }
+    fn lane_root_link_shapes_resolve_with_kernel_path_semantics() -> TestResult {
+        #[derive(Clone, Copy)]
+        enum LinkShape {
+            AliasedRootAndMissingTail,
+            FinalLinkUnderRoot,
+            ParentAfterLink,
+        }
 
-    #[test]
-    fn lane_roots_include_symlinks_under_an_aliased_root() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let root = std::fs::canonicalize(temp.path())?;
-        std::fs::create_dir(root.join("lane"))?;
-        std::fs::write(root.join("outside"), "config")?;
-        std::os::unix::fs::symlink(root.join("lane"), root.join("alias"))?;
-        std::os::unix::fs::symlink(root.join("outside"), root.join("lane/config"))?;
-        let roots = LaneRoots::new([root.join("lane")]);
-        assert!(roots.contains(&root.join("alias/config")));
-        assert!(!roots.contains(&root.join("outside")));
-        Ok(())
-    }
-
-    #[test]
-    fn lane_roots_follow_parent_components_after_a_link() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let root = std::fs::canonicalize(temp.path())?;
-        std::fs::create_dir_all(root.join("lane/deep"))?;
-        std::fs::create_dir_all(root.join("safe"))?;
-        // `safe/link/../x` is `lane/x` for the kernel, not `safe/x`.
-        std::os::unix::fs::symlink(root.join("lane/deep"), root.join("safe/link"))?;
-        let roots = LaneRoots::new([root.join("lane")]);
-        assert!(roots.contains(&root.join("safe/link/../not-yet")));
-        assert!(!roots.contains(&root.join("safe/not-yet")));
+        for (label, shape) in [
+            (
+                "aliased root and missing tail",
+                LinkShape::AliasedRootAndMissingTail,
+            ),
+            ("final link under root", LinkShape::FinalLinkUnderRoot),
+            ("parent after link", LinkShape::ParentAfterLink),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let root = std::fs::canonicalize(temp.path())?;
+            let (roots, included, excluded) = match shape {
+                LinkShape::AliasedRootAndMissingTail => {
+                    std::fs::create_dir_all(root.join("lane"))?;
+                    std::os::unix::fs::symlink(root.join("lane"), root.join("alias"))?;
+                    (
+                        LaneRoots::new([root.join("lane")]),
+                        vec![
+                            root.join("lane/a/b"),
+                            root.join("alias/not/yet/created"),
+                            root.join("other/../lane/x"),
+                        ],
+                        vec![root.join("laneish"), PathBuf::from("relative/lane")],
+                    )
+                }
+                LinkShape::FinalLinkUnderRoot => {
+                    std::fs::create_dir(root.join("lane"))?;
+                    std::fs::write(root.join("outside"), "config")?;
+                    std::os::unix::fs::symlink(root.join("lane"), root.join("alias"))?;
+                    std::os::unix::fs::symlink(root.join("outside"), root.join("lane/config"))?;
+                    (
+                        LaneRoots::new([root.join("lane")]),
+                        vec![root.join("alias/config")],
+                        vec![root.join("outside")],
+                    )
+                }
+                LinkShape::ParentAfterLink => {
+                    std::fs::create_dir_all(root.join("lane/deep"))?;
+                    std::fs::create_dir_all(root.join("safe"))?;
+                    // `safe/link/../x` resolves under lane for the kernel.
+                    std::os::unix::fs::symlink(root.join("lane/deep"), root.join("safe/link"))?;
+                    (
+                        LaneRoots::new([root.join("lane")]),
+                        vec![root.join("safe/link/../not-yet")],
+                        vec![root.join("safe/not-yet")],
+                    )
+                }
+            };
+            for path in included {
+                assert!(roots.contains(&path), "{label}: expected {path:?} inside");
+            }
+            for path in excluded {
+                assert!(!roots.contains(&path), "{label}: expected {path:?} outside");
+            }
+        }
         Ok(())
     }
 
@@ -518,6 +557,25 @@ mod tests {
             key: key.to_owned(),
             value: Some(value.to_owned()),
         }
+    }
+
+    #[test]
+    fn project_lane_roots_use_the_sourced_worktree_layout() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let config = root.join(".provenant");
+        std::fs::create_dir_all(&config)?;
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![PathBuf::from(".claude/worktrees")];
+        ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
+        std::fs::write(config.join("ports.json"), serde_json::to_vec(&ports)?)?;
+
+        let roots = LaneRoots::project(&root, &root)?;
+        assert!(roots.contains(&root.join(".claude/worktrees/topic/helper")));
+        assert!(roots.contains(&root.join(".provenant/state")));
+        assert!(roots.contains(&root.join(".agent-run/state")));
+        assert!(!roots.contains(&root.join(".worktrees/topic/helper")));
+        Ok(())
     }
 
     #[test]

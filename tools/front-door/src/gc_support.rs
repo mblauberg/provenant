@@ -1,7 +1,7 @@
 //! Host observations used by the existing GC composition.
 use crate::worktrees::Error;
 use provenant_confinement::worktrees::WorktreeContext;
-use provenant_core::{ActorId, CancelToken, Clock, GitOid, Roots, WaitBudget};
+use provenant_core::{ActorId, CancelToken, Clock, GitOid, Roots};
 use provenant_os::{
     clock::SystemClock,
     exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
@@ -412,12 +412,8 @@ fn scan_terminal(
         loop {
             let page = store.lanes(&query, &call)?;
             for attempt in page.lanes {
-                let request = store.request(attempt.run_id, &call)?;
-                let task = request
-                    .tasks
-                    .iter()
-                    .find(|task| task.task_id == attempt.task_id)
-                    .ok_or("unknown lane task")?;
+                let request = store.request(attempt.attempt_id, &call)?;
+                let task = &request.task;
                 if let Some(writer) = &task.writer {
                     if !writer.worktree.is_absolute() {
                         return Err("unknown writer path".into());
@@ -447,7 +443,7 @@ fn scan_terminal(
         if root.metadata_at(OsStr::new("run.sqlite3"), false).is_ok() {
             return Err("unobservable run store".into());
         }
-        match root.open_verified_directory(OsStr::new("runs")) {
+        match root.open_verified_directory(OsStr::new("attempts")) {
             Ok(runs) if !entry_names(&runs, 10_000)?.is_empty() => {
                 return Err("unindexed run records".into());
             }
@@ -495,14 +491,15 @@ pub(crate) fn disk_alert(
     let gc = root.open_verified_directory(OsStr::new("gc"))?;
     let clock = SystemClock;
     let cancel = CancelToken::new();
-    let budget = WaitBudget::cli(clock.mono_now(), 5).map_err(|_| Error::Budget)?;
-    let _lock = gc.lock(
-        OsStr::new("alert.lock"),
-        LockMode::Exclusive,
-        budget,
-        &cancel,
-        &clock,
-    )?;
+    let _lock = match gc.try_lock(OsStr::new("alert.lock"), LockMode::Exclusive) {
+        Ok(lock) => lock,
+        Err(provenant_os::fs::FsError::LockTimeout { .. }) => {
+            return Ok(vec![
+                "disk alert skipped: alert item busy; next pass retries".into(),
+            ]);
+        }
+        Err(error) => return Err(error.into()),
+    };
     let latch = OsStr::new("low-disk.json");
     let latched = match gc.metadata_at(latch, false) {
         Ok(_) => true,

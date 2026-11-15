@@ -47,16 +47,16 @@ fn node_review_base_requires_v2_and_a_nonempty_reference() {
         (2, json!(""), false),
         (2, json!(7), false),
     ] {
-        let graph = document(
-            version,
-            json!([
+        // A mistyped base is refused when the document is decoded.
+        let accepted = serde_json::from_value::<GraphDocument>(json!({
+            "schema_version": version,
+            "graph_id": "admission-test",
+            "nodes": [
                 {"id":"review","prompt":"review","access":"read_only","route":{"alias":"senior"},"review_base":base}
-            ]),
-        );
-        assert_eq!(
-            graph.admit(&crate::config::GraphLimits::default()).is_ok(),
-            allowed
-        );
+            ],
+        }))
+        .is_ok_and(|graph| graph.admit(&crate::config::GraphLimits::default()).is_ok());
+        assert_eq!(accepted, allowed, "{version} {base}");
     }
 }
 

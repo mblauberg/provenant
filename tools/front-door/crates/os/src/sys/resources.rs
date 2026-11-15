@@ -411,9 +411,33 @@ mod tests {
 
     #[test]
     fn process_budget_requires_headroom() {
-        let at = |used, limit| super::ProcessBudget { used, limit }.has_room();
-        assert!(at(0, 2666));
-        assert!(!at(10, 10));
+        let limit = super::ProcessBudget {
+            used: 0,
+            limit: 1000,
+        };
+        let headroom = limit.headroom();
+        assert!(
+            super::ProcessBudget {
+                used: limit.limit - headroom - 1,
+                ..limit
+            }
+            .has_room()
+        );
+        assert!(
+            !super::ProcessBudget {
+                used: limit.limit - headroom,
+                ..limit
+            }
+            .has_room()
+        );
+        assert!(
+            !super::ProcessBudget {
+                used: u64::MAX,
+                ..limit
+            }
+            .has_room()
+        );
+        assert!(super::ProcessBudget { used: 0, limit: 0 }.headroom() > 0);
     }
 
     #[test]

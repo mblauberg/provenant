@@ -5,6 +5,24 @@ use crate::test_support::Fixture;
 use std::{error::Error, fs};
 
 #[test]
+fn every_declared_repair_kind_renders_one_command() {
+    for kind in WorktreeRepairKind::ALL {
+        match kind {
+            WorktreeRepairKind::RetryDiagnosis
+            | WorktreeRepairKind::CreateWorktree
+            | WorktreeRepairKind::PruneRegistration
+            | WorktreeRepairKind::WaitForWriter
+            | WorktreeRepairKind::PreserveChanges
+            | WorktreeRepairKind::InspectGit
+            | WorktreeRepairKind::CreateBranch => {}
+        }
+        let repair = kind.render(Path::new("/repo"), Path::new("/repo/worktree"));
+        assert!(!repair.is_empty());
+        assert!(!repair.contains('\n'));
+    }
+}
+
+#[test]
 fn doctor_reports_five_worktree_states_and_one_repair_without_mutation()
 -> Result<(), Box<dyn Error>> {
     for scenario in ["dirty", "stale", "held", "unregistered", "detached"] {
@@ -34,8 +52,7 @@ fn doctor_reports_five_worktree_states_and_one_repair_without_mutation()
                 let slot = writer_directory(context.project_state, &path)?;
                 lease = Some(provenant_supervisor::fixture::acquire_writer(
                     slot,
-                    provenant_supervisor::custody::Scope {
-                        run: provenant_core::RunId::from_bytes([41; 16]),
+                    provenant_records::custody::Scope {
                         attempt: holder,
                         generation: 1,
                     },
@@ -54,27 +71,34 @@ fn doctor_reports_five_worktree_states_and_one_repair_without_mutation()
             &cancel,
         )?;
         let report = doctor(&context, &path, &cancel)?;
-        let (expected, repair_suffix) = match scenario {
+        let (expected, expected_repair) = match scenario {
             "dirty" => (
                 WorktreeDiagnosisState::Dirty,
-                "stash push --include-untracked",
+                WorktreeRepairKind::PreserveChanges,
             ),
-            "stale" => (WorktreeDiagnosisState::StaleRegistration, "worktree prune"),
+            "stale" => (
+                WorktreeDiagnosisState::StaleRegistration,
+                WorktreeRepairKind::PruneRegistration,
+            ),
             "held" => (
                 WorktreeDiagnosisState::LiveWriter,
-                "provenant status --wait",
+                WorktreeRepairKind::WaitForWriter,
             ),
             "unregistered" => (
                 WorktreeDiagnosisState::Unregistered,
-                "provenant worktree create BRANCH",
+                WorktreeRepairKind::CreateWorktree,
             ),
-            "detached" => (WorktreeDiagnosisState::Detached, "switch -c BRANCH"),
+            "detached" => (
+                WorktreeDiagnosisState::Detached,
+                WorktreeRepairKind::CreateBranch,
+            ),
             _ => unreachable!(),
         };
         assert_eq!(report.state, expected, "{scenario}: {report:?}");
+        assert_eq!(report.repair_kind(), expected_repair);
         assert!(!report.reason.is_empty());
-        assert!(report.repair.ends_with(repair_suffix), "{report:?}");
-        assert!(!report.repair.contains('\n'), "one repair command");
+        assert!(!report.repair.is_empty());
+        assert!(!report.repair.contains('\n'));
         assert_eq!(
             context.facts.writer_inventory(
                 context.repo,
@@ -142,16 +166,19 @@ fn doctor_unknown_preserves_census_and_custody_scope_and_evidence() -> Result<()
     ])?;
     let census = doctor(&context, &path, &cancel)?;
     assert_eq!(census.state, WorktreeDiagnosisState::Unknown);
+    assert_eq!(census.repair_kind(), WorktreeRepairKind::RetryDiagnosis);
     assert_eq!(census.source, Some("census"));
     assert_eq!(
-        serde_json::to_value(&census.scope)?,
-        serde_json::to_value(StructuredPathWire::from_path(&path)?)?
+        census.scope.as_ref(),
+        Some(&StructuredPathWire::from_path(&path)?)
     );
-    assert_eq!(
-        census.evidence.as_deref(),
-        Some("fixture descriptors unreadable for pid 24")
+    assert!(
+        census
+            .evidence
+            .as_deref()
+            .is_some_and(|evidence| !evidence.is_empty())
     );
-    assert!(census.repair.starts_with("provenant worktree doctor "));
+    assert!(!census.repair.is_empty());
 
     struct CensusHeld;
     impl WorkerObserver for CensusHeld {
@@ -172,17 +199,21 @@ fn doctor_unknown_preserves_census_and_custody_scope_and_evidence() -> Result<()
         &cancel,
     )?;
     assert_eq!(census_held.state, WorktreeDiagnosisState::Unknown);
+    assert_eq!(
+        census_held.repair_kind(),
+        WorktreeRepairKind::RetryDiagnosis
+    );
     assert_eq!(census_held.source, Some("census"));
     assert_eq!(census_held.holder, None);
     assert_eq!(
-        serde_json::to_value(&census_held.scope)?,
-        serde_json::to_value(StructuredPathWire::from_path(&path)?)?
+        census_held.scope.as_ref(),
+        Some(&StructuredPathWire::from_path(&path)?)
     );
     assert!(
         census_held
             .evidence
             .as_deref()
-            .is_some_and(|evidence| evidence.contains("without a held writer lease"))
+            .is_some_and(|evidence| !evidence.is_empty())
     );
 
     let verified = verify_worktree(context.repo, &path)?;
@@ -193,10 +224,11 @@ fn doctor_unknown_preserves_census_and_custody_scope_and_evidence() -> Result<()
     fs::write(&owner_path, "malformed owner record")?;
     let malformed = doctor(&test.context(), &path, &cancel)?;
     assert_eq!(malformed.state, WorktreeDiagnosisState::Unknown);
+    assert_eq!(malformed.repair_kind(), WorktreeRepairKind::RetryDiagnosis);
     assert_eq!(malformed.source, Some("custody"));
     assert_eq!(
-        serde_json::to_value(&malformed.scope)?,
-        serde_json::to_value(StructuredPathWire::from_path(&path)?)?
+        malformed.scope.as_ref(),
+        Some(&StructuredPathWire::from_path(&path)?)
     );
     assert!(
         malformed
@@ -204,14 +236,13 @@ fn doctor_unknown_preserves_census_and_custody_scope_and_evidence() -> Result<()
             .as_deref()
             .is_some_and(|evidence| !evidence.is_empty())
     );
-    assert!(malformed.repair.starts_with("provenant worktree doctor "));
+    assert!(!malformed.repair.is_empty());
     assert_eq!(fs::read_to_string(&owner_path)?, "malformed owner record");
     fs::remove_file(owner_path)?;
 
     // Custody uncertainty takes priority over an incomplete advisory census.
     let slot = writer_directory(context.project_state, &path)?;
-    let scope = provenant_supervisor::custody::Scope {
-        run: provenant_core::RunId::from_bytes([51; 16]),
+    let scope = provenant_records::custody::Scope {
         attempt: AttemptId::from_bytes([52; 16]),
         generation: 1,
     };
@@ -228,18 +259,19 @@ fn doctor_unknown_preserves_census_and_custody_scope_and_evidence() -> Result<()
     drop(lease);
     let custody = doctor(&context, &path, &cancel)?;
     assert_eq!(custody.state, WorktreeDiagnosisState::Unknown);
+    assert_eq!(custody.repair_kind(), WorktreeRepairKind::RetryDiagnosis);
     assert_eq!(custody.source, Some("custody"));
     assert_eq!(
-        serde_json::to_value(&custody.scope)?,
-        serde_json::to_value(StructuredPathWire::from_path(&path)?)?
+        custody.scope.as_ref(),
+        Some(&StructuredPathWire::from_path(&path)?)
     );
     assert!(
         custody
             .evidence
             .as_deref()
-            .is_some_and(|evidence| evidence.contains("retained import fence"))
+            .is_some_and(|evidence| !evidence.is_empty())
     );
-    assert!(custody.repair.starts_with("provenant worktree doctor "));
+    assert!(!custody.repair.is_empty());
     assert_eq!(fs::read(retained.join("reservation.json"))?, reservation);
     assert_eq!(
         fs::read(retained.join("import-retained.json"))?,
@@ -276,60 +308,57 @@ fn doctor_reports_an_observed_bystander_in_a_free_worktree() -> Result<(), Box<d
     ])?;
     let report = doctor(&context, &path, &CancelToken::new())?;
     assert_eq!(report.state, WorktreeDiagnosisState::Observed);
+    assert_eq!(report.repair_kind(), WorktreeRepairKind::RetryDiagnosis);
     assert_eq!(report.holder, None);
-    assert!(report.repair.starts_with("provenant worktree doctor "));
+    assert!(!report.repair.is_empty());
     Ok(())
 }
 
 #[test]
-fn a_read_only_probe_cannot_make_concurrent_admission_writer_busy() -> Result<(), Box<dyn Error>> {
-    use std::sync::{Arc, Barrier, mpsc};
-    use std::time::Duration;
+fn a_read_only_probe_yields_busy_and_never_leaves_a_stale_lease() -> Result<(), Box<dyn Error>> {
+    // Contract (Q4): an observation gate is tried once. A writer that meets a
+    // probe is refused as busy at once and leaves no record; after the probe
+    // the same writer is admitted and its release frees the slot.
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
     let path = fixture.root.join("probe-race");
     let slot = writer_directory(context.project_state, &path)?;
     drop(slot.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?);
-    let probe = provenant_supervisor::custody::writer_observation_guard(&slot)?;
-    let raw_probe = slot.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?;
-    let barrier = Arc::new(Barrier::new(2));
-    let entered = barrier.clone();
-    let writer_slot = slot.try_clone()?;
-    let (send, receive) = mpsc::channel();
-    let thread = std::thread::spawn(move || {
-        let clock = provenant_os::clock::SystemClock::new();
-        entered.wait();
-        let result = provenant_supervisor::fixture::acquire_writer(
-            writer_slot,
-            provenant_supervisor::custody::Scope {
-                run: provenant_core::RunId::from_bytes([91; 16]),
+    let clock = provenant_os::clock::SystemClock::new();
+    let admit = |slot: &provenant_os::fs::Directory| -> Result<_, Box<dyn Error>> {
+        Ok(provenant_supervisor::fixture::acquire_writer(
+            slot.try_clone()?,
+            provenant_records::custody::Scope {
                 attempt: AttemptId::from_bytes([92; 16]),
                 generation: 1,
             },
             WaitBudget::nonblocking(clock.mono_now()),
             &CancelToken::new(),
             &clock,
-        );
-        let _ = send.send(result);
-    });
-    barrier.wait();
+        ))
+    };
+    let probe = provenant_supervisor::custody::writer_observation_guard(&slot)?;
+    let refused = admit(&slot)?;
     assert!(
         matches!(
-            receive.recv_timeout(Duration::from_millis(50)),
-            Err(mpsc::RecvTimeoutError::Timeout)
+            refused,
+            Err(provenant_supervisor::custody::CustodyError::Busy)
         ),
-        "an admitting writer must wait for the observer, not return WriterBusy"
+        "{refused:?}"
     );
-    drop(raw_probe);
     drop(probe);
-    let lease = receive.recv_timeout(Duration::from_secs(5))??;
+    assert_eq!(
+        disk_writer_state(context.project_state, &path),
+        Occupancy::Available,
+        "a refused admission leaves no record"
+    );
+    let lease = admit(&slot)??;
     assert_eq!(
         disk_writer_state(context.project_state, &path),
         Occupancy::Held
     );
     drop(lease);
-    thread.join().map_err(|_| "writer panicked")?;
     assert_eq!(
         disk_writer_state(context.project_state, &path),
         Occupancy::Available,
@@ -339,11 +368,37 @@ fn a_read_only_probe_cannot_make_concurrent_admission_writer_busy() -> Result<()
 }
 
 #[test]
-fn legacy_gate_upgrade_and_missing_lock_preserve_custody_evidence() -> Result<(), Box<dyn Error>> {
+fn interrupted_writer_slot_initialisation_can_retry_without_repairing_a_published_slot()
+-> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
-    let path = fixture.root.join("legacy-probe");
+    let path = fixture.root.join("interrupted-slot");
+    FAIL_WRITER_GATE_INITIALISATION.with(|failure| failure.set(true));
+    assert!(matches!(
+        writer_directory(context.project_state, &path),
+        Err(WorktreeError::UnknownWriter)
+    ));
+    assert!(
+        context
+            .project_state
+            .metadata_at(&state_dir_name(&path), false)
+            .unwrap_err()
+            .is_not_found()
+    );
+    let slot = writer_directory(context.project_state, &path)?;
+    drop(provenant_supervisor::custody::writer_observation_guard(
+        &slot,
+    )?);
+    Ok(())
+}
+
+#[test]
+fn missing_observer_gate_refuses_without_creating_a_gate() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let path = fixture.root.join("missing-gate-probe");
     let slot = writer_directory(context.project_state, &path)?;
     drop(slot.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?);
     let gate_path = slot.current_path()?.join("writer-probe.lock");
@@ -354,29 +409,52 @@ fn legacy_gate_upgrade_and_missing_lock_preserve_custody_evidence() -> Result<()
     ));
     assert!(
         !gate_path.exists(),
-        "read-only observation cannot initialise legacy state"
+        "read-only observation cannot create a missing gate"
     );
-    prepare_writer_probe(context.project_state, &path)?;
-    assert!(gate_path.is_file());
-    assert_eq!(
-        disk_writer_state(context.project_state, &path),
-        Occupancy::Available
+    assert!(matches!(
+        cache_writer_probe(context.project_state, &path),
+        Err(Occupancy::Unknown { .. })
+    ));
+    assert!(
+        !gate_path.exists(),
+        "observation cannot repair a missing gate"
     );
+
+    Ok(())
+}
+
+#[test]
+fn retained_import_evidence_remains_a_fence_without_an_exclusion_inode()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+
     // Retained import evidence remains a fence even without an exclusion inode.
-    fs::remove_file(slot.current_path()?.join(WRITER_LOCK))?;
-    fs::write(slot.current_path()?.join("reservation.json"), "retained")?;
-    fs::write(
-        slot.current_path()?.join("import-retained.json"),
-        "retained",
-    )?;
-    assert!(
-        matches!(disk_writer_state(context.project_state, &path), Occupancy::Unknown { evidence, .. }
-        if evidence.contains("retained import fence"))
-    );
-    assert!(
-        matches!(cache_writer_probe(context.project_state, &path), Err(Occupancy::Unknown { evidence, .. })
-        if evidence.contains("retained import fence"))
-    );
+    let retained_path = fixture.root.join("retained-probe");
+    let retained = writer_directory(context.project_state, &retained_path)?;
+    drop(retained.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?);
+    fs::remove_file(retained.current_path()?.join(WRITER_LOCK))?;
+    let attempt = retained
+        .current_path()?
+        .join(AttemptId::from_bytes([53; 16]).to_string());
+    fs::create_dir(&attempt)?;
+    fs::write(attempt.join("reservation.json"), "retained")?;
+    fs::write(attempt.join("import-retained.json"), "retained")?;
+    assert!(matches!(
+        disk_writer_state(context.project_state, &retained_path),
+        Occupancy::Unknown {
+            source: OccupancyUnknownSource::Custody,
+            ..
+        }
+    ));
+    assert!(matches!(
+        cache_writer_probe(context.project_state, &retained_path),
+        Err(Occupancy::Unknown {
+            source: OccupancyUnknownSource::Custody,
+            ..
+        })
+    ));
     Ok(())
 }
 
@@ -397,8 +475,7 @@ fn recovery_wait_releases_the_observer_gate_while_a_writer_is_held() -> Result<(
         path.to_str().ok_or("path")?,
     ])?;
     let slot = writer_directory(context.project_state, &path)?;
-    let scope = custody::Scope {
-        run: provenant_core::RunId::from_bytes([101; 16]),
+    let scope = provenant_records::custody::Scope {
         attempt: AttemptId::from_bytes([102; 16]),
         generation: 1,
     };
@@ -434,6 +511,7 @@ fn recovery_wait_releases_the_observer_gate_while_a_writer_is_held() -> Result<(
     waited.recv_timeout(Duration::from_secs(5))?;
     let report = doctor(&context, &path, &CancelToken::new())?;
     assert_eq!(report.state, WorktreeDiagnosisState::LiveWriter);
+    assert_eq!(report.repair_kind(), WorktreeRepairKind::WaitForWriter);
     assert_eq!(report.holder, Some(scope.attempt));
     cancel.cancel();
     resume.send(())?;

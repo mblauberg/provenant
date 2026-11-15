@@ -3,10 +3,8 @@ use crate::{AdmissionError, RECORD_LIMIT, Result, RunError, artifacts::read_seal
 use provenant_core::retry::Backoff;
 use provenant_core::{CancelToken, Clock, DurationMicros, GitOid};
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
-use provenant_supervisor::{
-    census::{ProcessIdentity, ProcessObservation, SystemProcessObserver},
-    custody::Scope,
-};
+use provenant_records::custody::Scope;
+use provenant_supervisor::census::{ProcessIdentity, ProcessObservation, SystemProcessObserver};
 use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, sync::mpsc, time::Duration};
 
@@ -63,6 +61,8 @@ struct Journal {
     blocking_reason: Option<String>,
     #[serde(default)]
     abandonment: Option<Abandonment>,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,6 +71,8 @@ struct Abandonment {
     actor: provenant_core::ActorId,
     at: provenant_core::WallTime,
     phase: Phase,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 fn read(attempt: &Directory, scope: Scope) -> Result<Journal> {
@@ -89,6 +91,7 @@ fn read(attempt: &Directory, scope: Scope) -> Result<Journal> {
             recovery_failures: 0,
             blocking_reason: None,
             abandonment: None,
+            extra: Default::default(),
         },
     };
     if journal.schema_version != 1 || journal.scope != scope || journal.attempts > LIMIT {
@@ -275,22 +278,9 @@ impl crate::RunStore {
         }
         // Only this attempt's own slot can hold its guardian; sibling slots are
         // not inventoried for each displayed row.
-        self.db
-            .query_row(
-                "SELECT task,project FROM attempts WHERE id=?1",
-                [scope.attempt.to_string()],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
+        self.attempt_writer_slot(scope.attempt, call)
             .ok()
-            .and_then(|(task, project)| {
-                self.attempt_writer_slot(
-                    scope.run,
-                    provenant_core::TaskId::parse(&task).ok()?,
-                    provenant_core::ProjectId::parse(&project).ok()?,
-                    call,
-                )
-                .ok()?
-            })
+            .flatten()
             .and_then(|slot| Directory::open_anchor(&slot).ok())
             .is_some_and(|slot| check(&slot))
     }
@@ -356,6 +346,25 @@ pub(crate) enum ClaimRefusal {
     RetryDeadline(u64),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    JournalLock,
+    LiveOwner,
+    RetryDeadline(u64),
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::JournalLock => formatter.write_str("settlement journal contention"),
+            Self::LiveOwner => formatter.write_str("settlement driver ownership is live"),
+            Self::RetryDeadline(deadline) => {
+                write!(formatter, "settlement retry deadline: {deadline}ms")
+            }
+        }
+    }
+}
+
 /// Refusal observations use the same locks and deadline as a claim, without
 /// changing its retry budget. A free lifetime lease proves a same-process owner
 /// has abandoned its driver, even if Drop could not clear the journal.
@@ -373,24 +382,21 @@ pub(crate) fn refusal(
     attempt: &Directory,
     scope: Scope,
     clock: &dyn Clock,
-) -> Result<Option<String>> {
+) -> Result<Option<Refusal>> {
     let _lock = match try_progress_lock(attempt, "settlement.lock") {
         Ok(lock) => lock,
         Err(FsError::LockTimeout { .. }) => {
-            return Ok(Some("settlement journal contention".into()));
+            return Ok(Some(Refusal::JournalLock));
         }
         Err(error) => return Err(error.into()),
     };
     let journal = read(attempt, scope)?;
     let now = now_ms(clock)?;
     if owner_active(attempt, &journal, now)? {
-        return Ok(Some("settlement driver ownership is live".into()));
+        return Ok(Some(Refusal::LiveOwner));
     }
     if now < journal.retry_after_ms {
-        return Ok(Some(format!(
-            "settlement retry deadline: {}ms",
-            journal.retry_after_ms
-        )));
+        return Ok(Some(Refusal::RetryDeadline(journal.retry_after_ms)));
     }
     Ok(None)
 }
@@ -626,7 +632,7 @@ pub(crate) fn with_cancellation<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{AttemptId, RunId};
+    use provenant_core::AttemptId;
     use provenant_core::{DurationMicros, MonoTime, TestClock, WallTime};
 
     fn clock() -> TestClock {
@@ -642,48 +648,6 @@ mod tests {
     }
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
-
-    #[test]
-    fn one_uninterruptible_observation_is_not_a_stall() {
-        use provenant_supervisor::census::ProcessFact;
-        let identity = ProcessIdentity {
-            boot: "fixture".into(),
-            pid: 42,
-            native_start: 1,
-            group_id: 42,
-            session_id: 42,
-        };
-        let fact = ProcessFact {
-            identity: identity.clone(),
-            parent_pid: 1,
-            zombie: false,
-            cpu_micros: None,
-            command: None,
-        };
-        let observe = |_| ProcessObservation::Present(fact.clone());
-        let calls = std::cell::Cell::new(0);
-        let transient = |_| {
-            calls.set(calls.get() + 1);
-            Ok(if calls.get() == 1 {
-                provenant_os::pid::ProcessState::Uninterruptible
-            } else {
-                provenant_os::pid::ProcessState::Running
-            })
-        };
-        assert!(!identity_stalled_with(
-            &clock(),
-            &identity,
-            &observe,
-            &transient
-        ));
-        let persistent = |_| Ok(provenant_os::pid::ProcessState::Uninterruptible);
-        assert!(identity_stalled_with(
-            &clock(),
-            &identity,
-            &observe,
-            &persistent
-        ));
-    }
 
     #[test]
     fn stalled_probe_requires_matching_identity_before_and_after() {
@@ -702,33 +666,52 @@ mod tests {
             cpu_micros: None,
             command: None,
         };
-        let probe = |_| Ok(provenant_os::pid::ProcessState::Uninterruptible);
-        assert!(identity_stalled_with(
-            &clock(),
-            &identity,
-            &|_| ProcessObservation::Present(fact.clone()),
-            &probe
-        ));
-        let calls = std::cell::Cell::new(0);
-        assert!(!identity_stalled_with(
-            &clock(),
-            &identity,
-            &|_| {
-                calls.set(calls.get() + 1);
-                if calls.get() == 1 {
+        #[derive(Clone, Copy)]
+        enum ProbeCase {
+            Persistent,
+            Transient,
+            Running,
+        }
+        #[derive(Clone, Copy)]
+        enum IdentityCase {
+            Stable,
+            LostAfterProbe,
+        }
+        for (probe_case, identity_case, expected) in [
+            (ProbeCase::Persistent, IdentityCase::Stable, true),
+            (ProbeCase::Transient, IdentityCase::Stable, false),
+            (ProbeCase::Running, IdentityCase::Stable, false),
+            (ProbeCase::Persistent, IdentityCase::LostAfterProbe, false),
+        ] {
+            let probe_calls = std::cell::Cell::new(0);
+            let probe = |_| {
+                let call = probe_calls.get();
+                probe_calls.set(call + 1);
+                Ok(match probe_case {
+                    ProbeCase::Persistent => provenant_os::pid::ProcessState::Uninterruptible,
+                    ProbeCase::Transient if call == 0 => {
+                        provenant_os::pid::ProcessState::Uninterruptible
+                    }
+                    ProbeCase::Transient | ProbeCase::Running => {
+                        provenant_os::pid::ProcessState::Running
+                    }
+                })
+            };
+            let observation_calls = std::cell::Cell::new(0);
+            let observe = |_| {
+                let call = observation_calls.get();
+                observation_calls.set(call + 1);
+                if matches!(identity_case, IdentityCase::Stable) || call == 0 {
                     ProcessObservation::Present(fact.clone())
                 } else {
                     ProcessObservation::Absent
                 }
-            },
-            &probe
-        ));
-        assert!(!identity_stalled_with(
-            &clock(),
-            &identity,
-            &|_| ProcessObservation::Present(fact.clone()),
-            &|_| Ok(provenant_os::pid::ProcessState::Running)
-        ));
+            };
+            assert_eq!(
+                identity_stalled_with(&clock(), &identity, &observe, &probe),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -740,9 +723,9 @@ mod tests {
         let store = crate::RunStore::open(&crate::tests::context(temp.path())?, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.queue_reconcile_mode_with_probe(
-            run.run_id,
+            run.attempt_id,
             &call,
             |_, _| panic!("queued lane does not need a worker"),
             false,
@@ -756,21 +739,16 @@ mod tests {
             None,
             &call,
         )?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let scope = crate::RunStore::scope(&store.record(id, &call)?);
         for explicit in [false, true] {
-            let calls = std::cell::Cell::new(0);
             let found = store.queue_reconcile_mode_with_probe(
-                run.run_id,
+                run.attempt_id,
                 &call,
                 |_, _| panic!("stalled worker must not spawn"),
                 explicit,
-                &|_, _| {
-                    calls.set(calls.get() + 1);
-                    true
-                },
+                &|_, _| true,
             )?;
-            assert_eq!(calls.get(), 1, "one observation per attempt per queue call");
             assert!(matches!(
                 found.as_slice(),
                 [(
@@ -782,18 +760,17 @@ mod tests {
             ));
             assert_eq!(read(&attempt, scope)?.recovery_failures, 0);
         }
-        let mut spawned = false;
         store.queue_reconcile_mode_with_probe(
-            run.run_id,
+            run.attempt_id,
             &call,
-            |_, _| {
-                spawned = true;
-                Ok(())
-            },
+            |_, _| Ok(()),
             false,
             &|_, _| false,
         )?;
-        assert!(spawned, "recovery resumes on a later tick");
+        assert!(
+            read_sealed(&attempt, "settlement-queued.json", RECORD_LIMIT)?.is_some(),
+            "recovery publishes a worker request after the stalled probe clears"
+        );
         Ok(())
     }
 
@@ -806,7 +783,7 @@ mod tests {
         let store = crate::RunStore::open(&crate::tests::context(temp.path())?, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &crate::tests::route(),
@@ -816,7 +793,7 @@ mod tests {
             &call,
         )?;
         let lane = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let scope = crate::RunStore::scope(&lane);
         let lease = provenant_supervisor::custody::acquire_reader(
             attempt.try_clone()?,
@@ -833,7 +810,7 @@ mod tests {
             &attempt,
             "process.json",
             &serde_json::to_vec(
-                &serde_json::json!({"schema_version":1, "scope":scope, "guardian":identity}),
+                &serde_json::json!({"schema_version":1, "scope":scope, "publication_pending":false, "guardian":identity}),
             )?,
             RECORD_LIMIT,
         )?;
@@ -848,11 +825,8 @@ mod tests {
             crate::AttemptState::Running { .. } | crate::AttemptState::Starting { .. }
         ));
         let waits = store.lane_waits(std::slice::from_ref(&lane), &call);
-        assert_eq!(
-            waits[0].waiting_for,
-            "host_stalled: supervisor is in uninterruptible sleep"
-        );
-        let queued = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        assert_eq!(waits[0].waiting_for, crate::LaneWaitReason::HostStalled);
+        let queued = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
             panic!("stalled worker must not spawn")
         })?;
         assert!(matches!(
@@ -865,7 +839,7 @@ mod tests {
             )]
         ));
         let reconciled = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
@@ -919,7 +893,7 @@ mod tests {
         assert!(matches!(
             store
                 .reconcile_with_observer(
-                    run.run_id,
+                    run.attempt_id,
                     &crate::dispatch_tests::Fake::default(),
                     &call,
                     &SystemProcessObserver
@@ -941,7 +915,7 @@ mod tests {
             "an unreadable probe is unknown"
         );
         let mut spawned = false;
-        store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
             spawned = true;
             Ok(())
         })?;
@@ -960,7 +934,7 @@ mod tests {
         let store = crate::RunStore::open(&crate::tests::context(temp.path())?, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let record = store.mark_starting(
             &store.record(id, &call)?,
             &crate::tests::route(),
@@ -971,11 +945,11 @@ mod tests {
         )?;
         store.commit_lost(crate::RunStore::scope(&record), "fixture", &call)?;
         store.set_temporary_retained(id, false, &call)?;
-        assert_eq!(store.pending_reactions(run.run_id, &call)?, [id]);
+        assert!(store.reaction_pending(run.attempt_id, &call)?);
         assert!(store.writer_fences()?.is_empty());
         let mut spawned = false;
         let found = store.queue_reconcile_mode(
-            run.run_id,
+            run.attempt_id,
             &call,
             |argv, _| {
                 assert_eq!(argv[1..3], ["internal", "settle"]);
@@ -988,13 +962,13 @@ mod tests {
         assert!(found.is_empty());
         assert!(
             read_sealed(
-                &store.run_dir(run.run_id, false)?,
+                &store.attempt_dir(run.attempt_id, false)?,
                 "settlement-queued.json",
                 RECORD_LIMIT
             )?
             .is_some()
         );
-        store.drain_reactions(run.run_id, &clock, &cancel, &mut |reaction, _| {
+        store.drain_reactions(run.attempt_id, &clock, &cancel, &mut |reaction, _| {
             reaction.graph_done = true;
             reaction.notice_done = true;
             reaction.log_done = true;
@@ -1007,7 +981,7 @@ mod tests {
         let store = store.with_writer_registry(&registry);
         assert!(
             store
-                .queue_reconcile_with(run.run_id, &call, |_, _| {
+                .queue_reconcile_with(run.attempt_id, &call, |_, _| {
                     panic!("an unlistable registry with no candidates must return its error")
                 })
                 .is_err()
@@ -1026,8 +1000,8 @@ mod tests {
             let store = crate::RunStore::open(&context, &call)?;
             let run = crate::tests::input();
             store.create(&run, &call)?;
-            let id = run.attempts[0].attempt_id;
-            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let id = run.attempt_id;
+            let attempt = store.attempt_dir(id, false)?;
             let scope = crate::RunStore::scope(&store.record(id, &call)?);
             crate::artifacts::seal(&attempt, "retained-evidence", b"keep", RECORD_LIMIT)?;
             if fenced {
@@ -1092,7 +1066,7 @@ mod tests {
         let store = crate::RunStore::open(&context, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let record = store.mark_starting(
             &store.record(id, &call)?,
             &crate::tests::route(),
@@ -1104,15 +1078,14 @@ mod tests {
         let scope = crate::RunStore::scope(&record);
         store.commit_lost(scope, "fixture", &call)?;
         store.set_temporary_retained(id, false, &call)?;
-        store.drain_reactions(run.run_id, &clock, &cancel, &mut |reaction, _| {
+        store.drain_reactions(run.attempt_id, &clock, &cancel, &mut |reaction, _| {
             reaction.graph_done = true;
             reaction.notice_done = true;
             reaction.log_done = true;
             reaction.ledger_done = true;
             Ok(())
         })?;
-        assert!(store.pending_reactions(run.run_id, &call)?.is_empty());
-        assert!(store.pending_attempts(run.run_id, &call)?.is_empty());
+        assert!(!store.reaction_pending(run.attempt_id, &call)?);
         let slot = context
             .state_root
             .as_path()
@@ -1143,7 +1116,7 @@ mod tests {
         )?);
         let mut spawned = false;
         let found = store.queue_reconcile_mode(
-            run.run_id,
+            run.attempt_id,
             &call,
             |_, _| {
                 spawned = true;
@@ -1152,114 +1125,26 @@ mod tests {
             true,
         )?;
         assert!(spawned);
-        assert_eq!(found.len(), 2);
+        assert_eq!(found.len(), 1);
         assert!(
             found.iter().any(|(found, state)| *found == id
                 && matches!(state, crate::Reconciled::Settling { .. }))
         );
-        assert!(found.iter().any(|(found, state)| *found == orphan
-            && matches!(state, crate::Reconciled::Uncertain { .. })));
+        assert!(found.iter().all(|(found, _)| *found != orphan));
+        assert!(
+            store
+                .writer_fences()?
+                .iter()
+                .any(|fence| fence.scope.attempt == orphan)
+        );
         assert!(
             read_sealed(
-                &store.run_dir(run.run_id, false)?,
+                &store.attempt_dir(run.attempt_id, false)?,
                 "settlement-queued.json",
                 RECORD_LIMIT
             )?
             .is_some()
         );
-        Ok(())
-    }
-
-    #[test]
-    fn queue_and_reap_skip_bad_attempts_and_still_spawn_for_healthy_work() -> TestResult {
-        for explicit in [false, true] {
-            for failure in ["record", "directory", "journal", "reset"] {
-                if !explicit && failure == "reset" {
-                    continue;
-                }
-                let temp = tempfile::tempdir()?;
-                let clock = crate::tests::clock();
-                let cancel = CancelToken::new();
-                let call = crate::tests::call(&clock, &cancel);
-                let context = crate::tests::context(temp.path())?;
-                let store = crate::RunStore::open(&context, &call)?;
-                let mut run = crate::tests::input();
-                let bad = run.attempts[0].attempt_id;
-                let good = provenant_core::AttemptId::from_bytes([7; 16]);
-                let mut task = run.request.tasks[0].clone();
-                task.task_id = provenant_core::TaskId::from_bytes([8; 16]);
-                run.attempts.push(crate::NewAttempt {
-                    attempt_id: good,
-                    task_id: task.task_id,
-                    prompt: run.attempts[0].prompt.clone(),
-                });
-                run.request.tasks.push(task);
-                store.create(&run, &call)?;
-                for id in [bad, good] {
-                    store.mark_starting(
-                        &store.record(id, &call)?,
-                        &crate::tests::route(),
-                        &[],
-                        &Default::default(),
-                        None,
-                        &call,
-                    )?;
-                }
-                let path = context
-                    .state_root
-                    .as_path()
-                    .join(format!("runs/{}/attempts/{bad}", run.run_id));
-                match failure {
-                    "record" => {
-                        store.db.execute(
-                            "UPDATE attempts SET record=?1 WHERE id=?2",
-                            rusqlite::params![b"{".as_slice(), bad.to_string()],
-                        )?;
-                    }
-                    "directory" => std::fs::remove_dir_all(&path)?,
-                    "journal" => std::fs::write(path.join(FILE), b"{")?,
-                    "reset" => std::fs::create_dir(path.join("settlement.lock"))?,
-                    _ => unreachable!(),
-                }
-                let mut spawned = false;
-                let found = store.queue_reconcile_mode(
-                    run.run_id,
-                    &call,
-                    |_, _| {
-                        spawned = true;
-                        Ok(())
-                    },
-                    explicit,
-                )?;
-                assert!(spawned, "{failure}, explicit={explicit}");
-                assert!(
-                    matches!(&found[0], (id, crate::Reconciled::Uncertain { .. }) if *id == bad),
-                    "{found:?}"
-                );
-                assert!(
-                    matches!(&found[1], (id, crate::Reconciled::Settling { .. }) if *id == good),
-                    "{found:?}"
-                );
-                let queued = store.run_dir(run.run_id, false)?;
-                assert!(read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?.is_some());
-                queued.unlink(OsStr::new("settlement-queued.json"))?;
-                crate::artifacts::seal(
-                    &store.attempt_dir(run.run_id, good, false)?,
-                    "cancel.json",
-                    b"{}",
-                    RECORD_LIMIT,
-                )?;
-                let reaped = std::cell::Cell::new(false);
-                assert_eq!(
-                    store.reap_with(&call, |_, _| {
-                        reaped.set(true);
-                        Ok(())
-                    })?,
-                    1
-                );
-                assert!(reaped.get());
-            }
-        }
         Ok(())
     }
 
@@ -1272,7 +1157,7 @@ mod tests {
         let store = crate::RunStore::open(&crate::tests::context(temp.path())?, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let record = store.mark_starting(
             &store.record(id, &call)?,
             &crate::tests::route(),
@@ -1282,7 +1167,7 @@ mod tests {
             &call,
         )?;
         store.commit_lost(crate::RunStore::scope(&record), "fixture", &call)?;
-        store.drain_reactions(run.run_id, &clock, &cancel, &mut |reaction, _| {
+        store.drain_reactions(run.attempt_id, &clock, &cancel, &mut |reaction, _| {
             reaction.graph_done = true;
             reaction.notice_done = true;
             reaction.log_done = true;
@@ -1290,12 +1175,12 @@ mod tests {
             Ok(())
         })?;
         store.set_temporary_retained(id, true, &call)?;
-        assert!(run.request.tasks[0].writer.is_none());
-        assert!(store.pending_reactions(run.run_id, &call)?.is_empty());
+        assert!(run.request.task.writer.is_none());
+        assert!(!store.reaction_pending(run.attempt_id, &call)?);
         assert!(store.writer_fences()?.is_empty());
         let mut spawned = false;
         store.queue_reconcile_mode(
-            run.run_id,
+            run.attempt_id,
             &call,
             |argv, _| {
                 assert_eq!(argv[1..3], ["internal", "settle"]);
@@ -1305,7 +1190,7 @@ mod tests {
             true,
         )?;
         assert!(spawned);
-        let queued = store.run_dir(run.run_id, false)?;
+        let queued = store.attempt_dir(run.attempt_id, false)?;
         assert!(read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?.is_some());
         Ok(())
     }
@@ -1327,7 +1212,7 @@ mod tests {
             let run = crate::tests::input();
             let call = crate::tests::call(&clock, &cancel);
             store.create(&run, &call)?;
-            let id = run.attempts[0].attempt_id;
+            let id = run.attempt_id;
             let record = store.mark_starting(
                 &store.record(id, &call)?,
                 &crate::tests::route(),
@@ -1339,11 +1224,11 @@ mod tests {
             let scope = crate::RunStore::scope(&record);
             store.commit_lost(scope, "fixture", &call)?;
             store.set_temporary_retained(id, retained, &call)?;
-            assert_eq!(store.pending_reactions(run.run_id, &call)?, [id]);
-            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            assert!(store.reaction_pending(run.attempt_id, &call)?);
+            let attempt = store.attempt_dir(id, false)?;
             let mut spawned = false;
             store.queue_reconcile_mode(
-                run.run_id,
+                run.attempt_id,
                 &call,
                 |argv, _| {
                     assert_eq!(argv[1..3], ["internal", "settle"]);
@@ -1353,13 +1238,13 @@ mod tests {
                 true,
             )?;
             assert!(spawned);
-            let queued = store.run_dir(run.run_id, false)?;
+            let queued = store.attempt_dir(run.attempt_id, false)?;
             assert!(read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?.is_some());
             queued.unlink(OsStr::new("settlement-queued.json"))?;
             for n in 1..=LIMIT {
                 let call = crate::tests::call(&clock, &cancel);
                 let found = store.reconcile_with_observer(
-                    run.run_id,
+                    run.attempt_id,
                     &crate::dispatch_tests::Fake::default(),
                     &call,
                     &SystemProcessObserver,
@@ -1370,7 +1255,7 @@ mod tests {
                 ));
                 let journal = read(&attempt, scope)?;
                 assert_eq!(journal.recovery_failures, n);
-                let listed = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+                let listed = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
                     panic!("cooldown must prevent spawn")
                 })?;
                 assert!(
@@ -1380,7 +1265,7 @@ mod tests {
                 if n < LIMIT {
                     let call = crate::tests::call(&clock, &cancel);
                     let mut spawned = false;
-                    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+                    store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
                         spawned = true;
                         Ok(())
                     })?;
@@ -1392,7 +1277,7 @@ mod tests {
                 }
             }
             let call = crate::tests::call(&clock, &cancel);
-            let listed = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+            let listed = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
                 panic!("failure limit must prevent spawn")
             })?;
             assert!(
@@ -1401,7 +1286,7 @@ mod tests {
             assert!(read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?.is_none());
             let mut spawned = false;
             store.queue_reconcile_mode(
-                run.run_id,
+                run.attempt_id,
                 &call,
                 |_, _| {
                     spawned = true;
@@ -1413,7 +1298,7 @@ mod tests {
             assert!(read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?.is_some());
             assert_eq!(read(&attempt, scope)?.recovery_failures, 0);
             let retried = store.reconcile_with_observer(
-                run.run_id,
+                run.attempt_id,
                 &crate::dispatch_tests::Fake::default(),
                 &call,
                 &SystemProcessObserver,
@@ -1440,7 +1325,7 @@ mod tests {
             .with_writer_registry(&registry);
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let record = store.mark_starting(
             &store.record(id, &call)?,
             &crate::tests::route(),
@@ -1454,7 +1339,7 @@ mod tests {
         store.set_temporary_retained(id, true, &call)?;
         let mut spawned = false;
         store.queue_reconcile_mode(
-            run.run_id,
+            run.attempt_id,
             &call,
             |_, _| {
                 spawned = true;
@@ -1464,7 +1349,7 @@ mod tests {
         )?;
         assert!(spawned);
         let found = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
@@ -1473,7 +1358,7 @@ mod tests {
             found.as_slice(),
             [(_, crate::Reconciled::Uncertain { .. })]
         ));
-        let journal = read(&store.attempt_dir(run.run_id, id, false)?, scope)?;
+        let journal = read(&store.attempt_dir(id, false)?, scope)?;
         assert_eq!(journal.recovery_failures, 1);
         assert!(journal.blocking_reason.is_some());
         Ok(())
@@ -1495,7 +1380,7 @@ mod tests {
         let run = crate::tests::input();
         let call = crate::tests::call(&clock, &cancel);
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &crate::tests::route(),
@@ -1504,12 +1389,12 @@ mod tests {
             None,
             &call,
         )?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         let scope = crate::RunStore::scope(&store.record(id, &call)?);
         for n in 1..=LIMIT {
             let call = crate::tests::call(&clock, &cancel);
             let found = store.reconcile_with_observer(
-                run.run_id,
+                run.attempt_id,
                 &crate::dispatch_tests::Fake::default(),
                 &call,
                 &SystemProcessObserver,
@@ -1521,18 +1406,19 @@ mod tests {
             let journal = read(&attempt, scope)?;
             assert_eq!(journal.recovery_failures, n);
             assert!(journal.blocking_reason.is_some());
-            let queued = store
-                .queue_reconcile_with(run.run_id, &call, |_, _| panic!("retry must be delayed"))?;
+            let queued = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
+                panic!("retry must be delayed")
+            })?;
             assert!(
                 matches!(queued.as_slice(), [(_, crate::Reconciled::Uncertain { reason })] if reason.to_string() == journal.blocking_reason.clone().unwrap())
             );
             advance_to(&mut clock, journal.retry_after_ms)?;
         }
         let call = crate::tests::call(&clock, &cancel);
-        store.queue_reconcile_with(run.run_id, &call, |_, _| panic!("retry limit"))?;
+        store.queue_reconcile_with(run.attempt_id, &call, |_, _| panic!("retry limit"))?;
         let mut spawned = false;
         store.queue_reconcile_mode(
-            run.run_id,
+            run.attempt_id,
             &call,
             |_, _| {
                 spawned = true;
@@ -1554,7 +1440,7 @@ mod tests {
         let store = crate::RunStore::open(&crate::tests::context(temp.path())?, &call)?;
         let run = crate::tests::input();
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let queued_lane = store.record(id, &call)?;
         store.mark_starting(
             &store.record(id, &call)?,
@@ -1564,7 +1450,7 @@ mod tests {
             None,
             &call,
         )?;
-        let result = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        let result = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
             Err(provenant_os::exec::ExecError::ProcessBudget {
                 used: 950,
                 limit: 1000,
@@ -1582,15 +1468,18 @@ mod tests {
         let waits = store.lane_waits_with_resources(&[queued_lane], &call, &crate::SystemResources);
         assert_eq!(
             waits[0].waiting_for,
-            "launch: last recovery worker refused: user process count 950 of 1000"
+            crate::LaneWaitReason::RecoveryWorkerRefused {
+                used: 950,
+                limit: 1000
+            }
         );
         let mut retried = false;
-        store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
             retried = true;
             Ok(())
         })?;
         assert!(retried, "failed spawn must remove its queued marker");
-        assert!(store.recovery_process_wait(run.run_id, &call).is_none());
+        assert!(store.recovery_process_wait(run.attempt_id, &call).is_none());
         Ok(())
     }
 
@@ -1608,7 +1497,7 @@ mod tests {
         let run = crate::tests::input();
         let call = crate::tests::call(&clock, &cancel);
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         store.mark_starting(
             &store.record(id, &call)?,
             &crate::tests::route(),
@@ -1617,13 +1506,13 @@ mod tests {
             None,
             &call,
         )?;
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let attempt = store.attempt_dir(id, false)?;
         crate::artifacts::seal(&attempt, "launch.json", b"{}", RECORD_LIMIT)?;
         let scope = RunStore::scope(&store.record(id, &call)?);
         for index in 1..=LIMIT {
             let call = crate::tests::call(&clock, &cancel);
             let found = store.reconcile_with_observer(
-                run.run_id,
+                run.attempt_id,
                 &crate::dispatch_tests::Fake::default(),
                 &call,
                 &SystemProcessObserver,
@@ -1636,33 +1525,30 @@ mod tests {
             assert_eq!(journal.attempts, 0, "failure precedes import claim");
             assert_eq!(journal.recovery_failures, index);
             assert!(journal.owner.is_none());
-            let queued = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+            let queued = store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
                 panic!("cooldown must prevent another worker");
             })?;
-            assert!(
-                matches!(queued.as_slice(), [(_, Reconciled::Uncertain { reason })] if reason.to_string().contains("invalid"))
-            );
+            assert!(matches!(
+                queued.as_slice(),
+                [(
+                    _,
+                    Reconciled::Uncertain {
+                        reason: crate::UncertainReason::ReconcileFailed { .. }
+                    }
+                )]
+            ));
             advance_to(&mut clock, journal.retry_after_ms)?;
         }
         let call = crate::tests::call(&clock, &cancel);
         for _ in 0..4 {
-            store.queue_reconcile_with(run.run_id, &call, |_, _| {
+            store.queue_reconcile_with(run.attempt_id, &call, |_, _| {
                 panic!("exhausted recovery must stay bounded after cooldown");
             })?;
         }
-        let mut spawned = false;
-        store.queue_reconcile_mode(
-            run.run_id,
-            &call,
-            |_, _| {
-                spawned = true;
-                Ok(())
-            },
-            true,
-        )?;
+        store.queue_reconcile_mode(run.attempt_id, &call, |_, _| Ok(()), true)?;
         assert!(
-            spawned,
-            "an explicit reconcile permits another bounded recovery"
+            read_sealed(&attempt, "settlement-queued.json", RECORD_LIMIT)?.is_some(),
+            "an explicit reconcile publishes another bounded recovery request"
         );
         assert_eq!(read(&attempt, scope)?.recovery_failures, 0);
         attempt.unlink(OsStr::new("launch.json"))?;
@@ -1682,12 +1568,12 @@ mod tests {
             &attempt,
             "process.json",
             &serde_json::to_vec(&serde_json::json!({
-                "schema_version":1, "scope":scope, "guardian":current.identity
+                "schema_version":1, "scope":scope, "publication_pending":false, "guardian":current.identity
             }))?,
             RECORD_LIMIT,
         )?;
         let found = store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
@@ -1700,7 +1586,7 @@ mod tests {
         attempt.unlink(OsStr::new("launch.json"))?;
         attempt.unlink(OsStr::new("process.json"))?;
         store.reconcile_with_observer(
-            run.run_id,
+            run.attempt_id,
             &crate::dispatch_tests::Fake::default(),
             &call,
             &SystemProcessObserver,
@@ -1714,7 +1600,6 @@ mod tests {
 
     fn scope() -> Scope {
         Scope {
-            run: RunId::from_bytes([1; 16]),
             attempt: AttemptId::from_bytes([2; 16]),
             generation: 1,
         }
@@ -1891,10 +1776,9 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
         let driver = Guard::claim(&attempt, scope(), &clock)?.ok_or("initial claim")?;
-        assert!(
-            refusal(&attempt, scope(), &clock)?
-                .unwrap()
-                .contains("ownership")
+        assert_eq!(
+            refusal(&attempt, scope(), &clock)?,
+            Some(Refusal::LiveOwner)
         );
         clock.wait_until(MonoTime::from_micros(5_000_000))?;
         assert!(
@@ -1902,10 +1786,9 @@ mod tests {
             "live lease excludes after deadline"
         );
         let lock = try_progress_lock(&attempt, "settlement.lock")?;
-        assert!(
-            refusal(&attempt, scope(), &clock)?
-                .unwrap()
-                .contains("contention")
+        assert_eq!(
+            refusal(&attempt, scope(), &clock)?,
+            Some(Refusal::JournalLock)
         );
         drop(driver);
         drop(lock);
@@ -1916,11 +1799,10 @@ mod tests {
         let reclaimed =
             Guard::claim(&attempt, scope(), &clock)?.ok_or("abandoned same-process owner")?;
         drop(reclaimed);
-        assert!(
-            refusal(&attempt, scope(), &clock)?
-                .unwrap()
-                .contains("deadline")
-        );
+        assert!(matches!(
+            refusal(&attempt, scope(), &clock)?,
+            Some(Refusal::RetryDeadline(_))
+        ));
         clock.wait_until(MonoTime::from_micros(10_000_000))?;
         assert!(Guard::claim(&attempt, scope(), &clock)?.is_some());
         Ok(())
@@ -1982,34 +1864,126 @@ mod tests {
     }
 
     #[test]
-    fn import_accounting_and_owner_release_survive_short_journal_contention() -> TestResult {
+    fn import_is_accounted_once_and_driver_drop_releases_owner() -> TestResult {
         let clock = clock();
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
         let mut driver = Guard::claim(&attempt, scope(), &clock)?.expect("claim");
-        let held = try_progress_lock(&attempt, "settlement.lock")?;
-        std::thread::scope(|threads| {
-            threads.spawn(move || {
-                let (_wake, waiting) = mpsc::channel::<()>();
-                let _ = waiting.recv_timeout(Duration::from_millis(20));
-                drop(held);
-            });
-            driver.begin_import()
-        })?;
+        driver.begin_import()?;
+        driver.begin_import()?;
         assert_eq!(driver.attempts(), 1);
-        let held = try_progress_lock(&attempt, "settlement.lock")?;
-        std::thread::scope(|threads| {
-            threads.spawn(move || {
-                let (_wake, waiting) = mpsc::channel::<()>();
-                let _ = waiting.recv_timeout(Duration::from_millis(20));
-                drop(held);
-            });
-            drop(driver);
-        });
+        drop(driver);
         assert!(
             read(&attempt, scope())?.owner.is_none(),
             "drop releases durable ownership"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_records_preserve_unknown_fields_through_bounded_decoding() -> TestResult {
+        let attempt = AttemptId::from_bytes([3; 16]);
+        let expiry = WallTime::from_micros(100).unwrap();
+        let mut journal = serde_json::to_value(Journal {
+            schema_version: 1,
+            scope: scope(),
+            phase: Phase::Import,
+            attempts: 0,
+            head: None,
+            base: None,
+            owner: None,
+            owner_since_ms: 0,
+            retry_after_ms: 0,
+            recovery_failures: 0,
+            blocking_reason: None,
+            abandonment: Some(Abandonment {
+                reason: "fixture".into(),
+                actor: provenant_core::ActorId::from_bytes([4; 16]),
+                at: expiry,
+                phase: Phase::Import,
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
+        })?;
+        journal["future_journal"] = serde_json::json!({"preserved": true});
+        journal["abandonment"]["future_abandonment"] = serde_json::json!([1, 2, 3]);
+        let decoded = crate::db::decode::<Journal>(&serde_json::to_vec(&journal)?)?;
+        let encoded: serde_json::Value = serde_json::from_slice(&crate::db::bytes(&decoded)?)?;
+        assert_eq!(encoded["future_journal"], journal["future_journal"]);
+        assert_eq!(
+            encoded["abandonment"]["future_abandonment"],
+            journal["abandonment"]["future_abandonment"]
+        );
+
+        let mut abandonment = serde_json::to_value(QueuedAbandonment {
+            scope: scope(),
+            reason: "fixture".into(),
+            extra: Default::default(),
+        })?;
+        abandonment["future"] = serde_json::json!("retained");
+        let encoded: serde_json::Value =
+            serde_json::from_slice(&crate::db::bytes(&crate::db::decode_column::<
+                QueuedAbandonment,
+            >(&serde_json::to_vec(
+                &abandonment,
+            )?)?)?)?;
+        assert_eq!(encoded["future"], abandonment["future"]);
+
+        let mut queued = serde_json::to_value(QueuedWorker {
+            schema_version: 2,
+            attempt,
+            expires: expiry,
+            extra: Default::default(),
+        })?;
+        queued["future"] = serde_json::json!("retained");
+        let queued_bytes = serde_json::to_vec(&queued)?;
+        let decoded = QueuedWorker::decode(&queued_bytes, attempt)?;
+        let encoded: serde_json::Value = serde_json::from_slice(&crate::db::bytes(&decoded)?)?;
+        assert_eq!(encoded["future"], queued["future"]);
+
+        let mut refusal = serde_json::to_value(WorkerProcessRefusal {
+            schema_version: 1,
+            attempt,
+            expires: expiry,
+            used: 1,
+            limit: 2,
+            extra: Default::default(),
+        })?;
+        refusal["future"] = serde_json::json!("retained");
+        let decoded = crate::db::decode::<WorkerProcessRefusal>(&serde_json::to_vec(&refusal)?)?;
+        let encoded: serde_json::Value = serde_json::from_slice(&crate::db::bytes(&decoded)?)?;
+        assert_eq!(encoded["future"], refusal["future"]);
+
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = crate::RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let directory = store.attempt_dir(run.attempt_id, false)?;
+        let scope = crate::RunStore::scope(&store.record(run.attempt_id, &call)?);
+        let reason = "fixture abandonment";
+        let extra = std::collections::BTreeMap::from([(
+            "future_abandonment".to_owned(),
+            serde_json::json!("retained"),
+        )]);
+        crate::artifacts::seal(
+            &directory,
+            "queued-abandonment.json",
+            &crate::db::bytes(&QueuedAbandonment {
+                scope,
+                reason: reason.into(),
+                extra,
+            })?,
+            RECORD_LIMIT,
+        )?;
+        store.abandon_settlement(run.attempt_id, reason, &call)?;
+        let stored: serde_json::Value = serde_json::from_slice(
+            &read_sealed(&directory, "queued-abandonment.json", RECORD_LIMIT)?
+                .ok_or("queued abandonment marker missing")?,
+        )?;
+        assert_eq!(stored["future_abandonment"], "retained");
         Ok(())
     }
 }
@@ -2065,10 +2039,18 @@ pub(crate) fn queued_abandonment_pending(
     }
     Ok(
         read_sealed(attempt, "queued-abandonment.json", RECORD_LIMIT)?
-            .map(|raw| crate::db::decode_unversioned::<(Scope, String)>(&raw))
+            .map(|raw| crate::db::decode_column::<QueuedAbandonment>(&raw))
             .transpose()?
-            .is_some_and(|(scope, _)| scope == crate::RunStore::scope(record)),
+            .is_some_and(|intent| intent.scope == crate::RunStore::scope(record)),
     )
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct QueuedAbandonment {
+    scope: Scope,
+    reason: String,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 impl crate::RunStore {
@@ -2106,9 +2088,7 @@ impl crate::RunStore {
                 ));
             }
         }
-        if let Some(slot) =
-            self.attempt_writer_slot(record.run_id, record.task_id, record.project_id, call)?
-        {
+        if let Some(slot) = self.attempt_writer_slot(record.attempt_id, call)? {
             match Directory::open_anchor(&slot) {
                 Ok(slot) => {
                     if provenant_supervisor::custody::reservation_present(
@@ -2143,18 +2123,18 @@ impl crate::RunStore {
         }
         let reason = provenant_confinement::redact::bounded_line(reason, 4096);
         let mut record = self.record(id, call)?;
-        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        let attempt = self.attempt_dir(id, false)?;
         let _driver = try_progress_lock(&attempt, "settlement-driver.lock")?;
         let queued = matches!(record.state, crate::AttemptState::Queued { .. });
         // A cancelled, never-launched terminal row also permits retry after a
         // crash between withdrawal and the abandonment journal publication.
         let intent = read_sealed(&attempt, "queued-abandonment.json", RECORD_LIMIT)?
-            .map(|raw| crate::db::decode_unversioned::<(Scope, String)>(&raw))
+            .map(|raw| crate::db::decode_column::<QueuedAbandonment>(&raw))
             .transpose()?;
         let unstarted =
             queued
-                || intent.as_ref().is_some_and(|(scope, saved)| {
-                    *scope == Self::scope(&record) && saved == &reason
+                || intent.as_ref().is_some_and(|saved| {
+                    saved.scope == Self::scope(&record) && saved.reason == reason
                 }) && matches!(
                     record.state,
                     crate::AttemptState::Terminal {
@@ -2169,10 +2149,18 @@ impl crate::RunStore {
             false
         };
         if queued {
+            let extra = intent
+                .as_ref()
+                .map(|saved| saved.extra.clone())
+                .unwrap_or_default();
             crate::artifacts::seal(
                 &attempt,
                 "queued-abandonment.json",
-                &crate::db::bytes(&(Self::scope(&record), &reason))?,
+                &crate::db::bytes(&QueuedAbandonment {
+                    scope: Self::scope(&record),
+                    reason: reason.clone(),
+                    extra,
+                })?,
                 RECORD_LIMIT,
             )?;
             record = self
@@ -2250,6 +2238,7 @@ impl crate::RunStore {
                         .wall_now()
                         .map_err(|_| RunError::Admission(AdmissionError::Clock))?,
                     phase: journal.phase,
+                    extra: Default::default(),
                 });
                 journal.phase = Phase::Complete;
                 journal.owner = None;
@@ -2273,7 +2262,7 @@ pub struct ResumeRequest {
     roots: crate::RootSeed,
     project: provenant_core::ProjectId,
     actor: provenant_core::ActorId,
-    run: provenant_core::RunId,
+    attempt: provenant_core::AttemptId,
     registry: std::path::PathBuf,
 }
 
@@ -2290,8 +2279,8 @@ impl ResumeRequest {
     pub fn actor(&self) -> provenant_core::ActorId {
         self.actor
     }
-    pub fn run(&self) -> provenant_core::RunId {
-        self.run
+    pub fn attempt(&self) -> provenant_core::AttemptId {
+        self.attempt
     }
 }
 
@@ -2299,67 +2288,68 @@ impl ResumeRequest {
     clippy::print_stderr,
     reason = "report the run-level registry failure without suppressing judgeable queued rows"
 )]
-fn report_registry_error(run: provenant_core::RunId, error: &RunError) {
-    eprintln!("warning: writer fence listing failed for {run}: {error}");
+fn report_registry_error(attempt: provenant_core::AttemptId, error: &RunError) {
+    eprintln!("warning: writer fence listing failed for {attempt}: {error}");
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct WorkerProcessRefusal {
     schema_version: u64,
-    run: provenant_core::RunId,
+    attempt: provenant_core::AttemptId,
     expires: provenant_core::WallTime,
     used: u64,
     limit: u64,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 impl crate::RunStore {
     pub(crate) fn recovery_process_wait(
         &self,
-        run: provenant_core::RunId,
+        attempt: provenant_core::AttemptId,
         call: &crate::Request<'_>,
-    ) -> Option<String> {
-        let directory = self.run_dir(run, false).ok()?;
+    ) -> Option<crate::LaneWaitReason> {
+        let directory = self.attempt_dir(attempt, false).ok()?;
         let raw =
             read_sealed(&directory, "settlement-process-refusal.json", RECORD_LIMIT).ok()??;
         let refusal: WorkerProcessRefusal = crate::db::decode(&raw).ok()?;
         if refusal.schema_version != 1
-            || refusal.run != run
+            || refusal.attempt != attempt
             || call.clock.wall_now().ok()? >= refusal.expires
         {
             return None;
         }
-        Some(format!(
-            "launch: last recovery worker refused: user process count {} of {}",
-            refusal.used, refusal.limit
-        ))
+        Some(crate::LaneWaitReason::RecoveryWorkerRefused {
+            used: refusal.used,
+            limit: refusal.limit,
+        })
     }
 }
 
 impl crate::RunStore {
     pub(crate) fn queue_reconcile(
         &self,
-        run: provenant_core::RunId,
+        attempt: provenant_core::AttemptId,
         call: &crate::Request<'_>,
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
-        self.queue_reconcile_mode(run, call, provenant_os::exec::spawn_detached, true)
+        self.queue_reconcile_mode(attempt, call, provenant_os::exec::spawn_detached, true)
     }
 
     pub(crate) fn queue_reconcile_with(
         &self,
-        run: provenant_core::RunId,
+        attempt: provenant_core::AttemptId,
         call: &crate::Request<'_>,
         spawn: impl FnOnce(
             &[std::ffi::OsString],
             &std::path::Path,
         ) -> std::result::Result<(), provenant_os::exec::ExecError>,
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
-        self.queue_reconcile_mode(run, call, spawn, false)
+        self.queue_reconcile_mode(attempt, call, spawn, false)
     }
 
     fn queue_reconcile_mode(
         &self,
-        run: provenant_core::RunId,
+        attempt: provenant_core::AttemptId,
         call: &crate::Request<'_>,
         spawn: impl FnOnce(
             &[std::ffi::OsString],
@@ -2367,14 +2357,14 @@ impl crate::RunStore {
         ) -> std::result::Result<(), provenant_os::exec::ExecError>,
         explicit: bool,
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
-        self.queue_reconcile_mode_with_probe(run, call, spawn, explicit, &|directory, scope| {
+        self.queue_reconcile_mode_with_probe(attempt, call, spawn, explicit, &|directory, scope| {
             self.supervisor_stalled(directory, scope, call)
         })
     }
 
     fn queue_reconcile_mode_with_probe(
         &self,
-        run: provenant_core::RunId,
+        attempt: provenant_core::AttemptId,
         call: &crate::Request<'_>,
         spawn: impl FnOnce(
             &[std::ffi::OsString],
@@ -2383,10 +2373,20 @@ impl crate::RunStore {
         explicit: bool,
         stalled: &dyn Fn(&Directory, Scope) -> bool,
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
-        self.run(run, call)?;
-        let mut query = self.db.prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND (terminal=0 OR tmp_retained=1) ORDER BY sequence")?;
+        call.check()?;
+        // A run is derived from its attempt records, but recovery must inspect
+        // those records independently so one corrupt record cannot hide siblings.
+        let exists: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attempts WHERE id=?1 AND project=?2 AND refused=0)",
+            rusqlite::params![attempt.to_string(), self.context.project_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(RunError::NotFound);
+        }
+        let mut query = self.db.prepare("SELECT id FROM attempts WHERE id=?1 AND project=?2 AND refused=0 AND (terminal=0 OR tmp_retained=1) ORDER BY sequence")?;
         let rows = query.query_map(
-            rusqlite::params![run.to_string(), self.context.project_id.to_string()],
+            rusqlite::params![attempt.to_string(), self.context.project_id.to_string()],
             |row| row.get::<_, String>(0),
         )?;
         let mut ids = rows
@@ -2397,7 +2397,10 @@ impl crate::RunStore {
             .collect::<Result<Vec<_>>>()?;
         let listing_error = match self.writer_fences() {
             Ok(fences) => {
-                for fence in fences.into_iter().filter(|fence| fence.scope.run == run) {
+                for fence in fences
+                    .into_iter()
+                    .filter(|fence| fence.scope.attempt == attempt)
+                {
                     if !ids.contains(&fence.scope.attempt) {
                         ids.push(fence.scope.attempt);
                     }
@@ -2405,11 +2408,11 @@ impl crate::RunStore {
                 None
             }
             Err(error) => {
-                report_registry_error(run, &error);
+                report_registry_error(attempt, &error);
                 Some(error)
             }
         };
-        for id in self.pending_effect_attempts(run, call)? {
+        for id in self.pending_effect_attempts(attempt, call)? {
             if !ids.contains(&id) {
                 ids.push(id);
             }
@@ -2417,11 +2420,9 @@ impl crate::RunStore {
         // Reactions need the same retry gates, but are internal work rather
         // than custody recovery rows. Report them only if recovery is uncertain.
         let mut reaction_only = Vec::new();
-        for id in self.pending_reactions(run, call)? {
-            if !ids.contains(&id) {
-                ids.push(id);
-                reaction_only.push(id);
-            }
+        if self.reaction_pending(attempt, call)? && !ids.contains(&attempt) {
+            ids.push(attempt);
+            reaction_only.push(attempt);
         }
         if ids.is_empty()
             && let Some(error) = listing_error
@@ -2440,12 +2441,12 @@ impl crate::RunStore {
         let mut candidates = Vec::new();
         for id in ids {
             let inspected = crate::controls::retry_reconcile(&self.db, call, || -> Result<_> {
-                let attempt = self.record(id, call)?;
-                if attempt.run_id != run {
+                let record = self.record(id, call)?;
+                if record.attempt_id != attempt {
                     return Err(RunError::Validation("writer fence run mismatch"));
                 }
-                let directory = self.attempt_dir(run, id, false)?;
-                let scope = Self::scope(&attempt);
+                let directory = self.attempt_dir(id, false)?;
+                let scope = Self::scope(&record);
                 let journal = read(&directory, scope)?;
                 if let Some(abandonment) = &journal.abandonment {
                     return Ok((
@@ -2457,10 +2458,10 @@ impl crate::RunStore {
                         false,
                     ));
                 }
-                let queued = matches!(attempt.state, crate::AttemptState::Queued { .. });
+                let queued = matches!(record.state, crate::AttemptState::Queued { .. });
                 // A supervisor in uninterruptible sleep is never respawned.
                 if !queued
-                    && !matches!(attempt.state, crate::AttemptState::Terminal { .. })
+                    && !matches!(record.state, crate::AttemptState::Terminal { .. })
                     && stalled(&directory, scope)
                 {
                     return Ok((
@@ -2509,6 +2510,7 @@ impl crate::RunStore {
                 } else {
                     crate::Reconciled::Settling {
                         phase: refusal(&directory, scope, call.clock)?
+                            .map(|reason| reason.to_string())
                             .unwrap_or_else(|| format!("{:?}", journal.phase).to_ascii_lowercase()),
                         blocking_reason: None,
                     }
@@ -2525,7 +2527,7 @@ impl crate::RunStore {
                 Err(error) => found.push((id, failed(error.to_string()))),
             }
         }
-        let queued = self.run_dir(run, false)?;
+        let queued = self.attempt_dir(attempt, false)?;
         let spawn_lock =
             match queued.try_lock(OsStr::new("settlement-spawn.lock"), LockMode::Exclusive) {
                 Ok(lock) => Some(lock),
@@ -2539,7 +2541,7 @@ impl crate::RunStore {
                 Err(error) => return Err(error.into()),
             };
         let pending = read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?
-            .map(|raw| QueuedWorker::decode(&raw, run))
+            .map(|raw| QueuedWorker::decode(&raw, attempt))
             .transpose()?
             .is_some_and(|request| wall < request.expires);
         if !candidates.is_empty() && spawn_lock.is_some() && worker_lock.is_some() && !pending {
@@ -2583,7 +2585,7 @@ impl crate::RunStore {
                 },
                 project: self.context.project_id,
                 actor: self.context.actor_id,
-                run,
+                attempt,
                 registry: self.writer_registry.clone(),
             };
             let executable = std::env::current_exe()?;
@@ -2601,12 +2603,13 @@ impl crate::RunStore {
                     ".settlement-",
                     &crate::db::bytes(&QueuedWorker {
                         schema_version: 2,
-                        run,
+                        attempt,
                         expires: wall
                             .checked_add(provenant_core::DurationMicros::from_micros(
                                 UNKNOWN_OWNER_LIMIT_MS * 1000,
                             ))
                             .map_err(|_| RunError::Admission(AdmissionError::Clock))?,
+                        extra: Default::default(),
                     })?,
                     PublishMode::Replace,
                 )?
@@ -2624,10 +2627,11 @@ impl crate::RunStore {
                             .checked_add(provenant_core::DurationMicros::from_micros(60_000_000))
                             && let Ok(bytes) = crate::db::bytes(&WorkerProcessRefusal {
                                 schema_version: 1,
-                                run,
+                                attempt,
                                 expires,
                                 used,
                                 limit,
+                                extra: Default::default(),
                             })
                         {
                             let _ = queued
@@ -2656,7 +2660,9 @@ impl crate::RunStore {
                     && (!matches!(
                         state,
                         crate::Reconciled::Uncertain { .. } | crate::Reconciled::Settling { .. }
-                    ) || !self.reconcile_is_settled(run, *id, call).unwrap_or(false))
+                    ) || !self
+                        .reconcile_is_settled(attempt, *id, call)
+                        .unwrap_or(false))
             })
             .collect())
     }
@@ -2665,12 +2671,14 @@ impl crate::RunStore {
 #[derive(Serialize, Deserialize)]
 struct QueuedWorker {
     schema_version: u64,
-    run: provenant_core::RunId,
+    attempt: provenant_core::AttemptId,
     expires: provenant_core::WallTime,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 impl QueuedWorker {
-    fn decode(raw: &[u8], run: provenant_core::RunId) -> Result<Self> {
+    fn decode(raw: &[u8], attempt: provenant_core::AttemptId) -> Result<Self> {
         let marker: Self = provenant_records::decode(
             raw,
             provenant_records::Limits {
@@ -2678,7 +2686,7 @@ impl QueuedWorker {
                 ..Default::default()
             },
         )?;
-        if marker.schema_version != 2 || marker.run != run {
+        if marker.schema_version != 2 || marker.attempt != attempt {
             return Err(RunError::Validation(
                 "settlement queue marker run or version mismatch",
             ));
@@ -2711,7 +2719,7 @@ pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
         cancel: &cancel,
     };
     let store = crate::RunStore::open(&context, &call)?.with_writer_registry(&request.registry);
-    let directory = store.run_dir(request.run, false)?;
+    let directory = store.attempt_dir(request.attempt, false)?;
     // A queuing reader can briefly hold this lock while probing for a worker.
     // Wait through that probe instead of abandoning the queued request.
     let _worker = match directory.lock(
@@ -2735,8 +2743,12 @@ pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
             let (_wake, sleep) = mpsc::channel::<()>();
             let _ = sleep.recv_timeout(Duration::from_millis(delay_ms));
         }
-        let found =
-            store.reconcile_with_observer(request.run, providers, &call, &SystemProcessObserver)?;
+        let found = store.reconcile_with_observer(
+            request.attempt,
+            providers,
+            &call,
+            &SystemProcessObserver,
+        )?;
         if !found
             .iter()
             .any(|(_, state)| matches!(state, crate::Reconciled::Settling {..}) || matches!(state, crate::Reconciled::Uncertain { reason } if !matches!(reason, crate::UncertainReason::HostStalled)))

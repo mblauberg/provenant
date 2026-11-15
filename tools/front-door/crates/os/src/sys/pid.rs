@@ -2,6 +2,8 @@ use crate::pid::{CwdObservation, PidError, ProcessSignal, ProcessState};
 use std::io;
 
 const MAX_EINTR_RETRIES: u64 = 8;
+const OCCUPANCY_ATTEMPTS: usize = 4;
+const OCCUPANCY_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(80);
 
 /// Bounded executable and descriptor occupancy. Two snapshots must agree on
 /// every object identity before the result is complete; any failure keeps the
@@ -114,11 +116,9 @@ fn occupancy_with_retries_and_backoff(
     mut backoff: impl FnMut(std::time::Duration),
 ) -> crate::pid::OccupancyObservation {
     use crate::pid::OccupancyGap;
-    const ATTEMPTS: usize = 4;
-    const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(80);
     let mut paths: Vec<std::path::PathBuf> = Vec::new();
     let mut last = crate::pid::OccupancyObservation::default();
-    for attempt_number in 0..ATTEMPTS {
+    for attempt_number in 0..OCCUPANCY_ATTEMPTS {
         last = attempt();
         for path in &last.paths {
             if !paths.contains(path) {
@@ -133,9 +133,9 @@ fn occupancy_with_retries_and_backoff(
         ) {
             break;
         }
-        if attempt_number + 1 < ATTEMPTS {
+        if attempt_number + 1 < OCCUPANCY_ATTEMPTS {
             // Three pauses cap the added time per churning process at 240 ms.
-            backoff(RETRY_BACKOFF);
+            backoff(OCCUPANCY_RETRY_BACKOFF);
         }
     }
     last.paths = paths;
@@ -620,70 +620,65 @@ fn startup_churn_is_retried_but_a_table_that_never_settles_stays_incomplete() {
         complete: gap.is_none(),
         gap,
     };
-    // Churn that settles on the second attempt is complete and keeps the
-    // paths seen on the churned attempt, after one bounded backoff.
-    let mut calls = 0;
-    let mut backoffs = Vec::new();
-    let settled = occupancy_with_retries_and_backoff(
-        || {
-            calls += 1;
-            if calls == 1 {
-                observation(&["/a", "/transient"], Some(OccupancyGap::Churn))
-            } else {
-                observation(&["/a"], None)
-            }
-        },
-        |delay| backoffs.push(delay),
-    );
-    assert_eq!(calls, 2);
-    assert_eq!(backoffs.len(), 1);
-    assert!(settled.complete && settled.gap.is_none());
-    assert_eq!(settled.paths.len(), 2);
-    // Never settling is bounded and stays Churn.
-    let mut calls = 0;
-    let mut backoffs = Vec::new();
-    let churning = occupancy_with_retries_and_backoff(
-        || {
-            calls += 1;
-            observation(&["/a"], Some(OccupancyGap::Churn))
-        },
-        |delay| backoffs.push(delay),
-    );
-    assert!((2..=4).contains(&calls));
-    assert_eq!(backoffs.len(), calls - 1);
-    assert!(backoffs.iter().sum::<std::time::Duration>() <= std::time::Duration::from_millis(250));
-    assert!(!churning.complete);
-    assert_eq!(churning.gap, Some(OccupancyGap::Churn));
-    // Any other gap is reported at once, without retries.
-    let mut calls = 0;
-    let mut backoffs = Vec::new();
-    let denied = occupancy_with_retries_and_backoff(
-        || {
-            calls += 1;
-            observation(&[], Some(OccupancyGap::DescriptorsDenied))
-        },
-        |delay| backoffs.push(delay),
-    );
-    assert_eq!(calls, 1);
-    assert!(backoffs.is_empty());
-    assert_eq!(denied.gap, Some(OccupancyGap::DescriptorsDenied));
-
-    // An unreadable table that becomes readable after a pause settles.
-    let mut calls = 0;
-    let mut backoffs = Vec::new();
-    let recovered = occupancy_with_retries_and_backoff(
-        || {
-            calls += 1;
-            if calls == 1 {
-                observation(&[], Some(OccupancyGap::DescriptorsUnavailable))
-            } else {
-                observation(&["/a"], None)
-            }
-        },
-        |delay| backoffs.push(delay),
-    );
-    assert_eq!(backoffs.len(), 1);
-    assert_eq!(recovered.gap, None);
+    #[derive(Clone, Copy)]
+    enum Scenario {
+        SettlesAfterChurn,
+        NeverSettles,
+        ImmediateDenial,
+        RecoversAfterUnavailable,
+    }
+    let rows = [
+        (Scenario::SettlesAfterChurn, true, None, 2, 2),
+        (
+            Scenario::NeverSettles,
+            false,
+            Some(OccupancyGap::Churn),
+            OCCUPANCY_ATTEMPTS,
+            1,
+        ),
+        (
+            Scenario::ImmediateDenial,
+            false,
+            Some(OccupancyGap::DescriptorsDenied),
+            1,
+            0,
+        ),
+        (Scenario::RecoversAfterUnavailable, true, None, 2, 1),
+    ];
+    for (scenario, complete, gap, expected_calls, retained_paths) in rows {
+        let mut calls = 0;
+        let mut backoffs = Vec::new();
+        let result = occupancy_with_retries_and_backoff(
+            || {
+                calls += 1;
+                match scenario {
+                    Scenario::SettlesAfterChurn if calls == 1 => {
+                        observation(&["/a", "/transient"], Some(OccupancyGap::Churn))
+                    }
+                    Scenario::NeverSettles => observation(&["/a"], Some(OccupancyGap::Churn)),
+                    Scenario::ImmediateDenial => {
+                        observation(&[], Some(OccupancyGap::DescriptorsDenied))
+                    }
+                    Scenario::RecoversAfterUnavailable if calls == 1 => {
+                        observation(&[], Some(OccupancyGap::DescriptorsUnavailable))
+                    }
+                    _ => observation(&["/a"], None),
+                }
+            },
+            |delay| backoffs.push(delay),
+        );
+        assert_eq!(calls, expected_calls);
+        // Every retry, and only a retry, is preceded by one backoff.
+        assert_eq!(backoffs.len(), calls - 1);
+        assert!(
+            backoffs
+                .iter()
+                .all(|delay| *delay == OCCUPANCY_RETRY_BACKOFF)
+        );
+        assert_eq!(result.complete, complete);
+        assert_eq!(result.gap, gap);
+        assert_eq!(result.paths.len(), retained_paths);
+    }
 }
 
 #[cfg(test)]
@@ -709,27 +704,29 @@ fn budget_expiry_stops_retries_and_retains_positive_paths() {
 
 #[cfg(test)]
 #[test]
-fn a_pidpath_enoent_is_a_deleted_executable_but_other_failures_are_gaps() {
-    assert_eq!(darwin_pidpath_gap(Some(libc::ENOENT)), None);
-    for errno in [Some(libc::EPERM), Some(libc::ESRCH), None] {
+fn deleted_executables_are_not_gaps_but_other_failures_are() {
+    for errno in [
+        Some(libc::ENOENT),
+        Some(libc::EPERM),
+        Some(libc::ESRCH),
+        None,
+    ] {
         assert_eq!(
             darwin_pidpath_gap(errno),
+            (errno != Some(libc::ENOENT))
+                .then_some(crate::pid::OccupancyGap::ExecutableUnavailable)
+        );
+    }
+    let gone: io::Result<(u64, u64)> = Err(io::Error::from_raw_os_error(libc::ENOENT));
+    assert_eq!(darwin_image_gap(&gone), None);
+    assert_eq!(darwin_image_gap(&Ok((1, 2))), None);
+    for errno in [libc::EPERM, libc::ESRCH, libc::EACCES] {
+        let failed: io::Result<(u64, u64)> = Err(io::Error::from_raw_os_error(errno));
+        assert_eq!(
+            darwin_image_gap(&failed),
             Some(crate::pid::OccupancyGap::ExecutableUnavailable)
         );
     }
-}
-
-#[cfg(test)]
-#[test]
-fn a_deleted_executable_is_not_a_gap_but_other_failures_are() {
-    let gone: io::Result<(u64, u64)> = Err(io::Error::from_raw_os_error(libc::ENOENT));
-    let denied: io::Result<(u64, u64)> = Err(io::Error::from_raw_os_error(libc::EACCES));
-    assert_eq!(darwin_image_gap(&gone), None);
-    assert_eq!(darwin_image_gap(&Ok((1, 2))), None);
-    assert_eq!(
-        darwin_image_gap(&denied),
-        Some(crate::pid::OccupancyGap::ExecutableUnavailable)
-    );
 }
 
 #[cfg(test)]
@@ -1049,7 +1046,7 @@ pub(crate) fn unreadable_policy_uids(
         if listed && team.is_some() && darwin_team_id(pid) != team {
             return Err(crate::pid::UnreadablePolicyFailure {
                 condition: "stable signing team required",
-                builtin_condition: builtin.err(),
+                builtin_condition: builtin.err().map(BuiltinCondition::detail),
                 configurable: false,
             });
         }
@@ -1065,16 +1062,52 @@ pub(crate) fn unreadable_policy_uids(
 /// A built-in refusal. Only an approved-directory or volume refusal of a
 /// validly signed system process is one that a configured entry could excuse.
 #[cfg(any(target_os = "macos", test))]
-fn builtin_failure(condition: &'static str) -> crate::pid::UnreadablePolicyFailure {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuiltinCondition {
+    SystemUids,
+    PlatformSignature,
+    ApprovedDaemonDirectory,
+    SealedReadOnlyVolume,
+    SealedVolumeEvidence,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl BuiltinCondition {
+    #[cfg(test)]
+    const ALL: [Self; 5] = [
+        Self::SystemUids,
+        Self::PlatformSignature,
+        Self::ApprovedDaemonDirectory,
+        Self::SealedReadOnlyVolume,
+        Self::SealedVolumeEvidence,
+    ];
+
+    fn detail(self) -> &'static str {
+        match self {
+            Self::SystemUids => "real/effective/saved system uids below 500 required",
+            Self::PlatformSignature => "valid signed platform binary required",
+            Self::ApprovedDaemonDirectory => "approved daemon directory required",
+            Self::SealedReadOnlyVolume => "sealed read-only root volume required",
+            Self::SealedVolumeEvidence => "sealed read-only root volume evidence unavailable",
+        }
+    }
+
+    fn configurable(self) -> bool {
+        match self {
+            Self::SystemUids | Self::PlatformSignature => false,
+            Self::ApprovedDaemonDirectory
+            | Self::SealedReadOnlyVolume
+            | Self::SealedVolumeEvidence => true,
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn builtin_failure(condition: BuiltinCondition) -> crate::pid::UnreadablePolicyFailure {
     crate::pid::UnreadablePolicyFailure {
-        condition,
-        builtin_condition: Some(condition),
-        configurable: matches!(
-            condition,
-            "approved daemon directory required"
-                | "sealed read-only root volume required"
-                | "sealed read-only root volume evidence unavailable"
-        ),
+        condition: condition.detail(),
+        builtin_condition: Some(condition.detail()),
+        configurable: condition.configurable(),
     }
 }
 
@@ -1191,20 +1224,20 @@ fn darwin_builtin_condition(
     flags: u32,
     path: &std::path::Path,
     sealed: impl FnOnce() -> Option<bool>,
-) -> Result<(), &'static str> {
+) -> Result<(), BuiltinCondition> {
     if !uids.all_system() {
-        return Err("real/effective/saved system uids below 500 required");
+        return Err(BuiltinCondition::SystemUids);
     }
     if !darwin_platform_signature(flags) {
-        return Err("valid signed platform binary required");
+        return Err(BuiltinCondition::PlatformSignature);
     }
     if !darwin_daemon_path(path) {
-        return Err("approved daemon directory required");
+        return Err(BuiltinCondition::ApprovedDaemonDirectory);
     }
     match sealed() {
         Some(true) => Ok(()),
-        Some(false) => Err("sealed read-only root volume required"),
-        None => Err("sealed read-only root volume evidence unavailable"),
+        Some(false) => Err(BuiltinCondition::SealedReadOnlyVolume),
+        None => Err(BuiltinCondition::SealedVolumeEvidence),
     }
 }
 
@@ -1213,56 +1246,69 @@ fn darwin_builtin_condition(
 fn builtin_condition_names_each_failed_gate_and_accepts_complete_evidence() {
     use std::path::Path;
     let daemon = Path::new("/usr/libexec/daemon");
-    let flags = 0x2400_0001;
-    assert_eq!(
-        darwin_builtin_condition(test_uids(0), flags, daemon, || Some(true)),
-        Ok(())
-    );
-    assert_eq!(
-        darwin_builtin_condition(test_uids(500), flags, daemon, || Some(true)),
-        Err("real/effective/saved system uids below 500 required")
-    );
-    assert_eq!(
-        darwin_builtin_condition(test_uids(0), 0x2000_0001, daemon, || Some(true)),
-        Err("valid signed platform binary required")
-    );
-    assert_eq!(
-        darwin_builtin_condition(test_uids(0), flags | 4, daemon, || Some(true)),
-        Err("valid signed platform binary required")
-    );
-    assert_eq!(
-        darwin_builtin_condition(test_uids(0), flags, Path::new("/usr/bin/login"), || Some(
-            true
-        )),
-        Err("approved daemon directory required")
-    );
-    assert_eq!(
-        darwin_builtin_condition(test_uids(0), flags, daemon, || Some(false)),
-        Err("sealed read-only root volume required")
-    );
-    assert_eq!(
-        darwin_builtin_condition(test_uids(0), flags, daemon, || None),
-        Err("sealed read-only root volume evidence unavailable")
-    );
-}
-
-#[cfg(test)]
-#[test]
-fn only_path_or_volume_refusals_are_configurable() {
-    for condition in [
-        "approved daemon directory required",
-        "sealed read-only root volume required",
-        "sealed read-only root volume evidence unavailable",
-    ] {
-        let failure = builtin_failure(condition);
-        assert!(failure.configurable, "{condition}");
-        assert_eq!(failure.builtin_condition, Some(condition));
+    let flags = CS_VALID | CS_SIGNED | CS_PLATFORM_BINARY;
+    let cases = [
+        (test_uids(0), flags, daemon, Some(true), Ok(())),
+        (
+            test_uids(500),
+            flags,
+            daemon,
+            Some(true),
+            Err(BuiltinCondition::SystemUids),
+        ),
+        (
+            test_uids(0),
+            CS_VALID | CS_SIGNED,
+            daemon,
+            Some(true),
+            Err(BuiltinCondition::PlatformSignature),
+        ),
+        (
+            test_uids(0),
+            flags | CS_GET_TASK_ALLOW,
+            daemon,
+            Some(true),
+            Err(BuiltinCondition::PlatformSignature),
+        ),
+        (
+            test_uids(0),
+            flags,
+            Path::new("/usr/bin/login"),
+            Some(true),
+            Err(BuiltinCondition::ApprovedDaemonDirectory),
+        ),
+        (
+            test_uids(0),
+            flags,
+            daemon,
+            Some(false),
+            Err(BuiltinCondition::SealedReadOnlyVolume),
+        ),
+        (
+            test_uids(0),
+            flags,
+            daemon,
+            None,
+            Err(BuiltinCondition::SealedVolumeEvidence),
+        ),
+    ];
+    for (uids, flags, path, sealed, expected) in cases {
+        assert_eq!(
+            darwin_builtin_condition(uids, flags, path, || sealed),
+            expected
+        );
     }
-    for condition in [
-        "real/effective/saved system uids below 500 required",
-        "valid signed platform binary required",
-    ] {
-        assert!(!builtin_failure(condition).configurable, "{condition}");
+    for condition in BuiltinCondition::ALL {
+        let failure = builtin_failure(condition);
+        assert_eq!(failure.configurable, condition.configurable());
+        // This exhaustive match is the compile-time guard for the ALL table.
+        match condition {
+            BuiltinCondition::SystemUids
+            | BuiltinCondition::PlatformSignature
+            | BuiltinCondition::ApprovedDaemonDirectory
+            | BuiltinCondition::SealedReadOnlyVolume
+            | BuiltinCondition::SealedVolumeEvidence => {}
+        }
     }
     let plain: crate::pid::UnreadablePolicyFailure = "image policy evidence unavailable".into();
     assert!(!plain.configurable);
@@ -1278,7 +1324,7 @@ fn allowed_daemon_on_unsealed_volume_reaches_seal_refusal() {
             effective: 88,
             saved: 0,
         },
-        0x2400_0001,
+        CS_VALID | CS_SIGNED | CS_PLATFORM_BINARY,
         std::path::Path::new("/System/Library/Daemon"),
         || {
             called.set(true);
@@ -1286,7 +1332,7 @@ fn allowed_daemon_on_unsealed_volume_reaches_seal_refusal() {
         },
     );
     assert!(called.get(), "all predicates before the seal check passed");
-    assert_eq!(result, Err("sealed read-only root volume required"));
+    assert_eq!(result, Err(BuiltinCondition::SealedReadOnlyVolume));
 }
 
 pub(crate) fn process_details(pid: i32) -> String {
@@ -1305,7 +1351,7 @@ pub(crate) fn process_details(pid: i32) -> String {
         );
         let status = darwin_signing_status(pid);
         let flags = status.map_or_else(|| "unavailable".into(), |flags| format!("0x{flags:08x}"));
-        let team = if status.is_some_and(|flags| flags & 0x0400_0000 != 0) {
+        let team = if status.is_some_and(|flags| flags & CS_PLATFORM_BINARY != 0) {
             "platform".into()
         } else {
             darwin_team_id(pid).unwrap_or_else(|| "unavailable".into())
@@ -1320,13 +1366,30 @@ pub(crate) fn process_details(pid: i32) -> String {
 }
 
 #[cfg(any(target_os = "macos", test))]
+const CS_VALID: u32 = 0x0000_0001;
+#[cfg(any(target_os = "macos", test))]
+const CS_SIGNED: u32 = 0x2000_0000;
+#[cfg(any(target_os = "macos", test))]
+const CS_ADHOC: u32 = 0x0000_0002;
+#[cfg(any(target_os = "macos", test))]
+const CS_GET_TASK_ALLOW: u32 = 0x0000_0004;
+#[cfg(any(target_os = "macos", test))]
+const CS_RESTRICT: u32 = 0x0000_0020;
+#[cfg(any(target_os = "macos", test))]
+const CS_LINKER_SIGNED: u32 = 0x0002_0000;
+#[cfg(any(target_os = "macos", test))]
+const CS_PLATFORM_BINARY: u32 = 0x0400_0000;
+#[cfg(test)]
+const CS_PLATFORM_PATH: u32 = 0x0800_0000;
+#[cfg(any(target_os = "macos", test))]
+const CS_KILLED: u32 = 0x1000_0000;
+
+#[cfg(any(target_os = "macos", test))]
 fn darwin_valid_signature(flags: u32) -> bool {
-    const CS_VALID: u32 = 0x0000_0001;
-    const CS_SIGNED: u32 = 0x2000_0000;
-    const CS_LINKER_SIGNED: u32 = 0x0002_0000;
     // CS_ADHOC may be absent on live ad-hoc images; this mask alone is not a
     // signing trust anchor. Platform bits or explicit path/team policy remain.
-    const UNTRUSTED: u32 = 0x0000_0002 | 0x0000_0004 | 0x0000_0020 | CS_LINKER_SIGNED | 0x1000_0000;
+    const UNTRUSTED: u32 =
+        CS_ADHOC | CS_GET_TASK_ALLOW | CS_RESTRICT | CS_LINKER_SIGNED | CS_KILLED;
     let required = CS_VALID | CS_SIGNED;
     flags & required == required && flags & UNTRUSTED == 0
 }
@@ -1334,7 +1397,7 @@ fn darwin_valid_signature(flags: u32) -> bool {
 #[cfg(any(target_os = "macos", test))]
 fn darwin_platform_signature(flags: u32) -> bool {
     // CS_PLATFORM_PATH alone is not signing evidence.
-    darwin_valid_signature(flags) && flags & 0x0400_0000 != 0
+    darwin_valid_signature(flags) && flags & CS_PLATFORM_BINARY != 0
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -1362,9 +1425,25 @@ fn root_owned_mode(uid: u32, mode: u32) -> bool {
     uid == 0 && mode & 0o022 == 0
 }
 
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExecutableChainRefusal {
+    ExecutableMetadata,
+    ExecutableNotRootOwned,
+    AbsolutePathRequired,
+    RootDescriptorUnavailable,
+    AncestorMetadata,
+    AncestorNotRootOwned,
+    NormalComponentRequired,
+    AncestorOpen,
+    ExecutableOpen,
+    ExecutableMetadataUnavailable,
+    DescriptorIdentityMismatch,
+}
+
 /// Walk from / using only no-follow descriptor-relative opens. The final
 /// descriptor must identify the same file that was opened for image evidence.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn root_owned_executable_chain(path: &std::path::Path, executable: &std::fs::File) -> bool {
     check_root_owned_executable_chain(path, executable).is_ok()
 }
@@ -1373,48 +1452,48 @@ fn root_owned_executable_chain(path: &std::path::Path, executable: &std::fs::Fil
 fn check_root_owned_executable_chain(
     path: &std::path::Path,
     executable: &std::fs::File,
-) -> Result<(), &'static str> {
+) -> Result<(), ExecutableChainRefusal> {
     use std::os::unix::fs::MetadataExt;
     use std::path::Component;
     let expected = executable
         .metadata()
-        .map_err(|_| "executable metadata unavailable")?;
+        .map_err(|_| ExecutableChainRefusal::ExecutableMetadata)?;
     if !expected.is_file() || !root_owned_mode(expected.uid(), expected.mode()) {
-        return Err("root-owned non-writable executable required");
+        return Err(ExecutableChainRefusal::ExecutableNotRootOwned);
     }
     let mut parts = path.components();
     if parts.next() != Some(Component::RootDir) {
-        return Err("absolute executable path required");
+        return Err(ExecutableChainRefusal::AbsolutePathRequired);
     }
     let mut parts = parts.peekable();
     let mut directory = crate::sys::fs::open_anchor(std::path::Path::new("/"))
-        .map_err(|_| "root descriptor unavailable")?;
+        .map_err(|_| ExecutableChainRefusal::RootDescriptorUnavailable)?;
     loop {
         let metadata = directory
             .metadata()
-            .map_err(|_| "ancestor metadata unavailable")?;
+            .map_err(|_| ExecutableChainRefusal::AncestorMetadata)?;
         if !metadata.is_dir() || !root_owned_mode(metadata.uid(), metadata.mode()) {
-            return Err("root-owned non-writable ancestor required");
+            return Err(ExecutableChainRefusal::AncestorNotRootOwned);
         }
         let Some(Component::Normal(name)) = parts.next() else {
-            return Err("normal executable component required");
+            return Err(ExecutableChainRefusal::NormalComponentRequired);
         };
         if parts.peek().is_some() {
             directory = crate::sys::fs::open_directory(&directory, name, false)
-                .map_err(|_| "no-follow ancestor open failed")?;
+                .map_err(|_| ExecutableChainRefusal::AncestorOpen)?;
         } else {
             let file = crate::sys::fs::open_read(&directory, name)
-                .map_err(|_| "no-follow executable open failed")?;
+                .map_err(|_| ExecutableChainRefusal::ExecutableOpen)?;
             let metadata = file
                 .metadata()
-                .map_err(|_| "executable metadata unavailable")?;
+                .map_err(|_| ExecutableChainRefusal::ExecutableMetadataUnavailable)?;
             return if metadata.is_file()
                 && root_owned_mode(metadata.uid(), metadata.mode())
                 && (metadata.dev(), metadata.ino()) == (expected.dev(), expected.ino())
             {
                 Ok(())
             } else {
-                Err("root-owned executable with matching descriptor identity required")
+                Err(ExecutableChainRefusal::DescriptorIdentityMismatch)
             };
         }
     }
@@ -1427,10 +1506,14 @@ fn darwin_daemon_path(path: &std::path::Path) -> bool {
             part,
             std::path::Component::RootDir | std::path::Component::Normal(_)
         )
-    }) && ["/sbin", "/usr/sbin", "/usr/libexec", "/System/Library"]
+    }) && DARWIN_DAEMON_DIRECTORIES
         .iter()
         .any(|directory| path.starts_with(directory) && path != std::path::Path::new(directory))
 }
+
+#[cfg(any(target_os = "macos", test))]
+const DARWIN_DAEMON_DIRECTORIES: [&str; 4] =
+    ["/sbin", "/usr/sbin", "/usr/libexec", "/System/Library"];
 
 #[cfg(target_os = "macos")]
 fn darwin_executable_lookup(pid: i32) -> Result<std::path::PathBuf, Option<i32>> {
@@ -1972,7 +2055,7 @@ mod tests {
             team_id: "TEAM123".into(),
         }];
         let path = std::path::Path::new("/Library/Daemon");
-        let signed = 0x2000_0001;
+        let signed = CS_VALID | CS_SIGNED;
         assert!(
             listed_image_matches(&entries, path, signed, Some("TEAM123"), || true),
             "accepted listing"
@@ -2009,9 +2092,9 @@ mod tests {
             signed & !1,
             signed | 2,
             signed | 4,
-            signed | 0x20,
-            signed | 0x0002_0000,
-            signed | 0x1000_0000,
+            signed | CS_RESTRICT,
+            signed | CS_LINKER_SIGNED,
+            signed | CS_KILLED,
         ] {
             assert!(!listed_image_matches(
                 &entries,
@@ -2035,16 +2118,22 @@ mod tests {
         assert!(listed_image_matches(
             &platform,
             path,
-            signed | 0x0400_0000,
+            signed | CS_PLATFORM_BINARY,
             None,
             || true
         ));
         assert!(
-            !listed_image_matches(&platform, path, signed | 0x0400_0000, None, || false),
+            !listed_image_matches(&platform, path, signed | CS_PLATFORM_BINARY, None, || false),
             "platform selector requires the root-owned protected descriptor chain"
         );
         assert!(
-            !listed_image_matches(&platform, path, signed | 0x0402_0000, None, || true),
+            !listed_image_matches(
+                &platform,
+                path,
+                signed | CS_PLATFORM_BINARY | CS_LINKER_SIGNED,
+                None,
+                || true
+            ),
             "linker-signed code is refused even with a platform bit"
         );
     }
@@ -2052,42 +2141,64 @@ mod tests {
     #[test]
     fn platform_listing_requires_a_root_owned_nonwritable_descriptor_chain()
     -> Result<(), Box<dyn std::error::Error>> {
-        assert!(root_owned_mode(0, 0o755));
-        assert!(!root_owned_mode(501, 0o755));
-        assert!(!root_owned_mode(0, 0o775), "group-writable ancestor");
-        assert!(!root_owned_mode(0, 0o757), "other-writable ancestor");
-        // Linux runners may install coreutils entry points as symlinks. Select
-        // the real regular fixture before exercising the strict no-follow walk.
-        let path = std::fs::canonicalize("/usr/bin/true")?;
-        let file = crate::sys::fs::open_source(&path)?;
-        assert!(
-            root_owned_executable_chain(&path, &file),
-            "real root-owned chain"
-        );
-        let different_path = std::fs::canonicalize("/bin/sh")?;
-        let different = crate::sys::fs::open_source(&different_path)?;
-        assert!(
-            !root_owned_executable_chain(&path, &different),
-            "must match original fd identity"
-        );
-        let temp = tempfile::tempdir()?;
-        // macOS reaches the default temporary directory through the /var
-        // symlink, which the no-follow walk refuses before checking ownership.
-        let root = std::fs::canonicalize(temp.path())?;
-        // Keep a genuinely root-owned executable descriptor. Only an ancestor
-        // can fail this assertion; skipping its check would reach a missing leaf.
+        let fixtures = root_owned_executable_fixtures()?;
+        let (path, file) = fixtures.first().ok_or("no protected executable fixture")?;
+        let (different_path, different) = fixtures
+            .get(1)
+            .ok_or("second protected executable fixture unavailable")?;
+        assert_eq!(check_root_owned_executable_chain(path, file), Ok(()));
         assert_eq!(
-            check_root_owned_executable_chain(&root.join("missing-image"), &file),
-            Err("root-owned non-writable ancestor required"),
+            check_root_owned_executable_chain(path, different),
+            Err(ExecutableChainRefusal::DescriptorIdentityMismatch)
         );
-        let path = temp.path().join("image");
+        assert_ne!(path, different_path);
+
+        let temp = tempfile::tempdir()?;
+        let path = std::fs::canonicalize(temp.path())?.join("image");
         std::fs::write(&path, b"image")?;
         let file = crate::sys::fs::open_source(&path)?;
-        assert!(
-            !root_owned_executable_chain(&path, &file),
-            "user-writable temporary ancestor"
+        assert_eq!(
+            check_root_owned_executable_chain(&path, &file),
+            // The user-owned executable is refused before its ancestors are walked.
+            Err(ExecutableChainRefusal::ExecutableNotRootOwned)
         );
         Ok(())
+    }
+
+    fn root_owned_executable_fixtures() -> io::Result<Vec<(std::path::PathBuf, std::fs::File)>> {
+        use std::os::unix::fs::MetadataExt;
+        let mut fixtures: Vec<(std::path::PathBuf, std::fs::File)> = Vec::new();
+        for directory in DARWIN_DAEMON_DIRECTORIES {
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(path) = std::fs::canonicalize(entry.path()) else {
+                    continue;
+                };
+                if fixtures.iter().any(|(known, _)| known == &path) {
+                    continue;
+                }
+                let Ok(file) = crate::sys::fs::open_source(&path) else {
+                    continue;
+                };
+                let identity = file.metadata()?;
+                if fixtures.iter().any(|(_, known)| {
+                    known.metadata().is_ok_and(|metadata| {
+                        (metadata.dev(), metadata.ino()) == (identity.dev(), identity.ino())
+                    })
+                }) {
+                    continue;
+                }
+                if check_root_owned_executable_chain(&path, &file).is_ok() {
+                    fixtures.push((path, file));
+                    if fixtures.len() == 2 {
+                        return Ok(fixtures);
+                    }
+                }
+            }
+        }
+        Ok(fixtures)
     }
 
     #[test]
@@ -2140,66 +2251,25 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    #[allow(clippy::print_stderr)] // An optional live off-volume fixture must report its availability.
-    fn native_offsealed_platform_process_is_refused_when_present() {
-        fn unavailable(reason: &str) {
-            assert!(
-                std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_none(),
-                "off-sealed platform process: {reason}"
-            );
-            eprintln!("SKIP #1: off-sealed platform process: {reason}");
-        }
-        let mut pids = vec![0i32; 65_536];
-        // SAFETY: the vector supplies writable storage of the supplied byte
-        // size and libproc does not retain the pointer.
-        let count = unsafe {
-            libc::proc_listallpids(
-                pids.as_mut_ptr().cast(),
-                (pids.len() * std::mem::size_of::<i32>()) as i32,
-            )
-        };
-        if count <= 0 || count as usize >= pids.len() {
-            unavailable("process enumeration unavailable or incomplete");
-            return;
-        }
-        for &pid in &pids[..count as usize] {
-            if !darwin_signing_status(pid).is_some_and(darwin_platform_signature) {
-                continue;
-            }
-            let Some(path) = darwin_executable_path(pid) else {
-                continue;
-            };
-            let Ok(file) = std::fs::File::open(&path) else {
-                continue;
-            };
-            if darwin_on_sealed_system_volume(&file) != Some(false) {
-                continue;
-            }
-            assert!(
-                unreadable_policy_uids(pid, &[]).is_err(),
-                "off-sealed platform process {pid}: {path:?}"
-            );
-            eprintln!(
-                "ASSERTED: off-sealed platform process {pid} {path:?} refused by native daemon policy"
-            );
-            return;
-        }
-        unavailable("no observable off-sealed platform process is present");
-    }
-
     #[test]
     fn platform_policy_requires_valid_signed_platform_code() {
-        let required = 0x2000_0000 | 0x0400_0000 | 1;
+        let required = CS_SIGNED | CS_PLATFORM_BINARY | CS_VALID;
         assert!(darwin_platform_signature(required));
-        for missing in [1, 0x0400_0000, 0x2000_0000] {
+        for missing in [CS_VALID, CS_PLATFORM_BINARY, CS_SIGNED] {
             assert!(!darwin_platform_signature(required & !missing));
         }
-        for untrusted in [2, 4, 0x20, 0x0002_0000, 0x1000_0000] {
+        for untrusted in [
+            CS_ADHOC,
+            CS_GET_TASK_ALLOW,
+            CS_RESTRICT,
+            CS_LINKER_SIGNED,
+            CS_KILLED,
+        ] {
             assert!(!darwin_platform_signature(required | untrusted));
         }
-        assert!(!darwin_platform_signature(0x0800_0001)); // path is not signing evidence
+        assert!(!darwin_platform_signature(
+            CS_VALID | CS_SIGNED | CS_PLATFORM_PATH
+        ));
     }
 
     #[test]
@@ -2348,10 +2418,6 @@ mod tests {
             }),
             Err(PidError::Io { .. })
         ));
-    }
-
-    #[test]
-    fn darwin_cwd_classifies_permission_unsupported_and_malformed_paths() {
         assert!(matches!(
             classify_darwin_result(
                 42,

@@ -201,6 +201,41 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    /// Poll slices stay bounded, and cancellation/expiry produce typed errors.
+    #[test]
+    fn unix_connect_waits_are_bounded_and_cancellation_is_typed() {
+        use std::time::Duration;
+        let max_poll = UNIX_CONNECT_POLL_INTERVAL.as_millis() as i32;
+        let rows = [
+            (Duration::ZERO, false, Err(io::ErrorKind::TimedOut)),
+            (Duration::from_micros(500), false, Ok(1)),
+            (UNIX_CONNECT_POLL_INTERVAL, false, Ok(max_poll)),
+            (Duration::from_secs(1), false, Ok(max_poll)),
+            (
+                Duration::from_secs(1),
+                true,
+                Err(io::ErrorKind::Interrupted),
+            ),
+            (Duration::ZERO, true, Err(io::ErrorKind::Interrupted)),
+        ];
+        for (remaining, cancelled, expected) in rows {
+            match expected {
+                Ok(milliseconds) => {
+                    assert_eq!(
+                        connect_poll_timeout(remaining, cancelled).unwrap(),
+                        milliseconds
+                    )
+                }
+                Err(kind) => assert_eq!(
+                    connect_poll_timeout(remaining, cancelled)
+                        .unwrap_err()
+                        .kind(),
+                    kind
+                ),
+            }
+        }
+    }
+
     #[test]
     fn access_follows_links_and_checks_real_id_execution() {
         let dir = tempfile::tempdir().unwrap();
@@ -744,6 +779,139 @@ pub fn wait_pause(duration: std::time::Duration) {
     std::thread::sleep(duration.min(std::time::Duration::from_millis(50)));
 }
 
+/// Connect to a Unix stream socket without outliving `deadline` or `cancel`.
+///
+/// A blocking `connect` to a listener whose backlog is full waits until the
+/// listener accepts, with no deadline. This connects non-blocking, waits for
+/// completion in short slices that recheck both bounds, and retries a full
+/// backlog on a fresh socket. The stream is returned non-blocking. A
+/// cancelled call fails `Interrupted`; an expired one fails `TimedOut`.
+pub fn connect_unix_within(
+    path: &Path,
+    deadline: std::time::Instant,
+    cancel: &provenant_core::CancelToken,
+) -> io::Result<std::os::unix::net::UnixStream> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    // SAFETY: sockaddr_un is plain old data; all-zero is a valid empty value.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty() || bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    let length = (std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1) as libc::socklen_t;
+    let bounds = || {
+        connect_poll_timeout(
+            deadline.saturating_duration_since(std::time::Instant::now()),
+            cancel.is_cancelled(),
+        )
+    };
+    loop {
+        bounds()?;
+        // SAFETY: socket takes no pointers; a non-negative result is a new
+        // descriptor this function owns at once.
+        let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: raw is a fresh, valid descriptor nothing else owns.
+        let socket = unsafe { OwnedFd::from_raw_fd(raw) };
+        let fd = socket.as_raw_fd();
+        // SAFETY: fcntl on a live descriptor `socket` owns, with integer
+        // arguments only; it retains nothing.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: as above.
+        let cloexec = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        // SAFETY: as above.
+        let nonblocking = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        if cloexec < 0 || nonblocking < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: address is a live, initialised sockaddr_un and length does
+        // not exceed its size; connect retains no pointer.
+        let result =
+            unsafe { libc::connect(fd, (&raw const address).cast::<libc::sockaddr>(), length) };
+        if result == 0 {
+            return Ok(socket.into());
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINPROGRESS) => {}
+            // A full backlog (Linux) or an interrupted call: retry on a fresh
+            // socket after a bounded pause.
+            Some(libc::EAGAIN | libc::EINTR) => {
+                std::thread::park_timeout(std::time::Duration::from_millis(
+                    bounds()?.clamp(1, 10) as u64
+                ));
+                continue;
+            }
+            _ => return Err(error),
+        }
+        loop {
+            let millis = bounds()?;
+            let mut descriptor = libc::pollfd {
+                fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            // SAFETY: descriptor is a one-element live buffer over an owned fd;
+            // poll retains no pointer and the timeout is at most 50 ms.
+            let ready = unsafe { libc::poll(&mut descriptor, 1, millis) };
+            if ready < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if ready == 0 {
+                continue;
+            }
+            let mut pending: libc::c_int = 0;
+            let mut size = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            // SAFETY: pending and size are live, correctly sized out-params.
+            let status = unsafe {
+                libc::getsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_ERROR,
+                    (&raw mut pending).cast::<libc::c_void>(),
+                    &mut size,
+                )
+            };
+            if status < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if pending != 0 {
+                return Err(io::Error::from_raw_os_error(pending));
+            }
+            return Ok(socket.into());
+        }
+    }
+}
+
+const UNIX_CONNECT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+fn connect_poll_timeout(remaining: std::time::Duration, cancelled: bool) -> io::Result<i32> {
+    if cancelled {
+        return Err(io::ErrorKind::Interrupted.into());
+    }
+    if remaining.is_zero() {
+        return Err(io::ErrorKind::TimedOut.into());
+    }
+    let maximum_ms = UNIX_CONNECT_POLL_INTERVAL.as_millis();
+    let milliseconds = remaining.min(UNIX_CONNECT_POLL_INTERVAL).as_millis();
+    Ok(i32::try_from(milliseconds)
+        .unwrap_or(maximum_ms as i32)
+        .max(1))
+}
+
 /// All production clocks use this process-wide monotonic coordinate.
 #[allow(clippy::disallowed_methods)]
 pub fn monotonic_now() -> provenant_core::MonoTime {
@@ -756,3 +924,5 @@ pub fn monotonic_now() -> provenant_core::MonoTime {
 }
 
 pub mod hook_io;
+
+pub mod changes;

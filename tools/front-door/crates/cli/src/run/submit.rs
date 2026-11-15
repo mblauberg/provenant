@@ -19,141 +19,6 @@ pub fn with_deferred_provider_launch<T>(action: impl FnOnce() -> T) -> T {
     action()
 }
 
-/// Strict manifest: `{schema_version:1,tasks:[...]}`.
-pub(super) fn read_bounded(path: &Path) -> Result<String, Fail> {
-    let invalid = |error: &dyn std::fmt::Display| {
-        input_failure(
-            Status::Invalid,
-            ErrorKind::Invalid,
-            format!("{}: {error}", path.display()),
-            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::InputUnreadable,
-        )
-    };
-    // A FIFO or device would block or never end.
-    if !std::fs::metadata(path).map_err(|e| invalid(&e))?.is_file() {
-        return Err(invalid(&"not a regular file"));
-    }
-    read_text(std::fs::File::open(path).map_err(|e| invalid(&e))?)
-}
-
-fn input_failure(
-    status: Status,
-    kind: ErrorKind,
-    message: impl Into<String>,
-    detail: provenant_fabric_runtime::coordination::facade::InvalidInputDetail,
-) -> Fail {
-    let error = provenant_fabric_runtime::coordination::facade::FacadeError::invalid(detail);
-    let mut diagnostic = error.diagnostic();
-    diagnostic.code = kind.code().into();
-    let mut fail = Fail::new(status, kind, message);
-    fail.projection = Some(Box::new(diagnostic));
-    fail.detail = Some(Box::new(error));
-    fail
-}
-
-#[cfg(test)]
-mod diagnostic_tests {
-    use super::*;
-
-    #[test]
-    fn input_failures_keep_refusals_and_project_safe_reasons() {
-        let oversized = vec![b'x'; (PROMPT_LIMIT + 1) as usize];
-        let Err(too_large) = read_text(oversized.as_slice()) else {
-            panic!("accepted oversized input")
-        };
-        assert_eq!(too_large.kind, ErrorKind::Invalid);
-        assert_eq!(too_large.message, "input exceeds 1 MiB");
-        let detail = too_large.detail.unwrap().diagnostic();
-        assert!(detail.detail.unwrap().contains("1 MiB"));
-        assert!(detail.next.is_some());
-
-        let directory = tempfile::tempdir().unwrap();
-        let missing = directory.path().join("TOKEN_SENTINEL-no-such-input");
-        let Err(unreadable) = read_bounded(&missing) else {
-            panic!("accepted missing input")
-        };
-        assert_eq!(unreadable.kind, ErrorKind::Invalid);
-        let projected = unreadable.detail.unwrap().diagnostic();
-        assert!(projected.detail.as_ref().unwrap().contains("unreadable"));
-        assert!(
-            !serde_json::to_string(&projected)
-                .unwrap()
-                .contains("TOKEN_SENTINEL")
-        );
-    }
-
-    #[test]
-    fn unreadable_stream_keeps_io_refusal_and_safe_input_reason() {
-        struct FailedRead;
-        impl std::io::Read for FailedRead {
-            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::other("TOKEN_SENTINEL /private/host"))
-            }
-        }
-        let fail = read_text(FailedRead).unwrap_err();
-        assert_eq!(fail.kind, ErrorKind::Io);
-        assert!(fail.message.contains("TOKEN_SENTINEL"));
-        let rendered = super::super::command_error(&fail);
-        assert_eq!(rendered.code, "IO");
-        assert!(rendered.cause.as_deref().unwrap().contains("input"));
-        assert!(rendered.repair.is_some());
-        assert!(!rendered.cause.unwrap().contains("TOKEN_SENTINEL"));
-        let projection = fail.projection.unwrap();
-        assert_eq!(projection.code, "IO");
-        assert!(projection.detail.as_deref().unwrap().contains("input"));
-        assert!(projection.next.is_some());
-        let error = fail.detail.unwrap();
-        let decoded: provenant_fabric_runtime::coordination::facade::FacadeError =
-            serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
-        let wire = serde_json::to_string(&decoded.diagnostic()).unwrap();
-        assert!(!wire.contains("TOKEN_SENTINEL"));
-        assert!(!wire.contains("/private/host"));
-        assert!(wire.contains("input"));
-    }
-}
-
-pub(super) fn read_text(source: impl Read) -> Result<String, Fail> {
-    let mut bytes = Vec::new();
-    source
-        .take(PROMPT_LIMIT + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
-            let fact = provenant_records::diagnostic::IoFact::InputUnreadable;
-            let detail = provenant_fabric_runtime::coordination::facade::FacadeError::Io {
-                operation: "read input".into(),
-                path: None,
-                delivery_limit: None,
-                delivery_stage: None,
-                resource: None,
-                input_failure: Some(fact),
-                cause: None,
-            };
-            let mut projection = detail.diagnostic();
-            projection.code = ErrorKind::Io.code().into();
-            projection.category = Some(ErrorKind::Io.category().into());
-            let mut fail = Fail::new(Status::Error, ErrorKind::Io, error.to_string());
-            fail.projection = Some(Box::new(projection));
-            fail.detail = Some(Box::new(detail));
-            fail
-        })?;
-    if bytes.len() as u64 > PROMPT_LIMIT {
-        return Err(input_failure(
-            Status::Invalid,
-            ErrorKind::Invalid,
-            "input exceeds 1 MiB",
-            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::InputTooLarge,
-        ));
-    }
-    String::from_utf8(bytes).map_err(|_| {
-        input_failure(
-            Status::Invalid,
-            ErrorKind::Invalid,
-            "input is not UTF-8",
-            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::InputInvalidUtf8,
-        )
-    })
-}
-
 /// `ADAPTER/NAME` for a model-less adapter such as `command/fmt-check`.
 pub(super) fn adapter_entry(route: &str) -> Option<(&str, &str)> {
     let (provider, name) = route.split_once('/')?;
@@ -189,6 +54,7 @@ pub fn requested(
                 )
             })?;
             Ok(run::RequestedRoute::Model {
+                required_family: None,
                 extra: Default::default(),
                 provider: id.as_str().split('/').next().unwrap_or_default().into(),
                 model: model.into(),
@@ -205,12 +71,14 @@ pub fn requested(
                 ));
             }
             Ok(run::RequestedRoute::Adapter {
+                required_family: None,
                 extra: Default::default(),
                 provider: provider.into(),
                 name: entry.into(),
             })
         }
         (None, Some(name)) => Ok(run::RequestedRoute::Named {
+            required_family: None,
             extra: Default::default(),
             name: name.into(),
             effort,
@@ -221,22 +89,6 @@ pub fn requested(
             "each task needs exactly one of model or route",
         )),
     }
-}
-
-/// Task IDs default to a value derived from the operation, so replaying the
-/// same operation reproduces the same canonical request.
-pub fn derived_task(operation: &OperationId, index: usize) -> Result<TaskId, Fail> {
-    let digest = CanonicalV1::record_digest("run-task-id", 1, &(operation.as_str(), index))
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
-    let mut bytes = [0; 16];
-    bytes.copy_from_slice(&digest.as_bytes()[..16]);
-    Ok(TaskId::from_bytes(bytes))
-}
-
-/// Refuse input that matches a secret pattern before any record exists. The
-/// message never repeats the input.
-pub(super) fn scan(prompt: &str) -> Result<(), Fail> {
-    run::Service::scan(prompt).map_err(Fail::from)
 }
 
 /// The reach a network switch asks for. Off keeps a granted local database.
@@ -255,9 +107,9 @@ pub(super) fn network_access(switch: Option<Switch>, postgres: bool) -> Option<r
 pub fn lane_access(
     access: &crate::Access,
     state_root: &Path,
-    home: &Path,
+    credentials: &provenant_core::CredentialRoots,
 ) -> Result<run::LaneAccess, Fail> {
-    lane_access_checked(access, state_root, home)
+    lane_access_checked(access, state_root, credentials)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
 }
 
@@ -277,8 +129,13 @@ pub(super) enum AccessError {
     MissingDirectory { flag: &'static str, path: PathBuf },
     #[error("{flag} {} overlaps the Provenant state root", path.display())]
     StateOverlap { flag: &'static str, path: PathBuf },
-    #[error("{flag} {} is or encloses a credential root", path.display())]
-    CredentialRoot { flag: &'static str, path: PathBuf },
+    #[error("{flag} {} overlaps declared credential root {} (source: {declaration_source})", path.display(), root.display())]
+    CredentialRoot {
+        flag: &'static str,
+        path: PathBuf,
+        root: PathBuf,
+        declaration_source: String,
+    },
     #[error("--write-root {} overlaps the --worktree; worktree-write already grants the worktree", .0.display())]
     WorktreeOverlap(PathBuf),
 }
@@ -289,20 +146,26 @@ pub(super) fn refused_root(
     flag: &'static str,
     given: &Path,
     canonical: &Path,
-    home: &Path,
+    credentials: &provenant_core::CredentialRoots,
 ) -> Option<AccessError> {
-    provenant_confinement::refuses_lane_root(canonical, flag == "--read-root", Some(home)).then(
-        || AccessError::CredentialRoot {
+    credentials
+        .refusal(
+            canonical,
+            provenant_core::CredentialScope::Subtree,
+            flag == "--read-root",
+        )
+        .map(|root| AccessError::CredentialRoot {
             flag,
             path: given.to_path_buf(),
-        },
-    )
+            root: root.path.clone(),
+            declaration_source: root.source.clone(),
+        })
 }
 
 pub(super) fn lane_access_checked(
     access: &crate::Access,
     state_root: &Path,
-    home: &Path,
+    credentials: &provenant_core::CredentialRoots,
 ) -> Result<run::LaneAccess, AccessError> {
     let mut postgres = false;
     for name in &access.capability {
@@ -326,7 +189,7 @@ pub(super) fn lane_access_checked(
                         flag,
                         path: path.clone(),
                     })?;
-                if let Some(error) = refused_root(flag, path, &canonical, home) {
+                if let Some(error) = refused_root(flag, path, &canonical, credentials) {
                     return Err(error);
                 }
                 if !run::access_root_allowed(&canonical, &state, flag == "--read-root") {
@@ -364,7 +227,7 @@ pub(super) fn lane_access_checked(
                 continue;
             }
         };
-        if let Some(error) = refused_root("--read-root", path, &canonical, home) {
+        if let Some(error) = refused_root("--read-root", path, &canonical, credentials) {
             return Err(error);
         }
         if !run::access_root_allowed(&canonical, &state, true) {
@@ -377,6 +240,7 @@ pub(super) fn lane_access_checked(
     }
     Ok(run::LaneAccess {
         extra: Default::default(),
+        capability_sources: Default::default(),
         network,
         database_ipc: postgres,
         read_roots: resolve(&access.read_root, "--read-root")?,
@@ -398,7 +262,6 @@ pub struct Submitted {
     pub settlement_retry_limit: Option<u8>,
     pub context: Option<provenant_records::run::WorkContext>,
     pub title: Option<String>,
-    pub task_id: TaskId,
     pub prompt: String,
     pub base: Option<String>,
     pub pinned_base: Option<provenant_core::GitOid>,
@@ -414,10 +277,9 @@ pub struct Submitted {
 }
 
 pub struct Submission {
-    pub chair: Option<run::ChairBinding>,
+    pub chair: Option<provenant_records::custody::Chair>,
     pub operation_id: OperationId,
-    pub tasks: Vec<Submitted>,
-    pub concurrency: Option<u64>,
+    pub task: Submitted,
     pub knobs: Vec<String>,
 }
 
@@ -428,8 +290,24 @@ pub fn submit(
     edge: &Edge<'_>,
     submission: Submission,
     call: &run::Request<'_>,
-) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+) -> Result<(run::AttemptRecord, Vec<run::Started>), Fail> {
     submit_with_host(session, edge, submission, call, None)
+}
+
+/// The launch policy a submission seals: host knobs, then project rules,
+/// then dispatch overrides. The disk precheck decides under this same policy.
+fn submission_policy(
+    config: &provenant_config::ResolvedConfig<crate::domains::Domains>,
+    project: &str,
+    profile: &provenant_records::run::HarnessProfile,
+    attempt_overrides: &std::collections::BTreeMap<String, provenant_records::policy::Strength>,
+) -> provenant_records::policy::Policy {
+    let mut dispatch = provenant_config::policy::dispatch(profile);
+    dispatch.extend(attempt_overrides.clone());
+    config
+        .domains
+        .policy
+        .resolve_with_knobs(project, &config.knobs, &dispatch)
 }
 
 /// A failed writer disk precheck: either the volumes could not be observed, or
@@ -457,7 +335,7 @@ impl From<DiskCheck> for String {
                 reclaimed,
                 origin,
             } => format!(
-                "insufficient disk space on {}: {available} bytes available, floor {floor} bytes; gc.free_floor source: {}; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
+                "insufficient disk space on {}: {available} bytes available, floor {floor} bytes; gc.critical_free source: {}; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
                 path.display(),
                 origin.description()
             ),
@@ -467,6 +345,7 @@ impl From<DiskCheck> for String {
 
 pub(super) fn check_writer_disk(
     settings: &provenant_config::GcSettings,
+    policy: &provenant_records::policy::Policy,
     state: &Path,
     worktree: &Path,
     project: &Path,
@@ -474,6 +353,7 @@ pub(super) fn check_writer_disk(
 ) -> Result<(), DiskCheck> {
     check_writer_disk_with_collection(
         settings,
+        policy,
         state,
         worktree,
         home,
@@ -541,17 +421,19 @@ pub(super) fn pressure_collection(state: &Path, home: &Path, project: &Path) -> 
 #[cfg(test)]
 pub(super) fn check_writer_disk_with(
     settings: &provenant_config::GcSettings,
+    policy: &provenant_records::policy::Policy,
     state: &Path,
     worktree: &Path,
     home: &Path,
     available: impl FnMut(&Path) -> Result<u64, String>,
 ) -> Result<(), DiskCheck> {
-    check_writer_disk_with_collection(settings, state, worktree, home, available, || 0)
+    check_writer_disk_with_collection(settings, policy, state, worktree, home, available, || 0)
 }
 
 #[allow(clippy::print_stderr)]
 pub(super) fn check_writer_disk_with_collection(
     settings: &provenant_config::GcSettings,
+    policy: &provenant_records::policy::Policy,
     state: &Path,
     worktree: &Path,
     home: &Path,
@@ -559,8 +441,8 @@ pub(super) fn check_writer_disk_with_collection(
     mut collect: impl FnMut() -> u64,
 ) -> Result<(), DiskCheck> {
     let observed = (|| -> Result<(), DiskCheck> {
-        let floor = settings
-            .free_floor_bytes(state)
+        let limits = settings
+            .disk_limits(state)
             .map_err(|error| DiskCheck::Unobserved(error.to_string()))?;
         let cache = home.join("Library/Caches/provenant-lane-cargo");
         let (mut limiting, mut minimum) = (worktree, u64::MAX);
@@ -570,7 +452,7 @@ pub(super) fn check_writer_disk_with_collection(
                 (limiting, minimum) = (path, bytes);
             }
         }
-        if minimum < floor {
+        if limits.level(minimum) != provenant_config::DiskLevel::Ready {
             let reclaimed = if settings.schedule { collect() } else { 0 };
             minimum = u64::MAX;
             for path in [worktree, state, cache.as_path()] {
@@ -579,18 +461,22 @@ pub(super) fn check_writer_disk_with_collection(
                     (limiting, minimum) = (path, bytes);
                 }
             }
-            if minimum < floor {
-                return Err(DiskCheck::Low {
-                    path: limiting.to_path_buf(),
-                    available: minimum,
-                    floor,
-                    reclaimed,
-                    origin: if settings.free_floor.is_some() {
-                        provenant_records::diagnostic::SettingSource::Configuration
-                    } else {
-                        provenant_records::diagnostic::SettingSource::ShippedDefault
-                    },
-                });
+            // Admission and new builds take this same declared decision.
+            match provenant_config::DiskGate::new(limits, policy).decide(minimum) {
+                provenant_records::policy::Effect::Proceed => {}
+                provenant_records::policy::Effect::Warn(message) => eprintln!(
+                    "provenant: warning: {message}; on {}; dispatching",
+                    limiting.display()
+                ),
+                provenant_records::policy::Effect::Refuse(_) => {
+                    return Err(DiskCheck::Low {
+                        path: limiting.to_path_buf(),
+                        available: minimum,
+                        floor: limits.critical_free,
+                        reclaimed,
+                        origin: limits.critical_free_source,
+                    });
+                }
             }
         }
         Ok(())
@@ -613,7 +499,7 @@ pub fn submit_with_host(
     submission: Submission,
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
-) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+) -> Result<(run::AttemptRecord, Vec<run::Started>), Fail> {
     submit_with_host_and_wait(session, edge, submission, call, host, None)
 }
 
@@ -627,7 +513,7 @@ pub fn submit_with_host_for_refusal(
     host: Option<&run::HostLaunchContext>,
     deadline: Option<Instant>,
     refusal: run::RefusalContext,
-) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+) -> Result<(run::AttemptRecord, Vec<run::Started>), Fail> {
     submit_with_host_context(session, edge, submission, call, host, deadline, refusal)
 }
 
@@ -641,7 +527,7 @@ pub fn submit_with_host_and_wait(
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
     deadline: Option<Instant>,
-) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+) -> Result<(run::AttemptRecord, Vec<run::Started>), Fail> {
     submit_with_host_context(
         session,
         edge,
@@ -662,7 +548,7 @@ fn submit_with_host_context(
     host: Option<&run::HostLaunchContext>,
     deadline: Option<Instant>,
     refusal: run::RefusalContext,
-) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+) -> Result<(run::AttemptRecord, Vec<run::Started>), Fail> {
     submit_with_launcher(
         session,
         edge,
@@ -675,7 +561,7 @@ fn submit_with_host_context(
             } else if let Some(host) = host {
                 launch_on_host_with_wait(
                     session,
-                    record.run_id,
+                    record.attempt_id,
                     edge,
                     call,
                     Some(host),
@@ -691,7 +577,7 @@ fn submit_with_host_context(
                     deadline.saturating_duration_since(Instant::now()),
                 )
             } else {
-                launch_prepared_with_wait(session, record.run_id, edge, call, None, None)
+                launch_prepared_with_wait(session, record.attempt_id, edge, call, None, None)
             }
         },
     )
@@ -705,19 +591,32 @@ fn submit_with_launcher(
     submission: Submission,
     call: &run::Request<'_>,
     refusal: run::RefusalContext,
-    launch: impl FnOnce(&run::RunRecord, bool) -> Result<Vec<run::Started>, Fail>,
-) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    launch: impl FnOnce(&run::AttemptRecord, bool) -> Result<Vec<run::Started>, Fail>,
+) -> Result<(run::AttemptRecord, Vec<run::Started>), Fail> {
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
-    let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+    let config = crate::config_reads::read_for(edge.roots, "run")
         .map_err(|error| Fail::config(Status::Invalid, error))?;
+    let profile = match &submission.task.attempt.sealed_profile {
+        Some(profile) => profile.clone(),
+        None => config
+            .dispatch_profile(&submission.knobs)
+            .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?,
+    };
     // Nested proposals are checked by the host before provider preparation.
     // A confined parent cannot open a sibling worktree to sample its volume.
     if parent_attempt.is_none() {
-        for task in &submission.tasks {
+        let task = &submission.task;
+        {
             if let Some(path) = &task.worktree {
                 let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
                 check_writer_disk(
                     &config.gc,
+                    &submission_policy(
+                        &config,
+                        &session.context.project_id.to_string(),
+                        &profile,
+                        &task.attempt.policy_overrides,
+                    ),
                     edge.roots.state.as_path(),
                     &writer.worktree,
                     &writer.project,
@@ -733,7 +632,7 @@ fn submit_with_launcher(
                             let path = provenant_records::diagnostic::safe_path(path, provenant_records::diagnostic::Destination::Local)
                                 .unwrap_or_else(|| "the limiting volume".into());
                             Some(provenant_records::diagnostic::Diagnostic::new(kind.code()).category(kind.category())
-                                .detail(format!("insufficient disk space on {path}: {available} bytes available, floor {floor} bytes; gc.free_floor from {}; bounded GC reported {reclaimed} bytes reclaimed", origin.description()))
+                                .detail(format!("insufficient disk space on {path}: {available} bytes available, floor {floor} bytes; gc.critical_free from {}; bounded GC reported {reclaimed} bytes reclaimed", origin.description()))
                                 .next(format!("run `provenant gc --free-floor {floor}B` before dispatching a writer"))
                                 .fact(provenant_records::diagnostic::DiagnosticFact::DiskPressure { available: *available, floor: *floor, reclaimed: *reclaimed, origin: *origin }))
                         }
@@ -748,33 +647,44 @@ fn submit_with_launcher(
             }
         }
     }
-    let profile = config
-        .dispatch_profile(&submission.knobs)
-        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
-    let read_only = submission.tasks.iter().all(|task| task.worktree.is_none());
-    let bound = (read_only
-        && config.knob_is_set("lanes.max_concurrency", &submission.knobs)
-        && !config.knob_is_set("lanes.max_concurrency_read_only", &submission.knobs))
-    .then(|| profile.knob_u64("lanes.max_concurrency"))
-    .flatten();
-    let concurrency = run::concurrency(submission.concurrency, &profile, read_only, bound);
-    let tasks = submission
-        .tasks
-        .into_iter()
-        .map(|task| {
+    let task = {
+        let task = submission.task;
+        {
             let mut task_profile = profile.clone();
+            task_profile.policy_project = Some(session.context.project_id);
             task_profile.require_skill_location = task.require_skill_location;
             task_profile.settlement_retry_limit = task
                 .settlement_retry_limit
                 .map(|limit| limit.min(provenant_routing::MAX_SETTLEMENT_RETRIES));
-            let attempt = task.attempt;
-            if attempt.confidential { task_profile.extra.insert("confidential".into(), serde_json::json!(true)); }
-            if attempt.parent_sandboxed {
-                task_profile.extra.insert(
-                    provenant_records::run::PARENT_SANDBOXED_FIELD.into(),
-                    serde_json::json!(true),
-                );
+            let mut attempt = task.attempt;
+            // Seal direct-parent admission before hashing, just as graph and
+            // peer admission do. Continuations retain this immutable fact.
+            if !attempt.policy_sealed {
+                attempt.parent_sandboxed |= parent_attempt
+                    .is_some_and(|parent| session.store.attempt_floors_children(parent, call));
             }
+            seal_launch_policy(
+                &mut attempt,
+                task.worktree.as_deref().unwrap_or(edge.cwd),
+                &task.prompt,
+                &task.access,
+                task.base.as_deref(),
+                task.head.as_deref(),
+            )?;
+            task_profile.write_scope = attempt.write_scope.clone();
+            task_profile.policy_overrides = attempt.policy_overrides.clone();
+            task_profile.repository_policy = attempt.launch_policy.clone();
+            task_profile.confidential = attempt.confidential;
+            task_profile.parent_sandboxed = attempt.parent_sandboxed;
+            task_profile.admitted_by = attempt.admitted_by.clone();
+
+            let policy = submission_policy(
+                &config,
+                &session.context.project_id.to_string(),
+                &task_profile,
+                &attempt.policy_overrides,
+            );
+            task_profile.launch_policy = Some(policy);
             if attempt.new_worktree.is_some()
                 || !attempt.capabilities.is_empty()
                 || !attempt.write_roots.is_empty()
@@ -785,12 +695,11 @@ fn submit_with_launcher(
                     "resolve the attempt's new worktree, capabilities and write roots before submission",
                 ));
             }
-            Ok(run::DispatchTask {
+            Ok::<_, Fail>(run::DispatchTask {
                 context: task.context,
                 build_heavy: attempt.build_heavy,
                 profile: task_profile,
                 title: task.title,
-                task_id: task.task_id,
                 prompt: task.prompt,
                 base: task.base,
                 pinned_base: task.pinned_base,
@@ -804,8 +713,8 @@ fn submit_with_launcher(
                 worktree: task.worktree,
                 access: task.access,
             })
-        })
-        .collect::<Result<Vec<_>, Fail>>()?;
+        }
+    }?;
     let chair = parent_attempt
         .is_none()
         .then_some(submission.chair)
@@ -816,8 +725,7 @@ fn submit_with_launcher(
             run::DispatchRequest {
                 chair,
                 operation_id: submission.operation_id,
-                tasks,
-                concurrency,
+                task,
                 lane_depth,
                 parent_attempt,
             },
@@ -825,13 +733,14 @@ fn submit_with_launcher(
             call,
         )?;
     if parent_attempt.is_none() {
-        let canonical = session.store.request(record.run_id, call)?;
+        let canonical = session.store.request(record.attempt_id, call)?;
+        let graph = record.key.graph().to_owned();
         with_chair_index(edge.roots, call, |index, call| {
-            index.submit(session.context.project_id, record.run_id, &canonical, call)
+            index.submit(session.context.project_id, &graph, &canonical, call)
         })?;
-        let pending = session.store.pending_attempts(record.run_id, call)?;
-        for task in &canonical.tasks {
-            if let Some(writer) = &task.writer {
+        let operation = session.store.attempt_operation(record.attempt_id, call)?;
+        {
+            if let Some(writer) = &canonical.task.writer {
                 provenant_confinement::worktrees::with_context_using_facts(
                     edge.roots,
                     edge.home,
@@ -845,13 +754,10 @@ fn submit_with_launcher(
                             provenant_confinement::verify_worktree(context.repo, &writer.worktree)?;
                         if let Some(mut owner) = worktrees::load_owner(&tree)?
                             && owner.origin == worktrees::WorktreeOrigin::Lane
-                            && owner.operation_id.as_ref() == Some(&record.operation_id)
-                            && let Some(attempt) = pending
-                                .iter()
-                                .find(|attempt| attempt.task_id == task.task_id)
+                            && owner.operation_id.as_ref() == Some(&operation.operation_id)
                         {
                             let expected = owner.clone();
-                            owner.attempt_id = Some(attempt.attempt_id);
+                            owner.attempt_id = Some(record.attempt_id);
                             worktrees::update_owner_when_unchanged(
                                 context,
                                 &tree,

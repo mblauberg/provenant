@@ -7,8 +7,8 @@ use crate::{
     AttemptRecord, AttemptState, Request, Result, RunError, RunStore, WriterDeliveryState,
     db::bytes, db::decode,
 };
-use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, RunId};
-use provenant_records::run::ChairBinding;
+use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId};
+use provenant_records::custody::Chair;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +26,6 @@ pub const NOTICE_BYTES: usize = 300;
 pub struct Reaction {
     pub schema_version: u64,
     pub attempt: AttemptId,
-    pub run: RunId,
     pub project: ProjectId,
     /// Sender of the notice: the actor that committed the settlement.
     pub sender: ActorId,
@@ -43,7 +42,7 @@ pub struct Reaction {
     #[serde(default)]
     pub resolved: bool,
     #[serde(default)]
-    pub chair: Option<ChairBinding>,
+    pub chair: Option<Chair>,
     #[serde(default)]
     pub session: Option<String>,
     #[serde(default)]
@@ -72,7 +71,6 @@ pub struct Line<'a> {
     pub outcome: &'a str,
     pub partial: bool,
     pub model: Option<&'a str>,
-    pub staged: Option<&'a str>,
     pub head: Option<&'a str>,
     pub pull_request: Option<&'a str>,
 }
@@ -99,7 +97,6 @@ pub fn notice_line(line: &Line<'_>) -> String {
     }
     for (label, value, budget) in [
         ("model", line.model, 56),
-        ("next", line.staged, 40),
         ("head", line.head, 12),
         ("pr", line.pull_request, 90),
     ] {
@@ -118,12 +115,7 @@ fn number(text: &str) -> Option<String> {
 
 impl RunStore {
     /// Freeze the reaction payload from the terminal record about to commit.
-    pub(crate) fn freeze_reaction(
-        &self,
-        next: &AttemptRecord,
-        writer: bool,
-        staged: Option<&str>,
-    ) -> Result<Reaction> {
+    pub(crate) fn freeze_reaction(&self, next: &AttemptRecord, writer: bool) -> Result<Reaction> {
         let AttemptState::Terminal {
             outcome,
             finished_at,
@@ -153,14 +145,12 @@ impl RunStore {
             outcome: outcome.as_str().unwrap_or("unknown"),
             partial: !next.partial_signals.is_empty(),
             model: route.and_then(|route| route.model.as_deref()),
-            staged,
             head: head.as_deref().map(|head| clip(head, 12)),
             pull_request: pull_request.as_deref(),
         });
         Ok(Reaction {
             schema_version: 1,
             attempt: next.attempt_id,
-            run: next.run_id,
             project: next.project_id,
             sender: self.context.actor_id,
             notice,
@@ -192,10 +182,9 @@ impl RunStore {
 
     pub(crate) fn insert_reaction(tx: &rusqlite::Connection, reaction: &Reaction) -> Result<()> {
         tx.execute(
-            "INSERT OR IGNORE INTO reactions(attempt,run,project,settled_at,pending,payload) VALUES (?1,?2,?3,?4,1,?5)",
+            "INSERT OR IGNORE INTO reactions(attempt,project,settled_at,pending,payload) VALUES (?1,?2,?3,1,?4)",
             params![
                 reaction.attempt.to_string(),
-                reaction.run.to_string(),
                 reaction.project.to_string(),
                 reaction.finished_micros.div_euclid(1_000_000),
                 bytes(reaction)?
@@ -204,22 +193,14 @@ impl RunStore {
         Ok(())
     }
 
-    /// Attempts of a run that still owe reactions.
-    pub fn pending_reactions(&self, run: RunId, call: &Request<'_>) -> Result<Vec<AttemptId>> {
+    /// Whether the attempt still owes reactions.
+    pub fn reaction_pending(&self, attempt: AttemptId, call: &Request<'_>) -> Result<bool> {
         call.check()?;
-        let ids: Vec<String> = {
-            let mut query = self.db.prepare(
-                "SELECT attempt FROM reactions WHERE run=?1 AND project=?2 AND pending=1 ORDER BY rowid",
-            )?;
-            let rows = query.query_map(
-                params![run.to_string(), self.context.project_id.to_string()],
-                |row| row.get(0),
-            )?;
-            rows.collect::<std::result::Result<_, _>>()?
-        };
-        ids.into_iter()
-            .map(|id| AttemptId::parse(&id).map_err(|_| RunError::Validation("reaction attempt")))
-            .collect()
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reactions WHERE attempt=?1 AND project=?2 AND pending=1)",
+            params![attempt.to_string(), self.context.project_id.to_string()],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn reaction(&self, attempt: AttemptId, call: &Request<'_>) -> Result<Option<Reaction>> {
@@ -243,7 +224,6 @@ impl RunStore {
             .reaction(reaction.attempt, call)?
             .ok_or(RunError::NotFound)?;
         if current.notice != reaction.notice
-            || current.run != reaction.run
             || (current.resolved && current.chair != reaction.chair)
             || (current.resolved && current.session != reaction.session)
         {
@@ -263,33 +243,32 @@ impl RunStore {
         })
     }
 
-    /// Run `step` on every attempt of `run` that owes reactions, under the
-    /// run's reaction lock so concurrent drains do not repeat each other (a
-    /// busy lock means another drain covers the run). `step` records progress
+    /// Run `step` on the attempt's owed reaction, under the attempt's
+    /// reaction lock so concurrent drains do not repeat each other (a busy
+    /// lock means another drain covers it). `step` records progress
     /// on the reaction it is given and calls the saver it is handed at each
     /// boundary, so work already done survives a crash. A step may outlast any
     /// one call budget, so every persistence operation here takes a fresh one.
-    /// A failed reaction stays pending for the next drain, the others still
-    /// run, and the first failure is returned.
+    /// A failed reaction stays pending for the next drain.
     pub fn drain_reactions(
         &self,
-        run: RunId,
+        attempt: AttemptId,
         clock: &dyn Clock,
         cancel: &CancelToken,
         step: &mut Step<'_>,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let fresh = || -> Result<Request<'_>> { Ok(Request { clock, cancel }) };
-        if self.pending_reactions(run, &fresh()?)?.is_empty() {
+        if !self.reaction_pending(attempt, &fresh()?)? {
             return Ok(());
         }
-        let Some(_lock) = self.reaction_lock(run)? else {
+        let Some(_lock) = self.reaction_lock(attempt)? else {
             return Ok(());
         };
         let mut first = None;
         // Re-read under the lock: a drain that just finished leaves nothing.
-        for attempt in self.pending_reactions(run, &fresh()?)? {
+        if self.reaction_pending(attempt, &fresh()?)? {
             let Some(mut reaction) = self.reaction(attempt, &fresh()?)? else {
-                continue;
+                return Ok(());
             };
             let mut save =
                 |reaction: &Reaction| -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -310,10 +289,10 @@ impl RunStore {
         self.write(call, |tx| Self::insert_reaction(tx, reaction))
     }
 
-    /// Exclude other drains of this run. `None` when another holds it.
-    pub fn reaction_lock(&self, run: RunId) -> Result<Option<provenant_os::fs::LockGuard>> {
+    /// Exclude other drains of this attempt. `None` when another holds it.
+    pub fn reaction_lock(&self, attempt: AttemptId) -> Result<Option<provenant_os::fs::LockGuard>> {
         use provenant_os::fs::{FsError, LockMode};
-        let directory = self.run_dir(run, false)?;
+        let directory = self.attempt_dir(attempt, false)?;
         match directory.try_lock(std::ffi::OsStr::new("reactions.lock"), LockMode::Exclusive) {
             Ok(lock) => Ok(Some(lock)),
             Err(FsError::LockTimeout { .. }) => Ok(None),
@@ -343,7 +322,6 @@ mod tests {
             outcome: "quota_limited",
             partial: true,
             model: Some(model),
-            staged: Some("policy_fallback_with_a_long_name_that_overruns_it"),
             head: Some("0123456789abcdef"),
             pull_request: Some("https://github.com/example/example/pull/2125"),
         }
@@ -354,12 +332,7 @@ mod tests {
         let model = "m".repeat(512);
         let text = notice_line(&line(&model));
         assert!(text.len() <= NOTICE_BYTES, "{}", text.len());
-        for needle in [
-            "(partial)",
-            " next=policy_fallback",
-            " head=0123456789ab",
-            " pr=https://",
-        ] {
+        for needle in ["(partial)", " head=0123456789ab", " pr=https://"] {
             assert!(text.contains(needle), "{needle} in {text}");
         }
     }

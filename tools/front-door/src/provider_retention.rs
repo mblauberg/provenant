@@ -1,76 +1,77 @@
-//! GC composition for terminal provider state.
+//! GC adapters for provider state, attempt scratch and payload caps.
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots};
 use provenant_os::{clock::SystemClock, fs::Directory};
 use provenant_run::{ExecutionContext, ProviderStateGc, ProviderStateIssue, Request, RunStore};
 use std::path::Path;
 
-#[cfg(test)]
-pub(crate) fn collect(
-    roots: &Roots,
-    home: &Path,
-    assets: &Path,
-    days: u64,
-    dry_run: bool,
-) -> ProviderStateGc {
-    collect_with_logs(roots, home, assets, days, 30, 16 << 30, dry_run)
+#[derive(Clone, Copy)]
+enum RetentionPass {
+    ProviderState { days: u64, logs_days: u64 },
+    AttemptScratch { days: u64 },
+    PayloadCap { cap_bytes: u64, measure: bool },
 }
 
-pub(crate) fn collect_with_logs(
+pub(crate) fn collect_provider_state(
     roots: &Roots,
     home: &Path,
     assets: &Path,
     days: u64,
     logs_days: u64,
-    payload_cap: u64,
     dry_run: bool,
 ) -> ProviderStateGc {
     collect_retention(
         roots,
         home,
         assets,
-        days,
-        logs_days,
-        payload_cap,
+        RetentionPass::ProviderState { days, logs_days },
         dry_run,
-        false,
         None,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn collect_pressure(
-    projects: Option<&[ProjectId]>,
+pub(crate) fn collect_attempt_scratch(
     roots: &Roots,
     home: &Path,
     assets: &Path,
     days: u64,
-    logs_days: u64,
-    payload_cap: u64,
+    projects: Option<&[ProjectId]>,
     dry_run: bool,
 ) -> ProviderStateGc {
     collect_retention(
         roots,
         home,
         assets,
-        days,
-        logs_days,
-        payload_cap,
+        RetentionPass::AttemptScratch { days },
         dry_run,
-        true,
         projects,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) fn collect_payload_cap(
+    projects: Option<&[ProjectId]>,
+    roots: &Roots,
+    home: &Path,
+    assets: &Path,
+    cap_bytes: u64,
+    measure: bool,
+    dry_run: bool,
+) -> ProviderStateGc {
+    collect_retention(
+        roots,
+        home,
+        assets,
+        RetentionPass::PayloadCap { cap_bytes, measure },
+        dry_run,
+        projects,
+    )
+}
+
 fn collect_retention(
     roots: &Roots,
     home: &Path,
     assets: &Path,
-    days: u64,
-    logs_days: u64,
-    payload_cap: u64,
+    pass: RetentionPass,
     dry_run: bool,
-    temporary_only: bool,
     projects: Option<&[ProjectId]>,
 ) -> ProviderStateGc {
     let mut report = ProviderStateGc::default();
@@ -79,11 +80,8 @@ fn collect_retention(
         roots.state.as_path(),
         home,
         assets,
-        days,
-        logs_days,
-        payload_cap,
+        pass,
         dry_run,
-        temporary_only,
         projects,
         None,
         &mut report,
@@ -97,11 +95,8 @@ fn collect_store(
     path: &Path,
     home: &Path,
     assets: &Path,
-    days: u64,
-    logs_days: u64,
-    payload_cap: u64,
+    pass: RetentionPass,
     dry_run: bool,
-    temporary_only: bool,
     projects: Option<&[ProjectId]>,
     expected: Option<&Directory>,
     report: &mut ProviderStateGc,
@@ -133,8 +128,8 @@ fn collect_store(
             cancel: &cancel,
         };
         if let Some(reader) = RunStore::open_read_only(&context, &call)? {
-            // Applied cleanup updates the temporary-retained hint. Keep previews
-            // read-only and never create a run store just to collect it.
+            // Applied cleanup needs a writable store. Previews stay read-only
+            // and never create a run store just to collect it.
             let store = if dry_run {
                 reader
             } else {
@@ -142,54 +137,39 @@ fn collect_store(
                 RunStore::open(&context, &call)?
             };
             let store = store.with_writer_registry(host.state.as_path());
-            let mut collected = if temporary_only {
-                match projects {
-                    Some(projects) => store.gc_temporary_for_projects(
-                        &directory,
-                        days,
-                        logs_days,
-                        clock.wall_now()?,
-                        dry_run,
-                        projects,
-                        &call,
-                    )?,
-                    None => store.gc_temporary(
-                        &directory,
-                        days,
-                        logs_days,
-                        clock.wall_now()?,
-                        dry_run,
-                        &call,
-                    )?,
+            let now = clock.wall_now()?;
+            match pass {
+                RetentionPass::ProviderState { days, logs_days } => {
+                    let mut collected = store.gc_provider_state_with_logs(
+                        &directory, days, logs_days, now, dry_run, &call,
+                    )?;
+                    report.removed.append(&mut collected.removed);
+                    report.attempt_tmp.append(&mut collected.attempt_tmp);
+                    report.attempt_logs.append(&mut collected.attempt_logs);
+                    report.expired_events += collected.expired_events;
+                    report.kept.append(&mut collected.kept);
+                    report.errors.append(&mut collected.errors);
                 }
-            } else {
-                store.gc_provider_state_with_logs(
-                    &directory,
-                    days,
-                    logs_days,
-                    clock.wall_now()?,
-                    dry_run,
-                    &call,
-                )?
-            };
-            report.removed.append(&mut collected.removed);
-            report.attempt_tmp.append(&mut collected.attempt_tmp);
-            report.attempt_logs.append(&mut collected.attempt_logs);
-            report.expired_events += collected.expired_events;
-            report.kept.append(&mut collected.kept);
-            report.errors.append(&mut collected.errors);
-            // Pressure collection at settlement reads the size ledger; only a
-            // full sweep walks payloads to refresh it.
-            let payload = store.gc_payloads(
-                &directory,
-                payload_cap,
-                clock.wall_now()?,
-                dry_run,
-                !temporary_only && !dry_run,
-                projects,
-                &call,
-            )?;
-            report.payload.absorb(payload);
+                RetentionPass::AttemptScratch { days } => {
+                    let mut collected = match projects {
+                        Some(projects) => store.gc_temporary_for_projects(
+                            &directory, days, now, dry_run, projects, &call,
+                        )?,
+                        None => store.gc_temporary(&directory, days, now, dry_run, &call)?,
+                    };
+                    report.removed.append(&mut collected.removed);
+                    report.attempt_tmp.append(&mut collected.attempt_tmp);
+                    report.attempt_logs.append(&mut collected.attempt_logs);
+                    report.expired_events += collected.expired_events;
+                    report.kept.append(&mut collected.kept);
+                    report.errors.append(&mut collected.errors);
+                }
+                RetentionPass::PayloadCap { cap_bytes, measure } => {
+                    report.payload.absorb(store.gc_payloads(
+                        &directory, cap_bytes, now, dry_run, measure, projects, &call,
+                    )?);
+                }
+            }
         }
         Ok(())
     })();
@@ -202,9 +182,9 @@ fn collect_store(
 }
 
 #[cfg(test)]
-pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
+pub(crate) fn provider_retention_classes_sweep_host_and_refuse_replaced_roots()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, OperationId, RootInputs, RunId, TaskId, WallTime};
+    use provenant_core::{AttemptId, OperationId, RootInputs, WallTime};
     use provenant_records::CanonicalV1;
     use std::{fs, os::unix::fs::DirBuilderExt};
     let temp = tempfile::tempdir()?;
@@ -233,25 +213,21 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
         cancel: &cancel,
     };
     let store = RunStore::open(&context, &call)?;
-    let (run, attempt, task) = (
-        RunId::from_bytes([3; 16]),
-        AttemptId::from_bytes([4; 16]),
-        TaskId::from_bytes([5; 16]),
-    );
+    let attempt = AttemptId::from_bytes([4; 16]);
     store.create(&provenant_run::PreparedRun {
-        run_id: run, operation_id: OperationId::parse("retention-child")?, created_at: WallTime::from_micros(100)?,
-        attempts: vec![provenant_run::NewAttempt { attempt_id: attempt, task_id: task, prompt: String::new() }],
+        attempt_id: attempt, operation_id: OperationId::parse("retention-child")?, created_at: WallTime::from_micros(100)?,
+        prompt: String::new(),
         request: serde_json::from_value(serde_json::json!({
-            "schema_version":1, "concurrency":1, "parent":null, "tasks":[{
-                "task_id": task, "prompt_digest": CanonicalV1::file_digest(b""),
+            "schema_version":1, "parent":null, "task":{
+                "context": {"graph_id":"lane-retention","node_id":"retention","attempt":1},
+                "prompt_digest": CanonicalV1::file_digest(b""),
                 "route": {"kind":"model","provider":"codex","model":"codex/fixture"}, "authority_digest": provenant_core::Digest::from_bytes([0;32]),
-                "provider_timeout_seconds":20, "delivery_id":null }]
+                "provider_timeout_seconds":20, "delivery_id":null }
         }))?,
     }, &call)?;
     let reaction = provenant_run::Reaction {
         schema_version: 1,
         attempt,
-        run,
         project: context.project_id,
         sender: context.actor_id,
         notice: "fixture".into(),
@@ -270,15 +246,13 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
     };
     store.owe_reaction(&reaction, &call)?;
     store.save_reaction(&reaction, &call)?;
-    let kept = collect_pressure(None, &roots, &home, &assets, 7, 20, 16 << 30, false);
+    let kept = collect_provider_state(&roots, &home, &assets, 7, 20, false);
     assert!(kept.errors.is_empty(), "{:?}", kept.errors);
     assert!(store.reaction(attempt, &call)?.is_some());
-    let expired = collect_pressure(None, &roots, &home, &assets, 7, 5, 16 << 30, false);
+    let expired = collect_provider_state(&roots, &home, &assets, 7, 5, false);
     assert!(expired.errors.is_empty(), "{:?}", expired.errors);
     assert!(store.reaction(attempt, &call)?.is_none());
-    let candidate = child_path.join(format!(
-        "runs/{run}/attempts/{attempt}/provider-state/candidate-0"
-    ));
+    let candidate = child_path.join(format!("attempts/{attempt}/provider-state/candidate-0"));
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -304,14 +278,16 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
         clock: &clock,
         cancel: &cancel,
     };
+    let key = store.work_key(attempt, &call)?;
+    let graph = key.graph().to_owned();
     let index = provenant_fabric_runtime::chairs::ChairIndex::open(&roots.state, &index_call)?;
     index.submit(
         context.project_id,
-        run,
-        &store.request(run, &call)?,
+        &graph,
+        &store.request(attempt, &call)?,
         &index_call,
     )?;
-    let association = index.read(context.project_id, run, &index_call)?;
+    let association = index.read(context.project_id, &graph, &index_call)?;
     drop(store);
     let temporary = candidate
         .parent()
@@ -321,8 +297,17 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
         .join("tmp");
     fs::DirBuilder::new().mode(0o700).create(&temporary)?;
     fs::write(temporary.join("payload"), vec![1; 8192])?;
-    let preview = collect(&roots, &home, &assets, 7, true);
+    let preview = collect_provider_state(&roots, &home, &assets, 7, 30, true);
+    let preview_scratch = collect_attempt_scratch(&roots, &home, &assets, 7, None, true);
+    let preview_payload = collect_payload_cap(None, &roots, &home, &assets, 16 << 30, false, true);
     assert!(preview.errors.is_empty(), "{:?}", preview.errors);
+    assert!(preview.attempt_tmp.is_empty());
+    assert_eq!(preview.payload.cap_bytes, 0);
+    assert!(
+        preview_scratch.errors.is_empty(),
+        "{:?}",
+        preview_scratch.errors
+    );
     assert_eq!(preview.expired_events, (events_before.len() - 1) as u64);
     let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("run store")?;
     assert_eq!(
@@ -330,26 +315,43 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
         events_before.len()
     );
     drop(reader);
-    assert_eq!(preview.attempt_tmp.len(), 1);
-    assert_eq!(preview.attempt_tmp[0].path, temporary);
-    assert!(preview.attempt_tmp[0].bytes >= 8192);
+    assert_eq!(preview_scratch.attempt_tmp.len(), 1);
+    assert_eq!(preview_scratch.attempt_tmp[0].path, temporary);
+    assert!(preview_scratch.attempt_tmp[0].bytes >= 8192);
+    assert!(
+        preview_payload.errors.is_empty(),
+        "{:?}",
+        preview_payload.errors
+    );
+    assert_eq!(preview_payload.payload.cap_bytes, 16 << 30);
     assert!(temporary.exists());
-    let report = collect(&roots, &home, &assets, 7, false);
+    let report = collect_provider_state(&roots, &home, &assets, 7, 30, false);
+    let scratch = collect_attempt_scratch(&roots, &home, &assets, 7, None, false);
+    let payload = collect_payload_cap(None, &roots, &home, &assets, 16 << 30, true, false);
     assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(report.attempt_tmp.is_empty());
+    assert_eq!(report.payload.cap_bytes, 0);
+    assert!(scratch.errors.is_empty(), "{:?}", scratch.errors);
     assert_eq!(report.expired_events, preview.expired_events);
-    assert_eq!(report.attempt_tmp.len(), 1);
-    assert_eq!(report.attempt_tmp[0].path, temporary);
-    assert_eq!(report.attempt_tmp[0].bytes, preview.attempt_tmp[0].bytes);
+    assert_eq!(scratch.attempt_tmp.len(), 1);
+    assert_eq!(scratch.attempt_tmp[0].path, temporary);
+    assert_eq!(
+        scratch.attempt_tmp[0].bytes,
+        preview_scratch.attempt_tmp[0].bytes
+    );
+    assert!(payload.errors.is_empty(), "{:?}", payload.errors);
+    assert_eq!(payload.payload.cap_bytes, 16 << 30);
     assert!(!temporary.exists());
     assert!(!candidate.exists());
     let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("run store")?;
+    let retained_key = reader.work_key(attempt, &call)?;
     assert_eq!(
-        reader.run(run, &call)?.run_id,
-        run,
-        "payload GC retains run metadata"
+        reader.attempt_by_key(&retained_key, &call)?.attempt_id,
+        attempt,
+        "payload GC retains the attempt under its work key"
     );
     assert_eq!(
-        index.read(context.project_id, run, &index_call)?,
+        index.read(context.project_id, &graph, &index_call)?,
         association,
         "retained runs keep chair associations"
     );
@@ -363,7 +365,7 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
     assert!(
         child_path
             .join(format!(
-                "runs/{run}/attempts/{attempt}/provider-history/candidate-0/sessions/session.jsonl"
+                "attempts/{attempt}/provider-history/candidate-0/sessions/session.jsonl"
             ))
             .exists()
     );
@@ -377,10 +379,10 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
         &child_path,
         &home,
         &assets,
-        7,
-        30,
-        16 << 30,
-        false,
+        RetentionPass::ProviderState {
+            days: 7,
+            logs_days: 30,
+        },
         false,
         None,
         Some(&expected),

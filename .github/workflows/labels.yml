@@ -14,9 +14,10 @@ on:
 permissions: {}
 
 # Serialise syncs: overlapping runs from rapid pushes would race the same API.
+# The newest run syncs the newest file, so it cancels a superseded one.
 concurrency:
   group: labels-sync
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   sync:

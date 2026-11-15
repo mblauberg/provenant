@@ -14,6 +14,8 @@ pub struct Summary {
     pub next: String,
     pub needs_you: Vec<String>,
     pub risk: String,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 #[derive(Debug, Error)]
@@ -27,6 +29,8 @@ impl SummaryError {
 
 /// Fields omitted from a patch retain their existing values. Revision zero
 /// creates a summary on an existing checkpoint.
+/// This is a CLI update request; strict decoding rejects misspelled or
+/// unsupported fields instead of silently accepting and discarding an update.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SummaryPatch {
@@ -181,7 +185,7 @@ impl super::SessionStore {
         )?;
         self.recover_pending(&dir)?;
         match self.begin_update(&dir, patch, expected, operation_id, budget, cancel, clock)? {
-            Begun::Replayed(outcome) => Ok(outcome),
+            Begun::Replayed(outcome) => Ok(*outcome),
             Begun::Pending(pending) => self
                 .finish_pending(&dir, *pending)
                 .map(|receipt| receipt.outcome(false)),
@@ -212,7 +216,7 @@ impl super::SessionStore {
             if receipt.digest != digest {
                 return Err(super::SessionError::OperationConflict);
             }
-            return Ok(Begun::Replayed(receipt.outcome(true)));
+            return Ok(Begun::Replayed(Box::new(receipt.outcome(true))));
         }
         self.check_discovery_identity(self.load_discovery(dir)?.as_ref())?;
         let text = match dir.open_read(std::ffi::OsStr::new("checkpoint.md")) {
@@ -233,6 +237,7 @@ impl super::SessionStore {
             next: String::new(),
             needs_you: Vec::new(),
             risk: String::new(),
+            extra: Default::default(),
         });
         if summary.revision != expected {
             return Err(super::SessionError::SummaryStale {
@@ -261,6 +266,7 @@ impl super::SessionStore {
             operation_id: operation_id.clone(),
             digest,
             summary,
+            extra: Default::default(),
             saved: super::Saved {
                 revision: current.revision,
                 parent: current.parent,
@@ -270,6 +276,7 @@ impl super::SessionStore {
                     .len()
                     .min(usize::try_from(plan.keep).unwrap_or(usize::MAX)),
                 warnings: Vec::new(),
+                extra: Default::default(),
             },
         };
         super::check_wait(budget, cancel, clock).map_err(|stop| match stop {
@@ -279,11 +286,15 @@ impl super::SessionStore {
             super::WaitStop::Deadline => super::SessionError::Deadline,
         })?;
         // Past this point the update is committed: recovery finishes it.
-        let pending = Pending { plan, receipt };
+        let pending = Pending {
+            plan,
+            receipt,
+            extra: Default::default(),
+        };
         super::publish(
             dir,
             PENDING,
-            &serde_json::to_vec(&pending).map_err(|_| super::SessionError::Journal)?,
+            &provenant_records::encode(&pending).map_err(|_| super::SessionError::Journal)?,
         )?;
         Ok(Begun::Pending(Box::new(pending)))
     }
@@ -300,7 +311,8 @@ impl super::SessionStore {
             Err(error) => return Err(error.into()),
         };
         let pending: Pending =
-            serde_json::from_slice(&bytes).map_err(|_| super::SessionError::Journal)?;
+            provenant_records::decode(bytes.as_slice(), super::json_limits(PENDING_LIMIT))
+                .map_err(|_| super::SessionError::Journal)?;
         self.finish_pending(dir, pending).map(|_| ())
     }
 
@@ -309,7 +321,9 @@ impl super::SessionStore {
         dir: &super::Directory,
         pending: Pending,
     ) -> Result<SummaryReceipt, super::SessionError> {
-        let Pending { plan, mut receipt } = pending;
+        let Pending {
+            plan, mut receipt, ..
+        } = pending;
         let saved = self.execute_plan(dir, &plan, true, |dir, record| {
             self.publish_discovery(dir, record)
         })?;
@@ -324,7 +338,7 @@ impl super::SessionStore {
         super::publish(
             dir,
             RECEIPTS,
-            &serde_json::to_vec(&receipts).map_err(|_| super::SessionError::Journal)?,
+            &provenant_records::encode(&receipts).map_err(|_| super::SessionError::Journal)?,
         )?;
         match dir.unlink(std::ffi::OsStr::new(PENDING)) {
             Ok(()) => {}
@@ -339,7 +353,7 @@ const PENDING: &str = "summary-pending.json";
 /// Worst case for a journal: two checkpoint texts (the replaced and the new)
 /// as JSON strings, where one control character escapes to six bytes, plus the
 /// revision chain, discovery record and receipt.
-const PENDING_LIMIT: u64 = 2 * super::CHECKPOINT_LIMIT * 6 + 1024 * 1024;
+pub(super) const PENDING_LIMIT: u64 = 2 * super::CHECKPOINT_LIMIT * 6 + 1024 * 1024;
 /// Receipts hold a summary (at most an 8 KiB header, escaped) each.
 const RECEIPTS_LIMIT: u64 = RECEIPTS_KEPT as u64 * (8192 * 6 + 16 * 1024);
 const RECEIPTS: &str = "summary-receipts.json";
@@ -352,6 +366,8 @@ pub(super) struct SummaryReceipt {
     digest: provenant_records::FileDigest,
     summary: Summary,
     saved: super::Saved,
+    #[serde(flatten, default)]
+    pub(super) extra: provenant_records::ExtraFields,
 }
 impl SummaryReceipt {
     fn outcome(self, replayed: bool) -> SummaryOutcome {
@@ -363,24 +379,31 @@ impl SummaryReceipt {
     }
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct Receipts {
+pub(super) struct Receipts {
     entries: Vec<SummaryReceipt>,
+    #[serde(flatten, default)]
+    extra: provenant_records::ExtraFields,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct Pending {
     pub(super) plan: super::PublishPlan,
     receipt: SummaryReceipt,
+    #[serde(flatten, default)]
+    pub(super) extra: provenant_records::ExtraFields,
 }
 fn read_receipts(dir: &super::Directory) -> Result<Receipts, super::SessionError> {
     match dir.read_bounded(std::ffi::OsStr::new(RECEIPTS), RECEIPTS_LIMIT) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| super::SessionError::Journal),
+        Ok(bytes) => {
+            provenant_records::decode(bytes.as_slice(), super::json_limits(RECEIPTS_LIMIT))
+                .map_err(|_| super::SessionError::Journal)
+        }
         Err(error) if error.is_not_found() => Ok(Receipts::default()),
         Err(error) => Err(error.into()),
     }
 }
 
 pub(super) enum Begun {
-    Replayed(SummaryOutcome),
+    Replayed(Box<SummaryOutcome>),
     Pending(Box<Pending>),
 }
 
@@ -569,7 +592,7 @@ fn replace_summary(text: &str, summary: &Summary) -> Result<String, super::Sessi
         "\n"
     };
     let quote = |value: &str| serde_json::to_string(value).map_err(|_| SummaryError);
-    let block = format!(
+    let mut block = format!(
         "provenant_summary:{newline}  schema_version: 1{newline}  revision: {}{newline}  updated_at: {}{newline}  now: {}{newline}  next: {}{newline}  needs_you: {}{newline}  risk: {}{newline}",
         summary.revision,
         quote(&summary.updated_at)?,
@@ -578,6 +601,12 @@ fn replace_summary(text: &str, summary: &Summary) -> Result<String, super::Sessi
         serde_json::to_string(&summary.needs_you).map_err(|_| SummaryError)?,
         quote(&summary.risk)?
     );
+    for (key, value) in &summary.extra {
+        use std::fmt::Write as _;
+        let key = serde_json::to_string(key).map_err(|_| SummaryError)?;
+        let value = serde_json::to_string(value).map_err(|_| SummaryError)?;
+        writeln!(&mut block, "  {key}: {value}").map_err(|_| SummaryError)?;
+    }
     let output = if !text.starts_with("---\n") && !text.starts_with("---\r\n") {
         format!("---\n{block}---\n{text}")
     } else {
@@ -642,25 +671,11 @@ pub fn parse_summary(markdown: &str) -> Result<Option<Summary>, SummaryError> {
     let Some(node) = root.remove("provenant_summary") else {
         return Ok(None);
     };
-    let YamlValue::Object(mut fields) = node else {
-        return Err(SummaryError);
-    };
-    fn string(fields: &mut Mapping, key: &str) -> Result<String, SummaryError> {
-        match fields.remove(key) {
-            Some(YamlValue::String(s)) => Ok(s),
-            Some(YamlValue::Number(n)) if key == "schema_version" || key == "revision" => {
-                Ok(n.to_string())
-            }
-            _ => Err(SummaryError),
-        }
-    }
-    let schema_version = string(&mut fields, "schema_version")?
-        .parse()
-        .map_err(|_| SummaryError)?;
-    let revision = string(&mut fields, "revision")?
-        .parse()
-        .map_err(|_| SummaryError)?;
-    let updated_at = string(&mut fields, "updated_at")?;
+    let bytes = provenant_records::encode(&node).map_err(|_| SummaryError)?;
+    let summary: Summary =
+        provenant_records::decode(bytes.as_slice(), provenant_records::Limits::YAML)
+            .map_err(|_| SummaryError)?;
+    let updated_at = &summary.updated_at;
     let canonical_time = if updated_at.ends_with('Z') && !updated_at.contains('.') {
         format!("{}.000000Z", &updated_at[..updated_at.len() - 1])
     } else {
@@ -670,36 +685,106 @@ pub fn parse_summary(markdown: &str) -> Result<Option<Summary>, SummaryError> {
     {
         return Err(SummaryError);
     }
-    let now = string(&mut fields, "now")?;
-    let next = string(&mut fields, "next")?;
-    let risk = string(&mut fields, "risk")?;
-    let needs_you = match fields.remove("needs_you") {
-        Some(YamlValue::Array(items)) => items
-            .into_iter()
-            .map(|item| match item {
-                YamlValue::String(s) => Ok(s),
-                _ => Err(SummaryError),
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        _ => return Err(SummaryError),
-    };
-    if schema_version != 1 || revision == 0 {
+    if summary.schema_version != 1 || summary.revision == 0 {
         return Err(SummaryError);
     }
-    Ok(Some(Summary {
-        schema_version,
-        revision,
-        updated_at,
-        now,
-        next,
-        needs_you,
-        risk,
-    }))
+    Ok(Some(summary))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_extra_round_trip<T>(record: &T, limits: provenant_records::Limits)
+    where
+        T: Serialize + serde::de::DeserializeOwned,
+    {
+        let mut extended = serde_json::to_value(record).unwrap();
+        let extension = serde_json::json!({"source": "newer-writer"});
+        extended
+            .as_object_mut()
+            .unwrap()
+            .insert("future_summary_field".into(), extension.clone());
+        let bytes = serde_json::to_vec(&extended).unwrap();
+        let decoded: T = provenant_records::decode(bytes.as_slice(), limits).unwrap();
+        let encoded = provenant_records::encode(&decoded).unwrap();
+        let rewritten: serde_json::Value =
+            provenant_records::decode(encoded.as_slice(), limits).unwrap();
+        assert_eq!(rewritten["future_summary_field"], extension);
+    }
+
+    #[test]
+    fn summary_patch_rejects_unsupported_update_fields() {
+        let request = br#"{"now":"Repairing CI","future_update":"caller intent"}"#;
+        assert!(serde_json::from_slice::<SummaryPatch>(request).is_err());
+    }
+
+    #[test]
+    fn summary_journal_records_preserve_additive_fields_at_the_bounded_boundary() {
+        let at = provenant_core::UtcMicros::from_micros(1).unwrap();
+        let summary = Summary {
+            schema_version: 1,
+            revision: 1,
+            updated_at: "2026-10-28T03:00:00Z".into(),
+            now: "Now".into(),
+            next: "Next".into(),
+            needs_you: vec![],
+            risk: "None".into(),
+            extra: Default::default(),
+        };
+        let revision = super::super::Revision {
+            revision: 1,
+            parent: None,
+            sha256: provenant_records::CanonicalV1::file_digest(b"checkpoint"),
+            bytes: 10,
+            saved_at: at,
+            extra: Default::default(),
+        };
+        let plan = super::super::PublishPlan {
+            now: at,
+            prev: None,
+            text: b"checkpoint".to_vec(),
+            chain: vec![revision],
+            unchanged: false,
+            keep: 1,
+            discovery: None,
+            manifest_extra: Default::default(),
+            extra: Default::default(),
+        };
+        let saved = super::super::Saved {
+            revision: 1,
+            parent: None,
+            unchanged: false,
+            retained: 1,
+            warnings: vec![],
+            extra: Default::default(),
+        };
+        let receipt = SummaryReceipt {
+            operation_id: provenant_core::OperationId::parse("a").unwrap(),
+            digest: provenant_records::CanonicalV1::file_digest(b"request"),
+            summary: summary.clone(),
+            saved,
+            extra: Default::default(),
+        };
+        let receipts = Receipts {
+            entries: vec![receipt.clone()],
+            extra: Default::default(),
+        };
+        let pending = Pending {
+            plan,
+            receipt,
+            extra: Default::default(),
+        };
+
+        assert_extra_round_trip(&summary, provenant_records::Limits::YAML);
+        assert_extra_round_trip(&pending, super::super::json_limits(PENDING_LIMIT));
+        assert_extra_round_trip(&receipts, super::super::json_limits(RECEIPTS_LIMIT));
+        assert_extra_round_trip(&pending.receipt, super::super::json_limits(RECEIPTS_LIMIT));
+        assert_extra_round_trip(
+            &pending.receipt.saved,
+            super::super::json_limits(PENDING_LIMIT),
+        );
+    }
 
     #[test]
     fn summary_header_parses_example_and_rejects_invalid_data() {
@@ -707,13 +792,17 @@ mod tests {
         let summary = parse_summary(source).unwrap().unwrap();
         assert_eq!(summary.revision, 12);
         assert_eq!(summary.needs_you, ["request-id"]);
+        let extended = source.replace(
+            "  revision: 12",
+            "  future_field: {value: [1, 2]}\n  revision: 12",
+        );
+        let parsed = parse_summary(&extended).unwrap().unwrap();
+        assert_eq!(parsed.revision, summary.revision);
+        let rewritten = replace_summary(&extended, &parsed).unwrap();
+        let reread = parse_summary(&rewritten).unwrap().unwrap();
         assert_eq!(
-            parse_summary(&source.replace(
-                "  revision: 12",
-                "  future_field: {value: [1, 2]}\n  revision: 12"
-            ))
-            .unwrap(),
-            Some(summary.clone())
+            reread.extra.get("future_field"),
+            parsed.extra.get("future_field")
         );
         assert!(parse_summary(&source.replace("2026-10-28T03:00:00Z", "yesterday")).is_err());
         assert_eq!(
@@ -756,6 +845,7 @@ mod tests {
             next: "Next".into(),
             needs_you: vec![],
             risk: "None".into(),
+            extra: Default::default(),
         };
         let original = replace_summary("---\n---\nBody\n", &summary).unwrap();
         for prefix in [

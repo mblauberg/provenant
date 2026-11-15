@@ -1,12 +1,17 @@
 //! Local board metadata read in one SQLite snapshot, without artifact I/O.
-use crate::{db::decode, *};
+use crate::*;
 use provenant_core::ProjectId;
 use rusqlite::params;
 
+/// Upper bound for one run-board page.
+pub const MAX_BOARD_PAGE_SIZE: u64 = 100;
+
 #[derive(Debug, serde::Serialize)]
 pub struct BoardLane {
+    #[serde(serialize_with = "provenant_records::run::serialise_public_attempt")]
     pub attempt: AttemptRecord,
-    pub run: RunRecord,
+    /// The operation that admitted the attempt.
+    pub operation: OperationRecord,
 }
 
 #[derive(Debug)]
@@ -43,7 +48,7 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<BoardPage> {
         call.check()?;
-        if !(1..=100).contains(&limit) {
+        if !(1..=MAX_BOARD_PAGE_SIZE).contains(&limit) {
             return Err(RunError::Validation("board page bounds"));
         }
         let after = crate::db::sql_int(after)?;
@@ -67,10 +72,9 @@ impl RunStore {
         }
         let generation = format!("events:{event}");
         let mut statement = tx.prepare(
-            "SELECT a.sequence,a.id,a.project,a.run,a.task,a.record,r.record,\
+            "SELECT a.sequence,a.id,a.project,a.operation_record,a.record,a.operation,\
              a.number,a.revision,a.terminal FROM attempts a \
-             JOIN runs r ON r.id=a.run AND r.project=a.project \
-             WHERE (?1 IS NULL OR a.project=?1) AND (?2 OR a.terminal=0) \
+             WHERE a.refused=0 AND (?1 IS NULL OR a.project=?1) AND (?2 OR a.terminal=0) \
              AND (?3=0 OR a.sequence<?3) AND a.sequence<=?5 ORDER BY a.sequence DESC LIMIT ?4",
         )?;
         let mut rows =
@@ -83,27 +87,23 @@ impl RunStore {
                 more = true;
                 break;
             }
-            let attempt: AttemptRecord = crate::db::decode_attempt(&row.get::<_, Vec<u8>>(5)?)?;
-            let run: RunRecord = decode(&row.get::<_, Vec<u8>>(6)?)?;
+            let attempt: AttemptRecord = crate::db::decode_attempt(&row.get::<_, Vec<u8>>(4)?)?;
+            let operation: OperationRecord = crate::db::decode(&row.get::<_, Vec<u8>>(3)?)?;
             if attempt.attempt_id.to_string() != row.get::<_, String>(1)?
                 || attempt.project_id.to_string() != row.get::<_, String>(2)?
-                || attempt.run_id.to_string() != row.get::<_, String>(3)?
-                || attempt.task_id.to_string() != row.get::<_, String>(4)?
-                || crate::db::sql_int(attempt.attempt_number)? != row.get::<_, i64>(7)?
-                || crate::db::sql_int(attempt.revision)? != row.get::<_, i64>(8)?
+                || operation.project_id != attempt.project_id
+                || operation.operation_id.as_str() != row.get::<_, String>(5)?
+                || crate::db::sql_int(attempt.attempt_number)? != row.get::<_, i64>(6)?
+                || crate::db::sql_int(attempt.revision)? != row.get::<_, i64>(7)?
                 || matches!(attempt.state, AttemptState::Terminal { .. })
-                    != row.get::<_, bool>(9)?
-                || run.run_id != attempt.run_id
-                || run.project_id != attempt.project_id
-                || run.operation_id != attempt.operation_id
-                || !run.task_ids.contains(&attempt.task_id)
+                    != row.get::<_, bool>(8)?
             {
                 return Err(RunError::Validation("board index identity"));
             }
             crate::reader::validate_attempt(&attempt)?;
             last = u64::try_from(row.get::<_, i64>(0)?)
                 .map_err(|_| RunError::Validation("board sequence"))?;
-            lanes.push(BoardLane { attempt, run });
+            lanes.push(BoardLane { attempt, operation });
         }
         Ok(BoardPage {
             generation,
@@ -118,7 +118,7 @@ impl RunStore {
 mod tests {
     use super::*;
     use crate::tests::{call, clock, context, input};
-    use provenant_core::{AttemptId, CancelToken, RunId};
+    use provenant_core::{AttemptId, CancelToken};
 
     #[test]
     fn console_changes_after_creation_transition_and_terminal_commit()
@@ -136,7 +136,7 @@ mod tests {
         let created = provenant_os::changes::read(state)?;
         assert!(created.board.is_some());
         let generation = store.board_generation(&call)?;
-        let queued = store.record(input.attempts[0].attempt_id, &call)?;
+        let queued = store.record(input.attempt_id, &call)?;
         let attempt = store.mark_starting(
             &queued,
             &crate::tests::route(),
@@ -163,7 +163,7 @@ mod tests {
         assert!(
             store
                 .withdraw(
-                    input.attempts[0].attempt_id,
+                    input.attempt_id,
                     AttemptState::Queued {
                         extra: Default::default()
                     },
@@ -178,128 +178,210 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn board_paging_snapshot_and_metadata() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        context: ExecutionContext,
+        clock: provenant_core::TestClock,
+        cancel: CancelToken,
+        store: RunStore,
+    }
+
+    impl Fixture {
+        fn call(&self) -> Request<'_> {
+            call(&self.clock, &self.cancel)
+        }
+
+        fn add(&self, number: u8) -> TestResult<AttemptId> {
+            let mut run = input();
+            run.attempt_id = AttemptId::from_bytes([number; 16]);
+            run.operation_id = provenant_core::OperationId::parse(&format!("board-{number}"))?;
+            crate::tests::rekey(&mut run);
+            run.request.task.title = Some(format!("Task {number}"));
+            self.store.create(&run, &self.call())?;
+            Ok(run.attempt_id)
+        }
+    }
+
+    fn fixture() -> TestResult<Fixture> {
         let temp = tempfile::tempdir()?;
         let context = context(temp.path())?;
         let clock = clock();
         let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context, &call)?;
-        for n in 1u8..=101 {
-            let mut input = input();
-            input.run_id = RunId::from_bytes([n; 16]);
-            input.operation_id = provenant_core::OperationId::parse(&format!("board-{n}"))?;
-            input.attempts[0].attempt_id = AttemptId::from_bytes([n; 16]);
-            input.request.tasks[0].title = Some(format!("Task {n}"));
-            store.create(&input, &call)?;
+        let store = RunStore::open(&context, &call(&clock, &cancel))?;
+        Ok(Fixture {
+            _temp: temp,
+            context,
+            clock,
+            cancel,
+            store,
+        })
+    }
+
+    #[test]
+    fn board_pages_cover_the_high_water_snapshot() -> TestResult {
+        let fixture = fixture()?;
+        let expected: std::collections::HashSet<_> = (1u8..=5)
+            .map(|number| fixture.add(number))
+            .collect::<TestResult<_>>()?;
+        let call = fixture.call();
+        let mut current = fixture.store.board_page(None, true, 2, 0, None, &call)?;
+        let generation = current.generation.clone();
+        let high_water = current.high_water;
+        let mut seen = std::collections::HashSet::new();
+        let mut previous = None;
+        loop {
+            for lane in &current.lanes {
+                assert!(seen.insert(lane.attempt.attempt_id));
+                assert_eq!(
+                    lane.operation.operation_id.as_str(),
+                    format!("board-{}", lane.attempt.attempt_id.as_bytes()[0])
+                );
+            }
+            assert_eq!(current.generation, generation);
+            let Some(next) = current.next else { break };
+            assert!(next > 0 && previous.is_none_or(|prior| next < prior));
+            previous = Some(next);
+            current = fixture
+                .store
+                .board_page(None, true, 2, next, Some(high_water), &call)?;
         }
-        let page = store.board_page(None, true, 100, 0, None, &call)?;
-        assert_eq!(page.lanes.len(), 100);
-        let next = page.next.ok_or("missing cursor")?;
-        let last = store.board_page(None, true, 100, next, Some(page.high_water), &call)?;
-        assert_eq!(last.lanes.len(), 1);
-        assert!(last.next.is_none());
-        assert_eq!(page.generation, last.generation);
-        assert_eq!(page.lanes[0].attempt.title.as_deref(), Some("Task 101"));
-        assert_eq!(page.lanes[0].attempt.usage, UsageRecord::default());
-        assert_eq!(page.lanes[0].run.run_id, page.lanes[0].attempt.run_id);
-        let reopened = RunStore::open_read_only(&context, &call)?.ok_or("missing store")?;
+        assert_eq!(seen, expected);
+        let later = fixture.add(6)?;
+        assert!(!expected.contains(&later));
+        let snapshot = fixture.store.board_page(
+            None,
+            true,
+            MAX_BOARD_PAGE_SIZE,
+            0,
+            Some(high_water),
+            &call,
+        )?;
+        assert_eq!(
+            snapshot
+                .lanes
+                .iter()
+                .map(|lane| lane.attempt.attempt_id)
+                .collect::<std::collections::HashSet<_>>(),
+            expected
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn board_metadata_tracks_attempt_updates_in_read_only_views() -> TestResult {
+        let fixture = fixture()?;
+        let id = fixture.add(5)?;
+        let call = fixture.call();
+        let before = fixture
+            .store
+            .board_page(None, true, MAX_BOARD_PAGE_SIZE, 0, None, &call)?;
+        let reopened = RunStore::open_read_only(&fixture.context, &call)?.ok_or("missing store")?;
         assert_eq!(
             reopened
-                .board_page(None, true, 100, 0, None, &call)?
+                .board_page(None, true, MAX_BOARD_PAGE_SIZE, 0, None, &call)?
                 .generation,
-            page.generation
+            before.generation
         );
-        let old = store.record(AttemptId::from_bytes([101; 16]), &call)?;
-        let mut mixed = old.clone();
-        mixed.usage.uncached_input = Some(0);
-        mixed.usage.reasoning = Some(7);
-        mixed.revision += 1;
-        store.write(&call, |tx| {
-            crate::admission::update_attempt(tx, &old, &mixed)
+        let old = fixture.store.record(id, &call)?;
+        let mut updated = old.clone();
+        updated.usage.uncached_input = Some(0);
+        updated.usage.reasoning = Some(7);
+        updated.revision += 1;
+        fixture.store.write(&call, |tx| {
+            crate::admission::update_attempt(tx, &old, &updated)
         })?;
-        let updated = store.board_page(None, true, 100, 0, None, &call)?;
-        assert_eq!(updated.lanes[0].attempt.usage, mixed.usage);
-        assert_ne!(updated.generation, page.generation);
-        let mut corrupt = mixed.clone();
+        let after = fixture
+            .store
+            .board_page(None, true, MAX_BOARD_PAGE_SIZE, 0, None, &call)?;
+        let row = after
+            .lanes
+            .iter()
+            .find(|lane| lane.attempt.attempt_id == id)
+            .ok_or("updated attempt missing")?;
+        assert_eq!(row.attempt.usage, updated.usage);
+        assert_ne!(after.generation, before.generation);
+        Ok(())
+    }
+
+    #[test]
+    fn board_rejects_invalid_records_and_revisions() -> TestResult {
+        let fixture = fixture()?;
+        let id = fixture.add(5)?;
+        let call = fixture.call();
+        let record = fixture.store.record(id, &call)?;
+        let mut corrupt = record.clone();
         corrupt.usage.context_basis_points = Some(10_001);
-        for (record, revision) in [(&corrupt, mixed.revision), (&mixed, mixed.revision + 1)] {
-            store.db.execute(
-                "UPDATE attempts SET record=?1,revision=?2 WHERE id=?3",
-                params![
-                    serde_json::to_vec(record)?,
-                    revision as i64,
-                    mixed.attempt_id.to_string()
-                ],
-            )?;
+        fixture.store.db.execute(
+            "UPDATE attempts SET record=?1,revision=?2 WHERE id=?3",
+            params![
+                serde_json::to_vec(&corrupt)?,
+                record.revision as i64,
+                id.to_string()
+            ],
+        )?;
+        assert!(matches!(
+            fixture
+                .store
+                .board_page(None, true, MAX_BOARD_PAGE_SIZE, 0, None, &call),
+            Err(RunError::Validation(_))
+        ));
+        fixture.store.db.execute(
+            "UPDATE attempts SET record=?1,revision=?2 WHERE id=?3",
+            params![
+                serde_json::to_vec(&record)?,
+                (record.revision + 1) as i64,
+                id.to_string()
+            ],
+        )?;
+        assert!(matches!(
+            fixture
+                .store
+                .board_page(None, true, MAX_BOARD_PAGE_SIZE, 0, None, &call),
+            Err(RunError::Validation(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn board_page_limit_is_declared_and_terminal_filter_is_applied() -> TestResult {
+        let fixture = fixture()?;
+        let id = fixture.add(1)?;
+        let call = fixture.call();
+        for limit in [0, MAX_BOARD_PAGE_SIZE + 1] {
             assert!(matches!(
-                store.board_page(None, true, 100, 0, None, &call),
+                fixture.store.board_page(None, true, limit, 0, None, &call),
                 Err(RunError::Validation(_))
             ));
         }
-        store.db.execute(
-            "UPDATE attempts SET revision=?1 WHERE id=?2",
-            params![mixed.revision as i64, mixed.attempt_id.to_string()],
-        )?;
-        store.withdraw(
-            AttemptId::from_bytes([1; 16]),
-            AttemptState::Queued {
-                extra: Default::default(),
-            },
+        for limit in [1, MAX_BOARD_PAGE_SIZE] {
+            fixture
+                .store
+                .board_page(None, true, limit, 0, None, &call)?;
+        }
+        let row = fixture.store.record(id, &call)?;
+        fixture.store.withdraw(
+            id,
+            row.state,
             Outcome::Cancelled,
             "test",
             call.clock.wall_now()?,
             &call,
         )?;
-        assert!(matches!(
-            store.board_page(None, true, 101, 0, None, &call),
-            Err(RunError::Validation("board page bounds"))
-        ));
-        let history = store.record(AttemptId::from_bytes([1; 16]), &call)?;
-        let mut history = history;
-        history.attempt_id = AttemptId::from_bytes([0xee; 16]);
-        history.trace.attempt = Some(history.attempt_id);
-        history.prompt.path = crate::artifacts::artifact_path(history.attempt_id, "prompt.txt")?;
-        if let Some(result) = &mut history.result {
-            result.path = crate::artifacts::artifact_path(history.attempt_id, "result.md")?;
-        }
-        let event = RunEvent {
-            extra: Default::default(),
-            schema_version: 1,
-            sequence: 1,
-            project_id: history.project_id,
-            run_id: history.run_id,
-            attempt_id: history.attempt_id,
-            revision: history.revision,
-            change: history.state.clone(),
-            trace: history.trace.clone(),
-        };
-        let old_id = history.attempt_id.to_string();
-        let record = String::from_utf8(serde_json::to_vec(&history)?)?;
-        let event_record = String::from_utf8(serde_json::to_vec(&event)?)?;
-        store.write(&call, |tx| {
-            tx.execute(
-                "WITH RECURSIVE history(n) AS (VALUES(1000) UNION ALL SELECT n+1 FROM history WHERE n<100999) \
-                 INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) \
-                 SELECT printf('%032x',n),?1,?2,?3,n,?4,1, \
-                 CAST(json_set(replace(?5,?6,printf('%032x',n)),'$.attempt_number',n) AS BLOB) FROM history",
-                params![history.run_id.to_string(), history.project_id.to_string(), history.task_id.to_string(), history.revision as i64, record, old_id],
-            )?;
-            tx.execute(
-                "WITH RECURSIVE history(n) AS (VALUES(1000) UNION ALL SELECT n+1 FROM history WHERE n<100999) \
-                 INSERT INTO events(sequence,project,attempt,revision,record) \
-                 SELECT n+(SELECT MAX(sequence) FROM events),?1,printf('%032x',n),?2, \
-                 CAST(replace(?3,?4,printf('%032x',n)) AS BLOB) FROM history",
-                params![history.project_id.to_string(), history.revision as i64, event_record, old_id],
-            )?;
-            Ok(())
-        })?;
-        for all in [false, true] {
-            let page = reopened.board_page(None, all, 100, 0, None, &call)?;
-            assert_eq!(page.lanes.len(), 100);
-            assert_eq!(page.next.is_some(), all);
-        }
+        let active = fixture
+            .store
+            .board_page(None, false, MAX_BOARD_PAGE_SIZE, 0, None, &call)?;
+        assert!(
+            !active
+                .lanes
+                .iter()
+                .any(|lane| lane.attempt.attempt_id == id)
+        );
+        let all = fixture
+            .store
+            .board_page(None, true, MAX_BOARD_PAGE_SIZE, 0, None, &call)?;
+        assert!(all.lanes.iter().any(|lane| lane.attempt.attempt_id == id));
         Ok(())
     }
 }

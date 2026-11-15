@@ -2,7 +2,7 @@
 //! final spawn edge a verified snapshot feeds an inherited read pipe: Darwin's
 //! sandbox-exec rewrites regular-file /dev/fd names and cannot consume them.
 use provenant_os::fs::Directory;
-use provenant_os::sys::profile::{ProfilePipe, ProfileSource};
+use provenant_os::sys::profile::{LimitSource, ProfilePipe};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
@@ -10,6 +10,10 @@ use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileExt, MetadataExt};
+
+#[derive(Debug, thiserror::Error)]
+#[error("profile contents no longer match the verified identity")]
+struct ProfileContentChanged;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -115,7 +119,7 @@ impl ProfileFile {
         }
         let digest: [u8; 32] = hash.finalize().into();
         if offset != self.identity.bytes || digest != self.identity.sha256 {
-            return Err(failure("file content changed after verification"));
+            return Err(io::Error::other(ProfileContentChanged));
         }
         // Keep the staged-file API repeatable for direct fixture readers too.
         (&self.file).seek(SeekFrom::Start(0)).map_err(failure)?;
@@ -137,7 +141,7 @@ impl ProfileFile {
     }
 }
 
-impl ProfileSource for ProfileFile {
+impl LimitSource for ProfileFile {
     fn prepare(&self, argv: &[OsString]) -> io::Result<ProfilePipe> {
         self.verify_command(argv)?;
         let mut bytes = Vec::new();
@@ -325,7 +329,11 @@ mod tests {
         let profile = ProfileFile::inherit(reader, identity)?;
         writer.handoff_file().write_all_at(b"open", 0)?;
         let error = profile.verify().unwrap_err();
-        assert!(error.to_string().contains("file content changed"));
+        assert!(
+            error
+                .get_ref()
+                .is_some_and(|source| source.is::<ProfileContentChanged>())
+        );
         assert!(
             profile
                 .verify_command(&[

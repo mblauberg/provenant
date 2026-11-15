@@ -1,5 +1,5 @@
 //! Joins use host-stamped attempt traces and existing graph labels.
-use provenant_core::{AttemptId, RunId};
+use provenant_core::AttemptId;
 use provenant_records::{AttemptFact, telemetry_context::TelemetryContext};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -25,10 +25,10 @@ pub struct Report {
     pub comparability: &'static str,
 }
 
-/// Chair bindings must come from the existing host-owned ChairIndex, never a request proposal.
+/// Chair bindings must come from the host-owned graph index, never a request proposal.
 pub fn report(
     facts: &[&AttemptFact],
-    chairs: &BTreeMap<RunId, String>,
+    chairs: &BTreeMap<String, String>,
     prices: &crate::PriceTable,
 ) -> Result<Report, crate::TelemetryError> {
     let mut coverage = BTreeMap::<_, Coverage>::new();
@@ -37,11 +37,11 @@ pub fn report(
         .map(|fact| {
             let context = TelemetryContext::from_trace(&fact.trace);
             let known = |field: fn(&TelemetryContext) -> bool| context.as_ref().is_some_and(field);
-            let chair_session = fact.trace.run.and_then(|run| chairs.get(&run).cloned());
             let graph = fact
                 .context
                 .as_ref()
                 .and_then(|context| context.graph_id.clone());
+            let chair_session = graph.as_ref().and_then(|graph| chairs.get(graph).cloned());
             for (field, present) in [
                 (
                     "provenant_version",

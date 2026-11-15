@@ -6,8 +6,7 @@ Anchor: tools/front-door/src/cloud.rs; tools/front-door/crates/cli/src/cloud.rs
 the session link, and exits. `provenant cloud collect` later puts the
 session's result in a local worktree. Provenant keeps no lifecycle for the
 session. It does not poll, retry, cancel or supervise it. The provider's
-interface owns all of that. Graphs, routes and `--set` cannot place work in
-the cloud; a node naming `attempt.cloud` is refused.
+interface owns all of that.
 
 ## Set up a repository once
 
@@ -42,12 +41,8 @@ provenant cloud launch --file brief.md
 provenant cloud launch --file brief.md --provider codex --environment my-env
 ```
 
-Launch appends a short hand-off to the brief: start from that commit, push to
-the named branch (`--branch`, default `cloud/<nonce>`), and end the last
-commit message with a `Provenant-Launch: <nonce>` line. It prints the session
-ID, the link and the collect command. It writes one small record under the
-repository's Git directory (`<git-common-dir>/provenant/cloud/<key>.json`)
-holding what `collect` needs; Provenant's state directory is not touched.
+Keep the printed session link and collect command. Check the provider session
+for progress and repair a failed launch there before collecting.
 
 ## Collect
 

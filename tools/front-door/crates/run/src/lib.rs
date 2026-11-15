@@ -2,14 +2,16 @@
 #![forbid(unsafe_code)]
 mod admission;
 mod artifacts;
-mod automatic;
 mod board;
 mod completion;
 pub use board::{BoardLane, BoardPage};
-pub use completion::{handoff_progress_guidance, lane_preamble, sanitise_handoff};
+pub use completion::{
+    handoff_progress_guidance, lane_preamble, lane_preamble_with_policy, sanitise_handoff,
+    sanitise_handoff_result,
+};
 mod controls;
 mod correlation;
-pub use correlation::{WORK_INDEX_FILE, WorkCoverage, WorkIndex, WorkSelector, validate_work};
+pub use correlation::{WorkCoverage, WorkSelector, validate_work};
 mod db;
 mod delivery;
 mod disk;
@@ -34,6 +36,11 @@ mod short_temporary;
 mod store;
 mod telemetry_context;
 pub use telemetry_context::set_build_identity;
+mod limits;
+pub use limits::{HostCaps, gh_budget, lane_limits, writer_budget_limits};
+mod ci_scope;
+pub use ci_scope::{CiScope, ResolvedCiScope};
+mod gh_usage;
 pub mod token_budget;
 mod transcript;
 pub use service::{DispatchRequest, DispatchTask, ErrorKind, RefusalContext, Service};
@@ -45,8 +52,8 @@ pub mod target_seed_gc;
 mod writer;
 
 pub use admission::{
-    AdmissionPolicy, AdmissionTimeoutOrigin, AdmissionWindow, EffectiveAdmissionTimeout,
-    HOST_ACTIVE, HOST_QUEUED, LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
+    AdmissionPolicy, AdmissionTimeoutOrigin, EffectiveAdmissionTimeout, HOST_ACTIVE, HOST_QUEUED,
+    LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{
     CancelReceipt, Reconciled, Resume, TemporaryReason, TemporaryReasonKind, UncertainReason,
@@ -61,9 +68,11 @@ pub use holder::{
     HolderContext, HostLaunchContext, RetainedGit, RootSeed, RunHolder, SealedTask, retained_git,
     writer_base,
 };
+#[cfg(test)]
+pub(crate) use launch::fixture_refusal;
 pub use launch::{
     Decoded, LaunchPaths, PrepareRefusal, PreparedLaunch, PreparedStart, Providers, RefusalKind,
-    Started, WriteGrantLimit, access_root_allowed, capture_plan, concurrency,
+    Started, WriteGrantLimit, access_root_allowed, capture_plan, concurrency, launch_policy,
 };
 pub use overview::{OverviewAttempt, OverviewState, RunOverview};
 pub use plan::{
@@ -74,22 +83,24 @@ pub use retention::{
     ProviderStateIssue, TOMBSTONE, payload_totals,
 };
 pub use writer::{
-    LaunchConfinement, WriterFence, WriterLaunch, equivalent_writer, prepare_writer,
-    prepare_writer_with_facts, resolve_reader_source, resolve_writer, resolve_writer_proposal,
+    BoundSandboxBackend, LaunchConfinement, WriterFence, WriterLaunch, equivalent_writer,
+    prepare_writer, prepare_writer_with_facts, resolve_reader_source, resolve_writer,
+    resolve_writer_proposal,
 };
 
 pub use db::{ExecutionContext, Request, RunStore};
+/// Current SQLite versions, shared with the installer's header-only reset check.
+pub const RUN_SCHEMA_VERSION: u32 = db::SCHEMA.version as u32;
+pub const ADMISSION_SCHEMA_VERSION: u32 = ledger::SCHEMA.version as u32;
+pub const CONTRIBUTIONS_SCHEMA_VERSION: u32 = pr_contribution::SCHEMA.version as u32;
+use provenant_records::custody::Chair;
 pub use provenant_records::run::*;
 pub use provenant_supervisor::custody::AdmissionError;
 pub use reader::{
-    ArtifactPart, AttemptFilter, AttemptReader, Attempts, ByteRange, LanePage, LaneQuery,
-    LaneTarget, OutputChunk, fact,
+    ArtifactPart, AttemptReader, Attempts, ByteRange, LanePage, LaneQuery, OutputChunk, fact,
 };
-pub use store::{NewAttempt, PreparedRun, TerminalPublication};
+pub use store::{PreparedRun, TerminalPublication};
 use thiserror::Error;
-
-pub const LANE_DEPTH_ENV: &str = "PROVENANT_LANE_DEPTH";
-pub const PARENT_ATTEMPT_ENV: &str = "PROVENANT_PARENT_ATTEMPT_ID";
 
 /// Return the depth of the run being dispatched under this lane.
 pub fn next_lane_depth(parent_depth: u64, max_depth: u64) -> Result<u64> {
@@ -175,22 +186,17 @@ impl From<rusqlite::Error> for RunError {
 impl From<provenant_sqlite::VersionError> for RunError {
     fn from(error: provenant_sqlite::VersionError) -> Self {
         match error {
-            provenant_sqlite::VersionError::Unsupported(version) => Self::Version(version),
-            provenant_sqlite::VersionError::Unversioned => Self::Version(0),
+            provenant_sqlite::VersionError::Refused { found, .. } => Self::Version(found),
             provenant_sqlite::VersionError::Sqlite(error) => error.into(),
-        }
-    }
-}
-
-impl From<provenant_sqlite::SnapshotError> for RunError {
-    fn from(error: provenant_sqlite::SnapshotError) -> Self {
-        match error {
-            provenant_sqlite::SnapshotError::Filesystem(error) => error.into(),
-            provenant_sqlite::SnapshotError::Sqlite(error) => error.into(),
-            provenant_sqlite::SnapshotError::PathEncoding => {
-                Self::Validation("backup path is not UTF-8")
+            provenant_sqlite::VersionError::MissingBaseTable { .. } => {
+                Self::Validation("STATE_RESET_REQUIRED: missing known base table")
             }
-            provenant_sqlite::SnapshotError::ExhaustedNames => Self::Conflict,
+            provenant_sqlite::VersionError::MissingStep { .. } => {
+                Self::Validation("missing schema step; a writable open applies it")
+            }
+            provenant_sqlite::VersionError::InvalidStep { .. } => {
+                Self::Validation("invalid additive schema step declaration")
+            }
         }
     }
 }
@@ -349,6 +355,66 @@ impl std::fmt::Display for CausedSource {
 
 impl std::error::Error for CausedSource {}
 
+/// A declared stage in writer preparation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveryPrepareStep {
+    ForgePort,
+    IntegrationTarget,
+    RemoteUrl,
+    Head,
+    GitDir,
+    Worktree,
+    CredentialHelper,
+    LaneRoots,
+    Environment,
+    GitExecutable,
+    GhExecutable,
+    Fetch,
+    OriginRefresh,
+}
+
+impl DeliveryPrepareStep {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ForgePort => "forge port",
+            Self::IntegrationTarget => "integration target",
+            Self::RemoteUrl => "remote URL",
+            Self::Head => "HEAD",
+            Self::GitDir => "git dir",
+            Self::Worktree => "worktree",
+            Self::CredentialHelper => "credential helper",
+            Self::LaneRoots => "lane roots",
+            Self::Environment => "environment",
+            Self::GitExecutable => "git executable",
+            Self::GhExecutable => "gh executable",
+            Self::Fetch => "fetch",
+            Self::OriginRefresh => "origin refresh",
+        }
+    }
+}
+
+impl std::fmt::Display for DeliveryPrepareStep {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// A typed safety refusal associated with a preparation step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveryPrepareRefusal {
+    CredentialHelper(HelperSafety),
+}
+
+/// Why a configured credential helper cannot be used safely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HelperSafety {
+    UnsupportedSshCommand,
+    OpaqueShellCommand,
+    NonPlainExecutable,
+    LaneLocalPath,
+    Unavailable,
+}
+
 #[derive(Debug, Error)]
 pub enum RunError {
     #[error("{}", .0.detail.as_deref().unwrap_or("dispatch was refused"))]
@@ -398,7 +464,11 @@ pub enum RunError {
         reason: String,
     },
     #[error("host writer delivery failed at Prepare ({step}): {reason}")]
-    DeliveryPrepare { step: &'static str, reason: String },
+    DeliveryPrepare {
+        step: DeliveryPrepareStep,
+        refusal: Option<DeliveryPrepareRefusal>,
+        reason: String,
+    },
     #[error(
         "host writer delivery failed at {stage:?}: {tool} {command} output exceeded the {limit}-byte host limit"
     )]
@@ -436,11 +506,10 @@ pub enum RunError {
     WorktreeMissing(std::path::PathBuf),
     #[error("worktree {0} is not listed by Git; run `git worktree list --porcelain`")]
     WorktreeUnregistered(std::path::PathBuf),
-    #[error("writer import retained for worktree {}, run {run}, attempt {attempt}", worktree.display())]
+    #[error("writer import retained for worktree {}, lane {} (attempt {}), fence {}; run `{}` or `{}`", worktree.display(), fence.lane, fence.scope.attempt, fence.fence.display(), fence.reconcile(), fence.abandon())]
     RetainedWriterImport {
         worktree: std::path::PathBuf,
-        run: provenant_core::RunId,
-        attempt: provenant_core::AttemptId,
+        fence: Box<provenant_supervisor::custody::PendingImport>,
     },
     #[error(transparent)]
     Plan(#[from] provenant_confinement::PlanError),
@@ -448,6 +517,8 @@ pub enum RunError {
     AttemptReservationRetained,
     #[error("invalid run record: {0}")]
     Validation(&'static str),
+    #[error(transparent)]
+    Handoff(#[from] provenant_records::handoff::HandoffError),
     #[error("invalid run record: {0}")]
     WriterLineage(&'static str),
     #[error("invalid run record: writer HEAD is not the lane branch")]
@@ -465,7 +536,9 @@ pub enum RunError {
     ObjectImportLimit(&'static str),
     #[error("invalid Git base {0:?}: expected a resolvable commit reference")]
     InvalidBase(String),
-    #[error("run-store schema version {0} is unsupported")]
+    #[error(
+        "STATE_RESET_REQUIRED: schema version {0} is not supported; move the store aside to start it fresh"
+    )]
     Version(i64),
     #[error("run-store path {} is not private or contained: {check}", path.display())]
     UnsafePath {
@@ -489,10 +562,7 @@ pub enum RunError {
     #[error("read or record exceeds byte limit {limit}")]
     TooLarge { limit: u64 },
     #[error("read or record exceeds byte limit {limit}")]
-    PromptTooLarge {
-        task_index: Option<usize>,
-        limit: u64,
-    },
+    PromptTooLarge { limit: u64 },
     #[error("artifact digest or length does not match its record: {0}")]
     ArtifactMismatch(ArtifactProvenance),
     #[error("terminal publication is already sealed; recover its original facts and result")]
@@ -582,20 +652,13 @@ impl RunError {
             Self::ContinuationRefused { cause } => {
                 diagnostic = diagnostic.detail(cause.detail());
             }
-            Self::PromptTooLarge { task_index, limit } => {
-                let field = task_index.map_or_else(
-                    || "tasks".to_owned(),
-                    |index| format!("tasks[{index}].prompt"),
-                );
+            Self::PromptTooLarge { limit } => {
                 diagnostic = diagnostic
                     .detail(format!(
-                        "invalid input field `{field}`: exceeds {limit} bytes"
+                        "invalid input field `prompt`: exceeds {limit} bytes"
                     ))
                     .next("reduce the prompt input before retrying")
-                    .fact(DiagnosticFact::PromptLimit {
-                        task_index: *task_index,
-                        limit: *limit,
-                    });
+                    .fact(DiagnosticFact::PromptLimit { limit: *limit });
             }
             Self::Confinement(PermissionError::CredentialGrant { path, access }) => {
                 let access = match *access {
@@ -612,6 +675,21 @@ impl RunError {
                         "inspect the requested {access} grant and select a permitted root"
                     ))
                     .fact(DiagnosticFact::CredentialGrant { access });
+            }
+            Self::Confinement(PermissionError::CredentialStore {
+                path,
+                root,
+                declaration_source,
+            }) => {
+                let overlap = match (safe_path(path, destination), safe_path(root, destination)) {
+                    (Some(path), Some(root)) => {
+                        format!("credential grant at {path} overlaps {root}")
+                    }
+                    _ => "credential grant overlaps a declared store".into(),
+                };
+                diagnostic = diagnostic
+                    .detail(format!("{overlap} (source: {declaration_source})"))
+                    .next("select a root clear of the declared credential store");
             }
             Self::Confinement(error) => {
                 if let Some(fact) = error.resource_fact() {
@@ -794,20 +872,26 @@ impl RunError {
                         .fact(DiagnosticFact::Resource(fact));
                 }
             }
-            Self::RetainedWriterImport {
-                run,
-                attempt,
-                worktree,
-            } => {
+            Self::RetainedWriterImport { fence, worktree } => {
+                let path = safe_path(&fence.fence, destination);
+                diagnostic.custody = Some(provenant_records::diagnostic::RetainedCustody {
+                    scope: fence.scope,
+                    fence: path.clone(),
+                    lane: fence.lane.clone(),
+                    reconcile: fence.reconcile(),
+                    abandon: fence.abandon(),
+                });
                 diagnostic = diagnostic
-                    .detail(match safe_path(worktree, destination) {
-                        Some(path) => {
-                            format!("worktree {path}; retained run {run}, attempt {attempt}")
-                        }
-                        None => format!("retained run {run}, attempt {attempt}"),
-                    })
+                    .detail(format!(
+                        "lane {}; retained attempt {}; fence {}; worktree {}",
+                        fence.lane,
+                        fence.scope.attempt,
+                        path.as_deref().unwrap_or("[redacted]"),
+                        safe_path(worktree, destination).as_deref().unwrap_or("[redacted]")
+                    ))
                     .next(format!(
-                        "to release the fence and recover the preserved private Git manually, run `provenant reconcile --abandon {run}/{attempt} --reason 'recover retained work manually'`; this stops automatic import"
+                        "run `{}` to resume import, or `{}` to release custody and recover the preserved private Git manually",
+                        fence.reconcile(), fence.abandon()
                     ));
             }
             _ => {}
@@ -875,261 +959,6 @@ mod diagnostic_projection_tests {
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn launch_guard_inventory_has_valid_classifications() {
-        let inventory = include_str!("../assets/launch-guards.toml")
-            .parse::<toml_edit::DocumentMut>()
-            .expect("launch guard inventory must be valid TOML");
-        assert_eq!(inventory["schema_version"].as_integer(), Some(1));
-        let complete = inventory["complete"].as_bool().expect("completion flag");
-        assert!(complete, "launch guard inventory must be fully classified");
-        let guards = inventory["guard"].as_array_of_tables().expect("guard rows");
-        assert!(!guards.is_empty());
-        for guard in guards {
-            let site = guard
-                .get("site")
-                .and_then(|v| v.as_str())
-                .expect("guard site");
-            assert!(site.contains('#'), "invalid guard site: {site}");
-            let reason = guard
-                .get("reason")
-                .and_then(|v| v.as_str())
-                .expect("guard reason");
-            assert!(!reason.trim().is_empty(), "missing reason for {site}");
-            let boundary = guard
-                .get("boundary")
-                .and_then(|v| v.as_str())
-                .expect("guard classification");
-            match boundary {
-                "lane_git" | "credentials" | "object_integrity" | "authority" | "warning" => {}
-                // Operational setup failures stop preparation without
-                // claiming a security-boundary violation.
-                "operational" => {}
-                "configurable_default" => {
-                    assert!(
-                        guard
-                            .get("setting")
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|s| !s.trim().is_empty()),
-                        "missing setting for {site}"
-                    );
-                    let code = guard
-                        .get("code")
-                        .and_then(|value| value.as_str())
-                        .expect("configurable refusal code");
-                    assert!(
-                        ErrorKind::ALL.iter().any(|kind| kind.code() == code),
-                        "unknown code {code} at {site}"
-                    );
-                }
-                _ => panic!("invalid or incomplete classification {boundary} at {site}"),
-            }
-        }
-        let guardian = RunError::Admission(AdmissionError::GuardianIdentity);
-        assert_eq!(guardian.boundary_class(), BoundaryClass::Authority);
-        let code = ErrorKind::from(&guardian).code();
-        assert!(guards.iter().any(|guard| {
-            guard.get("code").and_then(|value| value.as_str()) == Some(code)
-                && guard.get("boundary").and_then(|value| value.as_str()) == Some("authority")
-        }));
-        let invalid_roots = RunError::Plan(provenant_confinement::PlanError::InvalidRoots);
-        assert_eq!(invalid_roots.boundary_class(), BoundaryClass::Authority);
-        assert_eq!(
-            RunError::WriterHeadNotLaneBranch.boundary_class(),
-            BoundaryClass::LaneGit
-        );
-        let lineage = RunError::WriterLineage("continuation worktree belongs to another lane");
-        assert_eq!(lineage.boundary_class(), BoundaryClass::Authority);
-        assert_eq!(ErrorKind::from(&lineage), ErrorKind::Invalid);
-        assert_eq!(
-            lineage.to_string(),
-            "invalid run record: continuation worktree belongs to another lane"
-        );
-        assert_eq!(
-            RefusalKind::HandoffBoundary(BoundaryClass::Authority).boundary_class(),
-            BoundaryClass::Authority
-        );
-        assert!(guards.iter().any(|guard| {
-            guard.get("site").and_then(|value| value.as_str())
-                == Some("run/src/launch/hand_off.rs#RunStore::hand_off")
-                && guard.get("boundary").and_then(|value| value.as_str()) == Some("authority")
-        }));
-    }
-
-    #[test]
-    fn every_inventoried_configurable_refusal_has_a_safe_setting_and_source() {
-        use provenant_records::diagnostic::{
-            LaneLimit, PacingReserveSetting, PacingSettingSource, PortSettingSource, PressureLevel,
-            PressureThreshold, ResourceFact, SettingSource,
-        };
-        let configured = SettingSource::Configuration;
-        let mut examples = vec![
-            (
-                ResourceFact::Disk {
-                    free: 1,
-                    floor: 2,
-                    origin: configured,
-                },
-                "host configuration",
-            ),
-            (
-                ResourceFact::ArgvPromptLimit {
-                    limit: 2,
-                    origin: configured,
-                },
-                "host configuration",
-            ),
-            (
-                ResourceFact::WriteGrantLimit {
-                    limit: 2,
-                    origin: configured,
-                },
-                "host configuration",
-            ),
-            (
-                ResourceFact::GrantLimit {
-                    limit: 2,
-                    origin: configured,
-                },
-                "host configuration",
-            ),
-            (
-                ResourceFact::ProfileLimit {
-                    bytes: 3,
-                    limit: 2,
-                    origin: configured,
-                },
-                "host configuration",
-            ),
-            (
-                ResourceFact::LanePorts {
-                    blocks: 2,
-                    origin: PortSettingSource::Configuration,
-                },
-                "host configuration",
-            ),
-            (
-                ResourceFact::MemoryPressure {
-                    level: PressureLevel::Critical,
-                    threshold: PressureThreshold::Warning,
-                    origin: configured,
-                },
-                "host configuration",
-            ),
-            (
-                ResourceFact::Processes {
-                    used: 3,
-                    limit: 4,
-                    reserved: 1,
-                },
-                "operating system",
-            ),
-        ];
-        for setting in [
-            PacingReserveSetting::AdapterFiveHour,
-            PacingReserveSetting::AdapterSevenDay,
-            PacingReserveSetting::Account,
-            PacingReserveSetting::Free,
-        ] {
-            examples.push((
-                ResourceFact::PacingReserve {
-                    percent: 15,
-                    setting,
-                    origin: PacingSettingSource::Configuration,
-                },
-                "host configuration",
-            ));
-        }
-        for lane_limit in [
-            LaneLimit::HostWriters,
-            LaneLimit::ProjectWriters,
-            LaneLimit::HostTotal,
-            LaneLimit::ProjectTotal,
-        ] {
-            examples.push((
-                ResourceFact::LaneCap {
-                    active: 2,
-                    limit: 2,
-                    lane_limit,
-                    origin: configured,
-                },
-                "host configuration",
-            ));
-        }
-        for setting in [
-            provenant_records::diagnostic::ContinuationCopyLimit::Bytes,
-            provenant_records::diagnostic::ContinuationCopyLimit::Entries,
-            provenant_records::diagnostic::ContinuationCopyLimit::Depth,
-        ] {
-            examples.push((
-                ResourceFact::ContinuationCopy {
-                    limit: 2,
-                    setting,
-                    origin: configured,
-                    available_bytes: None,
-                },
-                "host configuration",
-            ));
-        }
-        let inventory = include_str!("../assets/launch-guards.toml")
-            .parse::<toml_edit::DocumentMut>()
-            .unwrap();
-        // Inverse coverage: deleting a row must fail even when every remaining
-        // inventory row still has a valid projection.
-        let guards = inventory["guard"].as_array_of_tables().unwrap();
-        for (fact, source) in &examples {
-            let diagnostic = RefusalKind::HandoffResource(*fact).diagnostic().unwrap();
-            let detail = diagnostic.detail.as_deref().unwrap();
-            assert!(detail.contains(source));
-            assert!(
-                guards.iter().any(|row| {
-                    row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
-                        && row.get("code").and_then(|v| v.as_str())
-                            == Some(diagnostic.code.as_str())
-                        && row
-                            .get("setting")
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|setting| detail.contains(setting))
-                }),
-                "resource refusal is omitted from inventory: {fact:?}"
-            );
-        }
-        for row in inventory["guard"]
-            .as_array_of_tables()
-            .unwrap()
-            .iter()
-            .filter(|row| {
-                row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
-            })
-        {
-            let site = row.get("site").and_then(|v| v.as_str()).unwrap();
-            let setting = row.get("setting").and_then(|v| v.as_str()).unwrap();
-            let code = row.get("code").and_then(|v| v.as_str()).unwrap();
-            assert!(
-                examples.iter().any(|(fact, source)| {
-                    let Some(diagnostic) = RefusalKind::HandoffResource(*fact).diagnostic() else {
-                        return false;
-                    };
-                    diagnostic.code == code
-                        && diagnostic.detail.as_deref().is_some_and(|detail| {
-                            detail.contains(setting) && detail.contains(source)
-                        })
-                        && diagnostic.next.is_some()
-                }),
-                "no safe resource projection for {site} ({code}, {setting})"
-            );
-        }
-        assert!(guards.iter().any(|row| {
-            row.get("site").and_then(|v| v.as_str())
-                == Some("cli/src/run/provider/preparation.rs#dependency_preparation_event")
-                && row.get("boundary").and_then(|v| v.as_str()) == Some("warning")
-                && row
-                    .get("reason")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|reason| reason.contains("lanes.prepare_deps"))
-        }));
-    }
-
-    #[test]
     fn confinement_resource_diagnostic_keeps_code_and_excludes_source_text() {
         use provenant_confinement::permissions::PermissionError;
         use provenant_records::diagnostic::{DiagnosticFact, ResourceFact, SettingSource};
@@ -1159,165 +988,50 @@ mod diagnostic_projection_tests {
     }
 
     #[test]
-    fn resource_refusals_name_limits_and_corrective_actions() {
-        let inventory = include_str!("../assets/launch-guards.toml")
-            .parse::<toml_edit::DocumentMut>()
-            .expect("launch guard inventory must be valid TOML");
-        let guards = inventory["guard"].as_array_of_tables().unwrap();
-        let cases = [
-            (
-                AdmissionError::Disk {
-                    free: 1,
-                    floor: 2,
-                    origin: provenant_records::diagnostic::SettingSource::Configuration,
+    fn dirty_writer_projection_uses_typed_path_presence() {
+        use provenant_confinement::worktrees::WorktreeError;
+        for (paths, names_edits) in [
+            (String::new(), false),
+            ("TOKEN_SENTINEL\u{1b}".into(), true),
+        ] {
+            let error = RunError::Writer(WorktreeError::Dirty(paths));
+            for destination in [
+                Destination::Local,
+                Destination::Remote {
+                    repository: None,
+                    home: None,
                 },
-                "gc.free_floor",
-                "disk",
-            ),
-            (
-                AdmissionError::MemoryPressure {
-                    level: provenant_records::diagnostic::PressureLevel::Critical,
-                    threshold: provenant_records::diagnostic::PressureThreshold::Warning,
-                    origin: provenant_records::diagnostic::SettingSource::Configuration,
-                },
-                "memory_pressure_threshold",
-                "memory",
-            ),
-            (
-                AdmissionError::Processes { used: 3, limit: 4 },
-                "operating system RLIMIT_NPROC",
-                "process",
-            ),
-            (
-                AdmissionError::LaneCap {
-                    active: 5,
-                    limit: 5,
-                    kind: provenant_records::diagnostic::LaneLimit::ProjectWriters,
-                    origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
-                },
-                "max_project_writer_lanes",
-                "writer",
-            ),
-            (
-                AdmissionError::LaneCap {
-                    active: 5,
-                    limit: 5,
-                    kind: provenant_records::diagnostic::LaneLimit::HostWriters,
-                    origin: provenant_records::diagnostic::SettingSource::Configuration,
-                },
-                "max_writer_lanes",
-                "writer",
-            ),
-            (
-                AdmissionError::LaneCap {
-                    active: 5,
-                    limit: 5,
-                    kind: provenant_records::diagnostic::LaneLimit::HostTotal,
-                    origin: provenant_records::diagnostic::SettingSource::Configuration,
-                },
-                "max_lanes",
-                "lane",
-            ),
-            (
-                AdmissionError::LaneCap {
-                    active: 5,
-                    limit: 5,
-                    kind: provenant_records::diagnostic::LaneLimit::ProjectTotal,
-                    origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
-                },
-                "max_project_lanes",
-                "lane",
-            ),
-        ];
-        for (cause, limit, corrective) in cases {
-            let error = RunError::Admission(cause);
-            let code = ErrorKind::from(&error).code();
-            assert_eq!(error.boundary_class(), BoundaryClass::None);
-            let guard = guards
-                .iter()
-                .find(|row| {
-                    row.get("code").and_then(|v| v.as_str()) == Some(code)
-                        && row
-                            .get("setting")
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|s| s.contains(limit))
-                })
-                .expect("resource refusal must be inventoried");
-            assert_eq!(guard["boundary"].as_str(), Some("configurable_default"));
-            let setting = guard["setting"].as_str().unwrap();
-            let diagnostic = error.diagnostic(Destination::Remote {
-                repository: None,
-                home: None,
-            });
-            assert_eq!(diagnostic.code, code);
-            assert!(diagnostic.detail.as_deref().unwrap().contains(limit));
-            assert!(diagnostic.detail.as_deref().unwrap().contains(setting));
-            assert!(
-                diagnostic
-                    .detail
-                    .as_deref()
-                    .unwrap()
-                    .contains(if code == "HOST_PROCESSES" {
-                        "shipped"
-                    } else {
-                        "source:"
-                    })
-            );
-            assert!(diagnostic.next.as_deref().unwrap().contains(corrective));
-            assert!(
-                !serde_json::to_string(&diagnostic)
-                    .unwrap()
-                    .contains("TOKEN_SENTINEL")
-            );
+            ] {
+                let diagnostic = error.diagnostic(destination);
+                assert_eq!(diagnostic.code, error.code());
+                assert_eq!(diagnostic.detail.is_some(), names_edits);
+                assert!(
+                    !serde_json::to_string(&diagnostic)
+                        .unwrap()
+                        .contains("TOKEN_SENTINEL")
+                );
+            }
         }
     }
 
     #[test]
-    fn writer_refusal_without_named_edits_does_not_claim_edits() {
+    fn untrusted_error_sources_do_not_enter_diagnostics() {
         use provenant_confinement::worktrees::WorktreeError;
-        let error = RunError::Writer(WorktreeError::Dirty(String::new()));
-        let diagnostic = error.diagnostic(Destination::Local);
-        assert!(
-            !diagnostic
-                .detail
-                .as_deref()
-                .unwrap_or_default()
-                .contains("uncommitted")
-        );
-    }
-
-    #[test]
-    fn dirty_writer_projection_preserves_edits_without_source_text() {
-        use provenant_confinement::worktrees::WorktreeError;
-        let error = RunError::Writer(WorktreeError::Dirty("TOKEN_SENTINEL\u{1b}".into()));
-        let diagnostic = error.diagnostic(Destination::Remote {
-            repository: None,
-            home: None,
-        });
-        assert_eq!(diagnostic.code, "WRITER_SCOPE");
-        assert!(
-            diagnostic
-                .detail
-                .as_deref()
-                .unwrap()
-                .contains("uncommitted")
-        );
-        let action = diagnostic.next.as_deref().unwrap();
-        assert!(action.contains("commit") || action.contains("preserve"));
-        assert!(
-            !serde_json::to_string(&diagnostic)
-                .unwrap()
-                .contains("TOKEN_SENTINEL")
-        );
-    }
-
-    #[test]
-    fn raw_io_source_is_not_a_safe_fact() {
-        for source in [
-            "TOKEN_SENTINEL\u{1b}[31m".to_owned(),
-            format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
-        ] {
-            let error = RunError::Io(std::io::Error::other(source));
+        use provenant_records::diagnostic::DiagnosticFact;
+        let cases = [
+            RunError::Io(std::io::Error::other("TOKEN_SENTINEL\u{1b}[31m")),
+            RunError::Writer(WorktreeError::BranchCollision {
+                existing: "TOKEN_SENTINEL\u{1b}".into(),
+            }),
+            RunError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "TOKEN_SENTINEL".into(),
+            )),
+            RunError::Filesystem(provenant_os::fs::FsError::ReadIo {
+                path: "/private/host".into(),
+                source: std::io::Error::other("TOKEN_SENTINEL"),
+            }),
+        ];
+        for error in cases {
             for destination in [
                 Destination::Local,
                 Destination::Remote {
@@ -1327,74 +1041,21 @@ mod diagnostic_projection_tests {
             ] {
                 let projection = error.diagnostic(destination);
                 let encoded = serde_json::to_string(&projection).unwrap();
+                assert_eq!(projection.code, error.code());
                 assert!(!encoded.contains("TOKEN_SENTINEL"));
                 assert!(encoded.len() < 4096);
                 assert!(!encoded.chars().any(char::is_control));
-                assert_eq!(projection.code, "IO");
-                assert!(projection.detail.is_none());
-                assert!(projection.next.is_some());
+                if matches!(&error, RunError::Filesystem(_)) {
+                    assert!(matches!(
+                        projection.fact,
+                        Some(DiagnosticFact::Filesystem {
+                            operation: "read file",
+                            cause: None,
+                        })
+                    ));
+                }
             }
         }
-    }
-
-    #[test]
-    fn branch_refusal_omits_untrusted_ref_text() {
-        use provenant_confinement::worktrees::WorktreeError;
-        let error = RunError::Writer(WorktreeError::BranchCollision {
-            existing: "TOKEN_SENTINEL\u{1b}".into(),
-        });
-        for destination in [
-            Destination::Local,
-            Destination::Remote {
-                repository: None,
-                home: None,
-            },
-        ] {
-            let diagnostic = error.diagnostic(destination);
-            assert_eq!(diagnostic.code, "WRITER_SCOPE");
-            assert!(diagnostic.detail.as_deref().unwrap().contains("collides"));
-            assert!(diagnostic.next.as_deref().unwrap().contains("branch"));
-            assert!(
-                !serde_json::to_string(&diagnostic)
-                    .unwrap()
-                    .contains("TOKEN_SENTINEL")
-            );
-        }
-    }
-
-    #[test]
-    fn source_errors_are_not_diagnostic_detail_even_locally() {
-        let error = RunError::Sqlite(rusqlite::Error::InvalidParameterName(
-            "TOKEN_SENTINEL".into(),
-        ));
-        let projection = error.diagnostic(Destination::Local);
-        let encoded = serde_json::to_string(&projection).unwrap();
-        assert!(!encoded.contains("TOKEN_SENTINEL"));
-        assert!(projection.next.is_some());
-    }
-
-    #[test]
-    fn filesystem_fact_keeps_operation_without_source() {
-        let error = RunError::Filesystem(provenant_os::fs::FsError::ReadIo {
-            path: "/private/host".into(),
-            source: std::io::Error::other("TOKEN_SENTINEL"),
-        });
-        let projection = error.diagnostic(Destination::Remote {
-            repository: None,
-            home: None,
-        });
-        assert!(matches!(
-            projection.fact,
-            Some(provenant_records::diagnostic::DiagnosticFact::Filesystem {
-                operation: "read file",
-                cause: None,
-            })
-        ));
-        assert!(
-            !serde_json::to_string(&projection)
-                .unwrap()
-                .contains("TOKEN_SENTINEL")
-        );
     }
 
     #[test]
@@ -1417,55 +1078,69 @@ mod diagnostic_projection_tests {
     }
 
     #[test]
-    fn credential_grant_does_not_echo_unknown_access_text() {
-        let error = RunError::Confinement(
-            provenant_confinement::permissions::PermissionError::CredentialGrant {
-                path: PathBuf::from("/private/root"),
-                access: "TOKEN_SENTINEL",
-            },
-        );
-        let diagnostic = error.diagnostic(Destination::Remote {
-            repository: None,
-            home: None,
-        });
-        assert_eq!(diagnostic.code, "CREDENTIAL_ROOT");
-        assert!(diagnostic.next.is_some());
-        let wire = serde_json::to_string(&diagnostic).unwrap();
-        assert!(!wire.contains("TOKEN_SENTINEL"));
-        assert!(!wire.contains("/private"));
-    }
-
-    #[test]
-    fn credential_grants_disclose_only_safe_anchored_paths() {
-        for access in ["read", "write"] {
+    fn credential_grants_keep_typed_access_and_disclose_only_anchored_paths() {
+        use provenant_records::diagnostic::DiagnosticFact;
+        let rows = [
+            (
+                "TOKEN_SENTINEL",
+                PathBuf::from("/private/root"),
+                None,
+                "requested",
+                None,
+            ),
+            (
+                "read",
+                PathBuf::from("/home/person/.config/private"),
+                Some(Path::new("/home/person")),
+                "read",
+                Some("~/.config/private"),
+            ),
+            (
+                "write",
+                PathBuf::from("/home/person/.config/private"),
+                Some(Path::new("/home/person")),
+                "write",
+                Some("~/.config/private"),
+            ),
+        ];
+        for (requested, path, anchor, expected_access, safe_path) in rows {
             let error = RunError::Confinement(
                 provenant_confinement::permissions::PermissionError::CredentialGrant {
-                    path: PathBuf::from("/home/person/.config/private"),
-                    access,
+                    path: path.clone(),
+                    access: requested,
                 },
             );
-            let remote = error.diagnostic(Destination::Remote {
-                repository: None,
-                home: Some(Path::new("/home/person")),
-            });
             assert_eq!(
                 ErrorKind::from(&error).boundary_class(),
                 BoundaryClass::Credentials
             );
-            assert!(
-                remote
-                    .detail
-                    .as_deref()
-                    .unwrap()
-                    .contains("~/.config/private")
-            );
-            assert!(remote.detail.as_deref().unwrap().contains(access));
-            let opaque = error.diagnostic(Destination::Remote {
-                repository: None,
-                home: None,
-            });
-            assert!(!opaque.detail.as_deref().unwrap().contains("/home/person"));
-            assert!(opaque.next.is_some());
+            let homes = if anchor.is_some() {
+                vec![anchor, None]
+            } else {
+                vec![None]
+            };
+            for home in homes {
+                let diagnostic = error.diagnostic(Destination::Remote {
+                    repository: None,
+                    home,
+                });
+                assert_eq!(diagnostic.code, "CREDENTIAL_ROOT");
+                assert!(diagnostic.next.is_some());
+                assert!(matches!(
+                    &diagnostic.fact,
+                    Some(DiagnosticFact::CredentialGrant { access })
+                        if *access == expected_access
+                ));
+                let wire = serde_json::to_string(&diagnostic).unwrap();
+                assert!(!wire.contains("TOKEN_SENTINEL"));
+                assert!(!wire.contains("/private/root"));
+                assert!(!wire.contains("/home/person"));
+                if home.is_some()
+                    && let Some(safe_path) = safe_path
+                {
+                    assert!(diagnostic.detail.as_deref().unwrap().contains(safe_path));
+                }
+            }
         }
     }
 

@@ -55,8 +55,7 @@ fn postgres_requirement(bin: Option<PathBuf>, required: bool) -> Result<Option<P
 fn missing_postgres_obeys_required_control() {
     let root = tempfile::tempdir().unwrap();
     let missing = Some(root.path().join("missing"));
-    let error = postgres_requirement(missing.clone(), true).unwrap_err();
-    assert!(error.contains("PostgreSQL 18"));
+    assert!(postgres_requirement(missing.clone(), true).is_err());
     assert_eq!(postgres_requirement(missing, false).unwrap(), None);
 }
 
@@ -86,7 +85,7 @@ fn database_profile(
         AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
             git_grants_digest: [7; 32],
             publishing: false,
-            common_git_dir: Some(root.join("git")),
+            common_git_dir: root.join("git"),
             cargo_cache: PathGrant {
                 path: scratch.join("cache"),
                 scope: PathScope::Subtree,

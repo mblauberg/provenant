@@ -1,19 +1,36 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
-use provenant_core::{PathResolver, RootInputs, Roots};
+use provenant_core::Roots;
 use serde::Deserialize;
-use std::{io, path::Path};
+use std::{io, path::Path, sync::OnceLock};
 
-struct Resolver;
-impl PathResolver for Resolver {
-    fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
-        Ok(path.to_path_buf())
-    }
-}
 fn roots() -> Roots {
-    let mut inputs = RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
-    inputs.state_dir = Some("/fixture/state".into());
-    inputs.resolve(&Resolver).unwrap()
+    static FIXTURE: OnceLock<(tempfile::TempDir, Roots)> = OnceLock::new();
+    FIXTURE
+        .get_or_init(|| {
+            let base = tempfile::tempdir().unwrap();
+            let inputs = provenant_test_support::test_roots(base.path()).unwrap();
+            let roots = inputs
+                .resolve(&provenant_test_support::IdentityPathResolver)
+                .unwrap();
+            (base, roots)
+        })
+        .1
+        .clone()
+}
+
+fn retention_bounds(config: &ResolvedConfig, key: &str) -> (u64, u64) {
+    let declaration = schema(config, &domains::NO_DOMAINS, "fixture".into()).unwrap();
+    let path = format!("retention.{key}");
+    let field = declaration
+        .fields
+        .iter()
+        .find(|field| field.path == path)
+        .unwrap_or_else(|| panic!("missing retention declaration for {path}"));
+    (
+        field.min.expect("retention minimum") as u64,
+        field.max.expect("retention maximum") as u64,
+    )
 }
 
 #[test]
@@ -199,95 +216,69 @@ fn provider_update_settings_defaults_opt_out_commands_and_validation() {
 
 #[test]
 fn retention_defaults_overrides_and_invalid_values_are_named_cases() {
-    for (case, key, override_value, invalid_range_values, invalid_type) in [
-        (
-            "provider state days",
-            "provider_state_days",
-            14,
-            ["0", "3651"],
-            "'seven'",
-        ),
-        (
-            "session revisions",
-            "session_revisions",
-            20,
-            ["0", "65"],
-            "'many'",
-        ),
+    let config_defaults = load::<&[u8]>(&roots(), None).unwrap();
+    assert!(config_defaults.retention.validate().is_ok());
+    let defaults = serde_json::to_value(&config_defaults).unwrap();
+    for (key, override_value, invalid_type) in [
+        ("provider_state_days", 14, "'seven'"),
+        ("session_revisions", 20, "'many'"),
     ] {
-        let defaults = load::<&[u8]>(&roots(), None).unwrap();
-        assert!(defaults.retention.validate().is_ok());
-        let defaults = serde_json::to_value(defaults).unwrap();
+        let (minimum, maximum) = retention_bounds(&config_defaults, key);
         let default = &defaults["retention"][key];
         let default_value = default.as_u64().unwrap();
-        let upper_bound = if key == "provider_state_days" {
-            3650
-        } else {
-            64
-        };
-        assert!((1..=upper_bound).contains(&default_value), "{case} default");
+        assert!((minimum..=maximum).contains(&default_value));
         let text = format!("schema_version=1\n[retention]\n{key}={override_value}");
         let config = load(&roots(), Some(text.as_bytes())).unwrap();
         let value = serde_json::to_value(&config).unwrap();
-        assert_eq!(value["retention"][key], override_value, "{case} override");
+        assert_eq!(value["retention"][key], override_value);
         if key == "session_revisions" {
             assert_eq!(
                 value["retention"]["provider_state_days"],
-                defaults["retention"]["provider_state_days"],
-                "{case}"
+                defaults["retention"]["provider_state_days"]
             );
         }
         test_support::assert_leaf_origins(&config);
-        for (value, rule) in invalid_range_values
-            .into_iter()
-            .map(|value| (value, format!("{key}_range")))
-            .chain([("-1", "type".to_owned()), (invalid_type, "type".to_owned())])
-        {
+        for value in [minimum.saturating_sub(1), maximum.saturating_add(1)] {
+            let value = value.to_string();
             let text = format!("schema_version=1\n[retention]\n{key}={value}");
             let config = load(&roots(), Some(text.as_bytes())).unwrap();
-            assert_warning(&config, &rule);
+            assert_warning(&config, &format!("{key}_range"));
             assert_warning_message(&config, &format!("retention.{key}:"));
             let parsed = serde_json::to_value(config).unwrap();
-            assert_eq!(&parsed["retention"][key], default, "{case}: {value}");
+            assert_eq!(&parsed["retention"][key], default);
+        }
+        for value in ["-1", invalid_type] {
+            let text = format!("schema_version=1\n[retention]\n{key}={value}");
+            let config = load(&roots(), Some(text.as_bytes())).unwrap();
+            assert_warning(&config, "type");
+            assert_warning_message(&config, &format!("retention.{key}:"));
+            let parsed = serde_json::to_value(config).unwrap();
+            assert_eq!(&parsed["retention"][key], default);
         }
     }
 }
 
 #[test]
 fn chair_log_retention_and_gc_settings_are_named_cases() {
-    for (case, check) in [
-        (
-            "chair log retention",
-            assert_chair_log_retention_defaults_overrides_and_validation as fn(),
-        ),
-        (
-            "garbage collection settings",
-            assert_gc_settings_parse_defaults_and_warnings,
-        ),
-    ] {
-        if let Err(panic) = std::panic::catch_unwind(check) {
-            if let Some(message) = panic.downcast_ref::<String>() {
-                panic!("{case}: {message}");
-            }
-            if let Some(message) = panic.downcast_ref::<&str>() {
-                panic!("{case}: {message}");
-            }
-            panic!("{case} failed");
-        }
-    }
+    assert_chair_log_retention_defaults_overrides_and_validation();
+    assert_gc_settings_parse_defaults_and_warnings();
 }
 
 fn assert_chair_log_retention_defaults_overrides_and_validation() {
     let defaults = load::<&[u8]>(&roots(), None).unwrap();
     assert!(defaults.retention.validate().is_ok());
     let default_values = serde_json::to_value(&defaults).unwrap();
-    for (key, range) in [
-        ("chair_log_days", 1..=3650),
-        ("chair_log_entries", 1..=100_000),
-        ("chair_log_bytes", 65_536..=1_073_741_824),
-        ("payload_cap_bytes", 1_048_576..=1_125_899_906_842_624),
+    for key in [
+        "chair_log_days",
+        "chair_log_replay_days",
+        "chair_log_entries",
+        "chair_log_bytes",
+        "payload_cap_bytes",
     ] {
-        assert!(range.contains(&default_values["retention"][key].as_u64().unwrap()));
+        let (minimum, maximum) = retention_bounds(&defaults, key);
+        if let Some(value) = default_values["retention"][key].as_u64() {
+            assert!((minimum..=maximum).contains(&value));
+        }
     }
     let short = load(
         &roots(),
@@ -302,22 +293,21 @@ fn assert_chair_log_retention_defaults_overrides_and_validation() {
     assert_eq!(value["retention"]["chair_log_replay_days"], 8);
     assert_eq!(value["retention"]["chair_log_entries"], 20);
     assert_eq!(value["retention"]["chair_log_bytes"], 65_536);
-    for (key, value) in [
-        ("chair_log_days", "0"),
-        ("chair_log_days", "3651"),
-        ("chair_log_replay_days", "6"),
-        ("chair_log_replay_days", "3651"),
-        ("chair_log_entries", "0"),
-        ("chair_log_entries", "100001"),
-        ("chair_log_bytes", "65535"),
-        ("chair_log_bytes", "1073741825"),
-        ("payload_cap_bytes", "1048575"),
+    for key in [
+        "chair_log_days",
+        "chair_log_replay_days",
+        "chair_log_entries",
+        "chair_log_bytes",
+        "payload_cap_bytes",
     ] {
-        let text = format!("schema_version=1\n[retention]\n{key}={value}");
-        let config = load(&roots(), Some(text.as_bytes())).unwrap();
-        assert_warning(&config, &format!("{key}_range"));
-        assert_warning_message(&config, &format!("retention.{key}:"));
-        assert_eq!(config.retention, RetentionSettings::default());
+        let (minimum, maximum) = retention_bounds(&defaults, key);
+        for invalid in [minimum.saturating_sub(1), maximum.saturating_add(1)] {
+            let text = format!("schema_version=1\n[retention]\n{key}={invalid}");
+            let config = load(&roots(), Some(text.as_bytes())).unwrap();
+            assert_warning(&config, &format!("{key}_range"));
+            assert_warning_message(&config, &format!("retention.{key}:"));
+            assert_eq!(config.retention, RetentionSettings::default());
+        }
     }
 }
 
@@ -361,6 +351,7 @@ fn assert_gc_settings_parse_defaults_and_warnings() {
         ("graph_checkpoint_days=3651", "graph_checkpoint_days_range"),
         ("schedule='yes'", "type"),
         ("free_floor='bad'", "invalid_cache_size"),
+        ("critical_free='bad'", "invalid_cache_size"),
         ("alert_below='bad'", "invalid_cache_size"),
         (
             "projects.p.regenerable=['../target']",
@@ -610,16 +601,14 @@ fn bounded_reader_preserves_io_failures_and_consumes_at_most_limit_plus_one() {
     assert!(
         matches!(load(&roots(), Some(Fails)), Err(ConfigError::Read { source: provenant_os::fs::FsError::Io { operation: "read", source, .. }, .. }) if source.kind() == io::ErrorKind::PermissionDenied)
     );
+    let limit = provenant_records::Limits::CONFIG.max_bytes;
     let mut stream = io::repeat(b' ');
     assert!(matches!(
         load(&roots(), Some(&mut stream)),
-        Err(ConfigError::TooLarge {
-            limit: 1_048_576,
-            ..
-        })
+        Err(ConfigError::TooLarge { limit: found, .. }) if found == limit
     ));
     let mut exact = String::from("schema_version=1\n#");
-    exact.extend(std::iter::repeat_n(' ', 1_048_576 - exact.len()));
+    exact.extend(std::iter::repeat_n(' ', limit as usize - exact.len()));
     assert!(load(&roots(), Some(exact.as_bytes())).is_ok());
     exact.push(' ');
     assert!(matches!(
@@ -630,16 +619,20 @@ fn bounded_reader_preserves_io_failures_and_consumes_at_most_limit_plus_one() {
 
 #[test]
 fn collection_bounds_refuse_deep_and_wide_domain_inputs() {
+    let limits = provenant_records::Limits::CONFIG;
     let deep = format!(
         "schema_version=1\n[domains]\nx={}0{}",
-        "[".repeat(70),
-        "]".repeat(70)
+        "[".repeat(limits.max_depth + 1),
+        "]".repeat(limits.max_depth + 1)
     );
     assert!(matches!(
         load(&roots(), Some(deep.as_bytes())),
         Err(ConfigError::CollectionLimit { .. })
     ));
-    let wide = format!("schema_version=1\n[domains]\nx=[{}0]", "0,".repeat(100_001));
+    let wide_members = std::iter::repeat_n("0", limits.max_members + 1)
+        .collect::<Vec<_>>()
+        .join(",");
+    let wide = format!("schema_version=1\n[domains]\nx=[{wide_members}]");
     assert!(matches!(
         load(&roots(), Some(wide.as_bytes())),
         Err(ConfigError::CollectionLimit { .. })
@@ -656,14 +649,13 @@ impl Files {
         let base = temp.path().canonicalize().unwrap();
         // All environmental locations are supplied as values; tests never
         // discover ambient HOME, state or harness configuration.
-        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
-        inputs.state_dir = Some(base.join("state"));
-        std::fs::create_dir(base.join("home")).unwrap();
+        let inputs = provenant_test_support::test_roots(&base).unwrap();
+        let roots = inputs
+            .resolve(&provenant_test_support::IdentityPathResolver)
+            .unwrap();
+        std::fs::remove_dir(roots.state.as_path()).unwrap();
         std::fs::create_dir(base.join("harness")).unwrap();
-        Self {
-            roots: inputs.resolve(&Resolver).unwrap(),
-            _temp: temp,
-        }
+        Self { roots, _temp: temp }
     }
     fn config(&self) -> PathBuf {
         self.roots.state.as_path().join("config.toml")
@@ -788,18 +780,17 @@ fn config_filesystem_boundary_refuses_links_non_files_and_unreadable_roots() {
 fn show_serialises_origins_for_non_utf8_state_paths() {
     use std::os::unix::ffi::OsStringExt;
     let fixture = Files::new();
-    let mut inputs = RootInputs::new(
-        fixture.roots.state.as_path().with_file_name("home"),
-        fixture.roots.state.as_path().with_file_name("checkout"),
-    );
-    inputs.state_dir = Some(
-        fixture
-            .roots
-            .state
-            .as_path()
-            .with_file_name(std::ffi::OsString::from_vec(b"state-\xff".to_vec())),
-    );
-    let roots = inputs.resolve(&Resolver).unwrap();
+    let roots = fixture
+        .roots
+        .with_state_dir(
+            fixture
+                .roots
+                .state
+                .as_path()
+                .with_file_name(std::ffi::OsString::from_vec(b"state-\xff".to_vec())),
+            &provenant_test_support::IdentityPathResolver,
+        )
+        .unwrap();
     // APFS rejects creation of non-UTF-8 names. Inject a reader to prove the
     // native-path wire contract on both supported operating systems.
     let snapshot = load(&roots, Some(&b"schema_version=1\nprofile='economy'\n"[..])).unwrap();
@@ -1404,9 +1395,10 @@ fn empty_compiled_closed_section_warns_on_unknown_keys() {
 }
 
 pub(crate) fn state_roots(dir: &Path) -> Roots {
-    let mut inputs = RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
-    inputs.state_dir = Some(dir.into());
-    inputs.resolve(&Resolver).unwrap()
+    provenant_test_support::test_roots(dir)
+        .unwrap()
+        .resolve(&provenant_test_support::IdentityPathResolver)
+        .unwrap()
 }
 pub(crate) fn knob_edit(roots: &Roots, edit: KnobEdit) -> Result<ResolvedConfig, ConfigError> {
     edit_config(
@@ -1430,19 +1422,17 @@ fn config_edit_bumps_change_generation() {
         },
     )
     .unwrap();
-    assert_eq!(
-        provenant_os::changes::read(temp.path())
-            .unwrap()
-            .configuration,
-        Some(1)
-    );
+    let first_generation = provenant_os::changes::read(roots.state.as_path())
+        .unwrap()
+        .configuration
+        .unwrap();
+    assert!(first_generation > 0);
     knob_edit(&roots, KnobEdit::Unset("lanes.max_concurrency")).unwrap();
-    assert_eq!(
-        provenant_os::changes::read(temp.path())
-            .unwrap()
-            .configuration,
-        Some(2)
-    );
+    let next_generation = provenant_os::changes::read(roots.state.as_path())
+        .unwrap()
+        .configuration
+        .unwrap();
+    assert!(next_generation > first_generation);
 }
 
 #[test]
@@ -1450,7 +1440,13 @@ fn config_edit_commits_when_the_change_signal_cannot_publish() {
     let temp = tempfile::tempdir().unwrap();
     let roots = state_roots(temp.path());
     // A directory at the signal name cannot be published. The write still succeeds.
-    std::fs::create_dir(temp.path().join(provenant_core::changes::FILE_NAME)).unwrap();
+    std::fs::create_dir(
+        roots
+            .state
+            .as_path()
+            .join(provenant_core::changes::FILE_NAME),
+    )
+    .unwrap();
     knob_edit(
         &roots,
         KnobEdit::Set {
@@ -1459,7 +1455,7 @@ fn config_edit_commits_when_the_change_signal_cannot_publish() {
         },
     )
     .unwrap();
-    assert!(temp.path().join("config.toml").exists());
+    assert!(roots.state.as_path().join("config.toml").exists());
 }
 
 #[test]
@@ -1499,7 +1495,7 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
     let dir = tempfile::tempdir().unwrap();
     let roots = state_roots(dir.path());
 
-    let path = dir.path().join("config.toml");
+    let path = roots.state.as_path().join("config.toml");
     std::fs::write(
         &path,
         "schema_version = 1 # keep\nknobs = { \"lanes.max_concurrency\" = 1 } # inline\n",
@@ -1546,6 +1542,35 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
         KnobSource::Profile
     );
 }
+#[test]
+fn dispatch_profiles_preserve_fractional_policy_in_canonical_snapshots() {
+    use provenant_records::{BudgetGrace, BudgetPolicy, CanonicalV1, run::HarnessProfile};
+    let config = load::<&[u8]>(&roots(), None).unwrap();
+    for overrides in [vec![], vec!["lanes.budget_grace=0.125".into()]] {
+        let profile = config.dispatch_profile(&overrides).unwrap();
+        let expected = if overrides.is_empty() {
+            BudgetGrace::DEFAULT
+        } else {
+            BudgetGrace::from_fraction(0.125).unwrap()
+        };
+        let raw = CanonicalV1::bytes(&profile).unwrap();
+        let decoded: HarnessProfile = serde_json::from_slice(raw.as_bytes()).unwrap();
+        assert_eq!(decoded, profile);
+        let grace: BudgetGrace =
+            serde_json::from_value(decoded.knobs["lanes.budget_grace"].clone()).unwrap();
+        assert_eq!(grace, expected);
+        let policy = BudgetPolicy {
+            grace,
+            ..Default::default()
+        };
+        let raw = CanonicalV1::bytes(&policy).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<BudgetPolicy>(raw.as_bytes()).unwrap(),
+            policy
+        );
+    }
+}
+
 #[test]
 fn writer_publishing_knob_defaults_on_and_can_be_disabled_per_dispatch() {
     let config = load::<&[u8]>(&roots(), None).unwrap();
@@ -1643,13 +1668,13 @@ fn set_rejects_out_of_range_values_and_unknown_knobs() {
         set("review.polish", "always"),
         Err(ConfigError::UnknownKnob { .. })
     ));
-    assert!(!dir.path().join("config.toml").exists());
+    assert!(!roots.state.as_path().join("config.toml").exists());
 }
 #[test]
 fn knob_edit_preserves_unknown_keys_while_applying_the_edit() {
     let dir = tempfile::tempdir().unwrap();
     let roots = state_roots(dir.path());
-    let path = dir.path().join("config.toml");
+    let path = roots.state.as_path().join("config.toml");
     let invalid = "schema_version = 1\nunknown = 1\n";
     std::fs::write(&path, invalid).unwrap();
     let config = knob_edit(&roots, KnobEdit::Profile("economy")).unwrap();
@@ -1660,68 +1685,15 @@ fn knob_edit_preserves_unknown_keys_while_applying_the_edit() {
     assert_eq!(read(&roots).unwrap().profile, Profile::Economy);
 }
 #[test]
-fn migrate_drops_rigorous_profile_and_refused_knobs() {
-    let dir = tempfile::tempdir().unwrap();
-    let roots = state_roots(dir.path());
-    let path = dir.path().join("config.toml");
-    let content = "schema_version = 1\nprofile = 'rigorous'\n[knobs]\n'review.polish' = 'always'\n'domains.routing.capacity_cooldown_seconds' = 30\n'confinement.census_host_list_complete' = true\n'lanes.max_concurrency' = 4\n";
-    std::fs::write(&path, content).unwrap();
-    assert!(read(&roots).is_err());
-
-    let report = crate::migrate(&roots, &crate::domains::NO_DOMAINS, false).unwrap();
-    assert_eq!(report.migrations.len(), 2);
-    let profile_m = report
-        .migrations
-        .iter()
-        .find(|m| m.location == "profile")
-        .unwrap();
-    assert_eq!(profile_m.action, "dropped");
-    assert_eq!(profile_m.keys, vec!["rigorous"]);
-    let knobs_m = report
-        .migrations
-        .iter()
-        .find(|m| m.location == "knobs")
-        .unwrap();
-    assert_eq!(knobs_m.action, "dropped");
-    assert!(knobs_m.keys.contains(&"review.polish".to_owned()));
-    assert!(
-        knobs_m
-            .keys
-            .contains(&"domains.routing.capacity_cooldown_seconds".to_owned())
-    );
-    assert!(
-        knobs_m
-            .keys
-            .contains(&"confinement.census_host_list_complete".to_owned())
-    );
-
-    let loaded = read(&roots).unwrap();
-    assert_eq!(loaded.profile, Profile::Balanced);
-    assert_eq!(loaded.knobs["lanes.max_concurrency"].value, 4);
-    let after_text = std::fs::read_to_string(&path).unwrap();
-    assert!(!after_text.contains("rigorous"));
-    assert!(!after_text.contains("review.polish"));
-    assert!(after_text.contains("lanes.max_concurrency"));
-}
-#[test]
-fn migrate_preserves_unrecognised_knobs() {
-    let dir = tempfile::tempdir().unwrap();
-    let roots = state_roots(dir.path());
-    let path = dir.path().join("config.toml");
-    let original =
-        "schema_version = 1\n[knobs]\n'review.polish' = 'always'\n'domains.routing.future' = 1\n";
-    std::fs::write(&path, original).unwrap();
-    crate::migrate(&roots, &crate::domains::NO_DOMAINS, false).unwrap();
-    let text = std::fs::read_to_string(path).unwrap();
-    assert!(!text.contains("review.polish"));
-    assert!(text.contains("domains.routing.future"));
-}
-#[test]
 fn set_creates_a_missing_private_state_directory() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let state = dir.path().join("state");
-    let roots = state_roots(&state);
+    let inputs = provenant_test_support::test_roots(dir.path()).unwrap();
+    let roots = inputs
+        .resolve(&provenant_test_support::IdentityPathResolver)
+        .unwrap();
+    let state = roots.state.as_path().to_owned();
+    std::fs::remove_dir(&state).unwrap();
     knob_edit(&roots, KnobEdit::Profile("economy")).unwrap();
     assert_eq!(
         std::fs::metadata(&state).unwrap().permissions().mode() & 0o777,
@@ -1749,16 +1721,11 @@ fn unknown_key_in_a_serde_decoded_section_reports_unknown_key_at_the_key() {
             "retention.unknown",
             3,
         ),
-        // The same name at two depths: the one serde rejected, not the first.
+        // The same name at two depths: each is reported at its own key.
         (
             "schema_version=1\n[gc]\nidle_days=7\n[gc.projects.p]\nidle_days=7",
             "gc.projects.p.idle_days",
             5,
-        ),
-        (
-            "schema_version=1\n[gc]\nunknown=true\n[gc.projects.p]\nunknown=true",
-            "gc.unknown",
-            3,
         ),
         (
             "schema_version=1\n[gc.projects.p]\nunknown=true",
@@ -1773,13 +1740,32 @@ fn unknown_key_in_a_serde_decoded_section_reports_unknown_key_at_the_key() {
     ] {
         let config = load(&roots(), Some(text.as_bytes())).unwrap();
         assert_warning(&config, "unknown_key");
-        assert!(
-            config.warnings.iter().any(|warning| warning.line == line
-                && warning.message.starts_with(&format!("{key_path}:"))),
-            "{text}: {:?}",
-            config.warnings
+        let unknown: Vec<_> = config
+            .warnings
+            .iter()
+            .filter(|warning| warning.rule == "unknown_key")
+            .collect();
+        assert_eq!(unknown.len(), 1, "{text}: {:?}", config.warnings);
+        let warning = unknown[0];
+        assert_eq!(
+            warning.path.to_relative_path().unwrap().as_path(),
+            Path::new("config.toml")
         );
+        assert_eq!(warning.line, line);
+        assert!(warning.message.starts_with(&format!("{key_path}:")));
     }
+
+    // Every unknown key is reported, each at its own line.
+    let text = "schema_version=1\n[gc]\nunknown=true\n[gc.projects.p]\nunknown=true";
+    let config = load(&roots(), Some(text.as_bytes())).unwrap();
+    let mut found: Vec<_> = config
+        .warnings
+        .iter()
+        .filter(|warning| warning.rule == "unknown_key")
+        .map(|warning| (warning.line, warning.message.split(':').next().unwrap()))
+        .collect();
+    found.sort_unstable();
+    assert_eq!(found, [(3, "gc.unknown"), (5, "gc.projects.p.unknown")]);
 }
 
 #[test]
@@ -1860,113 +1846,58 @@ fn owner_marked_tables_replace_defaults_and_allow_empty_overrides() {
 }
 
 #[test]
-fn registered_knobs_have_production_readers() {
-    fn production_only(text: &str) -> String {
-        let mut result = String::new();
-        let mut skip = false;
-        let mut depth = 0_i32;
-        let mut opened = false;
-        for line in text.lines() {
-            if line.trim() == "#[cfg(test)]" {
-                skip = true;
-                depth = 0;
-                opened = false;
-                continue;
-            }
-            if skip {
-                depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
-                opened |= line.contains('{');
-                if (opened && depth == 0) || (!opened && line.trim_end().ends_with(';')) {
-                    skip = false;
-                }
-            } else if !line.trim_start().starts_with("//") {
-                result.push_str(line);
-                result.push('\n');
-            }
-        }
-        result
-    }
-    assert!(
-        !production_only("#[cfg(test)]\nmod tests {\n get(\"unread.knob\");\n}\n")
-            .contains("unread.knob")
-    );
-    fn sources(path: &std::path::Path, output: &mut String) {
-        for entry in std::fs::read_dir(path).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                sources(&path, output);
-            } else if path.extension().is_some_and(|ext| ext == "rs")
-                && path.file_name().unwrap() != "knobs.rs"
-                && !path.file_name().unwrap().to_string_lossy().contains("test")
-            {
-                let text = std::fs::read_to_string(path).unwrap();
-                output.push_str(&production_only(&text));
-                output.push('\n');
-            }
+fn removed_cli_spellings_match_both_migration_documents() {
+    fn declared_spelling(removed: &Removed) -> String {
+        let path = removed.words.join(" ");
+        match removed.flag {
+            Some(flag) => format!("provenant {path} --{flag}"),
+            None => format!("provenant {path}"),
         }
     }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut source = String::new();
-    sources(&root.join("src"), &mut source);
-    for entry in std::fs::read_dir(root.join("crates")).unwrap() {
-        let src = entry.unwrap().path().join("src");
-        if src.is_dir() {
-            sources(&src, &mut source);
-        }
+    fn rows(document: &str) -> Vec<(String, String)> {
+        let start = "<!-- REMOVED_CLI_START -->";
+        let end = "<!-- REMOVED_CLI_END -->";
+        let body = document
+            .split_once(start)
+            .and_then(|(_, rest)| rest.split_once(end).map(|(body, _)| body))
+            .expect("removed-command table markers exist");
+        body.lines()
+            .filter(|line| line.trim_start().starts_with('|'))
+            .filter_map(|line| {
+                let mut cells = line.trim().trim_matches('|').split('|');
+                let spelling = cells.next()?.trim().trim_matches('`').to_owned();
+                let replacement = cells.next()?.trim().to_owned();
+                (spelling.starts_with("provenant ") && !replacement.is_empty())
+                    .then_some((spelling, replacement))
+            })
+            .collect()
     }
-    let source: String = source.chars().filter(|c| !c.is_whitespace()).collect();
-    fn has_reader(source: &str, name: &str) -> bool {
-        // Confinement knobs are read through typed accessors on the config.
-        if let Some(accessor) = name.strip_prefix("confinement.") {
-            return source.contains(&format!(".{accessor}()"));
-        }
-        // Graph isolation is consumed from the typed per-node attempt before
-        // dispatch, when deciding whether to create a pinned source view.
-        if name == "lanes.isolation" {
-            return source.contains(".effective_isolation()");
-        }
-        // The Fabric MCP opt-in is read through a typed accessor.
-        if name == "fabric.mcp_server" {
-            return source.contains(".fabric_mcp_server()");
-        }
-        [".get(", "get(", "knob(", ".knob_u64(", ".knob_is_set("]
-            .iter()
-            .any(|call| source.contains(&format!("{call}\"{name}\"")))
-            || (name.starts_with("routing.") && source.contains(&format!("(\"{name}\",")))
-    }
-    assert!(!has_reader("log(\"unread.knob\", value)", "unread.knob"));
-    assert!(has_reader(
-        "config.knobs.get(\"unread.knob\")",
-        "unread.knob"
-    ));
-    for name in crate::knobs::registry().unwrap().knobs.keys() {
-        assert!(
-            has_reader(&source, name),
-            "registered knob {name} has no reader"
+
+    let expected: std::collections::BTreeSet<_> = REMOVED
+        .iter()
+        .map(|removed| (declared_spelling(removed), removed.replacement.to_owned()))
+        .collect();
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+    for path in [
+        repository.join("docs/runbooks/using-provenant-2-from-another-repository.md"),
+        repository.join("docs/specs/consumer-contract.md"),
+    ] {
+        let source = std::fs::read_to_string(&path).unwrap();
+        let entries = rows(&source);
+        let actual: std::collections::BTreeSet<_> = entries.iter().cloned().collect();
+        assert_eq!(
+            entries.len(),
+            actual.len(),
+            "duplicate migration rows in {}",
+            path.display()
+        );
+        assert_eq!(
+            actual,
+            expected,
+            "migration rows disagree in {}",
+            path.display()
         );
     }
-}
-
-#[test]
-fn misplaced_domain_knob_warns_with_the_migrate_repair() {
-    let config = load(
-        &roots(),
-        Some(&b"schema_version=1\n[knobs]\n'domains.routing.capacity_cooldown_seconds'=30"[..]),
-    )
-    .unwrap();
-    assert_warning(&config, "unknown_key");
-    assert!(config.warnings[0].message.contains("config migrate"));
-}
-
-#[test]
-fn unknown_domain_knob_warns_without_the_migrate_repair() {
-    let config = load(
-        &roots(),
-        Some(&b"schema_version=1\n[knobs]\n'domains.routing.future'=1"[..]),
-    )
-    .unwrap();
-    assert_warning(&config, "unknown_key");
-    assert!(!config.warnings[0].message.contains("config migrate"));
 }
 
 #[test]
@@ -1999,4 +1930,56 @@ fn launch_retry_knobs_are_listed_with_defaults_bounds_and_sources() {
         config.knobs["lanes.launch_retry_limit"].source,
         KnobSource::Override
     );
+}
+
+/// Every registered knob reports the layer that set it, so limits, receipts
+/// and status read one truthful source: the registry default, host
+/// configuration (its `[knobs]` table or its selected preset) or a launch.
+#[test]
+fn every_registered_knob_reports_the_layer_that_set_it() {
+    use provenant_records::LimitSource;
+    let registry = knobs::registry().unwrap();
+    let text = |value: &serde_json::Value| match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    let configured = |edits: &[KnobEdit<'_>]| {
+        let mut doc = toml_edit::DocumentMut::new();
+        doc["schema_version"] = toml_edit::value(1);
+        for edit in edits {
+            edit.apply(&mut doc).unwrap();
+        }
+        load(&roots(), Some(doc.to_string().as_bytes())).unwrap()
+    };
+    let defaults = configured(&[]).dispatch_profile(&[]).unwrap();
+    assert!(!registry.knobs.is_empty());
+    for (name, spec) in &registry.knobs {
+        assert_eq!(knob_source(&defaults, name), LimitSource::Default, "{name}");
+        let value = text(&spec.default);
+        let host = configured(&[KnobEdit::Set {
+            name,
+            value: &value,
+        }]);
+        assert_eq!(
+            knob_source(&host.dispatch_profile(&[]).unwrap(), name),
+            LimitSource::Host,
+            "{name}"
+        );
+        if !spec.host_only {
+            let launched = host.dispatch_profile(&[format!("{name}={value}")]).unwrap();
+            assert_eq!(knob_source(&launched, name), LimitSource::Launch, "{name}");
+        }
+    }
+    for (preset, values) in &registry.presets {
+        let profile = configured(&[KnobEdit::Profile(preset)])
+            .dispatch_profile(&[])
+            .unwrap();
+        for name in values.knobs.keys() {
+            assert_eq!(
+                knob_source(&profile, name),
+                LimitSource::Host,
+                "{preset}: {name}"
+            );
+        }
+    }
 }

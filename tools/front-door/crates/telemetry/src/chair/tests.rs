@@ -6,7 +6,7 @@ type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 fn chair(account: &str, session: &str) -> ChairSession {
     ChairSession {
         adapter: "claude".into(),
-        account: account.into(),
+        account_identity: crate::usage::AccountIdentity::known("claude", account, "fixture-epoch"),
         session: session.into(),
         project: None,
         config: None,

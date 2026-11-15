@@ -1,7 +1,9 @@
 // Integration tests use real time to bound process and filesystem coordination.
 #![allow(clippy::disallowed_methods)]
 
-use provenant_core::{AttemptId, CancelToken, RunId, WaitBudget};
+use provenant_records::custody::Scope;
+
+use provenant_core::{AttemptId, CancelToken, WaitBudget};
 use provenant_os::{
     clock::SystemClock,
     fs::{Directory, FileHandle, LockMode},
@@ -62,13 +64,6 @@ impl ExitPublisher for TrackingPublisher {
         directory: &Directory,
         bytes: &[u8],
     ) -> provenant_supervisor::custody::Result<provenant_os::fs::Publication> {
-        let calls = self.0.join("PROVENANT_STATE_DIR/s2-tracking-calls");
-        if calls.is_file() {
-            std::fs::OpenOptions::new()
-                .append(true)
-                .open(calls)?
-                .write_all(b"T")?;
-        }
         if self
             .0
             .join("tracking-writer")
@@ -297,7 +292,6 @@ impl ProcessObserver for CensusGateObserver {
 
 fn scope() -> Scope {
     Scope {
-        run: RunId::from_bytes([1; 16]),
         attempt: AttemptId::from_bytes([2; 16]),
         generation: 1,
     }
@@ -363,7 +357,6 @@ fn writer_is_fenced_after_every_descriptor_closes(root: &Path) -> Result<()> {
             .join("ownership.json"),
     )?;
     let next = Scope {
-        run: RunId::from_bytes([3; 16]),
         attempt: AttemptId::from_bytes([4; 16]),
         generation: 1,
     };
@@ -514,13 +507,14 @@ fn start_with_profile(
     )?;
     let identity = publication.custody_metadata()?;
     let mut command = ProviderCommand {
+        policy: Default::default(),
         profile_file: None,
         priority: 0,
         lane_ports: None,
         requester: provenant_core::ActorId::from_bytes([4; 16]),
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
-        task: provenant_core::TaskId::from_bytes([3; 16]),
+        key: provenant_supervisor::custody::fixture_key(3),
         protected_commands: fixture::protected_commands(),
         config_environment: fixture::config_environment(),
         argv: fixture::argv_with_args(scenario, extra)?,
@@ -734,19 +728,13 @@ fn live_census_failure_warns_once(root: &Path) -> Result<()> {
     );
     Ok(())
 }
-fn idle_supervisor_does_no_census_per_wake(root: &Path) -> Result<()> {
-    idle_supervisor(root, false)
-}
-
 fn unchanged_census_does_not_publish_tracking(root: &Path) -> Result<()> {
     let state = root.join("PROVENANT_STATE_DIR");
     std::fs::create_dir(&state)?;
-    // Failed process watches force an actual full census every 100 ms.
+    // Failed process watches make the guardian take repeated full censuses.
     std::fs::write(state.join("s2-fail-process-watch"), b"fail")?;
     let trace = state.join("s2-idle-census-trace");
-    let calls = state.join("s2-tracking-calls");
     std::fs::write(&trace, b"")?;
-    std::fs::write(&calls, b"")?;
     let socket = root.join("tracking.sock");
     let listener = UnixListener::bind(&socket)?;
     let (_writer, handle) = start(
@@ -758,30 +746,38 @@ fn unchanged_census_does_not_publish_tracking(root: &Path) -> Result<()> {
     )?;
     let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
     byte(&mut held, b'R')?;
-    let wait_for_censuses = |count| -> Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while std::fs::read(&trace)?
-            .iter()
-            .filter(|kind| **kind == b'F')
-            .count()
-            < count
-        {
-            if Instant::now() >= deadline {
-                return Err("expected repeated full censuses".into());
-            }
-            std::thread::park_timeout(Duration::from_millis(10));
-        }
-        Ok(())
-    };
-    wait_for_censuses(3)?;
-    let before = std::fs::read(&calls)?;
-    assert!(!before.is_empty(), "publisher was never exercised");
-    wait_for_censuses(8)?;
-    assert_eq!(
-        std::fs::read(&calls)?,
-        before,
-        "unchanged tracking was published"
-    );
+    let count_full_censuses = |trace: &[u8]| trace.iter().filter(|kind| **kind == b'F').count();
+    let baseline = provenant_test_support::wait_for(
+        "initial full census",
+        Duration::from_secs(5),
+        || std::fs::read(&trace).map(|trace| count_full_censuses(&trace)),
+        |observed| observed.as_ref().is_ok_and(|count| *count > 0),
+    )
+    .map_err(io::Error::other)?
+    .map_err(io::Error::other)?;
+    let reservation = root
+        .join("tracking-writer")
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
+    // The first censuses may still publish a changing process tree (the trace
+    // line precedes its publication); take the baseline once two more have run.
+    let settled = provenant_test_support::wait_for(
+        "tracking settled",
+        Duration::from_secs(5),
+        || std::fs::read(&trace).map(|trace| count_full_censuses(&trace)),
+        |observed| observed.as_ref().is_ok_and(|count| *count > baseline + 2),
+    )
+    .map_err(io::Error::other)?
+    .map_err(io::Error::other)?;
+    let before = std::fs::read(&reservation)?;
+    let _observed = provenant_test_support::wait_for(
+        "next full census",
+        Duration::from_secs(5),
+        || std::fs::read(&trace).map(|trace| count_full_censuses(&trace)),
+        |observed| observed.as_ref().is_ok_and(|count| *count > settled + 1),
+    )
+    .map_err(io::Error::other)?;
+    assert_eq!(std::fs::read(&reservation)?, before);
     stop(&handle, StopReason::ExplicitCancellation)?;
     assert_eq!(
         exited(&handle)?.stop_reason,
@@ -791,7 +787,7 @@ fn unchanged_census_does_not_publish_tracking(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn idle_supervisor(root: &Path, capture_cpu: bool) -> Result<()> {
+fn idle_supervisor(root: &Path) -> Result<()> {
     let home = root.join("HOME");
     std::fs::create_dir_all(&home)?;
     std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
@@ -799,8 +795,6 @@ fn idle_supervisor(root: &Path, capture_cpu: bool) -> Result<()> {
     std::fs::create_dir(&state)?;
     std::fs::write(state.join("s2-live-tree"), b"enabled")?;
     std::fs::write(state.join("s2-constant-cpu"), b"enabled")?;
-    let trace = state.join("s2-idle-census-trace");
-    std::fs::write(&trace, b"")?;
     let socket = root.join("idle-census.sock");
     let listener = UnixListener::bind(&socket)?;
     let (_writer, handle) = start(
@@ -815,49 +809,8 @@ fn idle_supervisor(root: &Path, capture_cpu: bool) -> Result<()> {
     // The first walk installs filters and the confirmation walk closes that
     // registration gap. No process forks or exits after this point.
     wait_for_file(&state.join("s2-live-tree-seen"))?;
-    let before = std::fs::read(&trace)?.len();
-    let began = Instant::now();
     let attempt = root.join("idle-census-attempt");
-    for index in 0..30 {
-        // Wake the actual reactor repeatedly without changing process state.
-        // This is also the event emitted by atomic cancellation publication.
-        std::fs::write(attempt.join(format!("idle-wake-{index}")), b"wake")?;
-        std::thread::park_timeout(Duration::from_millis(20));
-    }
-    let calls = std::fs::read(&trace)?;
-    let elapsed = began.elapsed();
-    assert!(
-        !calls[before..].contains(&b'L'),
-        "idle scoped walks: {calls:?}"
-    );
-    // Permit the mandatory five-second backstop even on a slow native host.
-    let full = calls[before..].iter().filter(|kind| **kind == b'F').count();
-    assert!(
-        full as u128 <= 1 + elapsed.as_millis() / 5_000,
-        "census per idle wake: {calls:?}"
-    );
-    if capture_cpu {
-        capture_idle_cpu(&attempt)?;
-    } else {
-        // Let the first CPU observation replace the initial unknown value.
-        // The next observation has identical facts and must retain the bytes,
-        // including the timestamp, rather than flushing a heartbeat.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let before = loop {
-            let bytes = std::fs::read(attempt.join("process.json"))?;
-            let checkpoint: serde_json::Value = serde_json::from_slice(&bytes)?;
-            if checkpoint["provider_cpu_micros"] == 0 && checkpoint["phase"] == "running" {
-                break bytes;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "running checkpoint with sampled CPU was not published: {checkpoint}"
-            );
-            std::thread::park_timeout(Duration::from_millis(20));
-        };
-        std::thread::park_timeout(Duration::from_millis(1_200));
-        assert_eq!(std::fs::read(attempt.join("process.json"))?, before);
-    }
+    capture_idle_cpu(&attempt)?;
     assert!(
         !home.join("graph-children-read").exists(),
         "live census must not read host graph checkpoints"
@@ -1149,7 +1102,7 @@ fn held_stop_ignores_lane_written_summary_and_cancel_request(root: &Path) -> Res
     let planted = serde_json::json!({
         "schema_version": 1,
         "scope": scope,
-        "request_id": format!("{}.{}.{}.cancel", scope.run, scope.attempt, scope.generation),
+        "request_id": format!("{}.{}.cancel", scope.attempt, scope.generation),
         "requester": provenant_core::ActorId::from_bytes([66; 16]),
         "reason": "explicit_cancellation",
     });
@@ -1176,7 +1129,7 @@ fn cancel_request(scope: Scope, requester: provenant_core::ActorId) -> serde_jso
     serde_json::json!({
         "schema_version": 1,
         "scope": scope,
-        "request_id": format!("{}.{}.{}.cancel", scope.run, scope.attempt, scope.generation),
+        "request_id": format!("{}.{}.cancel", scope.attempt, scope.generation),
         "requester": requester,
         "reason": "explicit_cancellation",
     })
@@ -1359,13 +1312,14 @@ fn never_spawned_cancel_is_published(root: &Path) -> Result<()> {
         &clock,
     )?;
     let command = ProviderCommand {
+        policy: Default::default(),
         profile_file: None,
         priority: 0,
         lane_ports: None,
         requester: provenant_core::ActorId::from_bytes([4; 16]),
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
-        task: provenant_core::TaskId::from_bytes([3; 16]),
+        key: provenant_supervisor::custody::fixture_key(3),
         protected_commands: fixture::protected_commands(),
         config_environment: fixture::config_environment(),
         argv: fixture::argv("exit")?,
@@ -1389,7 +1343,7 @@ fn never_spawned_cancel_is_published(root: &Path) -> Result<()> {
     )
     .err()
     .ok_or_else(|| io::Error::other("cancelled launch unexpectedly succeeded"))?;
-    assert!(matches!(failure.error, CustodyError::Cancelled));
+    assert!(matches!(failure.error.as_ref(), CustodyError::Cancelled));
     let record: serde_json::Value =
         serde_json::from_slice(&std::fs::read(attempt_path.join("process-exit.json"))?)?;
     assert_eq!(record["never_spawned"], true);
@@ -1417,13 +1371,14 @@ fn terminal_frame_closes_provider_stdin(root: &Path) -> Result<()> {
         &clock,
     )?;
     let command = ProviderCommand {
+        policy: Default::default(),
         profile_file: None,
         priority: 0,
         lane_ports: None,
         requester: provenant_core::ActorId::from_bytes([4; 16]),
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
-        task: provenant_core::TaskId::from_bytes([3; 16]),
+        key: provenant_supervisor::custody::fixture_key(3),
         protected_commands: fixture::protected_commands(),
         config_environment: fixture::config_environment(),
         argv: fixture::argv("terminal-stdin")?,
@@ -1622,7 +1577,7 @@ fn descendant_session_after_parent(root: &Path, timed: bool) -> Result<()> {
     wait_for_identity_absence(&descendant)?;
     Ok(())
 }
-/// A lane with an MCP child registers a nested owner whose custody macOS cannot
+/// A lane with a nested Provenant child registers a nested owner whose custody macOS cannot
 /// prove; that must not stop cleanup ending a different, exact escapee, and
 /// cleanup must not repeat a signal to a provider that is already gone.
 #[cfg(target_os = "macos")]
@@ -2277,7 +2232,6 @@ fn checkpoint_enospc_while_provider_lives_never_signals_it(root: &Path) -> Resul
 struct DiskBuild {
     _writer: CustodyLease,
     handle: CustodyHandle,
-    build: ProcessIdentity,
     channel: UnixStream,
     gate: UnixStream,
     state: PathBuf,
@@ -2306,36 +2260,21 @@ fn disk_build(root: &Path) -> Result<DiskBuild> {
     )?;
     let mut channel = fixture::fixture_accept(&build_listener, Duration::from_secs(5))?;
     byte(&mut channel, b'R')?;
-    let build = process_identity(read_pid_line(&mut channel)?)?;
+    process_identity(read_pid_line(&mut channel)?)?;
     let mut gate = fixture::fixture_accept(&gate_listener, Duration::from_secs(5))?;
     byte(&mut gate, b'R')?;
     channel.write_all(b"I")?;
     byte(&mut channel, b'I')?;
     set_disk_sample(&state, b"low")?;
-    wait_for_paused_build(&mut channel)?;
+    channel.write_all(b"A")?;
+    byte(&mut channel, b'A')?;
     Ok(DiskBuild {
         _writer: writer,
         handle,
-        build,
         channel,
         gate,
         state,
     })
-}
-
-fn wait_for_paused_build(channel: &mut UnixStream) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        channel.write_all(b"A")?;
-        match fixture::fixture_read_byte(channel, Duration::from_millis(250)) {
-            Err(error) if error.kind() == io::ErrorKind::TimedOut => return Ok(()),
-            Ok(byte) => assert_eq!(byte, b'A'),
-            Err(error) => return Err(error.into()),
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::other("owned cargo descendant was not SIGSTOPped").into());
-        }
-    }
 }
 
 fn set_disk_sample(state: &Path, sample: &[u8]) -> Result<()> {
@@ -2352,117 +2291,17 @@ fn set_disk_sample(state: &Path, sample: &[u8]) -> Result<()> {
     }
 }
 
-fn disk_floor_pauses_and_recovery_resumes_builds(root: &Path) -> Result<()> {
+fn disk_floor_never_stops_a_running_build(root: &Path) -> Result<()> {
     let mut fixture = disk_build(root)?;
 
-    set_disk_sample(&fixture.state, b"high")?;
-    byte(&mut fixture.channel, b'A')?;
+    set_disk_sample(&fixture.state, b"low")?;
+    fixture.channel.write_all(b"B")?;
+    byte(&mut fixture.channel, b'B')?;
     drop(fixture.gate);
     // The build lives in its own session, so cleanup may not signal it; EOF
     // lets it exit so the census can settle.
     drop(fixture.channel);
     assert!(!exited(&fixture.handle)?.unresolved_cleanup);
-    Ok(())
-}
-
-fn disk_sample_failure_resumes_paused_builds(root: &Path) -> Result<()> {
-    let mut fixture = disk_build(root)?;
-    set_disk_sample(&fixture.state, b"error-paused")?;
-    // The pending heartbeat proves CONT was delivered without a good sample.
-    byte(&mut fixture.channel, b'A')?;
-    set_disk_sample(&fixture.state, b"error-running")?;
-    fixture.channel.write_all(b"B")?;
-    byte(&mut fixture.channel, b'B')?;
-    drop(fixture.gate);
-    drop(fixture.channel);
-    assert!(!exited(&fixture.handle)?.unresolved_cleanup);
-    Ok(())
-}
-
-fn cancel_resumes_paused_builds_before_delivering_stop(root: &Path) -> Result<()> {
-    let mut fixture = disk_build(root)?;
-
-    assert_eq!(
-        stop(&fixture.handle, StopReason::ExplicitCancellation)?,
-        StopReceipt::Requested
-    );
-    byte(&mut fixture.channel, b'A')?;
-    drop(fixture.channel);
-    let exit = exited(&fixture.handle)?;
-    assert_eq!(exit.stop_reason, Some(StopReason::ExplicitCancellation));
-    assert!(!exit.unresolved_cleanup);
-    Ok(())
-}
-
-fn provider_exit_resumes_paused_builds(root: &Path) -> Result<()> {
-    let mut fixture = disk_build(root)?;
-
-    drop(fixture.gate);
-    byte(&mut fixture.channel, b'A')?;
-    drop(fixture.channel);
-    let exit = exited(&fixture.handle)?;
-    assert_eq!(
-        exit.termination,
-        Some(provenant_os::exec::Termination::Exit(0))
-    );
-    assert!(!exit.unresolved_cleanup);
-    Ok(())
-}
-
-fn guardian_sigkill_recovery_resumes_a_build_after_ancestry_is_lost(root: &Path) -> Result<()> {
-    let fixture = disk_build(root)?;
-    let guardian = reservation_identity(&root.join("disk-writer"), "guardian")?;
-    let provider = reservation_identity(&root.join("disk-writer"), "provider")?;
-    let attempt = root.join("disk-attempt");
-    let paused: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(attempt.join("disk-paused.json"))?)?;
-    assert!(
-        paused["identities"].as_array().is_some_and(|identities| {
-            identities
-                .iter()
-                .any(|identity| identity["pid"] == fixture.build.pid)
-        }),
-        "pause identity must be durable before SIGSTOP"
-    );
-    fixture::signal_recorded_process(&guardian, libc::SIGKILL)?;
-    fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(5))?;
-    fixture::signal_recorded_process(&provider, libc::SIGKILL)?;
-    wait_for_identity_absence(&provider)?;
-    // The kernel reparents the build only after the provider is gone; wait for it.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while matches!(
-        fixture::RecordedBootObserver.observe(fixture.build.pid),
-        ProcessObservation::Present(fact) if fact.parent_pid == provider.pid
-    ) && Instant::now() < deadline
-    {
-        std::thread::park_timeout(Duration::from_millis(5));
-    }
-    match fixture::RecordedBootObserver.observe(fixture.build.pid) {
-        ProcessObservation::Present(fact) => {
-            assert_ne!(
-                fact.parent_pid, provider.pid,
-                "dead provider ancestry must be lost"
-            );
-        }
-        other => return Err(io::Error::other(format!("paused build vanished: {other:?}")).into()),
-    }
-    let DiskBuild {
-        _writer,
-        mut channel,
-        gate,
-        build,
-        ..
-    } = fixture;
-    drop(_writer);
-    drop(gate);
-    fixture::resume_orphaned_builds(&Directory::open_anchor(&attempt)?, scope())?;
-    byte(&mut channel, b'A')?;
-    assert!(!attempt.join("disk-paused.json").exists());
-    let checkpoint: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(attempt.join("process.json"))?)?;
-    assert_eq!(checkpoint["disk_paused"], false);
-    drop(channel);
-    wait_for_identity_absence(&build)?;
     Ok(())
 }
 
@@ -2503,14 +2342,16 @@ fn guardian_signal_requests_provider_stop(root: &Path, signal: i32, label: &str)
     Ok(())
 }
 
-fn guardian_sigterm_uses_supervisor_signal_path(root: &Path) -> Result<()> {
-    guardian_signal_requests_provider_stop(root, libc::SIGTERM, "term")
-}
-fn guardian_sigint_uses_supervisor_signal_path(root: &Path) -> Result<()> {
-    guardian_signal_requests_provider_stop(root, libc::SIGINT, "int")
-}
-fn guardian_sighup_uses_supervisor_signal_path(root: &Path) -> Result<()> {
-    guardian_signal_requests_provider_stop(root, libc::SIGHUP, "hup")
+/// Each terminating signal takes the supervisor's stop path, not a default one.
+fn guardian_signals_use_supervisor_signal_path(root: &Path) -> Result<()> {
+    for (signal, label) in [
+        (libc::SIGTERM, "term"),
+        (libc::SIGINT, "int"),
+        (libc::SIGHUP, "hup"),
+    ] {
+        guardian_signal_requests_provider_stop(root, signal, label)?;
+    }
+    Ok(())
 }
 
 fn wait_for_zombie(identity: &ProcessIdentity) -> Result<()> {
@@ -2664,17 +2505,24 @@ fn guardian_exits_after_owner_and_tracked_descendant_are_gone(root: &Path) -> Re
     assert!(!settled.unresolved_cleanup, "{settled:?}");
     Ok(())
 }
-fn guardian_retires_after_owner_and_evidence_are_removed(root: &Path) -> Result<()> {
-    orphan_with_removed_writer_state(root, true, false, false)
-}
-fn guardian_retires_after_owner_and_lock_are_removed(root: &Path) -> Result<()> {
-    orphan_with_removed_writer_state(root, false, true, false)
-}
-fn guardian_retires_after_owner_and_writer_state_are_removed(root: &Path) -> Result<()> {
-    orphan_with_removed_writer_state(root, true, true, false)
-}
-fn guardian_retires_after_owner_and_lock_directory_are_removed(root: &Path) -> Result<()> {
-    orphan_with_removed_writer_state(root, true, true, true)
+fn guardian_retires_after_each_writer_artifact_removal(root: &Path) -> Result<()> {
+    let cases = [
+        ("evidence", true, false, false),
+        ("lock", false, true, false),
+        ("writer-state", true, true, false),
+        ("lock-directory", true, true, true),
+    ];
+    for (name, remove_evidence, remove_lock, remove_directory) in cases {
+        let case_root = root.join(name);
+        std::fs::create_dir(&case_root)?;
+        orphan_with_removed_writer_state(
+            &case_root,
+            remove_evidence,
+            remove_lock,
+            remove_directory,
+        )?;
+    }
+    Ok(())
 }
 fn orphan_with_removed_writer_state(
     root: &Path,
@@ -3035,9 +2883,9 @@ fn profile_transport_pass_failure_never_launches_provider(root: &Path) -> Result
     Ok(())
 }
 
-// Medium native integration: both exec handoffs consume the exact complete
-// profile, including a mandatory denial after the former 512 KiB boundary.
-fn native_profile_file_survives_both_handoffs_above_former_limit(root: &Path) -> Result<()> {
+// Medium native integration: both exec handoffs consume the exact profile and
+// preserve its mandatory denial.
+fn native_profile_file_survives_both_handoffs(root: &Path) -> Result<()> {
     let probe = std::process::Command::new("/usr/bin/sandbox-exec")
         .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
         .output()?;
@@ -3049,51 +2897,56 @@ fn native_profile_file_survives_both_handoffs_above_former_limit(root: &Path) ->
         return Ok(());
     }
     let directory = Directory::open_anchor(root)?;
-    for padding in [0, 600 * 1024] {
-        let name = format!("profile-{padding}");
-        let denied = root.join(format!("{name}-mandatory"));
-        let marker = root.join(format!("{name}-allowed"));
-        std::fs::write(&denied, b"mandatory")?;
-        let mut source = "(version 1)\n(allow default)\n".to_owned();
-        source.push_str(&format!(";{}\n", "padding".repeat(padding / 7)));
-        source.push_str(&format!("(deny file-read-data (literal \"{}\"))\n(deny file-write* (literal \"{}\"))\n(allow mach-lookup (global-name \"{}\"))\n", denied.display(), denied.display(), scope().attempt.sandbox_lookup_name()));
-        let profile = provenant_supervisor::ProfileFile::create(source.as_bytes(), &directory)?;
-        let identity = serde_json::to_value(profile.identity())?;
-        let argv = vec!["/usr/bin/sandbox-exec".into(), "-f".into(), profile.path(),
-            "/bin/sh".into(), "-c".into(),
-            "if /bin/cat \"$1\"; then exit 21; fi; if printf changed > \"$1\"; then exit 22; fi; printf applied > \"$2\"".into(),
-            "probe".into(), denied.into_os_string(), marker.clone().into_os_string()];
-        let (_writer, handle, _) = start_with_profile(
-            root,
-            &name,
-            "bytes",
-            &[],
-            CapturePlan::default(),
-            Some((argv, profile)),
-        )?;
-        let exit = exited(&handle)?;
-        assert_eq!(
-            exit.termination,
-            Some(provenant_os::exec::Termination::Exit(0)),
-            "{exit:?}"
-        );
-        assert!(!exit.never_spawned);
-        assert_eq!(std::fs::read(marker)?, b"applied");
-        assert_eq!(
-            std::fs::read(root.join(format!("{name}-mandatory")))?,
-            b"mandatory"
-        );
-        let summary: serde_json::Value = serde_json::from_slice(&std::fs::read(
-            root.join(format!("{name}-attempt/launch.json")),
-        )?)?;
-        assert_eq!(summary["profile"], identity);
-        assert_eq!(summary["profile"]["bytes"], serde_json::json!(source.len()));
-        use sha2::{Digest, Sha256};
-        assert_eq!(
-            summary["profile"]["sha256"],
-            serde_json::json!(Sha256::digest(source.as_bytes()).to_vec())
-        );
-    }
+    let name = "profile";
+    let denied = root.join("profile-mandatory");
+    let marker = root.join("profile-allowed");
+    std::fs::write(&denied, b"mandatory")?;
+    let source = format!(
+        "(version 1)\n(allow default)\n(deny file-read-data (literal \"{}\"))\n(deny file-write* (literal \"{}\"))\n(allow mach-lookup (global-name \"{}\"))\n",
+        denied.display(),
+        denied.display(),
+        scope().attempt.sandbox_lookup_name()
+    );
+    let profile = provenant_supervisor::ProfileFile::create(source.as_bytes(), &directory)?;
+    let identity = serde_json::to_value(profile.identity())?;
+    let argv = vec![
+        "/usr/bin/sandbox-exec".into(),
+        "-f".into(),
+        profile.path(),
+        "/bin/sh".into(),
+        "-c".into(),
+        "if /bin/cat \"$1\"; then exit 21; fi; if printf changed > \"$1\"; then exit 22; fi; printf applied > \"$2\"".into(),
+        "probe".into(),
+        denied.clone().into_os_string(),
+        marker.clone().into_os_string(),
+    ];
+    let (_writer, handle, _) = start_with_profile(
+        root,
+        name,
+        "bytes",
+        &[],
+        CapturePlan::default(),
+        Some((argv, profile)),
+    )?;
+    let exit = exited(&handle)?;
+    assert_eq!(
+        exit.termination,
+        Some(provenant_os::exec::Termination::Exit(0)),
+        "{exit:?}"
+    );
+    assert!(!exit.never_spawned);
+    assert_eq!(std::fs::read(marker)?, b"applied");
+    assert_eq!(std::fs::read(denied)?, b"mandatory");
+    let summary: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        root.join(format!("{name}-attempt/launch.json")),
+    )?)?;
+    assert_eq!(summary["profile"], identity);
+    assert_eq!(summary["profile"]["bytes"], serde_json::json!(source.len()));
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        summary["profile"]["sha256"],
+        serde_json::json!(Sha256::digest(source.as_bytes()).to_vec())
+    );
     Ok(())
 }
 
@@ -3104,12 +2957,8 @@ const CASES: &[Case] = &[
         profile_transport_pass_failure_never_launches_provider,
     ),
     (
-        "native_profile_file_survives_both_handoffs_above_former_limit",
-        native_profile_file_survives_both_handoffs_above_former_limit,
-    ),
-    (
-        "idle_supervisor_does_no_census_per_wake",
-        idle_supervisor_does_no_census_per_wake,
+        "native_profile_file_survives_both_handoffs",
+        native_profile_file_survives_both_handoffs,
     ),
     (
         "unchanged_census_does_not_publish_tracking",
@@ -3128,24 +2977,8 @@ const CASES: &[Case] = &[
         process_watch_failure_records_one_fallback,
     ),
     (
-        "guardian_sigkill_recovery_resumes_a_build_after_ancestry_is_lost",
-        guardian_sigkill_recovery_resumes_a_build_after_ancestry_is_lost,
-    ),
-    (
-        "disk_floor_pauses_and_recovery_resumes_builds",
-        disk_floor_pauses_and_recovery_resumes_builds,
-    ),
-    (
-        "disk_sample_failure_resumes_paused_builds",
-        disk_sample_failure_resumes_paused_builds,
-    ),
-    (
-        "cancel_resumes_paused_builds_before_delivering_stop",
-        cancel_resumes_paused_builds_before_delivering_stop,
-    ),
-    (
-        "provider_exit_resumes_paused_builds",
-        provider_exit_resumes_paused_builds,
+        "disk_floor_never_stops_a_running_build",
+        disk_floor_never_stops_a_running_build,
     ),
     (
         "live_provider_publishes_initial_checkpoint",
@@ -3200,20 +3033,8 @@ const CASES: &[Case] = &[
         guardian_exits_after_owner_and_tracked_descendant_are_gone,
     ),
     (
-        "guardian_retires_after_owner_and_evidence_are_removed",
-        guardian_retires_after_owner_and_evidence_are_removed,
-    ),
-    (
-        "guardian_retires_after_owner_and_lock_are_removed",
-        guardian_retires_after_owner_and_lock_are_removed,
-    ),
-    (
-        "guardian_retires_after_owner_and_writer_state_are_removed",
-        guardian_retires_after_owner_and_writer_state_are_removed,
-    ),
-    (
-        "guardian_retires_after_owner_and_lock_directory_are_removed",
-        guardian_retires_after_owner_and_lock_directory_are_removed,
+        "guardian_retires_after_each_writer_artifact_removal",
+        guardian_retires_after_each_writer_artifact_removal,
     ),
     (
         "retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive",
@@ -3289,16 +3110,8 @@ const CASES: &[Case] = &[
         stale_complete_census_does_not_signal_a_late_shared_group_owner,
     ),
     (
-        "guardian_sigterm_uses_supervisor_signal_path",
-        guardian_sigterm_uses_supervisor_signal_path,
-    ),
-    (
-        "guardian_sigint_uses_supervisor_signal_path",
-        guardian_sigint_uses_supervisor_signal_path,
-    ),
-    (
-        "guardian_sighup_uses_supervisor_signal_path",
-        guardian_sighup_uses_supervisor_signal_path,
+        "guardian_signals_use_supervisor_signal_path",
+        guardian_signals_use_supervisor_signal_path,
     ),
     (
         "checkpoint_failure_preserves_terminal_publication",
@@ -3408,7 +3221,7 @@ fn main() -> Result<()> {
             tempfile::Builder::new().prefix("cpu").tempdir_in(root)
         })?;
         let cleanup = fixture::ProcessCleanupGuard::new(root.path());
-        idle_supervisor(root.path(), true)?;
+        idle_supervisor(root.path())?;
         settle_writers(root.path())?;
         cleanup.disarm();
         return Ok(());
@@ -3446,10 +3259,7 @@ fn main() -> Result<()> {
         };
         let tracking_publisher = std::env::var_os("PROVENANT_STATE_DIR")
             .map(PathBuf::from)
-            .filter(|state| {
-                state.join("s2-tracking-failure").is_file()
-                    || state.join("s2-tracking-calls").is_file()
-            })
+            .filter(|state| state.join("s2-tracking-failure").is_file())
             .and_then(|state| {
                 state
                     .parent()

@@ -1,0 +1,178 @@
+# Complete 1.11.1 clap tree source: origin/main ed2d0731f8eab60906482e958a1909b80af4cb50.
+# Cargo package version 1.11.1; every path lists direct subcommands and effective long options.
+# Effective options include flattened args and inherited RawGlobals options. Clap also adds global `--help` and `--version`.
+.	accounts answer ask chair check cloud config console disk edit fabric gc help hook hosts inbox install internal land lane native output pr process-tree quota reconcile retry root route run stats status steer stop telemetry templates tick trace tracker uninstall upgrade workflow worktree	--full --help --json --project --state-dir --version
+accounts	list register set sync	--full --help --json --project --state-dir --version
+answer		--action --all-projects --channel --expect-revision --full --help --host --json --operation-id --option --project --project-key --state-dir --text-file --text-stdin --version
+ask		--file --full --help --json --operation-id --project --session --state-dir --version
+chair	log message summary switch	--full --help --json --project --state-dir --version
+check	config install release writing	--full --help --json --project --state-dir --version
+cloud	collect launch	--full --help --json --project --state-dir --version
+config	apply check history migrate schema set show unset	--full --help --json --project --state-dir --version
+console	board changes detail open overview projects search sessions tree	--full --help --json --project --state-dir --version
+disk	report	--full --help --json --project --state-dir --version
+edit		--file --full --help --json --project --state-dir --version
+fabric	claim events identity mail mcp peer peer-agent	--full --help --json --project --state-dir --version
+gc		--apply --dry-run --free-floor --full --help --idle-days --json --pressure --project --scheduled --state-dir --version
+help		--all --full --help --json --project --state-dir --version
+hook	claude git	--full --help --json --project --state-dir --version
+hosts	doctor	--full --help --json --project --state-dir --version
+inbox	acknowledge close	--all-projects --cursor --full --help --host --hosts --json --limit --project --project-key --session --state --state-dir --version
+install		--adopt-existing --bin-dir --dry-run --full --harness --help --hooks --json --project --source --state-dir --upgrade-preflight --version
+internal	build-slot lane-cleanup launch provider-updates settle supervise tick-gc tick-seed	--full --help --json --project --state-dir --version
+land		--accept-delta --batch --explain --full --head --help --json --poll --project --shadow --state-dir --tier --version --wait
+lane	deliver	--full --help --json --project --state-dir --version
+native	end start	--full --help --json --project --state-dir --version
+output		--full --help --host --json --max-bytes --offset --part --path --project --state-dir --tail --to --trace --version
+pr	contributions open status watch	--full --help --json --project --state-dir --version
+process-tree		--full --help --json --project --root --state-dir --version
+quota	display history show tick usage	--full --help --json --project --state-dir --version
+reconcile		--abandon --full --help --id --json --project --reason --state-dir --version
+retry		--brief --extend --full --help --json --no-fallback --node --operation-id --project --prompt-file --prompt-stdin --state-dir --version --wait
+root		--full --help --json --project --state-dir --version
+route	exclude list override pacing remove reset resolve set	--full --help --json --project --state-dir --version
+run		--account --base --branch --detached --effort --explain --file --full --help --host --json --mode --model --no-sandbox --operation-id --over --project --route --sandbox --set --state-dir --tier --use --version --wait --worktree --write-scope
+stats		--by --full --help --json --project --state-dir --version
+status		--all --by --cursor --follow --full --help --json --limit --project --session-stream --state-dir --stats --target --until --version --wait
+steer		--full --help --json --operation-id --project --state-dir --text-stdin --version
+stop		--full --help --json --operation-id --project --reason --state-dir --version --wait
+telemetry	backfill cost experiments ingest mileage prices stats trace value	--full --help --json --project --state-dir --version
+templates		--file --full --help --json --project --state-dir --version
+tick		--full --help --json --project --state-dir --version
+trace		--full --help --json --project --state-dir --version
+tracker	lint	--full --help --json --project --state-dir --version
+uninstall		--full --harness --help --json --project --state-dir --version
+upgrade		--from-source --full --help --hosts --json --project --state-dir --version --yes
+workflow	receipt review session	--full --help --json --project --state-dir --version
+worktree	create doctor list remove seed-build session-list	--full --help --json --project --state-dir --version
+accounts list		--full --help --json --project --state-dir --version
+accounts register		--adapter --billing-anchor --directory --full --help --json --plan --priority --project --state-dir --version
+accounts set		--display-name --full --headline --help --hidden --json --order --project --state-dir --version
+accounts sync		--adopt --dry-run --force-settings --full --help --json --project --prune-orphans --state-dir --version
+chair log	append list	--full --help --json --project --state-dir --version
+chair message		--channel --full --help --json --operation-id --project --state-dir --text-stdin --version
+chair summary	diff show update	--full --help --json --project --state-dir --version
+chair switch		--dry-run --full --help --json --project --session-id --state-dir --to --version
+check config		--cursor --full --help --json --limit --project --state-dir --version
+check install		--cursor --full --help --json --limit --project --source --state-dir --version
+check release		--base --cursor --full --head --help --json --limit --project --state-dir --version
+check writing		--cursor --full --help --json --limit --project --rules --state-dir --version
+cloud collect		--branch --full --help --json --path --project --state-dir --version
+cloud launch		--base --branch --effort --environment --file --full --help --json --model --project --provider --state-dir --version
+config apply		--dry-run --expect-revision --file --full --help --json --project --state-dir --version
+config check		--cursor --full --help --json --limit --project --state-dir --version
+config history		--full --help --json --limit --project --since --state-dir --version
+config migrate		--dry-run --full --help --json --project --state-dir --version
+config schema		--all --full --help --json --project --state-dir --version
+config set		--full --help --json --project --state-dir --version
+config show		--full --help --json --project --state-dir --version
+config unset		--full --help --json --project --state-dir --version
+console board		--all --cursor --full --help --hosts --json --limit --project --state-dir --version
+console changes		--full --help --json --project --since --state-dir --version
+console detail		--full --help --json --project --state-dir --version
+console open		--full --help --json --project --state-dir --version
+console overview		--full --help --json --project --state-dir --version
+console projects		--full --help --json --project --state-dir --version
+console search		--cursor --full --help --json --limit --part --project --session --state-dir --version
+console sessions		--cursor --full --help --json --limit --project --state-dir --version
+console tree		--detail --full --help --hosts --json --max-depth --max-nodes --project --state-dir --version
+disk report		--full --help --json --project --state-dir --version
+fabric claim	acquire list release renew verify	--full --help --json --project --state-dir --version
+fabric events	note read	--full --help --json --project --state-dir --version
+fabric identity		--full --help --json --project --state-dir --version
+fabric mail	mark-read read send	--full --help --json --project --state-dir --version
+fabric mcp		--client --full --help --json --project --state-dir --version
+fabric peer		--full --help --in-process --json --project --state-dir --version
+fabric peer-agent		--full --help --json --project --state-dir --version
+hook claude	chair-prompt chair-start chair-stop compact pre-compact pre-tool-use session-start stop worktree-create worktree-remove	--full --help --json --project --state-dir --version
+hook git	pre-push	--full --help --json --project --state-dir --version
+hosts doctor		--full --help --json --project --state-dir --version
+inbox acknowledge		--answer --full --help --host --json --operation-id --project --session --state-dir --version
+inbox close		--all-projects --expect-revision --full --help --host --json --operation-id --project --reason --state --state-dir --version
+internal build-slot		--full --help --json --project --state-dir --version
+internal lane-cleanup		--full --help --json --project --state-dir --version
+internal launch		--full --help --json --project --provider-lease-wait --state-dir --version
+internal provider-updates		--full --help --json --project --state-dir --version
+internal settle		--full --help --json --project --state-dir --version
+internal supervise		--full --help --json --project --state-dir --version
+internal tick-gc		--full --help --json --project --state-dir --version
+internal tick-seed		--full --help --json --project --state-dir --version
+lane deliver		--accept-review --deliver --full --help --json --project --state-dir --version
+native end		--agent --full --help --id --json --project --session --settlement --state-dir --version
+native start		--alias --effort --full --help --id --json --model --project --session --state-dir --version
+pr contributions		--bind --full --help --json --project --state-dir --version
+pr open		--base --branch --draft --dry-run --from-attempt --full --help --issue --json --project --review --state-dir --summary-file --version
+pr status		--full --help --json --project --state-dir --version --wait
+pr watch		--full --help --json --project --state-dir --version
+quota display		--full --headline --help --icon --json --project --state-dir --version
+quota history		--account --full --help --json --limit --project --since --state-dir --until --version
+quota show		--adapter --full --help --json --project --state-dir --version
+quota tick		--adapter --full --help --json --power --project --state-dir --trigger --version
+quota usage		--adapter --days --full --help --json --project --state-dir --version
+route exclude	add list remove	--full --help --json --project --state-dir --version
+route list		--adapter --full --help --json --pool --project --state-dir --valid --version
+route override	clear list set	--full --help --json --project --state-dir --version
+route pacing		--full --help --json --project --state-dir --version
+route remove		--full --help --json --project --state-dir --version
+route reset		--full --help --json --project --state-dir --version
+route resolve		--account --confidential --effort --exclude --fallback --full --help --json --model --project --read-heavy --route --state-dir --version --writes
+route set		--effort --efforts --full --help --json --project --state-dir --version --weight
+telemetry backfill		--full --help --json --project --state-dir --version
+telemetry cost		--by --full --help --json --project --since --state-dir --version
+telemetry experiments	show	--full --help --json --project --state-dir --version
+telemetry ingest		--full --help --json --project --provider --since --state-dir --version
+telemetry mileage		--account --fall-percent --full --help --json --min-runs --model --project --recent-days --since --state-dir --version --window
+telemetry prices	refresh	--full --help --json --project --state-dir --version
+telemetry stats		--by --ci-file --detail --expiry-days --full --help --json --main-ref --min-samples --outcome-days --outcomes --project --run-id --since --state-dir --suggest --until --usage --version
+telemetry trace		--full --help --json --out --peers --project --run --since --state-dir --version
+telemetry value		--account --full --help --json --project --since --state-dir --version --window
+tracker lint		--file --full --help --json --kind --project --state-dir --version
+workflow receipt	save show	--full --help --json --project --state-dir --version
+workflow review		--full --help --json --project --request --state-dir --version
+workflow session	diff handoff save show	--full --help --json --project --state-dir --version
+worktree create		--base --full --help --json --project --state-dir --version
+worktree doctor		--full --help --json --project --state-dir --version
+worktree list		--full --help --json --project --state-dir --version
+worktree remove		--branch --discard --full --help --integration --json --merged --project --since --state-dir --version
+worktree seed-build		--full --help --json --project --state-dir --version
+worktree session-list		--full --help --json --project --state-dir --version
+chair log append		--file --full --help --issued-at --json --operation-id --project --session --state-dir --version
+chair log list		--after --full --help --json --limit --project --session --state-dir --version
+chair summary diff		--from --full --help --json --project --state-dir --to --version
+chair summary show		--full --help --json --project --state-dir --version
+chair summary update		--expect-revision --file --full --help --json --operation-id --project --state-dir --version
+fabric claim acquire		--full --help --issue --json --lease-seconds --operation-id --path --project --state-dir --version --worktree
+fabric claim list		--after --full --help --json --limit --project --state-dir --version
+fabric claim release		--full --generation --help --json --operation-id --project --state-dir --token --version
+fabric claim renew		--full --generation --help --json --lease-seconds --operation-id --project --state-dir --token --version
+fabric claim verify		--full --generation --help --json --project --state-dir --token --version
+fabric events note		--full --help --json --note --operation-id --project --state-dir --version
+fabric events read		--after --full --help --json --limit --project --state-dir --version --wait
+fabric mail mark-read		--full --help --json --operation-id --project --session --state-dir --version
+fabric mail read		--after --full --help --json --limit --project --session --state-dir --version
+fabric mail send		--body --full --help --json --kind --operation-id --project --reply-to --state-dir --to --version
+hook claude chair-prompt		--full --help --json --project --state-dir --version
+hook claude chair-start		--full --help --json --project --state-dir --version
+hook claude chair-stop		--full --help --json --project --state-dir --version
+hook claude compact		--full --help --json --project --state-dir --version
+hook claude pre-compact		--full --help --json --project --state-dir --version
+hook claude pre-tool-use		--full --help --json --project --state-dir --version
+hook claude session-start		--full --help --json --project --state-dir --version
+hook claude stop		--full --help --json --project --state-dir --version
+hook claude worktree-create		--full --help --json --project --state-dir --version
+hook claude worktree-remove		--full --help --json --project --state-dir --version
+hook git pre-push		--full --help --json --project --state-dir --version
+route exclude add		--full --help --json --project --state-dir --until --version
+route exclude list		--full --help --json --project --state-dir --version
+route exclude remove		--full --help --json --project --state-dir --version
+route override clear		--account --full --help --json --project --provider --risk-tier --state-dir --task-kind --version
+route override list		--all --full --help --json --project --state-dir --version
+route override set		--account --all --full --help --json --model --policy --project --provider --risk-tier --starts --state-dir --task-kind --tz --until --version --window
+telemetry experiments show		--ci-file --expiry-days --full --help --json --main-ref --min-samples --outcome-days --project --state-dir --version
+telemetry prices refresh		--full --help --json --litellm-file --openrouter-file --out --project --source --state-dir --version
+workflow receipt save		--expected-revision --full --help --json --project --request --state-dir --version
+workflow receipt show		--full --help --json --project --state-dir --version
+workflow session diff		--full --help --json --project --state-dir --version
+workflow session handoff		--account --allow-dirty --attach --client --dry-run --full --help --json --model --no-checkpoint --no-launch --note --project --prompt-file --provider --session-id --state-dir --to --version --wip
+workflow session save		--client --file --full --help --json --project --rebind --state-dir --version
+workflow session show		--full --help --json --project --rev --revisions --state-dir --version

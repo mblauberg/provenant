@@ -5,6 +5,7 @@ use provenant_os::{
     clock::SystemClock,
     fs::{Directory, FileHandle, FileKind, PublishMode},
 };
+use provenant_records::{ExtraFields, Limits, decode};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -12,12 +13,26 @@ use std::{
     path::Path,
 };
 
-pub const ENV: &str = "PROVENANT_PROCESS_TREE";
+pub const SAMPLE_SCHEMA_VERSION: u32 = 2;
+/// The `Sample` fields `provenant process-tree --json` returns as `data`, and
+/// the fields of each entry in `processes`. The outward contract renders these
+/// lists; a test keeps them equal to the serialised shape.
+pub const SAMPLE_FIELDS: &[&str] = &[
+    "schema_version",
+    "root_pid",
+    "sampled_at",
+    "swap_used_bytes",
+    "swap_total_bytes",
+    "processes",
+];
+pub const PROCESS_FIELDS: &[&str] = &["pid", "ppid", "pgid", "rss_bytes"];
 pub const FILE: &str = "process-tree.json";
 pub const MAX_PROCESSES: usize = 4096;
 const MAX_BYTES: u64 = 1024 * 1024;
-const MAX_AGE_MICROS: u64 = 5_000_000;
 const MAX_SAMPLE_MICROS: u64 = 250_000;
+pub const DEFAULT_SAMPLE_INTERVAL_MS: u64 = 5_000;
+pub const DEFAULT_SAMPLE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(DEFAULT_SAMPLE_INTERVAL_MS);
 
 #[derive(Debug, thiserror::Error)]
 #[error("lane process-tree sample unavailable; retry while the supervisor is running")]
@@ -96,8 +111,9 @@ fn observe_refresh<T>(mut observe: impl FnMut() -> ObservationResult<T>) -> Opti
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProcessMemory {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub pid: u32,
     pub ppid: u32,
     pub pgid: u32,
@@ -105,8 +121,9 @@ pub struct ProcessMemory {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Sample {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub schema_version: u32,
     pub root_pid: u32,
     pub sampled_at: WallTime,
@@ -123,12 +140,14 @@ pub(crate) struct SwapUsage {
 /// Private on-disk envelope. Native identities and the boot clock fence stale
 /// files and PID reuse; the CLI exposes only `Sample`.
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Snapshot {
+    #[serde(flatten)]
+    extra: ExtraFields,
     sample: Sample,
     starts: BTreeMap<u32, u64>,
     boot: String,
     monotonic_micros: u64,
+    freshness_micros: u64,
 }
 
 #[derive(Clone)]
@@ -148,6 +167,7 @@ impl Sampler {
         root: &ProcessIdentity,
         attempt: AttemptId,
         sandboxed: bool,
+        interval: std::time::Duration,
     ) -> Option<Self> {
         let directory = directory.try_clone().ok()?;
         let root = root.clone();
@@ -158,14 +178,14 @@ impl Sampler {
                 loop {
                     // Reconcile transient fork/exit churn without overlapping
                     // walks. Retain the last good observation until it expires.
-                    let snapshot = observe_refresh(|| observe(&root, attempt, sandboxed));
+                    let snapshot = observe_refresh(|| observe(&root, attempt, sandboxed, interval));
                     if receiver.try_recv() != Err(std::sync::mpsc::TryRecvError::Empty) {
                         break;
                     }
                     if let Some(snapshot) = &snapshot {
                         let _ = publish(&directory, Some(snapshot));
                     }
-                    if receiver.recv_timeout(std::time::Duration::from_secs(1))
+                    if receiver.recv_timeout(interval)
                         != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
                     {
                         break;
@@ -186,13 +206,14 @@ impl Drop for Sampler {
 /// Sample only descendants of the supervisor-held provider identity. A child
 /// listing, identity or RSS failure invalidates the whole observation.
 pub fn sample(root: &ProcessIdentity, attempt: AttemptId) -> Result<Snapshot> {
-    observe(root, attempt, true).map_err(|_| Unavailable)
+    observe(root, attempt, true, DEFAULT_SAMPLE_INTERVAL).map_err(|_| Unavailable)
 }
 
 fn observe(
     root: &ProcessIdentity,
     attempt: AttemptId,
     sandboxed: bool,
+    interval: std::time::Duration,
 ) -> ObservationResult<Snapshot> {
     let clock = SystemClock::new();
     let monotonic_micros = clock
@@ -214,8 +235,10 @@ fn observe(
         .map_err(|_| ObservationError::Unavailable)?;
     let pid = u32::try_from(root.pid).map_err(|_| ObservationError::Unavailable)?;
     let snapshot = Snapshot {
+        extra: ExtraFields::default(),
         sample: Sample {
-            schema_version: 2,
+            extra: ExtraFields::default(),
+            schema_version: SAMPLE_SCHEMA_VERSION,
             root_pid: pid,
             sampled_at,
             swap_used_bytes: None,
@@ -225,6 +248,7 @@ fn observe(
         starts: BTreeMap::new(),
         boot,
         monotonic_micros,
+        freshness_micros: freshness_micros(interval),
     };
     let now = || {
         clock
@@ -355,7 +379,14 @@ pub fn read(path: &Path, root_pid: u32) -> Result<Sample> {
         return Err(Unavailable);
     }
     let bytes = file.read_bounded(MAX_BYTES).map_err(|_| Unavailable)?;
-    let snapshot: Snapshot = serde_json::from_slice(&bytes).map_err(|_| Unavailable)?;
+    let snapshot: Snapshot = decode(
+        bytes.as_slice(),
+        Limits {
+            max_bytes: MAX_BYTES,
+            ..Limits::CONFIG
+        },
+    )
+    .map_err(|_| Unavailable)?;
     let clock = SystemClock::new();
     let now = clock.host_monotonic_micros().map_err(|_| Unavailable)?;
     let boot = clock.boot_identity().map_err(|_| Unavailable)?;
@@ -367,6 +398,15 @@ pub fn read(path: &Path, root_pid: u32) -> Result<Sample> {
         }
         Ok(process.start)
     })
+}
+
+fn freshness_micros(interval: std::time::Duration) -> u64 {
+    u64::try_from(
+        interval
+            .as_micros()
+            .saturating_add(u128::from(MAX_SAMPLE_MICROS)),
+    )
+    .unwrap_or(u64::MAX)
 }
 
 fn select(
@@ -381,10 +421,10 @@ fn select(
     let age = now
         .checked_sub(snapshot.monotonic_micros)
         .ok_or(Unavailable)?;
-    if age > MAX_AGE_MICROS
+    if age > snapshot.freshness_micros
         || sample.sampled_at > wall
         || snapshot.boot != boot
-        || sample.schema_version != 2
+        || sample.schema_version != SAMPLE_SCHEMA_VERSION
         || sample.processes.is_empty()
         || sample.processes.len() > MAX_PROCESSES
         || sample.processes.len() != snapshot.starts.len()
@@ -435,6 +475,99 @@ mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
 
+    #[test]
+    fn declared_sample_fields_are_the_serialised_sample() {
+        let sample = Sample {
+            extra: ExtraFields::default(),
+            schema_version: SAMPLE_SCHEMA_VERSION,
+            root_pid: 1,
+            sampled_at: WallTime::from_micros(0).unwrap(),
+            swap_used_bytes: None,
+            swap_total_bytes: None,
+            processes: vec![ProcessMemory {
+                extra: ExtraFields::default(),
+                pid: 1,
+                ppid: 0,
+                pgid: 1,
+                rss_bytes: 0,
+            }],
+        };
+        let value = serde_json::to_value(&sample).unwrap();
+        let keys = |value: &serde_json::Value| -> BTreeSet<String> {
+            value.as_object().unwrap().keys().cloned().collect()
+        };
+        let declared =
+            |fields: &[&str]| -> BTreeSet<String> { fields.iter().map(|f| (*f).into()).collect() };
+        assert_eq!(keys(&value), declared(SAMPLE_FIELDS));
+        assert_eq!(keys(&value["processes"][0]), declared(PROCESS_FIELDS));
+    }
+
+    #[test]
+    fn stored_process_tree_shapes_preserve_unknown_fields_through_bounded_decode() {
+        fn add_forward_field(value: &mut serde_json::Value, marker: &str) {
+            value.as_object_mut().unwrap().insert(
+                format!("future_field_{marker}"),
+                serde_json::Value::String(marker.to_owned()),
+            );
+        }
+        fn contains_value(value: &serde_json::Value, expected: &serde_json::Value) -> bool {
+            value == expected
+                || value.as_array().is_some_and(|values| {
+                    values.iter().any(|value| contains_value(value, expected))
+                })
+                || value.as_object().is_some_and(|fields| {
+                    fields.values().any(|value| contains_value(value, expected))
+                })
+        }
+        fn contains_marker(extra: &ExtraFields, marker: &str) -> bool {
+            extra.values().any(|value| value.as_str() == Some(marker))
+        }
+
+        let mut payload = serde_json::to_value(snapshot()).unwrap();
+        add_forward_field(&mut payload, "snapshot");
+        let sample = payload.as_object_mut().unwrap().get_mut("sample").unwrap();
+        add_forward_field(sample, "sample");
+        let first_process = sample
+            .as_object_mut()
+            .unwrap()
+            .get_mut("processes")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .first_mut()
+            .unwrap();
+        add_forward_field(first_process, "process");
+
+        let limits = Limits {
+            max_bytes: MAX_BYTES,
+            ..Limits::CONFIG
+        };
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let decoded: Snapshot = decode(bytes.as_slice(), limits).unwrap();
+        assert!(contains_marker(&decoded.extra, "snapshot"));
+        assert!(contains_marker(&decoded.sample.extra, "sample"));
+        assert!(contains_marker(
+            &decoded.sample.processes[0].extra,
+            "process"
+        ));
+
+        let encoded = serde_json::to_value(decoded).unwrap();
+        for marker in ["snapshot", "sample", "process"] {
+            assert!(contains_value(
+                &encoded,
+                &serde_json::Value::String(marker.to_owned())
+            ));
+        }
+        let reencoded = serde_json::to_vec(&encoded).unwrap();
+        let round_trip: Snapshot = decode(reencoded.as_slice(), limits).unwrap();
+        assert!(contains_marker(&round_trip.extra, "snapshot"));
+        assert!(contains_marker(&round_trip.sample.extra, "sample"));
+        assert!(contains_marker(
+            &round_trip.sample.processes[0].extra,
+            "process"
+        ));
+    }
+
     struct FixtureSource {
         swap: Option<(u64, u64)>,
         now: Cell<u64>,
@@ -461,6 +594,7 @@ mod tests {
             }
             Ok(NativeProcess {
                 memory: ProcessMemory {
+                    extra: ExtraFields::default(),
                     pid,
                     ppid: if pid == 10 { 1 } else { 10 },
                     pgid: 10,
@@ -598,8 +732,10 @@ mod tests {
 
     fn snapshot() -> Snapshot {
         Snapshot {
+            extra: ExtraFields::default(),
             sample: Sample {
-                schema_version: 2,
+                extra: ExtraFields::default(),
+                schema_version: SAMPLE_SCHEMA_VERSION,
                 root_pid: 10,
                 sampled_at: WallTime::from_micros(1_000_000).unwrap(),
                 swap_used_bytes: Some(1024),
@@ -607,6 +743,7 @@ mod tests {
                 processes: [(10, 1), (11, 10), (12, 11), (13, 10)]
                     .into_iter()
                     .map(|(pid, ppid)| ProcessMemory {
+                        extra: ExtraFields::default(),
                         pid,
                         ppid,
                         pgid: 10,
@@ -619,6 +756,7 @@ mod tests {
                 .collect(),
             boot: "boot".into(),
             monotonic_micros: 1_000_000,
+            freshness_micros: freshness_micros(DEFAULT_SAMPLE_INTERVAL),
         }
     }
 
@@ -693,9 +831,30 @@ mod tests {
     }
 
     #[test]
+    fn process_tree_freshness_follows_the_declared_sampling_interval() {
+        let mut sampled = snapshot();
+        sampled.freshness_micros = freshness_micros(std::time::Duration::from_secs(20));
+        let selected = select(
+            sampled,
+            10,
+            21_000_000,
+            "boot",
+            WallTime::from_micros(21_000_000).unwrap(),
+            |_| Ok(100),
+        )
+        .unwrap();
+        assert_eq!(selected.root_pid, 10);
+    }
+
+    #[test]
     fn process_tree_refuses_stale_reused_foreign_and_incomplete_samples() {
         let wall = WallTime::from_micros(2_000_000).unwrap();
-        assert!(select(snapshot(), 10, 6_000_001, "boot", wall, |_| Ok(100)).is_err());
+        let stale = snapshot();
+        let stale_after = stale
+            .monotonic_micros
+            .saturating_add(stale.freshness_micros)
+            .saturating_add(1);
+        assert!(select(stale, 10, stale_after, "boot", wall, |_| Ok(100)).is_err());
         assert!(select(snapshot(), 10, 999_999, "boot", wall, |_| Ok(100)).is_err());
         assert!(select(snapshot(), 10, 2_000_000, "other-boot", wall, |_| Ok(100)).is_err());
         assert!(select(snapshot(), 10, 2_000_000, "boot", wall, |_| Ok(101)).is_err());

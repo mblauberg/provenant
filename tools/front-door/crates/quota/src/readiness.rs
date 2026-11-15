@@ -1,10 +1,13 @@
 //! Typed readiness observations and their freshness boundary.
 use crate::QuotaError;
+use provenant_records::ExtraFields;
 use serde::{Deserialize, Serialize};
 
 /// Identity of the route whose readiness was observed.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadinessScope {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub host: String,
     pub adapter: String,
     pub account_key: String,
@@ -12,37 +15,67 @@ pub struct ReadinessScope {
     pub route: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReadinessState {
-    Ready,
-    Unavailable,
-    Unknown,
+impl ReadinessScope {
+    fn same_scope(&self, other: &Self) -> bool {
+        self.host == other.host
+            && self.adapter == other.adapter
+            && self.account_key == other.account_key
+            && self.route == other.route
+    }
+
+    fn updated_from(&self, current: &Self) -> Self {
+        let mut updated = current.clone();
+        for (key, value) in &self.extra {
+            updated
+                .extra
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        updated
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReadinessReason {
-    NotProbed,
-    Stale,
-    ProbeTimeout,
-    CommandFailure,
-    MissingExecutable,
-    SignedOut,
-    LoginExpired,
-    AccountMismatch,
-    Exhausted,
-    ProviderRefusal,
-    UncalibratedPartialCoverage,
-    InvalidEvidence,
-    UnreachablePeer,
-    UnsupportedPeerVersion,
+macro_rules! declare_readiness_enum {
+    ($name:ident { $($variant:ident),+ $(,)? }) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name { $($variant),+ }
+
+        impl $name {
+            /// Every declared variant, for exhaustive stored-format tables.
+            pub const ALL: &[Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+
+declare_readiness_enum! {
+    ReadinessState { Ready, Unavailable, Unknown }
+}
+
+declare_readiness_enum! {
+    ReadinessReason {
+        NotProbed,
+        Stale,
+        ProbeTimeout,
+        CommandFailure,
+        MissingExecutable,
+        SignedOut,
+        LoginExpired,
+        AccountMismatch,
+        Exhausted,
+        ProviderRefusal,
+        UncalibratedPartialCoverage,
+        InvalidEvidence,
+        UnreachablePeer,
+        UnsupportedPeerVersion,
+    }
 }
 
 /// An observation is valid only for its exact scope and before its expiry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RouteReadiness {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub schema_version: u32,
     pub scope: ReadinessScope,
     pub state: ReadinessState,
@@ -67,8 +100,9 @@ const QUOTA_PROBE: &str = "quota-probe";
 /// Non-secret expiry metadata observed for this account's login. It is not
 /// quota evidence and never creates or clears a provider refusal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LoginObservation {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub scope: ReadinessScope,
     pub observed_unix_seconds: i64,
     pub valid_until_unix_seconds: i64,
@@ -151,6 +185,7 @@ impl ReadinessRead {
         match (self.state, self.reason) {
             (ReadinessState::Ready, _) => match (&self.evidence_ref, self.expires_unix_seconds) {
                 (Some(availability_ref), Some(expires_unix_seconds)) => Receipt::Ready {
+                    availability_warning: None,
                     extra: Default::default(),
                     availability_ref: availability_ref.clone(),
                     expires_unix_seconds,
@@ -158,6 +193,7 @@ impl ReadinessRead {
                 _ => Receipt::unknown(),
             },
             (ReadinessState::Unavailable, reason) => Receipt::Unavailable {
+                skipped_accounts: Vec::new(),
                 extra: Default::default(),
                 reason: match reason {
                     Some(ReadinessReason::MissingExecutable) => Excluded::MissingExecutable,
@@ -179,8 +215,9 @@ impl ReadinessRead {
 /// Every observation for one account and adapter, stored at
 /// `<state>/readiness/<account-key>/<adapter>.json`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ReadinessFile {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub schema_version: u32,
     pub records: Vec<RouteReadiness>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,6 +227,7 @@ pub struct ReadinessFile {
 impl Default for ReadinessFile {
     fn default() -> Self {
         Self {
+            extra: Default::default(),
             schema_version: SCHEMA_VERSION,
             records: Vec::new(),
             login: None,
@@ -200,8 +238,8 @@ impl Default for ReadinessFile {
 impl ReadinessFile {
     /// Decode a stored file whose path names `adapter` and `account_key`.
     pub fn decode(bytes: &[u8], adapter: &str, account_key: &str) -> Result<Self, QuotaError> {
-        let file: Self =
-            serde_json::from_slice(bytes).map_err(|_| QuotaError::Invalid("readiness record"))?;
+        let file: Self = provenant_records::decode(bytes, provenant_records::Limits::CONFIG)
+            .map_err(|_| QuotaError::Invalid("readiness record"))?;
         file.validate(adapter, account_key)?;
         Ok(file)
     }
@@ -225,7 +263,12 @@ impl ReadinessFile {
                     || r.scope.route.is_empty()
                     || r.scope.route.len() > 512
                     || r.scope.route.chars().any(char::is_control)
-                    || !seen.insert(&r.scope)
+                    || !seen.insert((
+                        r.scope.host.as_str(),
+                        r.scope.adapter.as_str(),
+                        r.scope.account_key.as_str(),
+                        r.scope.route.as_str(),
+                    ))
             })
         {
             return Err(QuotaError::Invalid("readiness bounds"));
@@ -237,7 +280,7 @@ impl ReadinessFile {
     /// covers every route of that account; any other gap reads as unknown.
     pub fn get(&self, scope: &ReadinessScope, now: i64) -> ReadinessRead {
         let read = |scope: &ReadinessScope| {
-            let Some(r) = self.records.iter().find(|r| r.scope == *scope) else {
+            let Some(r) = self.records.iter().find(|r| r.scope.same_scope(scope)) else {
                 return ReadinessRead::absent();
             };
             if self.schema_version != SCHEMA_VERSION
@@ -280,6 +323,7 @@ impl ReadinessFile {
         };
         if scope.route != ACCOUNT_ROUTE {
             let account = read(&ReadinessScope {
+                extra: Default::default(),
                 route: ACCOUNT_ROUTE.into(),
                 ..scope.clone()
             });
@@ -301,22 +345,6 @@ impl ReadinessFile {
         if scoped.state == ReadinessState::Unavailable {
             return scoped;
         }
-        if let Some(login) = &self.login
-            && login.scope.host == scope.host
-            && login.scope.adapter == scope.adapter
-            && login.scope.account_key == scope.account_key
-            && login.state(now, 0) == LoginExpiryState::Expired
-        {
-            return ReadinessRead {
-                observed_scope: Some(login.scope.clone()),
-                state: ReadinessState::Unavailable,
-                reason: Some(ReadinessReason::LoginExpired),
-                observed_unix_seconds: Some(login.observed_unix_seconds),
-                expires_unix_seconds: Some(login.valid_until_unix_seconds),
-                reset_unix_seconds: None,
-                evidence_ref: Some("login-expiry".into()),
-            };
-        }
         scoped
     }
 
@@ -331,6 +359,7 @@ impl ReadinessFile {
         host: &str,
         admission: &crate::Admission<'_>,
     ) -> Result<(), QuotaError> {
+        let previous = self.records.clone();
         let now = admission.now_unix_seconds;
         self.records.retain(|r| {
             r.expires_unix_seconds > now
@@ -339,6 +368,7 @@ impl ReadinessFile {
                     && r.reason == Some(ReadinessReason::ProviderRefusal))
         });
         let scope = ReadinessScope {
+            extra: Default::default(),
             host: host.into(),
             adapter: account.account.adapter.clone(),
             account_key: account.account.account_key.clone(),
@@ -359,6 +389,7 @@ impl ReadinessFile {
             }
             let expires = refusal.expires_unix_seconds()?;
             let scope = ReadinessScope {
+                extra: Default::default(),
                 host: host.into(),
                 adapter: account.account.adapter.clone(),
                 account_key: account.account.account_key.clone(),
@@ -367,7 +398,7 @@ impl ReadinessFile {
                     .clone()
                     .unwrap_or_else(|| format!("{}/{}", account.account.adapter, refusal.model)),
             };
-            if let Some(held) = published.iter_mut().find(|r| r.scope == scope) {
+            if let Some(held) = published.iter_mut().find(|r| r.scope.same_scope(&scope)) {
                 held.observed_unix_seconds = held
                     .observed_unix_seconds
                     .max(refusal.observed_unix_seconds);
@@ -375,9 +406,14 @@ impl ReadinessFile {
                 held.reset_unix_seconds = held.reset_unix_seconds.max(refusal.resets_unix_seconds);
                 continue;
             }
+            let old = previous
+                .iter()
+                .find(|record| record.scope.same_scope(&scope));
             published.push(RouteReadiness {
+                extra: old.map_or_else(Default::default, |record| record.extra.clone()),
                 schema_version: SCHEMA_VERSION,
-                scope,
+                scope: old
+                    .map_or_else(|| scope.clone(), |record| record.scope.updated_from(&scope)),
                 state: ReadinessState::Unavailable,
                 reason: Some(ReadinessReason::ProviderRefusal),
                 observed_unix_seconds: refusal.observed_unix_seconds,
@@ -387,7 +423,7 @@ impl ReadinessFile {
             });
         }
         self.records
-            .retain(|r| !published.iter().any(|new| new.scope == r.scope));
+            .retain(|r| !published.iter().any(|new| new.scope.same_scope(&r.scope)));
         self.records.extend(published);
         self.check_bound()
     }
@@ -402,6 +438,18 @@ impl ReadinessFile {
         interval_seconds: u64,
         reason: Option<ReadinessReason>,
     ) -> Result<(), QuotaError> {
+        let account_scope = ReadinessScope {
+            extra: Default::default(),
+            host: host.into(),
+            adapter: account.account.adapter.clone(),
+            account_key: account.account.account_key.clone(),
+            route: ACCOUNT_ROUTE.into(),
+        };
+        let previous = self
+            .records
+            .iter()
+            .find(|record| record.scope.same_scope(&account_scope))
+            .cloned();
         self.records.retain(|record| {
             record.expires_unix_seconds > now
                 && !(record.scope.host == host
@@ -415,13 +463,14 @@ impl ReadinessFile {
             let interval = i64::try_from(interval_seconds).unwrap_or(i64::MAX);
             let expires = now.saturating_add(interval.max(1));
             self.records.push(RouteReadiness {
+                extra: previous
+                    .as_ref()
+                    .map_or_else(Default::default, |record| record.extra.clone()),
                 schema_version: SCHEMA_VERSION,
-                scope: ReadinessScope {
-                    host: host.into(),
-                    adapter: account.account.adapter.clone(),
-                    account_key: account.account.account_key.clone(),
-                    route: ACCOUNT_ROUTE.into(),
-                },
+                scope: previous.as_ref().map_or_else(
+                    || account_scope.clone(),
+                    |record| record.scope.updated_from(&account_scope),
+                ),
                 state: ReadinessState::Unavailable,
                 reason: Some(reason),
                 observed_unix_seconds: now,
@@ -447,7 +496,9 @@ mod tests {
     #[test]
     fn login_expiry_uses_fixed_clock_threshold_and_freshness() {
         let mut login = LoginObservation {
+            extra: Default::default(),
             scope: ReadinessScope {
+                extra: Default::default(),
                 host: LOCAL_HOST.into(),
                 adapter: "claude".into(),
                 account_key: "key".into(),
@@ -472,10 +523,13 @@ mod tests {
     }
 
     #[test]
-    fn fresh_expiry_excludes_only_after_expiration_and_expires_with_evidence() {
+    fn login_expiry_metadata_never_synthesises_a_routing_veto() {
         let file = ReadinessFile {
+            extra: Default::default(),
             login: Some(LoginObservation {
+                extra: Default::default(),
                 scope: ReadinessScope {
+                    extra: Default::default(),
                     host: LOCAL_HOST.into(),
                     adapter: "claude".into(),
                     account_key: "key".into(),
@@ -488,6 +542,7 @@ mod tests {
             ..Default::default()
         };
         let route = ReadinessScope {
+            extra: Default::default(),
             host: LOCAL_HOST.into(),
             adapter: "claude".into(),
             account_key: "key".into(),
@@ -498,20 +553,15 @@ mod tests {
             Some(ReadinessReason::NotProbed)
         );
         let expired = file.get(&route, 200);
-        assert_eq!(expired.state, ReadinessState::Unavailable);
-        assert_eq!(expired.reason, Some(ReadinessReason::LoginExpired));
-        assert!(matches!(
-            expired.project(),
-            provenant_records::RouteReadiness::Unavailable {
-                reason: provenant_records::RouteExclusionReason::LoginExpired,
-                ..
-            }
-        ));
+        assert_eq!(expired.state, ReadinessState::Unknown);
+        assert_eq!(expired.reason, Some(ReadinessReason::NotProbed));
+        assert!(expired.project().is_unknown());
         assert_eq!(
             file.get(&route, 300).reason,
             Some(ReadinessReason::NotProbed)
         );
         let other = ReadinessScope {
+            extra: Default::default(),
             account_key: "other".into(),
             ..route.clone()
         };
@@ -520,6 +570,7 @@ mod tests {
             Some(ReadinessReason::NotProbed)
         );
         let remote = ReadinessScope {
+            extra: Default::default(),
             host: "other-host".into(),
             ..route
         };
@@ -532,6 +583,7 @@ mod tests {
     #[test]
     fn login_failure_expires_at_the_probe_interval() {
         let account_scope = crate::AccountScope {
+            extra: Default::default(),
             adapter: "claude".into(),
             account_key: "key".into(),
             label: "work".into(),
@@ -548,6 +600,7 @@ mod tests {
         )
         .unwrap();
         let scope = ReadinessScope {
+            extra: Default::default(),
             host: LOCAL_HOST.into(),
             adapter: "claude".into(),
             account_key: "key".into(),
@@ -558,6 +611,7 @@ mod tests {
             Some(ReadinessReason::LoginExpired)
         );
         let account_scope = ReadinessScope {
+            extra: Default::default(),
             route: ACCOUNT_ROUTE.into(),
             ..scope.clone()
         };
@@ -575,12 +629,14 @@ mod tests {
     #[test]
     fn readiness_round_trip_and_boundaries() {
         let scope = ReadinessScope {
+            extra: Default::default(),
             host: "host".into(),
             adapter: "agy".into(),
             account_key: "account".into(),
             route: "model".into(),
         };
         let record = RouteReadiness {
+            extra: Default::default(),
             schema_version: 1,
             scope: scope.clone(),
             state: ReadinessState::Unavailable,
@@ -594,6 +650,7 @@ mod tests {
             serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
         assert_eq!(record, decoded);
         let mut file = ReadinessFile {
+            extra: Default::default(),
             records: vec![decoded],
             ..Default::default()
         };
@@ -651,13 +708,16 @@ mod tests {
     #[test]
     fn readiness_ready_evidence_requires_fresh_matching_scope() {
         let scope = ReadinessScope {
+            extra: Default::default(),
             host: "host".into(),
             adapter: "fixture".into(),
             account_key: "account".into(),
             route: "model".into(),
         };
         let file = ReadinessFile {
+            extra: Default::default(),
             records: vec![RouteReadiness {
+                extra: Default::default(),
                 schema_version: 1,
                 scope: scope.clone(),
                 state: ReadinessState::Ready,
@@ -682,18 +742,22 @@ mod tests {
         assert!(model_read.observed_scope.is_none());
         for other in [
             ReadinessScope {
+                extra: Default::default(),
                 host: "other".into(),
                 ..scope.clone()
             },
             ReadinessScope {
+                extra: Default::default(),
                 adapter: "other".into(),
                 ..scope.clone()
             },
             ReadinessScope {
+                extra: Default::default(),
                 account_key: "other".into(),
                 ..scope.clone()
             },
             ReadinessScope {
+                extra: Default::default(),
                 route: "other".into(),
                 ..scope.clone()
             },
@@ -703,32 +767,92 @@ mod tests {
     }
 
     #[test]
+    fn readiness_stored_shapes_round_trip_future_fields() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let scope = ReadinessScope {
+            extra: Default::default(),
+            host: "host".into(),
+            adapter: "fixture".into(),
+            account_key: "account".into(),
+            route: "model".into(),
+        };
+        let mut file = ReadinessFile::default();
+        file.records.push(RouteReadiness {
+            extra: Default::default(),
+            schema_version: SCHEMA_VERSION,
+            scope: scope.clone(),
+            state: ReadinessState::Ready,
+            reason: None,
+            observed_unix_seconds: 10,
+            expires_unix_seconds: 20,
+            reset_unix_seconds: None,
+            evidence_ref: Some("probe:1".into()),
+        });
+        file.login = Some(LoginObservation {
+            extra: Default::default(),
+            scope: ReadinessScope {
+                route: ACCOUNT_ROUTE.into(),
+                ..scope
+            },
+            observed_unix_seconds: 10,
+            valid_until_unix_seconds: 20,
+            expires_unix_seconds: Some(30),
+        });
+        let mut value = serde_json::to_value(&file)?;
+        value["file"] = serde_json::json!({"future": true});
+        value["records"][0]["record"] = serde_json::json!({"future": true});
+        value["records"][0]["scope"]["scope"] = serde_json::json!({"future": true});
+        value["login"]["login"] = serde_json::json!({"future": true});
+        value["login"]["scope"]["scope"] = serde_json::json!({"future": true});
+        let bytes = serde_json::to_vec(&value)?;
+        let decoded = ReadinessFile::decode(&bytes, "fixture", "account")?;
+        let encoded = provenant_records::encode(&decoded)?;
+        let round_trip: ReadinessFile =
+            provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG)?;
+        assert_eq!(serde_json::to_value(&round_trip)?, value);
+        for &state in ReadinessState::ALL {
+            let encoded = provenant_records::encode(&state)?;
+            let decoded: ReadinessState =
+                provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG)?;
+            assert_eq!(decoded, state);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn receipt_projection_covers_every_reason_and_ready() {
-        use ReadinessReason::*;
         use provenant_records::{RouteExclusionReason as E, RouteReadiness as R};
-        for (reason, expected) in [
-            (NotProbed, E::UnknownAvailability),
-            (Stale, E::UnknownAvailability),
-            (ProbeTimeout, E::UnknownAvailability),
-            (CommandFailure, E::UnknownAvailability),
-            (MissingExecutable, E::MissingExecutable),
-            (SignedOut, E::AuthRequired),
-            (LoginExpired, E::LoginExpired),
-            (AccountMismatch, E::AccountMismatch),
-            (Exhausted, E::ProviderRefused),
-            (ProviderRefusal, E::ProviderRefused),
-            (UncalibratedPartialCoverage, E::UnknownAvailability),
-            (InvalidEvidence, E::UnknownAvailability),
-            (UnreachablePeer, E::UnknownAvailability),
-            (UnsupportedPeerVersion, E::UnknownAvailability),
-        ] {
+        fn unavailable_projection(reason: ReadinessReason) -> E {
+            match reason {
+                ReadinessReason::NotProbed
+                | ReadinessReason::Stale
+                | ReadinessReason::ProbeTimeout
+                | ReadinessReason::CommandFailure
+                | ReadinessReason::UncalibratedPartialCoverage
+                | ReadinessReason::InvalidEvidence
+                | ReadinessReason::UnreachablePeer
+                | ReadinessReason::UnsupportedPeerVersion => E::UnknownAvailability,
+                ReadinessReason::MissingExecutable => E::MissingExecutable,
+                ReadinessReason::SignedOut => E::AuthRequired,
+                ReadinessReason::LoginExpired => E::LoginExpired,
+                ReadinessReason::AccountMismatch => E::AccountMismatch,
+                ReadinessReason::Exhausted | ReadinessReason::ProviderRefusal => E::ProviderRefused,
+            }
+        }
+        for &reason in ReadinessReason::ALL {
+            let encoded = provenant_records::encode(&reason).unwrap();
+            let decoded: ReadinessReason =
+                provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG)
+                    .unwrap();
+            assert_eq!(decoded, reason);
+            let expected = unavailable_projection(reason);
             let mut read = ReadinessRead::unknown(reason);
             read.state = ReadinessState::Unavailable;
             assert!(
                 matches!(read.project(), R::Unavailable { reason: actual, .. } if actual == expected),
                 "{reason:?}"
             );
-            let expected = if reason == Stale {
+            let expected = if reason == ReadinessReason::Stale {
                 E::StaleAvailability
             } else {
                 E::UnknownAvailability
@@ -796,6 +920,7 @@ mod tests {
     }
     fn account() -> crate::AccountScope {
         crate::AccountScope {
+            extra: Default::default(),
             adapter: "claude".into(),
             account_key: "key".into(),
             label: "label".into(),
@@ -811,6 +936,7 @@ mod tests {
     }
     fn route(route: &str) -> ReadinessScope {
         ReadinessScope {
+            extra: Default::default(),
             host: LOCAL_HOST.into(),
             adapter: "claude".into(),
             account_key: "key".into(),
@@ -828,7 +954,8 @@ mod tests {
             refused(Some("pool"), "m", Some(500)),
             refused(None, "other", None),
         ];
-        let ready = RouteReadiness {
+        let mut ready = RouteReadiness {
+            extra: Default::default(),
             schema_version: 1,
             scope: route("pool"),
             state: ReadinessState::Ready,
@@ -838,6 +965,14 @@ mod tests {
             reset_unix_seconds: None,
             evidence_ref: Some("fixture".into()),
         };
+        let future = serde_json::json!({"value": true});
+        ready.extra.insert("future_readiness".into(), future);
+        ready
+            .scope
+            .extra
+            .insert("future_scope".into(), serde_json::json!({"value": true}));
+        let row_extra = ready.extra.clone();
+        let scope_extra = ready.scope.extra.clone();
         let mut retained = ready.clone();
         retained.scope.route = "retained".into();
         let mut peer = ready.clone();
@@ -856,6 +991,15 @@ mod tests {
             file.get(&route("pool"), 150).state,
             ReadinessState::Unavailable
         );
+        file.sync_refusals(&record, LOCAL_HOST, &at(&record, 160))
+            .unwrap();
+        let published = file
+            .records
+            .iter()
+            .find(|r| r.scope.same_scope(&route("pool")))
+            .unwrap();
+        assert_eq!(published.extra, row_extra);
+        assert_eq!(published.scope.extra, scope_extra);
         for observation in [retained, peer, probe] {
             assert!(file.records.contains(&observation));
         }
@@ -885,6 +1029,7 @@ mod tests {
         assert_eq!(file.get(&elsewhere, 150).state, ReadinessState::Unknown);
         // A fresh reading with headroom in the pool clears only that pool.
         record.snapshot = Some(crate::QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: account(),
             revision: 0,
@@ -894,6 +1039,7 @@ mod tests {
             authority_ref: None,
             details: None,
             windows: vec![crate::QuotaWindow {
+                extra: Default::default(),
                 window_seconds: None,
                 pool: "pool".into(),
                 used_basis_points: 1000,
@@ -909,64 +1055,5 @@ mod tests {
         );
         // The file refuses another account's records.
         assert!(ReadinessFile::decode(&bytes, "claude", "other").is_err());
-    }
-
-    #[test]
-    fn poolless_grouped_refusal_clears_from_newer_family_snapshot() {
-        let account = crate::AccountScope {
-            adapter: "agy".into(),
-            account_key: "key".into(),
-            label: "label".into(),
-        };
-        let mut record = crate::AccountRecord::empty(account.clone());
-        record.refusals.push(crate::Refusal {
-            extra: Default::default(),
-            account: account.clone(),
-            model: "gemini-3.8-flash".into(),
-            pool: None,
-            observed_unix_seconds: 100,
-            resets_unix_seconds: Some(500),
-        });
-        record.snapshot = Some(crate::QuotaSnapshot {
-            schema_version: 1,
-            account: account.clone(),
-            revision: 0,
-            status: crate::QuotaStatus::Available,
-            observed_unix_seconds: 190,
-            source_ref: "fixture".into(),
-            authority_ref: None,
-            details: None,
-            windows: vec![crate::QuotaWindow {
-                window_seconds: Some(604800),
-                pool: "gemini.weekly".into(),
-                used_basis_points: 1000,
-                resets_unix_seconds: Some(900),
-            }],
-        });
-        let admission = crate::Admission {
-            policies: crate::source::TEST_POLICIES,
-            now_unix_seconds: 200,
-            records: std::slice::from_ref(&record),
-            pools: &[],
-        };
-        let mut file = ReadinessFile::default();
-        file.sync_refusals(&record, LOCAL_HOST, &admission).unwrap();
-        let scope = ReadinessScope {
-            host: LOCAL_HOST.into(),
-            adapter: "agy".into(),
-            account_key: "key".into(),
-            route: "agy/gemini-3.8-flash".into(),
-        };
-        assert_eq!(file.get(&scope, 200).state, ReadinessState::Unknown);
-
-        record.snapshot.as_mut().unwrap().windows[0].used_basis_points = 10000;
-        let admission = crate::Admission {
-            policies: crate::source::TEST_POLICIES,
-            now_unix_seconds: 200,
-            records: std::slice::from_ref(&record),
-            pools: &[],
-        };
-        file.sync_refusals(&record, LOCAL_HOST, &admission).unwrap();
-        assert_eq!(file.get(&scope, 200).state, ReadinessState::Unavailable);
     }
 }

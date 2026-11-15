@@ -52,6 +52,11 @@ $icon_keys
   <key>CFBundleShortVersionString</key><string>0</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
+  <key>CFBundleURLTypes</key>
+  <array><dict>
+    <key>CFBundleURLName</key><string>dev.provenant.console</string>
+    <key>CFBundleURLSchemes</key><array><string>provenant-console</string></array>
+  </dict></array>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>

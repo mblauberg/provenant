@@ -1,4 +1,3 @@
-
 #[test]
 fn launch_prompt_refuses_invalid_input_before_account_resolution()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -12,16 +11,16 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
         let requested = run::TaskRequest {
             context: None,
             extra: Default::default(),
+            limit_extensions: Default::default(),
             build_heavy: false,
             title: None,
             base: None,
             head: None,
             source_head: None,
             base_ref: None,
-            task_id: provenant_core::TaskId::from_bytes([3; 16]),
             profile: Default::default(),
             prompt_digest: provenant_records::CanonicalV1::file_digest(full.as_bytes()),
-            route: run::RequestedRoute::Model {
+            route: run::RequestedRoute::Model { required_family: None,
                 extra: Default::default(),
                 provider: adapter.into(),
                 model: format!("{adapter}/fixture-model"),
@@ -54,24 +53,16 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
         if matches!(adapter, "cursor" | "agy") {
             let mut nested = prompt_paths(&attempt)?;
             nested.lane_depth = 2;
-            let error = prepare_with(
-                &Registry::default(),
-                &requested,
+            let prompt = launch_prompt(
                 &full,
                 &nested,
-                None,
-                |_| unreachable!("nested argv spill must not probe executables"),
-                None,
-            )
-            .err()
-            .ok_or("nested argv launch accepted")?;
-            assert!(
-                matches!(
-                    error,
-                    PrepareError::Prompt(LaunchPromptError::NestedArgvTooLarge { .. })
-                ),
-                "{error}"
-            );
+                &attempt,
+                adapter,
+                65_536,
+                provenant_records::diagnostic::SettingSource::ShippedDefault,
+                &provenant_records::policy::Policy::default(),
+            )?;
+            assert_eq!(prompt.text(), full);
             assert!(!attempt.join("prompt.md").exists());
             if adapter == "cursor" {
                 let home = attempt.join("fixture-home");
@@ -121,7 +112,10 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
                 )
                 .err()
                 .ok_or("nested threshold accepted")?;
-                assert!(error.to_string().contains("host configuration"), "{error}");
+                assert!(
+                    !matches!(error, PrepareError::Prompt(_)),
+                    "a warning-level argv threshold must not refuse: {error}"
+                );
             }
         }
     }
@@ -266,7 +260,7 @@ fn executable_discovery_after_wait_observes_the_completed_update()
     let executable = temp.path().join("cursor-agent");
     let host = run::HostLaunchContext {
         graph_directory: None,
-            configuration_root: temp.path().into(),
+        configuration_root: temp.path().into(),
         cwd: temp.path().into(),
         executables: Default::default(),
         executable_search_path: vec![temp.path().into()],
@@ -357,7 +351,9 @@ fn an_account_mismatch_is_cleared_only_by_a_check_that_names_the_account() {
         assert!(super::preparation::login_check_can_clear(adapter, false));
         assert!(!super::preparation::login_check_can_clear(adapter, true));
     }
-    assert!(super::preparation::login_check_can_clear("agy", true));
+    for adapter in ["agy", "claude"] {
+        assert!(super::preparation::login_check_can_clear(adapter, true));
+    }
 }
 
 #[test]
@@ -380,7 +376,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     adapter_name: &'static str,
     account_key: &'static str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, CancelToken, Digest, OperationId, RunId, TaskId};
+    use provenant_core::{AttemptId, CancelToken, Digest, OperationId};
     use provenant_os::exec::SystemExecutor;
     use provenant_providers::{
         Adapter, Continuation, ExitObservation, LaunchSpec, PrepareInput, ProviderError,
@@ -460,7 +456,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             provenant_providers::command::Command.validate_provenance(provenance)
         }
     }
-    impl provenant_quota::QuotaSource for Fixture {
+    impl provenant_providers::QuotaSource for Fixture {
         fn adapter_id(&self) -> &'static str {
             self.0
         }
@@ -475,12 +471,20 @@ fn registry_provider_resolves_prepares_and_reports_quota(
                 input: input.clone(),
             })
         }
+        fn capture(
+            &self,
+            _: &provenant_providers::quota_live::LiveQuota,
+            _: &provenant_quota::QuotaProbePlan,
+            _: Option<&provenant_quota::AccountRecord>,
+        ) -> Result<provenant_quota::ProbeCapture, provenant_quota::ProbeFailure> {
+            Err(provenant_quota::ProbeFailure::Disabled)
+        }
         fn decode(
             &self,
             plan: &provenant_quota::QuotaProbePlan,
             _: &provenant_quota::ProbeCapture,
         ) -> Result<provenant_quota::QuotaSnapshot, provenant_quota::QuotaError> {
-            Ok(provenant_quota::QuotaSnapshot {
+            Ok(provenant_quota::QuotaSnapshot { extra: Default::default(),
                 schema_version: 1,
                 account: plan.account.clone(),
                 revision: 0,
@@ -498,7 +502,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         fn accounts(
             &self,
         ) -> Result<Vec<provenant_quota::AccountScope>, provenant_quota::QuotaError> {
-            Ok(vec![provenant_quota::AccountScope {
+            Ok(vec![provenant_quota::AccountScope { extra: Default::default(),
                 adapter: self.1.into(),
                 account_key: self.2.into(),
                 label: self.2.into(),
@@ -576,7 +580,8 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             .any(|row| row.account.adapter == adapter_name
                 && row.status == provenant_quota::QuotaStatus::Available)
     );
-    let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
+    let utility =
+        provenant_confinement::UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
     let cancel = CancelToken::new();
     let repo = utility.open_repo(
         &executor,
@@ -591,15 +596,13 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     let executable = assets.join(adapter_name);
     std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf x >> \"$HOME/probe-count\"; fi\nprintf 'fixture 1.0\\n'\n")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-    let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
-    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let attempt = state.join(format!("attempts/{attempt_id}"));
     let paths = run::LaunchPaths {
         attempt_id,
         operation_id: OperationId::parse("registry-fixture")?,
         task_index: 0,
         lane_depth: 1,
-        run_id,
         deadline_unix_ms: u64::MAX,
         scratch: attempt.join("scratch"),
         provider_state: attempt.join("provider-state"),
@@ -620,12 +623,12 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     };
     let readiness_dir = state.join("readiness").join(account_key);
     std::fs::create_dir_all(&readiness_dir)?;
-    let stale = provenant_quota::ReadinessFile {
+    let stale = provenant_quota::ReadinessFile { extra: Default::default(),
         schema_version: 1,
         login: None,
-        records: vec![provenant_quota::RouteReadiness {
+        records: vec![provenant_quota::RouteReadiness { extra: Default::default(),
             schema_version: 1,
-            scope: provenant_quota::ReadinessScope {
+            scope: provenant_quota::ReadinessScope { extra: Default::default(),
                 host: provenant_quota::LOCAL_HOST.into(),
                 adapter: adapter_name.into(),
                 account_key: account_key.into(),
@@ -646,16 +649,16 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     let task = run::TaskRequest {
         context: None,
         extra: Default::default(),
+        limit_extensions: Default::default(),
         build_heavy: false,
         title: None,
         base: None,
         head: None,
         source_head: None,
         base_ref: None,
-        task_id: TaskId::from_bytes([3; 16]),
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
-        route: run::RequestedRoute::Model {
+        route: run::RequestedRoute::Model { required_family: None,
             extra: Default::default(),
             provider: adapter_name.into(),
             model,
@@ -703,9 +706,8 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     assert!(
         prepared
             .route
-            .extra
-            .get("availability_warning")
-            .and_then(|v| v.as_str())
+            .availability_warning
+            .as_deref()
             .is_some_and(|v| v.contains("Stale"))
     );
     Ok(())
@@ -714,7 +716,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
 #[test]
 fn opencode_stale_auth_prepares_with_an_unverified_warning()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId};
+    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId};
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     use std::{
         os::unix::fs::{DirBuilderExt, PermissionsExt},
@@ -778,7 +780,8 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
         ..provenant_core::RootInputs::new(home.clone(), project.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
+    let utility =
+        provenant_confinement::UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
     let cancel = CancelToken::new();
     let repo = utility.open_repo(
         &executor,
@@ -795,7 +798,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     std::fs::write(&executable, b"#!/bin/sh\nprintf 'opencode 2.2.0\\n'\n")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
     let now = provenant_os::clock::SystemClock::new().unix_seconds();
-    let account = provenant_quota::AccountRecord::empty(provenant_quota::AccountScope {
+    let account = provenant_quota::AccountRecord::empty(provenant_quota::AccountScope { extra: Default::default(),
         adapter: "opencode".into(),
         account_key: "go".into(),
         label: "go".into(),
@@ -804,7 +807,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     readiness.sync_probe_result(
         &account,
         provenant_quota::LOCAL_HOST,
-        now - 1,
+        now - 301,
         300,
         Some(provenant_quota::ReadinessReason::SignedOut),
     )?;
@@ -816,15 +819,13 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     let readiness_path = readiness_dir.join("opencode.json");
     std::fs::write(&readiness_path, serde_json::to_vec(&readiness)?)?;
     std::fs::set_permissions(&readiness_path, std::fs::Permissions::from_mode(0o600))?;
-    let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
-    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let attempt = state.join(format!("attempts/{attempt_id}"));
     let paths = run::LaunchPaths {
         attempt_id,
         operation_id: OperationId::parse("opencode-auth-fixture")?,
         task_index: 0,
         lane_depth: 1,
-        run_id,
         deadline_unix_ms: u64::MAX,
         scratch: attempt.join("scratch"),
         provider_state: attempt.join("provider-state"),
@@ -841,16 +842,16 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     let task = run::TaskRequest {
         context: None,
         extra: Default::default(),
+        limit_extensions: Default::default(),
         build_heavy: false,
         title: None,
         base: None,
         head: None,
         source_head: None,
         base_ref: None,
-        task_id: TaskId::from_bytes([3; 16]),
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
-        route: run::RequestedRoute::Model {
+        route: run::RequestedRoute::Model { required_family: None,
             extra: Default::default(),
             provider: "opencode".into(),
             model: "opencode/opencode-go/deepseek-v4.1-flash".into(),
@@ -892,17 +893,6 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     )?;
     assert_eq!(prepared.route.provider.as_deref(), Some("opencode"));
     assert_eq!(prepared.route.account_key.as_deref(), Some("go"));
-    // Readiness remains recorded; only the current launch treats it as unknown.
-    let scope = provenant_quota::ReadinessScope {
-        host: provenant_quota::LOCAL_HOST.into(),
-        adapter: "opencode".into(),
-        account_key: "go".into(),
-        route: "opencode/opencode-go/deepseek-v4.1-flash".into(),
-    };
-    assert_eq!(
-        crate::quota::read_readiness(&state, &scope, now).reason,
-        Some(provenant_quota::ReadinessReason::SignedOut)
-    );
     Ok(())
 }
 
@@ -950,13 +940,13 @@ fn rerun_in_clean_environment(test: &str) -> Result<bool, Box<dyn std::error::Er
     Ok(true)
 }
 
-/// Prepare one unpinned (or pinned) OpenCode Go launch over two registered
-/// accounts, `spent` being recorded with a full allowance window.
-fn prepare_over_two_accounts(
+/// Prepare one unpinned (or pinned) OpenCode Go launch over three registered
+/// accounts, `spent` carrying advisory local-ledger usage estimates.
+fn prepare_with_partial_account_estimates(
     spent: &[&str],
     pin: Option<&str>,
 ) -> Result<Result<run::PreparedLaunch, PrepareError>, Box<dyn std::error::Error>> {
-    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId};
+    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId};
     use provenant_os::exec::SystemExecutor;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let temp = tempfile::tempdir()?;
@@ -971,8 +961,7 @@ fn prepare_over_two_accounts(
     }
     let executor = SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
-    // `ready` registers first and sorts first. Pacing scores each spent account
-    // 0, so an unpinned lane draws an unspent account before any spent one.
+    // Local-ledger estimates remain advisory, including at the reported limit.
     let mut config = String::from("schema_version=1\n");
     for label in ["ready", "spent-a", "spent-b"] {
         let directory = home.join(format!("opencode-{label}"));
@@ -989,16 +978,49 @@ fn prepare_over_two_accounts(
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
     let now = provenant_os::clock::SystemClock::new().unix_seconds();
+    // Keep readiness positive so this invariant isolates advisory local usage
+    // estimates from the independent account-login admission boundary.
+    let readiness_root = state.join("readiness");
+    std::fs::DirBuilder::new().mode(0o700).create(&readiness_root)?;
+    for key in ["ready", "spent-a", "spent-b"] {
+        let directory = readiness_root.join(key);
+        std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        let readiness_path = directory.join("opencode.json");
+        let readiness = provenant_quota::ReadinessFile { extra: Default::default(),
+            schema_version: 1,
+            login: None,
+            records: vec![provenant_quota::RouteReadiness { extra: Default::default(),
+                schema_version: 1,
+                scope: provenant_quota::ReadinessScope { extra: Default::default(),
+                    host: provenant_quota::LOCAL_HOST.into(),
+                    adapter: "opencode".into(),
+                    account_key: key.into(),
+                    route: "opencode/opencode-go/deepseek-v4.1-flash".into(),
+                },
+                state: provenant_quota::ReadinessState::Ready,
+                reason: None,
+                observed_unix_seconds: now,
+                expires_unix_seconds: now + 300,
+                reset_unix_seconds: None,
+                evidence_ref: Some("fixture".into()),
+            }],
+        };
+        std::fs::write(&readiness_path, serde_json::to_vec(&readiness)?)?;
+        std::fs::set_permissions(
+            &readiness_path,
+            std::fs::Permissions::from_mode(0o600),
+        )?;
+    }
     let quota = state.join("quota");
     std::fs::DirBuilder::new().mode(0o700).create(&quota)?;
     for key in spent {
-        let account = provenant_quota::AccountScope {
+        let account = provenant_quota::AccountScope { extra: Default::default(),
             adapter: "opencode".into(),
             account_key: (*key).into(),
             label: (*key).into(),
         };
         let mut record = provenant_quota::AccountRecord::empty(account.clone());
-        record.snapshot = Some(provenant_quota::QuotaSnapshot {
+        record.snapshot = Some(provenant_quota::QuotaSnapshot { extra: Default::default(),
             schema_version: 1,
             account,
             revision: 0,
@@ -1007,7 +1029,7 @@ fn prepare_over_two_accounts(
             source_ref: "fixture".into(),
             authority_ref: None,
             details: None,
-            windows: vec![provenant_quota::QuotaWindow {
+            windows: vec![provenant_quota::QuotaWindow { extra: Default::default(),
                 pool: "five_hour".into(),
                 window_seconds: None,
                 used_basis_points: 10000,
@@ -1020,7 +1042,8 @@ fn prepare_over_two_accounts(
         std::fs::write(&path, serde_json::to_vec(&record)?)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
-    let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
+    let utility =
+        provenant_confinement::UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
     let cancel = CancelToken::new();
     let repo = utility.open_repo(
         &executor,
@@ -1036,15 +1059,13 @@ fn prepare_over_two_accounts(
     std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
     std::fs::write(&executable, b"#!/bin/sh\nprintf 'opencode 2.2.0\\n'\n")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-    let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
-    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let attempt = state.join(format!("attempts/{attempt_id}"));
     let paths = run::LaunchPaths {
         attempt_id,
         operation_id: OperationId::parse("exhausted-walk-fixture")?,
         task_index: 0,
         lane_depth: 1,
-        run_id,
         deadline_unix_ms: u64::MAX,
         scratch: attempt.join("scratch"),
         provider_state: attempt.join("provider-state"),
@@ -1061,16 +1082,16 @@ fn prepare_over_two_accounts(
     let task = run::TaskRequest {
         context: None,
         extra: Default::default(),
+        limit_extensions: Default::default(),
         build_heavy: false,
         title: None,
         base: None,
         head: None,
         source_head: None,
         base_ref: None,
-        task_id: TaskId::from_bytes([3; 16]),
         profile: Default::default(),
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
-        route: run::RequestedRoute::Model {
+        route: run::RequestedRoute::Model { required_family: None,
             extra: Default::default(),
             provider: "opencode".into(),
             model: "opencode/opencode-go/deepseek-v4.1-flash".into(),
@@ -1113,80 +1134,26 @@ fn prepare_over_two_accounts(
 }
 
 #[test]
-fn an_exhausted_account_stands_by_while_an_unspent_one_remains()
+fn partial_account_estimates_allow_launch_without_swapping_a_pinned_account()
 -> Result<(), Box<dyn std::error::Error>> {
-    if rerun_in_clean_environment("an_exhausted_account_stands_by_while_an_unspent_one_remains")? {
+    if rerun_in_clean_environment(
+        "partial_account_estimates_allow_launch_without_swapping_a_pinned_account",
+    )? {
         return Ok(());
     }
-    let prepared =
-        prepare_over_two_accounts(&["spent-a"], None)?.map_err(|error| format!("{error}"))?;
-    // Pacing scores the spent account 0, so the walk never draws it while an
-    // unprobed account remains. Either unprobed account is a valid pick; the
-    // router breaks the tie between them, so the test does not pin which one.
-    assert!(
-        matches!(
-            prepared.route.account_key.as_deref(),
-            Some("ready" | "spent-b")
-        ),
-        "{:?}",
-        prepared.route.account_key
-    );
-    assert!(
-        !prepared
-            .skipped_routes
-            .iter()
-            .any(|skipped| skipped.detail.contains("account spent-a")),
-        "{:?}",
-        prepared.skipped_routes
-    );
-    Ok(())
-}
-
-#[test]
-fn every_refused_account_is_named_when_the_lane_is_usage_limited()
--> Result<(), Box<dyn std::error::Error>> {
-    if rerun_in_clean_environment("every_refused_account_is_named_when_the_lane_is_usage_limited")?
-    {
-        return Ok(());
-    }
-    let refused = prepare_over_two_accounts(&["ready", "spent-a", "spent-b"], None)?;
-    let Err(PrepareError::Candidates {
-        fallback_outcome,
-        message,
-        ..
-    }) = refused
-    else {
-        return Err("every account is spent, so no launch is prepared".into());
-    };
-    assert_eq!(
-        fallback_outcome,
-        Some(provenant_records::run::PreparationFailure::UsageLimited)
-    );
-    // The message lists each refused account as `accounts skipped: <label>: …`.
-    for label in ["ready", "spent-a", "spent-b"] {
-        assert!(message.contains(&format!("{label}: ")), "{message}");
-    }
-    Ok(())
-}
-
-#[test]
-fn a_pinned_account_is_not_swapped_when_its_allowance_is_refused()
--> Result<(), Box<dyn std::error::Error>> {
-    if rerun_in_clean_environment("a_pinned_account_is_not_swapped_when_its_allowance_is_refused")?
-    {
-        return Ok(());
-    }
-    match prepare_over_two_accounts(&["spent-a"], Some("spent-a"))? {
-        Ok(prepared) => Err(format!(
-            "the pinned account is spent, yet the lane ran on {:?}",
-            prepared.route.account_key
-        )
-        .into()),
-        Err(PrepareError::Candidates { message, .. }) => {
-            assert!(message.contains("allowance is exhausted"), "{message}");
-            assert!(!message.contains("account ready"), "{message}");
-            Ok(())
+    for (at_limit, pin) in [
+        (&["spent-a"][..], None),
+        (&["ready", "spent-a", "spent-b"][..], None),
+        (&["spent-a"][..], Some("spent-a")),
+    ] {
+        let prepared = prepare_with_partial_account_estimates(at_limit, pin)?
+            .map_err(|error| format!("{error}"))?;
+        if let Some(pin) = pin {
+            assert_eq!(prepared.route.account_key.as_deref(), Some(pin));
         }
-        Err(other) => Err(format!("{other}").into()),
+        assert!(prepared.skipped_routes.iter().all(|route| {
+            route.cause != Some(provenant_records::RouteExclusionReason::Exhausted)
+        }));
     }
+    Ok(())
 }

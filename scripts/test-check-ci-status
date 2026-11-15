@@ -12,12 +12,17 @@ loader.exec_module(module)
 
 needs = {name: {"result": "success"} for name in module.REQUIRED}
 assert not module.failures(needs, "true")
-for result in ("failure", "cancelled", "skipped"):
-    changed = {**needs, "rust-macos-tests": {"result": result}}
-    assert module.failures(changed, "true")
-missing = dict(needs)
-del missing["rust-macos-tests"]
-assert module.failures(missing, "false")
+# Every required producer, consumer and evidence gate fails closed, even when
+# the filter permits a skip; a missing job is never an intentional skip.
+for name in module.REQUIRED:
+    for result in ("failure", "cancelled", "skipped"):
+        changed = {**needs, name: {"result": result}}
+        assert module.failures(changed, "true")
+        if result != "skipped":
+            assert module.failures(changed, "false", "false")
+    missing = dict(needs)
+    del missing[name]
+    assert module.failures(missing, "false", "false")
 for name in module.MACOS:
     needs[name] = {"result": "skipped"}
 assert not module.failures(needs, "false")

@@ -15,6 +15,32 @@ fn worst(max: usize) -> String {
     bounded(&"\u{1}".repeat(max), max)
 }
 
+/// Quotes escape to two bytes each: the largest handoff the record admits.
+fn worst_handoff() -> provenant_records::handoff::Handoff {
+    provenant_records::handoff::Handoff {
+        schema_version: 2,
+        status: provenant_records::handoff::HandoffStatus::StoppedEarly,
+        note: "\"".repeat(provenant_records::handoff::NOTE_BYTES),
+        remaining: vec!["\"".repeat(1900)],
+        decisions: Vec::new(),
+        verify: Vec::new(),
+        spec_concerns: Vec::new(),
+        write_scope: None,
+        extra: Default::default(),
+    }
+}
+
+fn worst_decision() -> provenant_records::FindingDecision {
+    provenant_records::FindingDecision::new(
+        "\"".repeat(provenant_records::finding_decision::FINDING_ID_BYTES / 2),
+        provenant_records::FindingDisposition::Replace,
+        "\"".repeat(provenant_records::finding_decision::DECISION_REASON_BYTES / 2),
+        provenant_core::GitOid::parse(&"1".repeat(64)).unwrap(),
+        Some(provenant_core::GitOid::parse(&"2".repeat(64)).unwrap()),
+    )
+    .unwrap()
+}
+
 fn routes(count: usize) -> serde_json::Value {
     (0..count)
         .map(|index| json!({"adapter":"fixture", "model":format!("fixture/model-{index}")}))
@@ -36,7 +62,7 @@ fn mixed() -> GraphDocument {
              "route":{"alias":"senior"}, "plan":{"kinds":["task"], "max_nodes":4}},
             {"id":"review", "access":"read_only", "prompt":"Review", "routes":routes(3)},
             {"id":"choose", "kind":"decide", "access":"read_only", "depends_on":["review"],
-             "decide":{"question":"Ship the reviewed change?", "default":"hold", "timeout_seconds":60,
+             "decide":{"on_unanswered":"block_dependants", "question":"Ship the reviewed change?", "default":"hold", "timeout_seconds":60,
                 "options":[{"id":"ship", "label":"Ship"}, {"id":"hold", "label":"Hold", "description":"Wait for more review"}]}},
             {"id":"ci", "kind":"gate", "access":"read_only", "depends_on":["review"],
              "condition":{"type":"ci", "target":"feature/example"}},
@@ -65,6 +91,19 @@ fn planned(document: &GraphDocument) -> PlannedGraph {
 fn findings(cap: usize) -> Vec<Finding> {
     let finding = |summary: String| Finding {
         extra: Default::default(),
+        url: None,
+        trigger: None,
+        triage: None,
+        class: None,
+        verification: None,
+        evidence: None,
+        proposed_fix: None,
+        kind: None,
+        lens: None,
+        propagates: None,
+        design_defect: None,
+        risk_grew: None,
+        scope_grew: None,
         id: "F1".into(),
         severity: "high".into(),
         file: "src/lib.rs".into(),
@@ -79,7 +118,8 @@ fn findings(cap: usize) -> Vec<Finding> {
     // Long individual strings are externalised; spread the allowance so the
     // findings remain inline in the checkpoint representation being measured.
     for (index, finding) in findings.iter_mut().enumerate() {
-        finding.summary = "x".repeat(spare / MAX_FINDINGS + usize::from(index < spare % MAX_FINDINGS));
+        finding.summary =
+            "x".repeat(spare / MAX_FINDINGS + usize::from(index < spare % MAX_FINDINGS));
     }
     assert_eq!(canonical_len(&findings), cap);
     findings
@@ -96,12 +136,15 @@ fn filled_outputs(node: &PlannedNode) -> NodeOutputs {
         Some(worst(4 * OUTPUT_FIELD_BYTES)),
         Some(worst(4 * OUTPUT_FIELD_BYTES)),
     );
-    outputs.extra.insert(review::PARTIAL.into(), true.into());
+    outputs.partial = true;
     outputs.verdict = Some(worst(OUTPUT_FIELD_BYTES));
     outputs.verdict_error = Some("verdict malformed, repeated or not final".into());
     let cap = if node.dispositions.is_empty()
         && node.composite.is_none()
-        && !node.inputs.iter().any(|input| input.outputs.contains(&OutputKind::Findings))
+        && !node
+            .inputs
+            .iter()
+            .any(|input| input.outputs.contains(&OutputKind::Findings))
     {
         FINDINGS_BYTES
     } else {
@@ -111,33 +154,34 @@ fn filled_outputs(node: &PlannedNode) -> NodeOutputs {
     if plans::writer(node) {
         outputs.warnings.push(worst(WARNING_BYTES));
     }
-    if node.composite.is_some() && let Some(result) = &mut outputs.result {
+    if node.composite.is_some()
+        && let Some(result) = &mut outputs.result
+    {
         result.excerpt = worst(COMPOSITE_EXCERPT_BYTES);
     }
     assert!(outputs.warnings.len() <= MAX_WARNINGS);
     outputs
 }
 
-/// An ask holding the longest deadline, answer and inbox error it can store.
-fn filled_ask(mut ask: NodeAsk) -> NodeAsk {
-    ask.wake_at = Some(envelope::latest());
-    ask.answer = Some(AskAnswer {
+/// The link an ask leaves in the checkpoint, holding the longest deadline and
+/// request ID it can store.
+fn filled_ask(ask: AskRequest) -> AskLink {
+    AskLink {
         extra: Default::default(),
-        source: AnswerSource::Answered,
-        option: Some(worst(asks::OPTION_BYTES)),
-        text: Some(worst(asks::ANSWER_BYTES)),
-        actor: Some(worst(HOST_ID_BYTES)),
-        at: Some(envelope::latest()),
-        rejected: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
-        rejection_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
-    });
-    ask.inbox_error = Some(worst(MAX_ADVANCE_ERROR_BYTES));
-    ask
+        ask_id: ask.ask_id,
+        kind: ask.kind,
+        node: ask.node,
+        rounds: ask.rounds,
+        session: ask.session,
+        wake_at: Some(envelope::latest()),
+        timeout: ask.timeout,
+        request: "f".repeat(asks::REQUEST_ID_BYTES),
+    }
 }
 
-/// Every ask the plan can hold at once: each loop round, each decide node and
-/// the pause history with one open and one awaiting its close.
-fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
+/// Every link the plan can hold at once: each loop round, each decide node and
+/// the one open pause.
+fn filled_asks(plan: &PlannedGraph) -> Vec<AskLink> {
     let mut asks = Vec::new();
     for node in &plan.nodes {
         if let Some(session) = node
@@ -157,12 +201,9 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
                 .max()
                 .unwrap_or(0);
             asks.extend((1..=rounds).map(|round| {
-                filled_ask(asks::loop_ask(
-                    &plan.graph_id,
-                    &node.id,
-                    usize::MAX - round,
-                    session,
-                ))
+                let mut ask = asks::loop_ask(&plan.graph_id, &node.id, usize::MAX - round, session);
+                ask.ask_id.push_str(&format!(".retry-{}", u64::MAX));
+                filled_ask(ask)
             }));
         }
         if let Some(spec) = &node.land {
@@ -171,11 +212,13 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
                 node,
                 &filled_land(spec.tier),
                 land::session(spec, plan).unwrap(),
+                1,
+                u64::MAX,
             )));
         }
         if let Some(spec) = &node.decide {
-            let scope = node.extra.get("repair_scope_gate") == Some(&json!(true));
-            let session = asks::decide_session(spec, plan.decision_session.as_deref()).unwrap_or(&plan.graph_id);
+            let session = asks::decide_session(spec, plan.decision_session.as_deref())
+                .unwrap_or(&plan.graph_id);
             let mut ask = asks::decide_ask(
                 &plan.graph_id,
                 node,
@@ -183,22 +226,22 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
                 session,
                 u64::MAX,
                 None,
+                asks::WORST_DECIDE_TIMEOUT,
                 Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
             );
-            if scope { ask.body = worst(provenant_records::inbox::REQUEST_BODY_BYTES); }
+            // A node raised again after a retry carries the generation.
+            ask.ask_id.push_str(&format!(".retry-{}", u64::MAX));
             asks.push(filled_ask(ask));
         }
     }
     if let Some(session) = &plan.decision_session {
-        asks.extend((0..asks::MAX_PAUSE_ASKS as u64 + 2).map(|index| {
-            filled_ask(asks::pause_ask(
-                &plan.graph_id,
-                u64::MAX - index,
-                session,
-                &worst(PAUSE_REASON_BYTES),
-                Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
-            ))
-        }));
+        asks.push(filled_ask(asks::pause_ask(
+            &plan.graph_id,
+            u64::MAX,
+            session,
+            &worst(PAUSE_REASON_BYTES),
+            Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
+        )));
     }
     asks
 }
@@ -222,6 +265,19 @@ fn filled_land(tier: provenant_records::workflow::RiskTier) -> LandRecord {
 }
 
 fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphCheckpoint {
+    let placeholder_base = provenant_core::GitOid::parse(&"f".repeat(64)).unwrap();
+    let bases = GraphBaseBinding::new(
+        document
+            .review_base
+            .as_deref()
+            .filter(|reference| !reference.is_empty())
+            .map(|_| placeholder_base),
+        document
+            .integration_branch
+            .as_deref()
+            .filter(|branch| !branch.is_empty())
+            .map(|_| placeholder_base),
+    );
     let longest = plan
         .nodes
         .iter()
@@ -234,21 +290,49 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         .map(|node| {
             let boundary = node.condition.is_some() || node.loop_body.is_some();
             NodeProgress {
-                extra: if template::review_behaviour(node) == Some(template::ReviewBehaviour::Lens) {
-                    [(review::CORRECTION_REFUSED.into(), worst(MAX_ADVANCE_ERROR_BYTES).into())].into()
-                } else {
-                    Default::default()
-                },
+                children_cancelled: false,
+                detached_from_graph_cancel: false,
+                subtree_cancel: None,
+                yielded_slot: false,
+                stop_fence: false,
+                owner_notified: false,
+                retry: Some(RetryAllowance { retries: u8::MAX, origin: "shipped_default".into() }),
+                quota_redraw_spent: 0,
+                quota_redraw_archived: 0,
+                retry_generation: None,
+                container_retry: false,
+                concurrency_warning: None,
+                repair_growth: None,
+                provisioned_source: None,
+                removed_requirements: node.removed_requirements.clone(),
+                extra: Default::default(),
+                review_verdict_correction_refused: (template::review_behaviour(node)
+                    == Some(template::ReviewBehaviour::Lens))
+                .then(|| worst(MAX_ADVANCE_ERROR_BYTES)),
+                warnings: Vec::new(),
                 children: node.composite_members.clone(),
                 source_binding: node.source.clone(),
                 min_successful: node.composite.as_ref().and_then(|spec| spec.min_successful),
                 source_commit: node.source.as_ref().map(|_| "1".repeat(64)),
                 writer_binding: None,
         writer_binding_pending: plans::writer(node),
-                review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
+                review_base: node.review_base.as_ref().map(|_| "1".repeat(64)),
         review_base_pending: false,
                 fragment: node.plan.as_ref().map(|_| "\"".repeat(plans::STORED_BLOCK_BYTES / 2 - 1)),
-                handoff: plans::writer(node).then(|| "\"".repeat(plans::STORED_HANDOFF_BYTES / 2 - 1)),
+                handoff: plans::writer(node).then(worst_handoff),
+                blocked: true,
+                review_settlement: template::review_node(node).then(|| ReviewSettlement {
+                    attempt_id: provenant_core::AttemptId::from_bytes([1; 16]),
+                    head: provenant_core::GitOid::parse(&"1".repeat(64)).unwrap(),
+                    base: Some(provenant_core::GitOid::parse(&"2".repeat(64)).unwrap()),
+                    verdict: provenant_records::workflow::ReviewVerdict::ApproveWithNits,
+                    independent: false,
+                }),
+                decisions: if template::review_node(node) {
+                    vec![worst_decision()]
+                } else {
+                    Vec::new()
+                },
                 expansion_pause: (node.plan.is_some() || plans::writer(node))
                     .then(|| worst(MAX_ADVANCE_ERROR_BYTES)),
                 expansion_cause: (node.plan.is_some() || plans::writer(node)).then_some(NodeDecisionCause::PlanExpansionPaused { active: false, fallback: false, fragment_error: Some(PlanFailureFact::Structural(GraphStructuralLimit { key: GraphLimitKey::GraphPromptBytes, actual: usize::MAX, max: usize::MAX })) }),
@@ -300,6 +384,8 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 land: node.land.as_ref().map(|spec| filled_land(spec.tier)),
                 title: Some(node.title.clone().unwrap_or_else(|| node.id.clone())),
                 worktree: node.worktree.clone(),
+settled_dependency_snapshots: Default::default(),
+new_worktree_base: None,
                 id: node.id.clone(),
                 state: NodeState::Succeeded,
                 cancelled_from: Some(NodeState::Running),
@@ -332,17 +418,24 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     .iter()
                     .enumerate()
                     .map(|(index, route)| GraphAttempt {
+                        placement_host: None,
+                        placement_host_id: None,
                         review_substitution: false,
                         extra: Default::default(),
+host_refused_before_acceptance: false,
                         launched: true,
                         key: AttemptKey {
                             extra: Default::default(),
+                            retry_generation: None,
+                            previous_attempt_ref: None,
                             graph_id: plan.graph_id.clone(),
                             node_id: node.id.clone(),
                             route_index: u16::MAX - index as u16,
+                            attempt: index as u32 + 1,
                         },
                         route: route.clone(),
                         state: AttemptState::Unresolved,
+                        stop: Some(provenant_records::StopCause::HostNativeUnconfigured),
                         attempt_ref: Some(worst(HOST_ID_BYTES)),
                         outcome: Some(AttemptOutcome::AdapterUnavailable),
                         launch_actor: worst(HOST_ID_BYTES),
@@ -351,18 +444,23 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                         input_manifest: Some(AttemptInputManifest {
                             extra: Default::default(), schema_version: 1,
                             source_commit: node.source.as_ref().map(|_| "a".repeat(64)),
-                            source_producer: node.source.as_ref().map(|_| AttemptKey { extra: Default::default(), graph_id: plan.graph_id.clone(), node_id: "n".repeat(64), route_index: u16::MAX }),
+                            source_producer: node.source.as_ref().map(|_| AttemptKey { extra: Default::default(), retry_generation: None, previous_attempt_ref: None, graph_id: plan.graph_id.clone(), node_id: "n".repeat(64), route_index: u16::MAX, attempt: 1 }),
                             writer_head: plans::writer(node).then(|| "a".repeat(64)),
-                            review_base: node.extra.get("review_base").map(|_| "a".repeat(64)),
+                            review_base: node.review_base.as_ref().map(|_| "a".repeat(64)),
                             graph_review_base: Some("a".repeat(64)), integration_base: Some("a".repeat(64)), integration_source: Some("a".repeat(64)),
-                            applied_route: Some(GraphRoute { extra: Default::default(), adapter: Some("a".repeat(256)), model: Some("m".repeat(256)), effort: Some("e".repeat(256)), account: Some("a".repeat(256)), name: None, alias: None }),
+                            applied_route: Some(GraphRoute {                                required_family: None,
+                                peer_source_head: None,
+                                peer_requested_route: None,
+                                peer_network: None,
+                                peer_retry_limit: None, extra: Default::default(), adapter: Some("a".repeat(256)), model: Some("m".repeat(256)), effort: Some("e".repeat(256)), account: Some("a".repeat(256)), name: None, alias: None, tier: None, }),
                             dependencies: Some(node.depends_on.iter().take(MANIFEST_INPUT_LIMIT).cloned().collect()), dependencies_omitted: node.depends_on.len().saturating_sub(MANIFEST_INPUT_LIMIT),
-                            inputs: node.inputs.iter().flat_map(|input| input.outputs.iter().map(move |kind| AttemptInputEvidence { extra: Default::default(), producer_node: input.node.clone(), producer_attempt: Some(AttemptKey { extra: Default::default(), graph_id: plan.graph_id.clone(), node_id: input.node.clone(), route_index: u16::MAX }), kind: *kind, required: true, producer_result_digest: Some("a".repeat(71)), commit: Some("a".repeat(64)), delivery: InputDelivery::Delivered, file_delivery: InputDelivery::Delivered })).take(MANIFEST_INPUT_LIMIT).collect(),
+                            inputs: node.inputs.iter().flat_map(|input| input.outputs.iter().map(move |kind| AttemptInputEvidence { extra: Default::default(), producer_node: input.node.clone(), producer_attempt: Some(AttemptKey { extra: Default::default(), retry_generation: None, previous_attempt_ref: None, graph_id: plan.graph_id.clone(), node_id: input.node.clone(), route_index: u16::MAX, attempt: 1 }), kind: *kind, required: true, producer_result_digest: Some("a".repeat(71)), commit: Some("a".repeat(64)), delivery: InputDelivery::Delivered, file_delivery: InputDelivery::Delivered })).take(MANIFEST_INPUT_LIMIT).collect(),
                             omitted: node.inputs.iter().map(|input| input.outputs.len()).sum::<usize>().saturating_sub(MANIFEST_INPUT_LIMIT),
                         }),
                         settled: u64::MAX,
                         usage: Some(AttemptUsage {
                             extra: Default::default(),
+                            resolved_route: None,
                             tokens: Some(u64::MAX),
                             cost_micro_usd: Some(u64::MAX),
                             wall_time_seconds: Some(u64::MAX),
@@ -376,9 +474,10 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         })
         .collect();
     GraphCheckpoint {
-        bound_review_base: Some("f".repeat(64)),
-        bound_integration_base: Some("f".repeat(64)),
+        bases,
         extra: Default::default(),
+        cancellation_request_receipt: None,
+        pending_writer_provisioning: Default::default(),
         expansions: Vec::new(),
         remaining: Some(RemainingBudgets {
             extra: Default::default(),
@@ -397,8 +496,14 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         integration_pin: Some("1".repeat(64)),
         cancelled: true,
         cancel_reason: Some(worst(MAX_CANCEL_REASON_BYTES)),
-        pause_reason: Some(worst(PAUSE_REASON_BYTES)),
-        pause_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
+        pause: Some(
+            provenant_records::pause::Pause::new(
+                PauseCause::Stop(provenant_records::StopCause::CredentialHelperFailed),
+                None,
+                worst(PAUSE_REASON_BYTES),
+            )
+            .unwrap(),
+        ),
         unknown_usage: vec![
             format!(
                 "node {longest} route {}: wall_time_seconds usage unknown",
@@ -505,28 +610,33 @@ fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: b
         .collect();
     for (node, planned) in checkpoint.nodes.iter_mut().zip(&plan.nodes) {
         if repair::is_repair_gate(planned, &plan, &positions) {
-            node.extra.insert(
-                "repair_growth".into(),
-                json!({"before":"1".repeat(64),"after":"2".repeat(64),"grew":grew}),
-            );
+            node.repair_growth = Some(RepairGrowth {
+                before: "1".repeat(64),
+                after: "2".repeat(64),
+                grew,
+            });
         }
-        if planned.extra.get("repair_scope_gate") == Some(&json!(true)) {
-            node.extra.insert("owner_notified".into(), true.into());
+        if planned.repair_scope_gate {
+            node.owner_notified = true;
         }
         if let Some(outputs) = &mut node.outputs {
-            outputs.extra.insert("risk_tier".into(), tier.into());
+            outputs.risk_tier = serde_json::from_value(serde_json::Value::from(tier)).ok();
             if plan.nodes.iter().any(|consumer| {
-                consumer.extra.get("repair_scope_gate") == Some(&json!(true))
-                    && consumer.depends_on.contains(&planned.id)
+                consumer.repair_scope_gate && consumer.depends_on.contains(&planned.id)
             }) {
-                outputs.extra.insert("repair_design".into(), json!({"within_scope":false,"one_way_door":false}));
+                outputs.repair_design = Some(RepairDesign {
+                    within_scope: false,
+                    one_way_door: false,
+                });
             }
         }
     }
     let execution = GraphExecution {
-        review_base: None,
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
-        integration_base: Some("1".repeat(40).parse().unwrap()),
+        bases: checkpoint.bases,
         directory: format!("/{}", "\u{1}".repeat(4095)).into(),
         document: document.clone(),
     };
@@ -655,8 +765,8 @@ fn a_loop_extension_past_the_envelope_pauses_instead_of_growing() {
     .unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
-        run.checkpoint.pause_code.as_deref(),
-        Some("invalid_loop_decision")
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::InvalidLoopDecision)
     );
     assert!(run.checkpoint.extensions.is_empty());
     assert_eq!(owner.calls.len(), 18);
@@ -753,13 +863,9 @@ fn fixture_task() -> GraphDocument {
 fn a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit() {
     use provenant_core::{Clock, ProjectId};
     use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
-    use std::os::unix::fs::PermissionsExt;
     let directory = crate::test_support::tempdir().unwrap();
     let base = std::fs::canonicalize(directory.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.join("state"));
-    std::fs::create_dir(base.join("state")).unwrap();
-    std::fs::set_permissions(base.join("state"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -783,10 +889,12 @@ fn a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit() {
         FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
     journal
         .bind(GraphExecution {
-            review_base: None,
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
-            integration_base: None,
-            directory: base.clone(),
+            bases: None,
+            directory: inputs.checkout.clone(),
             document: document.clone(),
         })
         .unwrap();
@@ -824,6 +932,8 @@ fn usage_warnings_keep_the_most_recently_settled_attempts() {
         let attempt = checkpoint.nodes[node].attempts[0].clone();
         checkpoint.nodes[node].attempts = (0..copies as u64)
             .map(|i| GraphAttempt {
+                placement_host: None,
+                placement_host_id: None,
                 review_substitution: false,
                 settled: first + i,
                 ..attempt.clone()
@@ -849,8 +959,7 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
     let temp = crate::test_support::tempdir().unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
     std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -876,10 +985,12 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
             .bind(GraphExecution {
-                review_base: None,
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
-                integration_base: None,
-                directory: base.clone(),
+                bases: None,
+                directory: inputs.checkout.clone(),
                 document: document.clone(),
             })
             .unwrap();
@@ -979,9 +1090,11 @@ fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
                 }
             }
             let execution = GraphExecution {
-                review_base: None,
+                peer_origin_context: None,
+                peer_submission_digest: None,
+
                 extra: Default::default(),
-                integration_base: Some("1".repeat(40).parse().unwrap()),
+                bases: checkpoint.bases,
                 directory: "/fixture".into(),
                 document: document.clone(),
             };
@@ -1017,6 +1130,19 @@ fn disposition_checkpoint_fits_its_reduced_bound() {
         .unwrap();
     let finding = Finding {
         extra: Default::default(),
+        url: None,
+        trigger: None,
+        triage: None,
+        class: None,
+        verification: None,
+        evidence: None,
+        proposed_fix: None,
+        kind: None,
+        lens: None,
+        propagates: None,
+        design_defect: None,
+        risk_grew: None,
+        scope_grew: None,
         id: "F".into(),
         severity: "high".into(),
         file: worst(OUTPUT_FIELD_BYTES),
@@ -1037,9 +1163,11 @@ fn disposition_checkpoint_fits_its_reduced_bound() {
     }
     let bound = graph_envelope_bound(&document, &[], &checkpoint.extensions, &plan);
     let execution = GraphExecution {
-        review_base: None,
+        peer_origin_context: None,
+        peer_submission_digest: None,
+
         extra: Default::default(),
-        integration_base: Some("1".repeat(40).parse().unwrap()),
+        bases: checkpoint.bases,
         directory: format!("/{}", "\u{1}".repeat(4095)).into(),
         document: document.clone(),
     };
@@ -1055,10 +1183,7 @@ fn disposition_checkpoint_fits_its_reduced_bound() {
     assert!(size(&checkpoint) <= bound);
     let outputs = checkpoint.nodes[index].outputs.as_mut().unwrap();
     outputs.findings.clear();
-    outputs.extra.insert(
-        "_compact_disposition_findings".into(),
-        json!("\u{1}".repeat(16 * 1024)),
-    );
+    outputs.compact_disposition_findings = Some("\u{1}".repeat(16 * 1024));
     assert!(size(&checkpoint) <= bound);
 }
 
@@ -1081,14 +1206,13 @@ fn routing_stratum_flows_from_graph_to_nodes() {
     assert_eq!(context.task_kind.as_deref(), Some("review"));
 }
 
-
 #[test]
 fn principal_scope_report_notification_and_assessment_fit_checkpoint_bound() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1,"graph_id":"principal-envelope","nodes":[
             {"id":"design","access":"read_only","prompt":"design","route":{"alias":"principal"}},
             {"id":"scope","kind":"decide","access":"read_only","depends_on":["design"],
-             "repair_scope_gate":true,"decide":{"question":"Approve changed scope?",
+             "repair_scope_gate":true,"decide":{"on_unanswered":"block_dependants", "question":"Approve changed scope?",
              "options":[{"id":"approve","label":"Approve"},{"id":"hold","label":"Hold"}]}}
         ]
     })).unwrap();
@@ -1101,19 +1225,29 @@ fn live_child_patch_keeps_the_planners_final_fragment_envelope_reserve() {
     let plan = planned(&document);
     let before = envelope::checkpoint_bound(&document, &[], &[], &plan);
     let live: Expansion = serde_json::from_value(json!({
-        "source":"plan", "continuation":false, "nodes":[],
+        "source":"plan",  "nodes":[],
         "patch":{"revision":1,"digest":format!("sha256:{}", "a".repeat(64)),"parent":"plan"}
-    })).unwrap();
+    }))
+    .unwrap();
     let live_bound = envelope::checkpoint_bound(&document, std::slice::from_ref(&live), &[], &plan);
-    assert!(live_bound >= before, "a live child patch must retain space for the planner's final fragment");
+    assert!(
+        live_bound >= before,
+        "a live child patch must retain space for the planner's final fragment"
+    );
 
     let mut final_fragment = live.clone();
-    final_fragment.extra.insert("final_fragment".into(), true.into());
+    final_fragment.final_fragment = true;
     let closed_bound = envelope::checkpoint_bound(&document, &[final_fragment], &[], &plan);
-    assert!(closed_bound < live_bound, "a final fragment releases its producer's fragment reserve");
+    assert!(
+        closed_bound < live_bound,
+        "a final fragment releases its producer's fragment reserve"
+    );
 
     let mut fallback = live;
     fallback.patch = None;
     let fallback_bound = envelope::checkpoint_bound(&document, &[fallback], &[], &plan);
-    assert!(fallback_bound < live_bound, "a fallback expansion also closes its producer");
+    assert!(
+        fallback_bound < live_bound,
+        "a fallback expansion also closes its producer"
+    );
 }

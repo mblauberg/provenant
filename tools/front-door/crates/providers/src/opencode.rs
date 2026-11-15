@@ -86,9 +86,8 @@ crate::adapter!(OpenCode, "opencode", prepare, failure_diagnostic);
 const MODEL_ON_WIRE: bool = false;
 
 /// Confirm that the retained database contains the exact session identity.
-/// OpenCode 2.x records a session in `session_v2` and no longer writes the
-/// older `session` table, so either table names it; a table the installed
-/// OpenCode does not have records nothing.
+/// OpenCode 2.x stores sessions in `session_v2`; a missing table or session is
+/// an unknown identity.
 pub fn session_exists(data: &std::path::Path, session: &str) -> Result<(), ProviderError> {
     use rusqlite::{Connection, OpenFlags};
     let db = Connection::open_with_flags(
@@ -98,18 +97,18 @@ pub fn session_exists(data: &std::path::Path, session: &str) -> Result<(), Provi
     .map_err(|_| ProviderError::UnknownIdentity)?;
     db.busy_timeout(std::time::Duration::from_millis(250))
         .map_err(|_| ProviderError::UnknownIdentity)?;
-    for sql in [
-        "SELECT EXISTS(SELECT 1 FROM session_v2 WHERE id=?)",
-        "SELECT EXISTS(SELECT 1 FROM session WHERE id=?)",
-    ] {
-        let Ok(found) = db.query_row(sql, [session], |row| row.get::<_, bool>(0)) else {
-            continue;
-        };
-        if found {
-            return Ok(());
-        }
+    let found = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_v2 WHERE id=?)",
+            [session],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|_| ProviderError::UnknownIdentity)?;
+    if found {
+        Ok(())
+    } else {
+        Err(ProviderError::UnknownIdentity)
     }
-    Err(ProviderError::UnknownIdentity)
 }
 
 /// The answering model from OpenCode's own session record, keyed by the
@@ -123,35 +122,21 @@ pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, Pr
     .map_err(|_| ProviderError::UnknownIdentity)?;
     db.busy_timeout(std::time::Duration::from_millis(250))
         .map_err(|_| ProviderError::UnknownIdentity)?;
-    // OpenCode keeps assistant turns in `session_message` (v2 shape) or in the
-    // older `message` table. A session may be recorded in either, so read both
-    // and require every recorded answer to name the same provider and model.
-    let mut models = Vec::new();
-    for sql in [
-        "SELECT DISTINCT json_extract(data,'$.model.providerID'), json_extract(data,'$.model.id') \
-         FROM session_message WHERE session_id=? AND type='assistant' LIMIT 2",
-        "SELECT DISTINCT json_extract(data,'$.providerID'), json_extract(data,'$.modelID') \
-         FROM message WHERE session_id=? AND json_extract(data,'$.role')='assistant' LIMIT 2",
-    ] {
-        // A table the installed OpenCode does not have records nothing.
-        let Ok(mut statement) = db.prepare(sql) else {
-            continue;
-        };
-        let rows = statement
-            .query_map([session], |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
-            })
-            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-            .map_err(|_| ProviderError::UnknownIdentity)?;
-        for row in rows {
-            if !models.contains(&row) {
-                models.push(row);
-            }
-        }
-    }
+    let mut statement = db
+        .prepare(
+            "SELECT DISTINCT json_extract(data,'$.model.providerID'), json_extract(data,'$.model.id') \
+             FROM session_message WHERE session_id=? AND type='assistant' LIMIT 2",
+        )
+        .map_err(|_| ProviderError::UnknownIdentity)?;
+    let models = statement
+        .query_map([session], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(|_| ProviderError::UnknownIdentity)?;
     match models.as_slice() {
         [] => Err(ProviderError::UnknownIdentity),
         [(Some(provider), Some(model))] => Ok(format!("opencode/{provider}/{model}")),
@@ -160,9 +145,9 @@ pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, Pr
 }
 
 /// OpenCode uses the user's configuration and stored provider accounts.
-/// Read-only runs deny edits but allow shell commands inside outer confinement
-/// so they can atomically publish progress in their private state. Its
-/// built-in search tools still run ripgrep, which the profile grants by path.
+/// Native tools remain available while the outer profile grants their paths
+/// and bounds filesystem and network access. Search tools run ripgrep, which
+/// the profile grants by path.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -170,15 +155,21 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    let mut tool_requirements = crate::launch::ToolRequirements::default();
     if plan.selected_authentication.as_deref() != Some("login") {
-        return Err(ProviderError::UnsupportedPolicy);
+        return Err(input.boundary_error(
+            "OPENCODE_PREPARE_CREDENTIALS",
+            "OpenCode requires its selected login authentication",
+            ProviderError::UnsupportedPolicy,
+        ));
     }
-    let private = &plan
-        .private_state
-        .as_ref()
-        .ok_or(ProviderError::UnsupportedPolicy)?
-        .path;
+    let private = crate::launch::private_state_or_scratch(
+        plan.private_state
+            .as_ref()
+            .map(|state| state.path.as_path()),
+        &plan.scratch.path,
+        input.policy,
+        "OPENCODE_PREPARE_NONE",
+    )?;
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "run".as_ref(),
@@ -195,7 +186,13 @@ fn prepare(
     .map(OsString::from)
     .to_vec();
     if session == Session::Resume {
-        let continuation = input.continuation.ok_or(ProviderError::UnknownIdentity)?;
+        let continuation = input.continuation.ok_or_else(|| {
+            input.boundary_error(
+                "OPENCODE_PREPARE_AUTHORITY",
+                "resumed OpenCode invocation has no validated continuation identity",
+                ProviderError::UnknownIdentity,
+            )
+        })?;
         argv.extend(["-s".into(), continuation.session().into()]);
     }
     let model = match &input.route.effort {
@@ -207,80 +204,100 @@ fn prepare(
     let user_skills = staged_skills.root.clone();
     let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
     let mut omitted_discovery = Vec::new();
-    let permission = if access == Access::WorktreeWrite {
-        // Confinement enforces path and credential access. Do not add headless
-        // approval prompts for writer tools or directories outside the cwd.
-        serde_json::json!({"*": "allow"})
-    } else {
-        let mut permission = serde_json::json!({
-            "edit": "deny",
-            "bash": "allow",
-            "webfetch": "deny",
-        });
+    let permission = {
+        // The provider's own prompt layer cannot answer in a headless lane.
+        // The outer profile remains the source of path and network authority.
+        let native = crate::launch::OPENCODE_NATIVE_PERMISSIONS;
+        let mut permission = serde_json::Map::new();
+        permission.insert(native.default_key.into(), native.default_value.into());
         let mut external = serde_json::Map::new();
         let mut reads = serde_json::Map::new();
         // The pinned cwd and candidate state are siblings. Headless tools must
         // not prompt for the private directory where progress is published.
         let progress = format!("{}/**", private.to_str().ok_or(ProviderError::InvalidPath)?);
-        external.insert(progress.clone(), "allow".into());
-        reads.insert(progress, "allow".into());
+        external.insert(progress.clone(), native.path_value.into());
+        reads.insert(progress, native.path_value.into());
         if input.git_context {
             // Scratch is outside the workspace; headless runs cannot answer the
             // external-directory prompt. Keep the exception inside its existing grant.
             // https://opencode.ai/docs/permissions/#external-directories
             let scratch = format!(
                 "{}/**",
-                plan.scratch
-                    .path
-                    .to_str()
-                    .ok_or(ProviderError::InvalidPath)?
+                plan.scratch.path.to_str().ok_or_else(|| {
+                    input.boundary_error(
+                        "OPENCODE_PREPARE_AUTHORITY_2",
+                        "Git-context scratch path cannot be represented by OpenCode",
+                        ProviderError::InvalidPath,
+                    )
+                })?
             );
-            external.insert(scratch.clone(), "allow".into());
-            reads.insert(scratch, "allow".into());
+            external.insert(scratch.clone(), native.path_value.into());
+            reads.insert(scratch, native.path_value.into());
         }
         if let Some(skills) = &user_skills {
             // Keep native paths usable even when the skills root is itself a link.
             let pattern = format!("{}/**", skills.display());
-            external.insert(pattern.clone(), "allow".into());
-            reads.insert(pattern, "allow".into());
+            external.insert(pattern.clone(), native.path_value.into());
+            reads.insert(pattern, native.path_value.into());
         }
         for grant in &skill_reads {
             let pattern = format!("{}/**", grant.path.display());
-            external.insert(pattern.clone(), "allow".into());
-            reads.insert(pattern, "allow".into());
+            external.insert(pattern.clone(), native.path_value.into());
+            reads.insert(pattern, native.path_value.into());
+        }
+        if access == Access::ReadOnly {
+            for grant in &plan.read_roots {
+                let pattern = match grant.scope {
+                    provenant_confinement::permissions::PathScope::Exact => {
+                        grant.path.display().to_string()
+                    }
+                    provenant_confinement::permissions::PathScope::Subtree => {
+                        format!("{}/**", grant.path.display())
+                    }
+                };
+                external.insert(pattern.clone(), native.path_value.into());
+                reads.insert(pattern, native.path_value.into());
+            }
         }
         if !external.is_empty() {
-            permission["external_directory"] = external.into();
-            permission["read"] = reads.into();
+            permission.insert(native.external_directory_key.into(), external.into());
+            permission.insert(native.read_key.into(), reads.into());
         }
-        permission
+        serde_json::Value::Object(permission)
     };
     let config = serde_json::json!({
         "autoupdate": false,
         "share": "disabled",
         "mcp": {},
-        "plugin": [],
         "permission": permission,
     })
     .to_string();
-    let package = package_grant(input.executable, &mut omitted_discovery);
+    let package = package_grant(input.executable, &mut omitted_discovery, input.policy)?;
     // Bypass Apple's Git shim, including when the selected binary is Homebrew's.
     let bin = plan.scratch.path.join("bin");
-    let shell = access == Access::WorktreeWrite;
-    let defaults = crate::launch::tool_search_path(input.home, shell);
+    let writer = access == Access::WorktreeWrite;
+    let defaults = crate::launch::tool_search_path(input.home, true, input.policy)?;
     let path = match std::env::join_paths(
         std::iter::once(bin.clone()).chain(std::env::split_paths(&defaults)),
     ) {
         Ok(path) => path,
-        Err(_) if !shell => {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: the OpenCode Git launcher cannot be included in PATH; continuing without it"
-            );
+        Err(_) if !writer => {
+            crate::launch::policy_warning(
+                input.policy,
+                "OPENCODE_PREPARE_NONE_2",
+                "the optional read-only Git launcher cannot be encoded in PATH; the selected Git remains explicitly granted",
+            )?;
             defaults
         }
-        Err(_) => return Err(ProviderError::InvalidPath),
+        Err(_) => {
+            return Err(input.policy.boundary_error(
+                "OPENCODE_PREPARE_GIT_ISOLATION",
+                provenant_records::policy::Facts::violation(
+                    "the private Git launcher cannot be placed first in PATH",
+                ),
+                ProviderError::InvalidPath,
+            ));
+        }
     };
     let mut env = base_env(input, &plan.scratch.path, path);
     let xdg = |key, fallback| {
@@ -301,22 +318,23 @@ fn prepare(
         crate::launch::filter_optional_grants(
             &mut runtime_reads,
             start,
-            input.home,
+            &input.credential_roots,
+            input.policy,
             crate::launch::OmissionSource::Toolchain,
             &mut omitted_discovery,
-        );
+        )?;
     }
-    // Preserve the existing provider configuration without making skills
-    // readable when discovery is off. Do not follow unrelated config links.
+    // Preserve ordinary provider configuration without importing user plugins
+    // or skills into the lane. Do not follow unrelated config links.
     let config_dir = config_home.join("opencode");
     let optional_start = runtime_reads.len();
     if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
-        && !provenant_confinement::refuses_lane_root(&config_dir, true, Some(input.home))
+        && !provenant_confinement::refuses_lane_root(&config_dir, true, &input.credential_roots)
         && let Ok(entries) = std::fs::read_dir(&config_dir)
     {
         runtime_reads.push(exact(&config_dir));
         for entry in entries.flatten() {
-            if entry.file_name() == "skills" {
+            if matches!(entry.file_name().to_str(), Some("skills" | "plugins")) {
                 continue;
             }
             if let Ok(kind) = entry.file_type() {
@@ -329,7 +347,7 @@ fn prepare(
         }
     }
     if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
-        && provenant_confinement::refuses_lane_root(&config_dir, true, Some(input.home))
+        && provenant_confinement::refuses_lane_root(&config_dir, true, &input.credential_roots)
         && !omitted_discovery.iter().any(|entry| {
             entry.path == config_dir
                 && entry.source == crate::launch::OmissionSource::ProviderConfig
@@ -343,10 +361,11 @@ fn prepare(
     crate::launch::filter_optional_grants(
         &mut runtime_reads,
         optional_start,
-        input.home,
+        &input.credential_roots,
+        input.policy,
         crate::launch::OmissionSource::ProviderConfig,
         &mut omitted_discovery,
-    );
+    )?;
     let mut authentication_roots = runtime_reads.split_off(optional_start);
     authentication_roots.push(exact(host_data.join("auth.json")));
     runtime_reads.extend(skill_reads);
@@ -362,17 +381,18 @@ fn prepare(
             target: input.provenant.git.to_owned(),
         },
     ];
-    // Mirror provider configuration as individual links; staged skills have their own tree.
+    // Mirror ordinary provider settings as individual links. Lane-owned
+    // instructions, hooks and skills use their own private paths.
     let private_config = private.join("config");
     {
         let private_opencode = private_config.join("opencode");
         setup.push(SetupStep::CreateDir(private_opencode.clone()));
         if let Ok(canonical) = std::fs::canonicalize(&config_dir)
-            && !provenant_confinement::refuses_lane_root(&canonical, true, Some(input.home))
+            && !provenant_confinement::refuses_lane_root(&canonical, true, &input.credential_roots)
             && let Ok(entries) = std::fs::read_dir(&config_dir)
         {
             for entry in entries.flatten() {
-                if entry.file_name() != "skills"
+                if !matches!(entry.file_name().to_str(), Some("skills" | "plugins"))
                     && entry.file_type().is_ok_and(|kind| !kind.is_symlink())
                 {
                     setup.push(SetupStep::Symlink {
@@ -398,14 +418,9 @@ fn prepare(
     }
     // Writers' system roots do not cover a host-selected Homebrew Git.
     let process_executables = vec![exact(input.executable), exact(input.provenant.git)];
-    // Read-only Bash needs a shell and atomic rename utilities, but receives
-    // no writer toolchain or source write grant. As for Claude, Codex and AGY
-    // readers, the rendered profile denies writes to the source and protected
-    // checkouts (`push_boundaries`); OpenCode's permission config is not that boundary.
-    let mut tool_exec_roots = vec![subtree("/bin"), subtree("/usr/bin")];
-    if shell {
-        tool_exec_roots.push(package.clone());
-    }
+    // Shell tools run under the outer lane profile. Its write grants and
+    // protected checkouts, not OpenCode's prompt config, set write authority.
+    let mut tool_exec_roots = vec![subtree("/bin"), subtree("/usr/bin"), package.clone()];
     if access == Access::ReadOnly {
         // OpenCode's grep, glob and list tools execute ripgrep. It resolves
         // `rg` from PATH, then from its cache bin ($XDG_CACHE_HOME/opencode/bin),
@@ -446,19 +461,9 @@ fn prepare(
             private.join("state").into_os_string(),
         ),
     ]);
-    // Only lanes whose permissions allow bash can run the toolchain.
-    if shell {
-        crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
-        crate::launch::node_tools(
-            input.home,
-            access,
-            crate::launch::lane_cache(input),
-            &mut tool_requirements,
-            &mut env,
-        );
-    }
     env.push(("OPENCODE_CONFIG_CONTENT".into(), config.into()));
-    // No repository configuration or plugins, and no Claude Code files.
+    // No repository configuration or Claude Code files. Provenant's global
+    // plugin is loaded from the private OpenCode config home.
     for key in [
         "OPENCODE_DISABLE_AUTOUPDATE",
         "OPENCODE_DISABLE_PROJECT_CONFIG",
@@ -476,8 +481,10 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: staged_skills,
-        tool_requirements,
+        tool_requirements: Default::default(),
         git_wrapper: Default::default(),
+        policy: input.policy.clone(),
+        credential_roots: input.credential_roots.clone(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables,
@@ -515,15 +522,22 @@ fn prepare(
         },
         stream,
     };
-    crate::launch::prepare_tool_requirements(input, &mut spec);
+    crate::launch::prepare_tool_requirements(input, &mut spec)?;
     Ok(spec)
 }
 
 /// The server's own cause for a failed HTTP request, from its log lines
 /// (`... cause="..." ... http.status=500`). Only a bounded, printable cause on
 /// a 5xx line is kept; no other stderr prose is copied.
-fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
-    const LIMIT: usize = 240;
+const SERVER_FAILURE_CAUSE_LIMIT: usize = 240;
+
+#[derive(Debug, PartialEq, Eq)]
+struct ServerFailureDiagnostic {
+    status: u16,
+    cause: String,
+}
+
+fn parse_failure_diagnostic(stderr: &[u8]) -> Option<ServerFailureDiagnostic> {
     let stderr = std::str::from_utf8(stderr).ok()?;
     stderr.lines().find_map(|line| {
         let status = line.split(" http.status=").nth(1)?;
@@ -548,13 +562,28 @@ fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
                 }
             })
             .collect();
-        let first = provenant_confinement::redact::bounded_line(&printable, LIMIT);
-        (!first.is_empty()).then(|| format!("opencode server failed with HTTP {digits}: {first}"))
+        let cause =
+            provenant_confinement::redact::bounded_line(&printable, SERVER_FAILURE_CAUSE_LIMIT);
+        let status = digits.parse().ok()?;
+        (!cause.is_empty()).then_some(ServerFailureDiagnostic { status, cause })
     })
 }
 
-/// Extract only bounded protocol identifiers, never provider messages or bodies.
-pub fn stdout_error_diagnostic(stdout: &[u8]) -> Option<String> {
+fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
+    let failure = parse_failure_diagnostic(stderr)?;
+    Some(format!(
+        "opencode server failed with HTTP {}: {}",
+        failure.status, failure.cause
+    ))
+}
+
+/// Parse the error envelope, projecting identifiers and the requested route,
+/// never arbitrary provider messages or response bodies.
+pub fn stdout_error_diagnostic(
+    stdout: &[u8],
+    model: Option<&str>,
+    variant: Option<&str>,
+) -> Option<String> {
     fn identifier(value: Option<&str>) -> &str {
         value
             .filter(|s| {
@@ -564,6 +593,17 @@ pub fn stdout_error_diagnostic(stdout: &[u8]) -> Option<String> {
                         b.is_ascii_lowercase()
                             || b.is_ascii_digit()
                             || matches!(b, b'.' | b'_' | b'-')
+                    })
+            })
+            .unwrap_or("unknown")
+    }
+    fn selector(value: Option<&str>) -> &str {
+        value
+            .filter(|text| {
+                !text.is_empty()
+                    && text.len() <= 128
+                    && text.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')
                     })
             })
             .unwrap_or("unknown")
@@ -591,9 +631,24 @@ pub fn stdout_error_diagnostic(stdout: &[u8]) -> Option<String> {
             .filter(|n| (100..=599).contains(n))
             .map(|n| n.to_string())
             .unwrap_or_else(|| "unknown".into());
+        let invalid_reference = [
+            error.get("message"), error.pointer("/data/message"),
+            body.as_ref().and_then(|body| body.pointer("/error/message")),
+            error.get("type"),
+        ].into_iter().flatten().filter_map(serde_json::Value::as_str).any(|message| {
+            let message = message.to_ascii_lowercase();
+            message.contains("invalid model reference")
+                || message.contains("unsupported variant")
+                || message.contains("unknown variant")
+                || message.contains("modelnotfound")
+                || message.contains("variantnotfound")
+                || ((message.contains("variant") || message.contains("effort"))
+                    && (message.contains("not supported") || message.contains("not found")))
+        });
+        let guidance = if invalid_reference { "; choose a supported model and variant (check the route's effort)" } else { "" };
         Some(provenant_confinement::redact::bounded_line(
-            &format!("opencode provider error: type={kind}, status={status}, code={code}"),
-            240,
+            &format!("opencode provider error: model={}, variant={}, type={kind}, status={status}, code={code}{guidance}", selector(model), selector(variant.or(Some("default")))),
+            640,
         ))
     })
 }
@@ -730,7 +785,8 @@ struct ErrorBody {
 }
 #[derive(Deserialize)]
 struct LimitError {
-    #[serde(default, rename = "type", alias = "name")]
+    // Provider HTTP errors may report only a code; absence is current wire data.
+    #[serde(default, rename = "type")]
     kind: String,
     message: Option<String>,
     #[serde(default)]
@@ -914,7 +970,12 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     })
 }
 
-crate::quota_source!(OpenCode, "opencode");
+crate::quota_source!(
+    OpenCode,
+    "opencode",
+    crate::quota_live::opencode::capture_source,
+    crate::quota::opencode::decode_source
+);
 
 #[cfg(test)]
 mod tests {
@@ -1114,146 +1175,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn v2_text_without_finish_observes_model_from_live_wal() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = rusqlite::Connection::open(dir.path().join("opencode.db")).unwrap();
-        db.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; \
-             CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)",
-        )
-        .unwrap();
-        db.execute(
-            "INSERT INTO session_message VALUES (?, 'assistant', ?)",
-            (
-                "ses_x",
-                r#"{"model":{"id":"beam-free","providerID":"opencode-go"},"finish":"stop"}"#,
-            ),
-        )
-        .unwrap();
-        assert!(dir.path().join("opencode.db-wal").is_file());
-        let mut stream = OpenCode.stream(None).unwrap();
-        for chunk in
-            include_bytes!("../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl")
-                .chunks(17)
-        {
-            OpenCode.observe(&mut stream, chunk).unwrap();
-        }
-        let outcome = OpenCode
-            .finish(
-                stream,
-                crate::ExitObservation {
-                    code: Some(0),
-                    timed_out: false,
-                },
-            )
-            .unwrap();
-        assert_eq!(outcome.status(), crate::OutcomeStatus::Success);
-        assert_eq!(outcome.session(), Some("ses_x"));
-        assert_eq!(
-            observe_model(dir.path(), outcome.session().unwrap()).unwrap(),
-            "opencode/opencode-go/beam-free"
-        );
+    #[derive(Clone, Copy)]
+    enum ModelSource {
+        Stream(&'static [u8]),
+        SessionV2,
     }
 
-    #[test]
-    fn recorded_stream_session_selects_v2_model() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = rusqlite::Connection::open(dir.path().join("opencode.db")).unwrap();
-        db.execute_batch("CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")
-            .unwrap();
-        db.execute(
-            "INSERT INTO session_message VALUES (?, 'assistant', ?)",
-            (
-                "FIXTURE_SESSION_IDENTIFIER_007",
-                r#"{"model":{"id":"glm-5.3-flash-free","providerID":"opencode"}}"#,
-            ),
-        )
-        .unwrap();
-        let mut stream = OpenCode.stream(None).unwrap();
-        OpenCode
-            .observe(
-                &mut stream,
-                include_bytes!(
-                    "../../../tests/fixtures/providers/opencode/unversioned-success.jsonl"
-                ),
-            )
-            .unwrap();
-        let outcome = OpenCode
-            .finish(
-                stream,
-                crate::ExitObservation {
-                    code: Some(0),
-                    timed_out: false,
-                },
-            )
-            .unwrap();
-        assert_eq!(
-            observe_model(dir.path(), outcome.session().unwrap()).unwrap(),
-            "opencode/opencode/glm-5.3-flash-free"
-        );
-        assert!(matches!(
-            observe_model(dir.path(), "ses_none"),
-            Err(ProviderError::UnknownIdentity)
-        ));
-        db.execute(
-            "INSERT INTO session_message VALUES (?, 'assistant', ?)",
-            (
-                "FIXTURE_SESSION_IDENTIFIER_007",
-                r#"{"model":{"id":"other","providerID":"opencode"}}"#,
-            ),
-        )
-        .unwrap();
-        assert!(matches!(
-            observe_model(dir.path(), outcome.session().unwrap()),
-            Err(ProviderError::IdentityMismatch)
-        ));
+    struct ModelCase {
+        session: &'static str,
+        model: &'static str,
+        expected: &'static str,
+        source: ModelSource,
+        live_wal: bool,
     }
 
-    fn seed_v1(dir: &std::path::Path, provider: &str, model: &str) {
-        let db = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
-        db.execute_batch("CREATE TABLE IF NOT EXISTS message (session_id TEXT, data TEXT)")
-            .unwrap();
-        db.execute(
-            "INSERT INTO message VALUES ('ses_z', ?)",
-            [format!(
-                r#"{{"role":"assistant","providerID":"{provider}","modelID":"{model}"}}"#
-            )],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn zen_session_recorded_in_message_table_is_observed() {
-        let dir = tempfile::tempdir().unwrap();
-        seed_v1(dir.path(), "opencode", "deepseek-v4.1-flash-free");
-        assert_eq!(
-            observe_model(dir.path(), "ses_z").unwrap(),
-            "opencode/opencode/deepseek-v4.1-flash-free"
-        );
-        seed_v1(dir.path(), "opencode-go", "mimo-v2.6-flash");
-        assert!(matches!(
-            observe_model(dir.path(), "ses_z"),
-            Err(ProviderError::IdentityMismatch)
-        ));
-        assert!(matches!(
-            observe_model(dir.path(), "ses_other"),
-            Err(ProviderError::UnknownIdentity)
-        ));
-    }
-
-    #[test]
-    fn go_session_recorded_in_message_table_names_the_go_provider() {
-        let dir = tempfile::tempdir().unwrap();
-        seed_v1(dir.path(), "opencode-go", "mimo-v2.6-flash");
-        assert_eq!(
-            observe_model(dir.path(), "ses_z").unwrap(),
-            "opencode/opencode-go/mimo-v2.6-flash"
-        );
-    }
-
-    /// OpenCode 2.x keeps a session only in `session_v2`, with its assistant
-    /// turns in `session_message`; the older `session` table is not written.
+    /// Seed only the current session and assistant-turn tables.
     fn seed_v2_only(dir: &std::path::Path, session: &str, provider: &str, model: &str) {
         let db = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
         db.execute_batch(
@@ -1276,22 +1212,121 @@ mod tests {
     }
 
     #[test]
-    fn zen_session_recorded_only_in_session_v2_is_found_and_observed() {
+    fn model_observation_follows_each_session_source() {
+        let cases = [
+            ModelCase {
+                session: "ses_x",
+                model: r#"{"model":{"id":"beam-free","providerID":"opencode-go"},"finish":"stop"}"#,
+                expected: "opencode/opencode-go/beam-free",
+                source: ModelSource::Stream(include_bytes!(
+                    "../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl"
+                )),
+                live_wal: true,
+            },
+            ModelCase {
+                session: "FIXTURE_SESSION_IDENTIFIER_007",
+                model: r#"{"model":{"id":"glm-5.3-flash-free","providerID":"opencode"}}"#,
+                expected: "opencode/opencode/glm-5.3-flash-free",
+                source: ModelSource::Stream(include_bytes!(
+                    "../../../tests/fixtures/providers/opencode/unversioned-success.jsonl"
+                )),
+                live_wal: false,
+            },
+            ModelCase {
+                session: "ses_zen",
+                model: r#"{"model":{"id":"deepseek-v4.1-flash-free","providerID":"opencode","variant":"default"}}"#,
+                expected: "opencode/opencode/deepseek-v4.1-flash-free",
+                source: ModelSource::SessionV2,
+                live_wal: false,
+            },
+        ];
+
+        for case in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let db = rusqlite::Connection::open(dir.path().join("opencode.db")).unwrap();
+            if case.live_wal {
+                db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+                    .unwrap();
+            }
+            db.execute_batch(
+                "CREATE TABLE IF NOT EXISTS session_message (session_id TEXT, type TEXT, data TEXT)",
+            )
+            .unwrap();
+            if matches!(case.source, ModelSource::SessionV2) {
+                db.execute_batch("CREATE TABLE session_v2 (id TEXT PRIMARY KEY)")
+                    .unwrap();
+                db.execute("INSERT INTO session_v2 VALUES (?)", [case.session])
+                    .unwrap();
+            }
+            db.execute(
+                "INSERT INTO session_message VALUES (?, 'assistant', ?)",
+                (case.session, case.model),
+            )
+            .unwrap();
+            if case.live_wal {
+                assert!(dir.path().join("opencode.db-wal").is_file());
+            }
+
+            let observed_session = match case.source {
+                ModelSource::Stream(bytes) => {
+                    let mut stream = OpenCode.stream(None).unwrap();
+                    for chunk in bytes.chunks(17) {
+                        OpenCode.observe(&mut stream, chunk).unwrap();
+                    }
+                    let outcome = OpenCode
+                        .finish(
+                            stream,
+                            crate::ExitObservation {
+                                code: Some(0),
+                                timed_out: false,
+                            },
+                        )
+                        .unwrap();
+                    assert_eq!(outcome.status(), crate::OutcomeStatus::Success);
+                    outcome.session().unwrap().to_owned()
+                }
+                ModelSource::SessionV2 => {
+                    session_exists(dir.path(), case.session).unwrap();
+                    case.session.to_owned()
+                }
+            };
+            assert_eq!(observed_session, case.session);
+            assert_eq!(
+                observe_model(dir.path(), &observed_session).unwrap(),
+                case.expected
+            );
+        }
+    }
+
+    #[test]
+    fn model_observation_rejects_unknown_sessions_and_conflicting_models() {
         let dir = tempfile::tempdir().unwrap();
-        seed_v2_only(
-            dir.path(),
-            "ses_zen",
-            "opencode",
-            "deepseek-v4.1-flash-free",
-        );
-        session_exists(dir.path(), "ses_zen").unwrap();
-        assert_eq!(
-            observe_model(dir.path(), "ses_zen").unwrap(),
-            "opencode/opencode/deepseek-v4.1-flash-free"
-        );
+        let db = rusqlite::Connection::open(dir.path().join("opencode.db")).unwrap();
+        db.execute_batch("CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")
+            .unwrap();
+        db.execute(
+            "INSERT INTO session_message VALUES (?, 'assistant', ?)",
+            (
+                "fixture-session",
+                r#"{"model":{"id":"glm-5.3-flash-free","providerID":"opencode"}}"#,
+            ),
+        )
+        .unwrap();
         assert!(matches!(
-            session_exists(dir.path(), "ses_other"),
+            observe_model(dir.path(), "unknown-session"),
             Err(ProviderError::UnknownIdentity)
+        ));
+        db.execute(
+            "INSERT INTO session_message VALUES (?, 'assistant', ?)",
+            (
+                "fixture-session",
+                r#"{"model":{"id":"other","providerID":"opencode"}}"#,
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            observe_model(dir.path(), "fixture-session"),
+            Err(ProviderError::IdentityMismatch)
         ));
     }
 
@@ -1329,25 +1364,43 @@ mod tests {
     );
 
     #[test]
-    fn final_text_without_step_finish_succeeds_only_on_clean_exit() {
+    fn completion_status_follows_answer_stop_and_exit_state() {
         use crate::{ExitObservation, OutcomeStatus};
 
-        for (code, timed_out, expected) in [
-            (Some(0), false, OutcomeStatus::Success),
-            (Some(1), false, OutcomeStatus::Failed),
-            (None, false, OutcomeStatus::Failed),
-            (Some(0), true, OutcomeStatus::Partial),
+        let stop =
+            "{\"type\":\"step_finish\",\"sessionID\":\"fixture\",\"part\":{\"reason\":\"stop\"}}\n";
+        let answerless = FINAL_TEXT_WITHOUT_FINISH
+            .rsplit_once("{\"type\":\"text\"")
+            .unwrap()
+            .0;
+        for (answer, stop_present, code, timed_out, expected) in [
+            (true, false, Some(0), false, OutcomeStatus::Success),
+            (true, true, Some(0), false, OutcomeStatus::Success),
+            (false, false, Some(0), false, OutcomeStatus::Partial),
+            (false, true, Some(0), false, OutcomeStatus::Success),
+            (true, false, Some(1), false, OutcomeStatus::Failed),
+            (true, false, None, false, OutcomeStatus::Failed),
+            (true, false, Some(0), true, OutcomeStatus::Partial),
         ] {
             let mut stream = OpenCode.stream(None).unwrap();
             let mut events = Vec::new();
-            for chunk in FINAL_TEXT_WITHOUT_FINISH.as_bytes().chunks(17) {
+            let raw = if answer {
+                FINAL_TEXT_WITHOUT_FINISH
+            } else {
+                answerless
+            };
+            let mut input = raw.to_owned();
+            if stop_present {
+                input.push_str(stop);
+            }
+            for chunk in input.as_bytes().chunks(17) {
                 events.extend(OpenCode.observe(&mut stream, chunk).unwrap());
             }
-            assert!(events.contains(&E::Text("Provenant".into())));
+            assert_eq!(events.contains(&E::Text("Provenant".into())), answer);
             let outcome = OpenCode
                 .finish(stream, ExitObservation { code, timed_out })
                 .unwrap();
-            assert_eq!(outcome.status(), expected, "{code:?}, {timed_out}");
+            assert_eq!(outcome.status(), expected, "{answer}, {stop_present}");
         }
     }
 
@@ -1379,26 +1432,6 @@ mod tests {
     }
 
     #[test]
-    fn clean_exit_without_answer_or_stop_remains_partial() {
-        let raw = FINAL_TEXT_WITHOUT_FINISH
-            .rsplit_once("{\"type\":\"text\"")
-            .unwrap()
-            .0;
-        let mut stream = OpenCode.stream(None).unwrap();
-        OpenCode.observe(&mut stream, raw.as_bytes()).unwrap();
-        let outcome = OpenCode
-            .finish(
-                stream,
-                crate::ExitObservation {
-                    code: Some(0),
-                    timed_out: false,
-                },
-            )
-            .unwrap();
-        assert_eq!(outcome.status(), crate::OutcomeStatus::Partial);
-    }
-
-    #[test]
     fn server_shell_state_is_created_and_writable() {
         let plan = crate::tests::read_only_plan("/fixture", Some("login"));
         let route = crate::tests::route("opencode", "fixture-model");
@@ -1410,13 +1443,7 @@ mod tests {
             std::path::Path::new("/fixture/repo"),
             None,
         );
-        let spec = prepare(
-            &input,
-            Access::ReadOnly,
-            Session::Fresh,
-            OpenCode.stream(None).unwrap(),
-        )
-        .unwrap();
+        let spec = OpenCode.prepare(input).unwrap();
         let shell = plan
             .permissions()
             .private_state
@@ -1429,98 +1456,6 @@ mod tests {
         assert!(shell.starts_with(&plan.permissions().private_state.as_ref().unwrap().path));
         let argv: Vec<_> = spec.argv.iter().map(|a| a.to_string_lossy()).collect();
         assert!(argv.iter().any(|a| a == "--print-logs"));
-    }
-
-    #[test]
-    fn read_only_search_grants_cached_ripgrep_and_system_grep() {
-        use provenant_confinement::permissions::{PathGrant, PathScope};
-        use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
-
-        let base = crate::tests::read_only_plan("/fixture", Some("login"));
-        let mut permissions = base.permissions().clone();
-        // Provider state is attempt-private and separate from the lane state
-        // root, as in the Seatbelt snapshot fixture.
-        permissions.private_state = Some(PathGrant {
-            path: "/fixture/provider-state".into(),
-            scope: PathScope::Subtree,
-        });
-        let plan = ConfinedPlan::new(PlanRequest {
-            scope: base.scope(),
-            permissions,
-            codex: CodexPolicy::Clean,
-            extensions: ExtensionPolicy::Deny,
-            agy_state: None,
-        })
-        .unwrap();
-        let route = crate::tests::route("opencode", "fixture-model");
-        let prompt = crate::Prompt::new("fixture".into());
-        let input = crate::tests::fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            std::path::Path::new("/fixture/repo"),
-            None,
-        );
-        let spec = prepare(
-            &input,
-            Access::ReadOnly,
-            Session::Fresh,
-            OpenCode.stream(None).unwrap(),
-        )
-        .unwrap();
-        let env = |key: &str| {
-            spec.env
-                .iter()
-                .find(|(name, _)| name == key)
-                .map(|(_, value)| value.clone())
-        };
-        let config: serde_json::Value = serde_json::from_str(
-            &env("OPENCODE_CONFIG_CONTENT")
-                .expect("inline config")
-                .to_string_lossy(),
-        )
-        .unwrap();
-        assert_eq!(config["permission"]["bash"], "allow");
-        assert_eq!(config["permission"]["edit"], "deny");
-
-        // OpenCode resolves ripgrep from PATH and then its cache bin, which is
-        // XDG_CACHE_HOME/opencode/bin under the lane's private state.
-        let rg = exact(std::path::Path::new(
-            "/fixture/provider-state/cache/opencode/bin/rg",
-        ));
-        assert_eq!(
-            spec.profile.spec.process_executables,
-            [exact(input.executable), exact(input.provenant.git)]
-        );
-        assert_eq!(
-            spec.profile.spec.tool_exec_roots,
-            [
-                subtree("/bin"),
-                subtree("/usr/bin"),
-                rg.clone(),
-                exact("/usr/bin/grep")
-            ]
-        );
-        // No writer toolchain leaks into a read-only lane.
-        let path: Vec<_> = std::env::split_paths(&env("PATH").expect("PATH")).collect();
-        assert!(!path.contains(&input.home.join(".cargo/bin")), "{path:?}");
-        assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
-
-        let profile = provenant_confinement::permissions::snapshot::render(
-            plan.permissions(),
-            &spec.profile,
-            input.home,
-        )
-        .unwrap();
-        let exec = format!("(allow process-exec (literal \"{}\"))", rg.path.display());
-        assert!(profile.contains(&exec), "{exec}");
-        assert!(
-            provenant_confinement::write_grants(plan.permissions(), &spec.profile)
-                .iter()
-                .all(|grant| !grant.path.starts_with(input.cwd))
-        );
-        // The private state grant is the read access ripgrep needs.
-        assert!(profile.contains("(allow file-read* (subpath \"/fixture/provider-state\"))"));
     }
 
     #[cfg(unix)]
@@ -1561,31 +1496,65 @@ mod tests {
         image(&second, 6, &[])?;
         let alias = root.join("host/alias.dylib");
         symlink(&first, &alias)?;
-        let denied = [
-            home.join("Documents/plain.txt"),
-            root.join("host/Cellar/plain.txt"),
-            home.join("fixture.dylib"),
-            lane.join("state/fixture.dylib"),
-            lane.join("scratch/fixture.dylib"),
-            cwd.join("fixture.dylib"),
-            root.join("host/.ssh/fixture.dylib"),
-            root.join("host/executable"),
-            root.join("host/directory"),
-        ];
+        #[derive(Clone, Copy)]
+        enum Coverage {
+            Library,
+            AlreadyCovered,
+            CredentialOmitted,
+            Ineligible,
+        }
+        struct DependencyFixture {
+            path: PathBuf,
+            coverage: Coverage,
+        }
+
+        let home_text = home.join("Documents/plain.txt");
+        let host_text = root.join("host/Cellar/plain.txt");
+        let home_library = home.join("fixture.dylib");
+        let state_library = lane.join("state/fixture.dylib");
+        let scratch_library = lane.join("scratch/fixture.dylib");
+        let worktree_library = cwd.join("fixture.dylib");
+        let credential_library = root.join("host/.ssh/fixture.dylib");
+        let executable = root.join("host/executable");
+        let directory = root.join("host/directory");
         // Already-covered images still contribute their own dependencies.
         let hidden = root.join("host/hidden.dylib");
         image(&hidden, 6, &[])?;
-        for path in &denied {
+        for path in [
+            &home_text,
+            &host_text,
+            &home_library,
+            &state_library,
+            &scratch_library,
+            &worktree_library,
+            &credential_library,
+            &executable,
+            &directory,
+        ] {
             image(path, 6, &[&hidden])?;
         }
-        std::fs::write(&denied[0], "plain text")?;
-        std::fs::write(&denied[1], "plain text")?;
-        image(&denied[7], 2, &[&hidden])?;
-        std::fs::remove_file(&denied[8])?;
-        std::fs::create_dir(&denied[8])?;
+        std::fs::write(&home_text, "plain text")?;
+        std::fs::write(&host_text, "plain text")?;
+        image(&executable, 2, &[&hidden])?;
+        std::fs::remove_file(&directory)?;
+        std::fs::create_dir(&directory)?;
         let cached = lane.join("state/cache/opencode/bin/rg");
         let mut dependencies = vec![alias.as_path()];
-        dependencies.extend(denied.iter().map(|path| path.as_path()));
+        dependencies.extend(
+            [
+                &home_text,
+                &host_text,
+                &home_library,
+                &state_library,
+                &scratch_library,
+                &worktree_library,
+                &credential_library,
+                &executable,
+                &directory,
+            ]
+            .iter()
+            .map(|path| path.as_path()),
+        );
         image(&cached, 2, &dependencies)?;
         // A non-executable, unrelated rg earlier on PATH cannot suppress grants.
         let host_bin = root.join("host/bin");
@@ -1596,6 +1565,16 @@ mod tests {
         let prompt = crate::Prompt::new("fixture".into());
         let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None);
         input.home = &home;
+        // Credential stores are declared paths; the host's store is declared
+        // here as host configuration would declare it.
+        let mut credential_roots = provenant_core::CredentialRoots::for_home(&home);
+        credential_roots.add(
+            root.join("host/.ssh"),
+            provenant_core::CredentialScope::Subtree,
+            "fixture host declaration",
+            provenant_core::CredentialKind::Store,
+        );
+        input.credential_roots = credential_roots;
         let host_var = |name: &str| (name == "PATH").then(|| host_bin.clone().into_os_string());
         input.host_var = &host_var;
         let spec = prepare(
@@ -1635,49 +1614,100 @@ mod tests {
                     .all(|grant| !path.starts_with(&grant.path))
             );
         }
-        for path in [&first, &second, &denied[2], &hidden] {
-            assert!(
-                tool.dependency_closure.libraries.contains(path),
-                "{}",
-                path.display()
-            );
-            assert_eq!(std::fs::canonicalize(path)?, *path);
-            assert!(
-                spec.profile
-                    .spec
-                    .runtime_reads
-                    .iter()
-                    .all(|grant| grant.scope
-                        != provenant_confinement::permissions::PathScope::Subtree
-                        || !path.starts_with(&grant.path))
-            );
-            assert!(
-                provenant_confinement::write_grants(plan.permissions(), &spec.profile)
-                    .iter()
-                    .all(|grant| !path.starts_with(&grant.path) && !grant.path.starts_with(path))
-            );
+        let denied = [
+            home_text.clone(),
+            host_text.clone(),
+            home_library.clone(),
+            state_library.clone(),
+            scratch_library.clone(),
+            worktree_library.clone(),
+            credential_library.clone(),
+            executable.clone(),
+            directory.clone(),
+        ];
+        let dependency_fixtures = [
+            DependencyFixture {
+                path: first.clone(),
+                coverage: Coverage::Library,
+            },
+            DependencyFixture {
+                path: second.clone(),
+                coverage: Coverage::Library,
+            },
+            DependencyFixture {
+                path: home_library,
+                coverage: Coverage::Library,
+            },
+            DependencyFixture {
+                path: hidden.clone(),
+                coverage: Coverage::Library,
+            },
+            DependencyFixture {
+                path: state_library,
+                coverage: Coverage::AlreadyCovered,
+            },
+            DependencyFixture {
+                path: scratch_library,
+                coverage: Coverage::AlreadyCovered,
+            },
+            DependencyFixture {
+                path: worktree_library,
+                coverage: Coverage::AlreadyCovered,
+            },
+            DependencyFixture {
+                path: credential_library,
+                coverage: Coverage::CredentialOmitted,
+            },
+            DependencyFixture {
+                path: home_text,
+                coverage: Coverage::Ineligible,
+            },
+            DependencyFixture {
+                path: host_text,
+                coverage: Coverage::Ineligible,
+            },
+            DependencyFixture {
+                path: executable,
+                coverage: Coverage::Ineligible,
+            },
+            DependencyFixture {
+                path: directory,
+                coverage: Coverage::Ineligible,
+            },
+        ];
+        for fixture in dependency_fixtures {
+            let libraries = tool.dependency_closure.libraries.contains(&fixture.path);
+            let covered = tool
+                .dependency_closure
+                .already_covered
+                .contains(&fixture.path);
+            let omitted = tool.dependency_closure.omitted.contains(&fixture.path);
+            match fixture.coverage {
+                Coverage::Library => {
+                    assert!(libraries, "{}", fixture.path.display());
+                    assert_eq!(std::fs::canonicalize(&fixture.path)?, fixture.path);
+                    assert!(spec.profile.spec.runtime_reads.iter().all(|grant| {
+                        grant.scope != provenant_confinement::permissions::PathScope::Subtree
+                            || !fixture.path.starts_with(&grant.path)
+                    }));
+                    assert!(
+                        provenant_confinement::write_grants(plan.permissions(), &spec.profile)
+                            .iter()
+                            .all(|grant| !fixture.path.starts_with(&grant.path)
+                                && !grant.path.starts_with(&fixture.path))
+                    );
+                }
+                Coverage::AlreadyCovered => assert!(covered, "{}", fixture.path.display()),
+                Coverage::CredentialOmitted => {
+                    assert!(omitted, "{}", fixture.path.display());
+                    assert!(tool.dependency_closure.reasons.iter().any(|reason| matches!(
+                        reason,
+                        crate::IncompleteReason::OmittedCredential(path) if path == &fixture.path
+                    )));
+                }
+                Coverage::Ineligible => assert!(!libraries && !covered && !omitted),
+            }
         }
-        for path in [&denied[3], &denied[4], &denied[5]] {
-            assert!(
-                tool.dependency_closure.already_covered.contains(path),
-                "{}",
-                path.display()
-            );
-        }
-        assert!(
-            tool.dependency_closure
-                .omitted
-                .contains(&root.join("host/.ssh/fixture.dylib"))
-        );
-        assert!(
-            tool.dependency_closure
-                .reasons
-                .iter()
-                .any(|reason| matches!(
-                    reason, crate::IncompleteReason::OmittedCredential(path)
-                        if path == &root.join("host/.ssh/fixture.dylib")
-                ))
-        );
         assert!(
             !tool
                 .receipt()
@@ -1865,34 +1895,31 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
     }
 
     #[test]
-    fn server_http_failure_cause_is_a_bounded_diagnostic() {
+    fn server_http_failure_diagnostic_carries_its_typed_cause_and_status() {
         let log = concat!(
             "timestamp=t level=INFO run=a message=\"watcher stopped\" path=/x http.span=1\n",
             "timestamp=t level=INFO run=a cause=\"Error: EPERM: operation not permitted, ",
             "mkdir '/h/.local/share/opencode/shell/abc'\\n    at ServerProcess.start\" ",
             "http.span=68 role=server http.method=GET http.url=/api/location http.status=500\n",
         );
-        assert_eq!(
-            failure_diagnostic(log.as_bytes()).as_deref(),
-            Some(
-                "opencode server failed with HTTP 500: Error: EPERM: operation not permitted, \
-                 mkdir '/h/.local/share/opencode/shell/abc'"
-            )
-        );
+        let failure = parse_failure_diagnostic(log.as_bytes()).unwrap();
+        assert_eq!(failure.status, 500);
+        assert!(failure.cause.contains("EPERM"));
+        assert!(failure.cause.contains("mkdir"));
+        let rendered = failure_diagnostic(log.as_bytes()).unwrap();
+        assert!(rendered.contains(&failure.status.to_string()));
+        assert!(rendered.contains(&failure.cause));
         let long = format!(
             "level=INFO cause=\"{}\" http.status=503\n",
             "x".repeat(1000)
         );
-        let diagnostic = failure_diagnostic(long.as_bytes()).unwrap();
-        assert_eq!(
-            diagnostic.chars().count(),
-            240 + "opencode server failed with HTTP 503: ".len()
-        );
-        assert!(diagnostic.ends_with('…'));
+        let diagnostic = parse_failure_diagnostic(long.as_bytes()).unwrap();
+        assert_eq!(diagnostic.status, 503);
+        assert!(diagnostic.cause.chars().count() <= SERVER_FAILURE_CAUSE_LIMIT);
         let secret =
             "level=INFO cause=\"fetch https://user:secret@example.invalid/x\" http.status=500\n";
-        let redacted = failure_diagnostic(secret.as_bytes()).unwrap();
-        assert!(!redacted.contains("secret"), "{redacted}");
+        let redacted = parse_failure_diagnostic(secret.as_bytes()).unwrap();
+        assert!(!redacted.cause.contains("secret"));
         for unrelated in [
             "level=INFO cause=\"boom\" http.status=404\n",
             "level=INFO message=\"ok\" http.status=500\n",
@@ -1908,54 +1935,58 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
     }
 
     #[test]
-    fn discovery_reads_are_literal_along_cwd_ancestry() {
-        let plan = crate::tests::read_only_plan("/fixture", Some("login"));
-        let route = crate::tests::route("opencode", "fixture-model");
-        let prompt = crate::Prompt::new("fixture".into());
-        let input = crate::tests::fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            std::path::Path::new("/fixture/repo"),
-            None,
-        );
-        let spec = prepare(
-            &input,
-            Access::ReadOnly,
-            Session::Fresh,
-            OpenCode.stream(None).unwrap(),
-        )
-        .unwrap();
-        for parent in input.cwd.ancestors() {
-            // `/fixture` holds the fixture home, so the walk stops below it.
-            let probed = parent == input.cwd;
-            for name in [".agents", ".claude", ".codex"] {
-                assert_eq!(
-                    spec.profile
-                        .spec
-                        .discovery_reads
-                        .contains(&exact(parent.join(name))),
-                    probed,
-                    "{}",
-                    parent.display()
-                );
-            }
-        }
-        assert!(
-            spec.profile
-                .spec
-                .discovery_reads
+    fn discovery_reads_are_exact_below_the_home_for_each_cwd_shape() {
+        let cases = [
+            ("/fixture", "/fixture/repo", &["/fixture/repo"][..]),
+            (
+                "/fixture/home",
+                "/fixture/home/repo/crate",
+                &["/fixture/home/repo/crate", "/fixture/home/repo"][..],
+            ),
+        ];
+        for (root, cwd, expected_parents) in cases {
+            let plan = crate::tests::read_only_plan(root, Some("login"));
+            let route = crate::tests::route("opencode", "fixture-model");
+            let prompt = crate::Prompt::new("fixture".into());
+            let cwd = std::path::Path::new(cwd);
+            let input = crate::tests::fixture_input(&route, &plan, &prompt, cwd, None);
+            let spec = prepare(
+                &input,
+                Access::ReadOnly,
+                Session::Fresh,
+                OpenCode.stream(None).unwrap(),
+            )
+            .unwrap();
+            let expected = expected_parents
                 .iter()
-                .all(|g| g.scope == provenant_confinement::permissions::PathScope::Exact)
-        );
+                .flat_map(|parent| {
+                    [".agents", ".claude", ".codex"]
+                        .map(|name| exact(PathBuf::from(*parent).join(name)))
+                })
+                .collect::<Vec<_>>();
+            let mut actual = spec.profile.spec.discovery_reads;
+            actual.sort_by(|left, right| left.path.cmp(&right.path));
+            let mut expected = expected;
+            expected.sort_by(|left, right| left.path.cmp(&right.path));
+            assert_eq!(actual, expected);
+            assert!(
+                actual.iter().all(
+                    |grant| grant.scope == provenant_confinement::permissions::PathScope::Exact
+                )
+            );
+        }
     }
 
+    #[cfg(unix)]
     #[test]
-    fn read_only_search_path_skips_unencodable_git_directory() {
+    fn read_only_search_path_skips_unencodable_git_shim_directory() {
         use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
         let base = crate::tests::read_only_plan("/fixture", Some("login"));
+        let scratch = tempfile::tempdir().unwrap();
+        let scratch_path = scratch.path().canonicalize().unwrap().join("scratch:other");
+        std::fs::create_dir_all(scratch_path.join("bin")).unwrap();
         let mut permissions = base.permissions().clone();
-        permissions.scratch.path = "/fixture/scratch:other".into();
+        permissions.scratch.path = scratch_path;
         let plan = ConfinedPlan::new(PlanRequest {
             scope: base.scope(),
             permissions,
@@ -1981,10 +2012,8 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
         )
         .unwrap();
         let path = &spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
-        assert_eq!(
-            std::env::split_paths(path).collect::<Vec<_>>(),
-            [PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
-        );
+        let defaults = crate::launch::tool_search_path(input.home, true, input.policy).unwrap();
+        assert_eq!(path, &defaults);
         assert!(matches!(
             prepare(
                 &input,
@@ -2012,6 +2041,7 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
             None,
         );
         input.home = &home;
+        input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
         let spec = prepare(
             &input,
             Access::WorktreeWrite,
@@ -2037,6 +2067,7 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
             None,
         );
         input.home = home;
+        input.credential_roots = provenant_core::CredentialRoots::for_home(home);
         let spec = prepare(
             &input,
             Access::WorktreeWrite,
@@ -2046,86 +2077,6 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
         .unwrap();
         let path = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
         assert!(!std::env::split_paths(&path.1).any(|entry| entry == home.join(".cargo/bin")));
-    }
-
-    #[test]
-    fn git_discovery_exec_is_exact_in_both_access_modes() {
-        let plan = crate::tests::read_only_plan("/fixture", Some("login"));
-        let route = crate::tests::route("opencode", "fixture-model");
-        let prompt = crate::Prompt::new("fixture".into());
-        let input = crate::tests::fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            std::path::Path::new("/fixture/repo"),
-            None,
-        );
-        for access in [Access::ReadOnly, Access::WorktreeWrite] {
-            let spec = prepare(
-                &input,
-                access,
-                Session::Fresh,
-                OpenCode.stream(None).unwrap(),
-            )
-            .unwrap();
-            let profile = provenant_confinement::permissions::snapshot::render(
-                plan.permissions(),
-                &spec.profile,
-                input.home,
-            )
-            .unwrap();
-            let git = input.provenant.git.display();
-            let literal = format!("(allow process-exec (literal \"{git}\"))");
-            assert!(profile.contains(&literal), "{access:?} lacks {literal}");
-            let subtree_rule = format!("(allow process-exec (subpath \"{git}\"))");
-            assert!(
-                !profile.contains(&subtree_rule),
-                "{access:?} grants {subtree_rule}"
-            );
-            for shim in ["/usr/bin/git", "/usr/bin/xcode-select"] {
-                assert!(
-                    !profile.contains(&format!("(allow process-exec (literal \"{shim}\"))")),
-                    "{access:?} grants shim {shim}"
-                );
-            }
-            let path = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
-            let bin = plan.permissions().scratch.path.join("bin");
-            assert_eq!(std::env::split_paths(&path.1).next(), Some(bin.clone()));
-            assert!(spec.setup.contains(&SetupStep::Symlink {
-                link: bin.join("git"),
-                target: input.provenant.git.to_owned(),
-            }));
-            // Read-only discovery enables OpenCode's cached search binary and system grep; a
-            // writer's toolchain roots follow the system and package roots.
-            let roots = &spec.profile.spec.tool_exec_roots;
-            if access == Access::ReadOnly {
-                assert_eq!(
-                    roots,
-                    &[
-                        subtree("/bin"),
-                        subtree("/usr/bin"),
-                        exact(
-                            plan.permissions()
-                                .private_state
-                                .as_ref()
-                                .unwrap()
-                                .path
-                                .join("cache/opencode/bin/rg")
-                        ),
-                        exact("/usr/bin/grep"),
-                    ]
-                );
-            } else {
-                assert_eq!(
-                    roots[..3],
-                    [
-                        subtree("/bin"),
-                        subtree("/usr/bin"),
-                        subtree(crate::launch::package_root(input.executable).unwrap()),
-                    ]
-                );
-            }
-        }
     }
 
     #[test]
@@ -2165,58 +2116,14 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
         }
     }
 
-    /// A discovery read on the home's `.claude` or `.codex` would list their entries.
-    #[test]
-    fn seatbelt_profile_for_a_project_under_home_lists_no_home_probes() {
-        let home = std::path::Path::new("/fixture/home");
-        let plan = crate::tests::read_only_plan("/fixture/home", Some("login"));
-        let route = crate::tests::route("opencode", "fixture-model");
-        let prompt = crate::Prompt::new("fixture".into());
-        let cwd = home.join("repo/crate");
-        let input = crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None);
-        assert_eq!(input.home, home);
-        let spec = prepare(
-            &input,
-            Access::ReadOnly,
-            Session::Fresh,
-            OpenCode.stream(None).unwrap(),
-        )
-        .unwrap();
-        let profile = provenant_confinement::permissions::snapshot::render(
-            plan.permissions(),
-            &spec.profile,
-            home,
-        )
-        .unwrap();
-        let literal = |parent: &std::path::Path, name| {
-            format!("(literal \"{}\")", parent.join(name).display())
-        };
-        for name in [".agents", ".claude", ".codex"] {
-            for parent in [&cwd, &home.join("repo")] {
-                assert!(profile.contains(&literal(parent, name)), "{name}");
-            }
-            for parent in [home, std::path::Path::new("/fixture")] {
-                let literal = literal(parent, name);
-                assert!(
-                    !profile.lines().any(|line| line.starts_with("(allow file-read") && line.contains(&literal)),
-                    "{literal}"
-                );
-            }
-        }
-    }
-
     // Anchors are real host paths; on Linux `/bin` links to `/usr/bin`, and
     // only the macOS backend confines OpenCode.
     #[cfg(target_os = "macos")]
     #[test]
-    fn homebrew_launch_plan_anchors_with_default_xdg_homes() {
-        homebrew_discovery_fixture(Access::ReadOnly);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn homebrew_writer_launch_plan_anchors_with_discovery_directories() {
-        homebrew_discovery_fixture(Access::WorktreeWrite);
+    fn homebrew_launch_plan_anchors_with_discovery_directories_for_each_access_mode() {
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            homebrew_discovery_fixture(access);
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -2273,6 +2180,7 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
         let mut input = PrepareInput {
             executable: &executable,
             home: &home,
+            credential_roots: provenant_core::CredentialRoots::for_home(&home),
             ..crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None)
         };
         input.provenant.git = &git;
@@ -2326,15 +2234,22 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
                 git.display()
             )));
             assert!(profile.contains(&format!("(literal \"{}\")", cwd.join(".claude").display())));
+            let grants_subpath = |path: &std::path::Path| {
+                let needle = format!("(subpath \"{}\")", path.display());
+                profile
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("(allow") && line.contains(&needle))
+            };
             for name in [".agents", ".claude", ".codex"] {
                 for parent in [&project_parent, &cwd] {
                     let directory = parent.join(name);
                     assert!(profile.contains(&format!("(literal \"{}\")", directory.display())));
-                    assert!(!profile.contains(&format!("(subpath \"{}\")", directory.display())));
+                    // Credential-root denials may name the subtree; no grant may.
+                    assert!(!grants_subpath(&directory));
                     assert!(!profile.contains(directory.join("config.json").to_str().unwrap()));
                 }
                 // Ancestor configuration has no enclosing data-read grant.
-                assert!(!profile.contains(&format!("(subpath \"{}\")", project_parent.display())));
+                assert!(!grants_subpath(&project_parent));
             }
         }
     }
@@ -2351,6 +2266,24 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
         };
         let input = PrepareInput {
             host_var: &lookup,
+            credential_roots: {
+                let mut roots = provenant_core::CredentialRoots::for_home(std::path::Path::new(
+                    "/fixture/home",
+                ));
+                roots.add(
+                    PathBuf::from("/xdg/config/opencode"),
+                    provenant_core::CredentialScope::Subtree,
+                    "provider declaration: opencode XDG config",
+                    provenant_core::CredentialKind::Store,
+                );
+                roots.add(
+                    PathBuf::from("/xdg/data/opencode"),
+                    provenant_core::CredentialScope::Subtree,
+                    "provider declaration: opencode XDG data",
+                    provenant_core::CredentialKind::Store,
+                );
+                roots
+            },
             ..crate::tests::fixture_input(
                 &route,
                 &plan,

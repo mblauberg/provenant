@@ -63,9 +63,16 @@ another patch.
 
 ## What not to report
 
-Do not report style that lint covers, an abstraction no defect needs, tests for
-states the types make impossible, demand rigid tests or example snapshots where
-invariants suffice, or report work beyond the spec. A disclosed,
+Do not report style that lint covers, tests for states the types make impossible,
+or work beyond the spec. A disclosed,
 evidenced divergence that serves the stated outcome and stays in write scope is
 a note, not scope growth. So is a request to restore a format the spec retires:
 that is a spec conflict, not a defect.
+
+## Evolvability and rigidity
+
+Flag hand-kept parallel lists, per-host, project or provider branches, silent
+fallbacks, compatibility code, and rigid tests or snapshots that do not pin an
+invariant. Flag new refusals, locks, queues or waits outside credentials, Git
+isolation, data integrity and authority. Designing for foreseeable cases,
+including a core before a second use, is not itself a defect. See `deliver`.

@@ -29,7 +29,7 @@ pub struct Install {
     /// Plan the install without changing anything
     #[arg(long)]
     pub dry_run: bool,
-    /// Check state before a graph cutover (installer use only)
+    /// Preview the install and check the release without changing anything (installer use only)
     #[arg(long, hide = true)]
     pub upgrade_preflight: bool,
 }
@@ -43,7 +43,7 @@ pub struct Uninstall {
 
 #[derive(Debug, clap::Args)]
 pub struct Upgrade {
-    /// Proceed after the upgrade preflight reports work to drain or port
+    /// Accept the pinned toolchain install
     #[arg(long)]
     pub yes: bool,
     /// Build this checkout instead of downloading the latest release
@@ -58,7 +58,7 @@ pub(crate) fn harness_parser() -> impl clap::builder::TypedValueParser<Value = H
     clap::builder::PossibleValuesParser::new(
         provenant_records::ADAPTER_SPECS
             .iter()
-            .filter(|spec| !spec.binary.is_empty())
+            .filter(|spec| spec.install.is_some())
             .map(|spec| spec.name),
     )
     .try_map(|name| serde_json::from_value::<Harness>(serde_json::Value::String(name)))
@@ -74,9 +74,12 @@ pub fn configured_targets(
     codex_home: Option<&Path>,
 ) -> Result<Targets, InstallError> {
     let mut targets = Targets::new(roots, home, harnesses);
-    // Validate against every registered domain, so sections other commands
-    // write (accounts, routing, quota) never block installation.
-    config::apply_install_config_with_domains(&mut targets, &crate::domains::SECTIONS)?;
+    // Read installation dependencies only; unrelated domain settings remain
+    // advisory and cannot block installation.
+    config::apply_install_config_with_domains(
+        &mut targets,
+        &crate::config_reads::sections_for("knobs")?,
+    )?;
     targets.apply_environment(claude_config_dir, codex_home)?;
     Ok(targets)
 }
@@ -89,10 +92,6 @@ pub fn execute_install(
     smoke: &dyn ReleaseSmoke,
     target: &str,
 ) -> Result<InstallOutcome, InstallError> {
-    targets.hook_specs = crate::hooks::HOOK_SPECS
-        .iter()
-        .map(|spec| spec.registration)
-        .collect();
     targets.bin_dir = args.bin_dir.clone().unwrap_or(targets.bin_dir);
     targets.adopt_existing = args.adopt_existing;
     targets.hooks = matches!(args.hooks, Some(Switch::On));
@@ -132,17 +131,14 @@ mod tests {
             cli,
             ADAPTER_SPECS
                 .iter()
-                .filter(|spec| !spec.binary.is_empty())
+                .filter(|spec| spec.install.is_some())
                 .map(|spec| spec.name.to_owned())
                 .collect()
         );
-        let harnesses = [
-            Harness::Claude,
-            Harness::Codex,
-            Harness::Cursor,
-            Harness::Agy,
-            Harness::Opencode,
-        ];
+        let harnesses = ADAPTER_SPECS
+            .iter()
+            .filter(|spec| spec.install.is_some())
+            .map(|spec| spec.id);
         for harness in harnesses {
             let name = serde_json::to_value(harness)?;
             let name = name.as_str().ok_or("harness name missing")?;

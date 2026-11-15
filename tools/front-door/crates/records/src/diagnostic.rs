@@ -6,9 +6,10 @@ use std::path::{Component, Path};
 pub const MAX_DIAGNOSTIC_BYTES: usize = 1024;
 
 /// The hard boundary protected by a typed refusal, if any.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BoundaryClass {
+    #[default]
     None,
     LaneGit,
     Credentials,
@@ -341,8 +342,8 @@ impl ResourceFact {
     pub fn project(&self, diagnostic: Diagnostic) -> Diagnostic {
         match self {
             Self::Disk { free, floor, origin } => diagnostic
-                .detail(format!("disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: {})", origin.description()))
-                .next("free disk space above gc.free_floor before retrying"),
+                .detail(format!("disk space: {free} bytes available; gc.critical_free is {floor} bytes (source: {})", origin.description()))
+                .next("free disk space above gc.critical_free before retrying"),
             Self::ArgvPromptLimit { limit, origin } => diagnostic
                 .detail(format!("argv prompt exceeds domains.run.argv_prompt_limit_bytes ({limit} bytes; source: {})", origin.description()))
                 .next("shorten the prompt or adjust domains.run.argv_prompt_limit_bytes"),
@@ -498,7 +499,6 @@ pub enum DiagnosticFact {
     },
     DiskUnobserved,
     PromptLimit {
-        task_index: Option<usize>,
         limit: u64,
     },
     Resource(ResourceFact),
@@ -543,12 +543,24 @@ impl DeliveryLimit {
     }
 }
 
+/// Safe retained-writer recovery facts projected by the run owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedCustody {
+    pub scope: crate::custody::Scope,
+    pub fence: Option<String>,
+    pub lane: crate::WorkKey,
+    pub reconcile: String,
+    pub abandon: String,
+}
+
 /// Only explicitly selected safe facts belong in these fields; source errors,
 /// captured output, prompts and credentials are not safe facts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnostic {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custody: Option<RetainedCustody>,
     pub code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
@@ -584,6 +596,7 @@ impl Diagnostic {
     pub fn new(code: impl AsRef<str>) -> Self {
         Self {
             extra: Default::default(),
+            custody: None,
             code: safe_text(code.as_ref()),
             category: None,
             detail: None,
@@ -686,30 +699,40 @@ pub fn shell_path(path: &Path, destination: Destination<'_>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn every_route_exclusion_is_covered(cause: &crate::RouteExclusionReason) {
+        use crate::RouteExclusionReason as Cause;
+        match cause {
+            Cause::SetupFailed
+            | Cause::AccountPinned
+            | Cause::AdmissionRefused
+            | Cause::Disabled
+            | Cause::MissingExecutable
+            | Cause::ProviderUpdating
+            | Cause::UnknownAvailability
+            | Cause::StaleAvailability
+            | Cause::UnknownAccount
+            | Cause::DisclosureDenied
+            | Cause::ConfinementUnavailable
+            | Cause::UnsupportedEffort
+            | Cause::Exhausted
+            | Cause::PacingReserve
+            | Cause::UnknownPartialHeadroom
+            | Cause::AuthRequired
+            | Cause::LoginExpired
+            | Cause::UnverifiedModel
+            | Cause::AccountMismatch
+            | Cause::FreeTierRefused
+            | Cause::ProviderRefused
+            | Cause::InvalidAccountEvidence => {}
+        }
+    }
+
     #[test]
     fn route_exclusions_have_bounded_causes_and_actions() {
         use crate::RouteExclusionReason as Cause;
-        for cause in [
-            Cause::Disabled,
-            Cause::MissingExecutable,
-            Cause::ProviderUpdating,
-            Cause::UnknownAvailability,
-            Cause::StaleAvailability,
-            Cause::UnknownAccount,
-            Cause::DisclosureDenied,
-            Cause::ConfinementUnavailable,
-            Cause::UnsupportedEffort,
-            Cause::Exhausted,
-            Cause::PacingReserve,
-            Cause::UnknownPartialHeadroom,
-            Cause::AuthRequired,
-            Cause::LoginExpired,
-            Cause::UnverifiedModel,
-            Cause::AccountMismatch,
-            Cause::FreeTierRefused,
-            Cause::ProviderRefused,
-            Cause::InvalidAccountEvidence,
-        ] {
+        for cause in Cause::ALL {
+            every_route_exclusion_is_covered(cause);
             let diagnostic = cause.diagnostic("REFUSED");
             assert_eq!(diagnostic.code, "REFUSED");
             for text in [diagnostic.detail.unwrap(), diagnostic.next.unwrap()] {
@@ -727,11 +750,13 @@ mod tests {
             run::{SkipKind, SkippedRoute},
         };
         let mut route = SkippedRoute {
+            skipped_accounts: Vec::new(),
             extra: Default::default(),
             route: "fixture/model".into(),
             kind: SkipKind::Unavailable,
             cause: None,
             detail: "TOKEN_SENTINEL /private/source \u{1b}".into(),
+            ..Default::default()
         };
         let initial = serde_json::to_string(&route.diagnostic()).unwrap();
         assert!(!initial.contains("TOKEN_SENTINEL"));
@@ -741,28 +766,18 @@ mod tests {
         assert!(route.detail.contains("provenant quota tick"));
         assert!(!route.detail.contains("TOKEN_SENTINEL"));
         assert!(route.detail.len() <= 2 * MAX_DIAGNOSTIC_BYTES + 2);
-        route.extra.insert(
-            "guard_resource".into(),
-            serde_json::json!({"kind": "TOKEN_SENTINEL", "detail": "/private/source"}),
-        );
-        let invalid = serde_json::to_string(&route.diagnostic()).unwrap();
-        assert!(!invalid.contains("TOKEN_SENTINEL"));
-        assert!(!invalid.contains("/private/source"));
-        route.extra.insert(
-            "confinement_guard".into(),
-            serde_json::json!(ConfinementGuard::ProtectedPathOverlap),
-        );
+        let mut malformed = serde_json::to_value(&route).unwrap();
+        malformed["guard_resource"] =
+            serde_json::json!({"kind": "TOKEN_SENTINEL", "detail": "/private/source"});
+        assert!(serde_json::from_value::<SkippedRoute>(malformed).is_err());
+        route.confinement_guard = Some(ConfinementGuard::ProtectedPathOverlap);
         route.set_cause(RouteExclusionReason::ConfinementUnavailable);
         let projected = route.diagnostic();
         assert!(projected.detail.unwrap().contains("protected path overlap"));
         assert!(!route.detail.contains("TOKEN_SENTINEL"));
-        route.extra.insert(
-            "confinement_guard".into(),
-            serde_json::json!("TOKEN_SENTINEL /private/source"),
-        );
-        let invalid = serde_json::to_string(&route.diagnostic()).unwrap();
-        assert!(!invalid.contains("TOKEN_SENTINEL"));
-        assert!(!invalid.contains("/private/source"));
+        let mut malformed = serde_json::to_value(&route).unwrap();
+        malformed["confinement_guard"] = serde_json::json!("TOKEN_SENTINEL /private/source");
+        assert!(serde_json::from_value::<SkippedRoute>(malformed).is_err());
     }
 
     #[test]

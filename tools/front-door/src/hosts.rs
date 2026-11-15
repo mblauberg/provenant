@@ -231,8 +231,7 @@ fn presence(home: &Path, config: &Path) -> CredentialPresence {
 /// Reads the receipt and the files it owns, never a credential. A configuration
 /// or receipt defect is reported in place of rows rather than failing doctor.
 fn managed(roots: &provenant_core::Roots, home: &Path) -> (Vec<Managed>, Option<String>) {
-    let config = match provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
-    {
+    let config = match provenant_cli::config_reads::read_for(roots, "accounts") {
         Ok(config) => config,
         Err(error) => return (Vec::new(), Some(error.to_string())),
     };
@@ -281,6 +280,44 @@ fn agy_accounts(
         })
         .collect()
 }
+
+/// Warn while the untouched 1.x root remains. The doctor checks only the
+/// root entry itself; it never opens the old receipt or any stored state.
+fn legacy_state_warning(home: &Path) -> Option<&'static str> {
+    let root = home.join(provenant_core::LEGACY_V1_STATE_SUFFIX);
+    match fs::symlink_metadata(root) {
+        Ok(_) => Some(
+            "1.x state remains on this host. The 2.0 install copied owner configuration only; after all lanes are wound down, manually archive or remove remaining run state and other unowned data. Preserve it if rollback is required.",
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some("could not inspect whether 1.x state remains on this host"),
+    }
+}
+
+/// Report obsolete Provenant LaunchAgent plists from the shared artifact
+/// declaration. Current peer and tick agents are deliberately excluded.
+fn legacy_agent_warning(home: &Path) -> Option<&'static str> {
+    use provenant_config::{ArtifactDisposition, LegacyArtifact};
+
+    provenant_config::LEGACY_1X_ARTIFACTS
+        .iter()
+        .any(|artifact| match artifact {
+            LegacyArtifact::LaunchAgent {
+                plist,
+                disposition: ArtifactDisposition::Remove,
+                ..
+            } => match fs::symlink_metadata(home.join(plist)) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(_) => true,
+            },
+            _ => false,
+        })
+        .then_some(
+            "obsolete Provenant launch-agent files remain on this host; run the 2.0 install after lanes are wound down to remove them by name",
+        )
+}
+
 pub(crate) fn local(
     home: &Path,
     roots: &provenant_core::Roots,
@@ -341,12 +378,31 @@ pub(crate) fn local(
         claude.push(Identity { label, signin });
     }
     let (managed, managed_error) = managed(roots, home);
-    let agy_accounts =
-        provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
-            .ok()
-            .map(|config| agy_accounts(&config.domains.accounts, home))
-            .unwrap_or_default();
+    let account_config = provenant_cli::config_reads::read_for(roots, "accounts").ok();
+    let registered_accounts = account_config
+        .as_ref()
+        .map(|config| provenant_cli::accounts::homes(&config.domains.accounts))
+        .unwrap_or_default();
+    let agy_accounts = account_config
+        .as_ref()
+        .map(|config| agy_accounts(&config.domains.accounts, home))
+        .unwrap_or_default();
     let mut warnings = crate::pool_effort_warnings(roots);
+    if let Some(warning) = legacy_state_warning(home) {
+        warnings.push(warning.into());
+    }
+    if let Some(warning) = legacy_agent_warning(home) {
+        warnings.push(warning.into());
+    }
+    match provenant_config::legacy_harness_selectors(roots, home, &registered_accounts) {
+        Ok(leftovers) if !leftovers.is_empty() => warnings.push(
+            "obsolete Provenant Fabric entries remain in harness configuration; run the 2.0 install to remove them by name".into(),
+        ),
+        Ok(_) => {}
+        Err(_) => warnings.push(
+            "could not inspect known 1.x Provenant harness entries".into(),
+        ),
+    }
     let login_accounts = match provenant_cli::quota::recorded_login_rows(roots) {
         Ok(rows) => rows.into_iter().map(login_account).collect(),
         Err(_) => {
@@ -518,11 +574,47 @@ fn discard_remote_repairs(report: &mut Report) {
         row.repair = None;
     }
 }
+/// Lane worktrees of the selected checkout that an ignore file declared by an
+/// installed adapter hides from that adapter. Outside a checkout there is
+/// nothing to check; the parent checkout is the one holding the common Git
+/// directory, whose ignore files a provider applies to nested worktrees.
+fn ignore_file_warnings(globals: &Globals, state: &Path) -> Vec<String> {
+    let Ok(checkout) = roots::selected_project(globals.project.as_deref(), true) else {
+        return Vec::new();
+    };
+    let common = match provenant_os::git::repository_path(
+        &checkout,
+        provenant_os::git::RepositoryPath::CommonDir,
+    ) {
+        Ok(common) => common,
+        Err(error) => {
+            return vec![format!(
+                "warning: provider ignore files unchecked: Git common directory unavailable: {error}"
+            )];
+        }
+    };
+    let Some(parent) = common.parent() else {
+        return Vec::new();
+    };
+    let installed: Vec<_> = provenant_records::ADAPTER_SPECS
+        .iter()
+        .filter(|spec| !spec.ignore_files.is_empty() && executable(spec.binary).is_some())
+        .collect();
+    if installed.is_empty() {
+        return Vec::new();
+    }
+    provenant_cli::ignore_files::layout_warnings(parent, state, installed.iter().copied())
+}
 fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, DoctorError> {
     let Some(name) = host else {
         let resolved = roots::resolve(globals, roots::Workspace::Home, roots::Product::Optional)
             .map_err(DoctorError::local)?;
-        return local(&resolved.home, &resolved.roots).map_err(DoctorError::local);
+        let mut report = local(&resolved.home, &resolved.roots).map_err(DoctorError::local)?;
+        report.warnings.extend(ignore_file_warnings(
+            globals,
+            resolved.roots.state.as_path(),
+        ));
+        return Ok(report);
     };
     let resolved = roots::resolve(globals, roots::Workspace::Project, roots::Product::Required)
         .map_err(DoctorError::local)?;
@@ -717,6 +809,50 @@ pub(crate) fn keychain_suffix(config_dir: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn doctor_warns_for_a_remaining_legacy_root() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(super::legacy_state_warning(home.path()).is_none());
+        let legacy = home.path().join(provenant_core::LEGACY_V1_STATE_SUFFIX);
+        std::fs::create_dir_all(&legacy).unwrap();
+        assert!(super::legacy_state_warning(home.path()).is_some());
+        std::fs::remove_dir(&legacy).unwrap();
+        assert!(super::legacy_state_warning(home.path()).is_none());
+    }
+
+    #[test]
+    fn doctor_warns_only_for_declared_removed_launch_agents() {
+        use provenant_config::{ArtifactDisposition, LegacyArtifact};
+
+        let home = tempfile::tempdir().unwrap();
+        assert!(super::legacy_agent_warning(home.path()).is_none());
+        for artifact in provenant_config::LEGACY_1X_ARTIFACTS {
+            if let LegacyArtifact::LaunchAgent {
+                plist, disposition, ..
+            } = artifact
+                && matches!(disposition, ArtifactDisposition::Replace)
+            {
+                let path = home.path().join(plist);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"current agent").unwrap();
+            }
+        }
+        assert!(super::legacy_agent_warning(home.path()).is_none());
+        for artifact in provenant_config::LEGACY_1X_ARTIFACTS {
+            if let LegacyArtifact::LaunchAgent {
+                plist,
+                disposition: ArtifactDisposition::Remove,
+                ..
+            } = artifact
+            {
+                let path = home.path().join(plist);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"leftover").unwrap();
+            }
+        }
+        assert!(super::legacy_agent_warning(home.path()).is_some());
+    }
+
+    #[test]
     fn doctor_flags_an_agy_registration_without_its_isolated_keychain() {
         let home = tempfile::tempdir().unwrap();
         let directory = home.path().join(".gemini");
@@ -819,6 +955,7 @@ mod tests {
     fn doctor_login_projection_keeps_account_reason_and_recovery() {
         let row = provenant_quota::AccountRow {
             account: provenant_quota::AccountScope {
+                extra: Default::default(),
                 adapter: "claude".into(),
                 account_key: "key".into(),
                 label: "work".into(),
@@ -832,14 +969,17 @@ mod tests {
                 reset_unix_seconds: None,
                 evidence_ref: Some("fixture".into()),
             }),
+            auth_state: None,
             login_expiry: Some(provenant_quota::LoginExpiryView {
                 state: provenant_quota::LoginExpiryState::Expired,
                 expires_unix_seconds: Some(90),
                 observed_unix_seconds: Some(100),
             }),
             snapshot: Some(provenant_quota::QuotaSnapshot {
+                extra: Default::default(),
                 schema_version: 1,
                 account: provenant_quota::AccountScope {
+                    extra: Default::default(),
                     adapter: "claude".into(),
                     account_key: "key".into(),
                     label: "work".into(),

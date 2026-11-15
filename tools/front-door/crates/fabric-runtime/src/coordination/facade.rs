@@ -1,4 +1,4 @@
-//! Typed run/identity seam for F3. Runtime implements this trait; MCP consumes
+//! Typed run/identity seam for F3. Runtime implements this trait; the relay consumes
 //! it without a reverse dependency. F9 owns production composition.
 use super::input::bounded_input;
 use provenant_core::{AttemptId, CancelToken, DeliveryId, Digest, HostId, OperationId, WaitBudget};
@@ -6,7 +6,7 @@ use provenant_records::ArtifactRef;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// An MCP run target is an attempt ID, optionally qualified by its owning host.
+/// A run target is an attempt ID, optionally qualified by its owning host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptTarget {
     #[serde(flatten)]
@@ -16,7 +16,7 @@ pub struct AttemptTarget {
     pub host: Option<HostId>,
 }
 
-/// One task in an MCP submission. Project, actor, authority and cwd come from
+/// One task in a submission. Project, actor, authority and cwd come from
 /// the service's authenticated identity rather than request supplied paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmittedTask {
@@ -37,7 +37,7 @@ pub struct SubmittedTask {
     pub capabilities: Option<Vec<String>>,
     /// Provenance for explicitly supplied capabilities.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub capability_sources: std::collections::BTreeMap<String, String>,
+    pub capability_sources: provenant_records::run::CapabilitySources,
     #[serde(default)]
     pub worktree: Option<String>,
     pub prompt: String,
@@ -67,6 +67,8 @@ pub struct SubmittedTask {
 pub struct NewWorktree {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default_base: bool,
     pub base: String,
     pub branch: String,
 }
@@ -81,9 +83,12 @@ bounded_input! {
     pub enum SubmitInput as WireSubmitInput {
         Submit {
             operation_id: OperationId,
-            tasks: Vec<SubmittedTask>,
-            #[serde(default)]
-            concurrency: Option<u16>,
+            /// Origin identity is mandatory for peer placement; receiver
+            /// attempts keep their own local WorkKeys.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            origin_work_key: Option<provenant_records::WorkKey>,
+            /// One submission admits exactly one attempt.
+            task: SubmittedTask,
             #[serde(default)]
             knobs: Vec<String>,
             /// Explicit peer placement; read-only tasks only.
@@ -206,7 +211,6 @@ pub enum GraphRelayCause {
     WriterParentRequired,
     WriterWorktree,
     WriterComposite,
-    WriteScope,
     TargetOutsideGraph,
     RelayUnavailable,
     InvalidFrame,
@@ -234,7 +238,7 @@ impl GraphRelayCause {
             Self::RetryUnsettled => "the selected node or its subtree has unsettled attempts",
             Self::RetryContainerBrief => "a container retry requires per-leaf brief edits",
             Self::RetryBriefNeedsNode => {
-                "a graph with several nodes needs --node to say which node's brief to replace"
+                "a graph with several nodes needs a NAME/NODE target to say which node's brief to replace"
             }
             Self::ParentSettled => "the parent node has settled; launch from a running node",
             Self::ChildDepth => {
@@ -249,7 +253,6 @@ impl GraphRelayCause {
             Self::WriterComposite => {
                 "writer composite children require explicit per-node worktree bindings"
             }
-            Self::WriteScope => "write_scope requires a writer child; select --mode worktree-write",
             Self::TargetOutsideGraph => {
                 "the target is outside the calling lane's graph or permitted subtree"
             }
@@ -301,6 +304,8 @@ impl GraphRelayCause {
 pub enum InvalidInputDetail {
     /// `attempt.cloud` or `attempt.placement`: cloud placement was removed.
     CloudPlacementRemoved,
+    /// `operation_id` on a graph operation: `run` replays by `name` instead.
+    OperationIdRetired,
     GraphReason(String),
     OperationFailed,
     GraphRelayCause(GraphRelayCause),
@@ -325,6 +330,9 @@ pub enum InvalidInputDetail {
     InputTooLarge,
     InputInvalidUtf8,
     GraphDocumentTooLarge,
+    /// Host configuration a request depends on is malformed. Configuration
+    /// errors carry locations and rules, never TOML text.
+    Configuration(String),
 }
 
 impl InvalidInputDetail {
@@ -354,6 +362,9 @@ impl InvalidInputDetail {
     fn safe_text(&self) -> Option<String> {
         match self {
             Self::CloudPlacementRemoved => Some(crate::graph::CLOUD_PLACEMENT_REMOVED.into()),
+            Self::OperationIdRetired => Some(
+                "invalid input field `operation_id`: graph operations take no operation ID; use `name` to make a run replay-safe".into(),
+            ),
             // Parser and transport errors may contain input, prompts or source
             // text. They are not approved facts, even when a secret scanner
             // does not recognise their contents.
@@ -372,6 +383,7 @@ impl InvalidInputDetail {
             }
             Self::InputTooLarge => Some("input exceeds the 1 MiB limit".into()),
             Self::InputInvalidUtf8 => Some("input is not UTF-8".into()),
+            Self::Configuration(error) => Some(format!("host configuration is invalid: {error}")),
             Self::GraphDocumentTooLarge => {
                 let bound = crate::config::GraphLimits::document_bytes_bound();
                 Some(format!("limits.{}={} reached; set by {}", bound.name, bound.maximum, bound.owner))
@@ -392,6 +404,12 @@ impl InvalidInputDetail {
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum FacadeError {
+    /// A refusal replay uses its original safe, typed diagnostic.
+    #[error("recorded refusal: {}", diagnostic.detail.as_deref().unwrap_or(&diagnostic.code))]
+    RecordedRefusal {
+        refusal_code: String,
+        diagnostic: Box<provenant_records::diagnostic::Diagnostic>,
+    },
     #[error("{operation} failed (Git reported lock failure: {lock_failure})")]
     GitMutationFailed {
         operation: provenant_confinement::worktrees::GitMutationOperation,
@@ -406,7 +424,7 @@ pub enum FacadeError {
         #[serde(flatten, with = "invalid_detail_wire")]
         detail: Option<InvalidInputDetail>,
     },
-    /// A graph relay refusal retains its named cause across CLI and MCP.
+    /// A graph relay refusal retains its named cause across the CLI and the relay.
     #[error("graph relay refused: {refusal_code}")]
     GraphRelayRefused {
         refusal_code: String,
@@ -753,6 +771,7 @@ impl FacadeError {
         use provenant_records::diagnostic::Diagnostic;
         let mut projected = Diagnostic::new(self.code());
         match self {
+            Self::RecordedRefusal { diagnostic, .. } => return (**diagnostic).clone(),
             Self::GitMutationFailed { operation, lock_failure } => {
                 projected = projected.detail(format!("{operation} failed (Git reported lock failure: {lock_failure})"))
                     .next("inspect repository Git mutation state before retrying");
@@ -875,7 +894,8 @@ impl FacadeError {
     }
 
     pub fn code(&self) -> &str {
-        if let Self::GraphRelayRefused { refusal_code, .. } = self
+        if let Self::GraphRelayRefused { refusal_code, .. }
+        | Self::RecordedRefusal { refusal_code, .. } = self
             && !refusal_code.is_empty()
             && refusal_code.len() <= 128
             && refusal_code
@@ -890,6 +910,7 @@ impl FacadeError {
     /// Error category for callers projecting a temporary facade conversion.
     pub const fn static_code(&self) -> &'static str {
         match self {
+            Self::RecordedRefusal { .. } => "recorded_refusal",
             Self::UnknownHost => "UNKNOWN_HOST",
             Self::WorktreeNotApplicable => "WORKTREE_NOT_APPLICABLE",
             Self::OwnerUnavailable => "owner_unavailable",
@@ -1052,7 +1073,7 @@ pub(super) fn safe_input_field(field: &str) -> Option<String> {
         "paths",
         "path",
         "key",
-        "tasks",
+        "task",
         "context",
         "title",
         "prompt",
@@ -1093,7 +1114,6 @@ pub(super) fn safe_input_field(field: &str) -> Option<String> {
         "targets",
         "max_bytes",
         "wait_seconds",
-        "lease_seconds",
         "operation_id",
         "artifacts",
         "artifact",
@@ -1121,6 +1141,7 @@ pub(super) fn safe_input_field(field: &str) -> Option<String> {
         "capabilities",
         "build_heavy",
         "local_cargo",
+        "ci_scope",
         "preset",
         "isolation",
         "supervision",
@@ -1322,7 +1343,7 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
         match error {
             Error::NotFound => Self::NotFound,
             Error::StaleFence => Self::StaleFence,
-            Error::Conflict | Error::Overlap { .. } => Self::Conflict,
+            Error::Conflict => Self::Conflict,
             Error::Busy => Self::Busy,
             Error::Cancelled => Self::Cancelled,
             Error::Invalid(_) => Self::InvalidInput { detail: None },
@@ -1355,9 +1376,6 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             },
             Error::SchemaVersion(version) => Self::StateCorruptDetail {
                 detail: format!("fabric store: unsupported database schema version {version}"),
-            },
-            Error::UnversionedDatabase => Self::StateCorruptDetail {
-                detail: "fabric store: unversioned database".into(),
             },
             Error::JournalMode(_) => Self::StateCorruptDetail {
                 detail: "fabric store: journal mode error".into(),
@@ -1974,7 +1992,7 @@ pub struct EventCoverage {
     pub more_events: bool,
 }
 
-/// Typed runtime seam shared by the F3 facade and MCP. The run owner is
+/// Typed runtime seam shared by the F3 facade. The run owner is
 /// composed in `src/fabric.rs`; calls are bounded and cancellable, while only
 /// the explicit run-cancel operation can stop a launched run.
 pub trait F3Facade {
@@ -2031,7 +2049,7 @@ pub trait F3Facade {
     ) -> Result<Self::Hosts, FacadeError>;
 }
 
-/// Output payload encoding is explicit and lossless across MCP JSON.
+/// Output payload encoding is explicit and lossless across JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "encoding", content = "data", rename_all = "snake_case")]
 pub enum OutputBytes {
@@ -2054,6 +2072,8 @@ impl OutputBytes {
 pub enum OutputResult {
     Chunk {
         #[serde(flatten)]
+        peer: provenant_records::run::PeerOutputFields,
+        #[serde(flatten)]
         extra: provenant_records::ExtraFields,
         target: AttemptTarget,
         part: OutputPart,
@@ -2070,10 +2090,41 @@ pub enum OutputResult {
     },
     Artifact {
         #[serde(flatten)]
+        peer: provenant_records::run::PeerOutputFields,
+        #[serde(flatten)]
         extra: provenant_records::ExtraFields,
         target: AttemptTarget,
         artifact: ArtifactRef,
         digest: Digest,
         bytes: OutputBytes,
     },
+}
+
+#[cfg(test)]
+mod new_worktree_tests {
+    use super::NewWorktree;
+    use serde_json::json;
+
+    #[test]
+    fn declared_worktree_metadata_round_trips_and_rejects_wrong_types() {
+        for default_base in [false, true] {
+            let worktree = NewWorktree {
+                extra: [(
+                    "future_worktree_field".into(),
+                    json!({"source": "newer minor"}),
+                )]
+                .into(),
+                default_base,
+                base: "main".into(),
+                branch: "writer".into(),
+            };
+            let mut value = serde_json::to_value(&worktree).unwrap();
+            let decoded: NewWorktree = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(decoded, worktree);
+            for malformed in [json!("true"), json!(1), json!({})] {
+                value["default_base"] = malformed;
+                assert!(serde_json::from_value::<NewWorktree>(value.clone()).is_err());
+            }
+        }
+    }
 }

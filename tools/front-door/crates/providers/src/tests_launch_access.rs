@@ -58,6 +58,12 @@ pub(super) fn fixture_token() -> crate::claude::OauthToken {
     crate::claude::OauthToken::parse(item.as_bytes(), 1_000).expect("fixture token")
 }
 
+pub(super) fn fixture_policy() -> &'static provenant_records::policy::Policy {
+    static POLICY: std::sync::OnceLock<provenant_records::policy::Policy> =
+        std::sync::OnceLock::new();
+    POLICY.get_or_init(provenant_records::policy::Policy::default)
+}
+
 pub(super) fn fixture_input<'a>(
     route: &'a ResolvedRoute,
     confined: &'a provenant_confinement::ConfinedPlan,
@@ -74,6 +80,10 @@ pub(super) fn fixture_input<'a>(
         prompt,
         continuation: None,
         grant_digest: "fixture",
+        policy: fixture_policy(),
+        credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+            "/fixture/home",
+        )),
         executable,
         home: std::path::Path::new("/fixture/home"),
         user: std::ffi::OsStr::new("fixture"),
@@ -92,7 +102,6 @@ pub(super) fn fixture_input<'a>(
             depth: 1,
             attempt: provenant_core::AttemptId::from_bytes([7; 16]),
             assets: std::path::Path::new("/fixture/provenant"),
-            fabric_mcp: true,
         },
     }
 }
@@ -137,81 +146,6 @@ fn spilled_prompts_reach_argv_adapters_with_file_read_permissions() -> Result<()
                         .any(|arg| arg == "--dangerously-skip-permissions")
                 );
             }
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn image_attachments_reach_codex_and_claude() -> Result<(), ProviderError> {
-    let images = vec![
-        Path::new("/outside/first image.png").to_owned(),
-        Path::new("/outside/second.png").to_owned(),
-    ];
-    let prompt = Prompt::new("Describe the images".into());
-    let token = fixture_token();
-    for id in ["codex", "claude"] {
-        let plan = fixture_access_plan(Access::ReadOnly, (id == "codex").then_some("login"), false);
-        let mut route = route(id, "fixture-model");
-        route.account_key = None;
-        let mut input = fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            Path::new("/fixture/repo"),
-            (id == "claude").then_some(&token),
-        );
-        input.images = &images;
-        let adapter = REGISTRY
-            .iter()
-            .find(|entry| entry.adapter.id() == id)
-            .unwrap()
-            .adapter;
-        let spec = adapter.prepare(input)?;
-        if id == "codex" {
-            for image in &images {
-                assert!(
-                    spec.argv
-                        .windows(2)
-                        .any(|pair| pair[0] == "--image" && pair[1] == image.as_os_str())
-                );
-            }
-        } else {
-            let Stdin::Bytes(bytes) = spec.stdin else {
-                panic!("expected prompt on stdin")
-            };
-            let text = String::from_utf8(bytes).unwrap();
-            for image in &images {
-                assert!(text.contains(&image.display().to_string()));
-            }
-            assert!(!text.contains("/outside/sibling.png"));
-            assert!(
-                !spec
-                    .argv
-                    .windows(2)
-                    .any(|pair| pair[0] == "--add-dir" && pair[1] == "/outside")
-            );
-            let settings_path = &spec.argv[spec
-                .argv
-                .iter()
-                .position(|arg| arg == "--settings")
-                .unwrap()
-                + 1];
-            let settings = spec
-                .setup
-                .iter()
-                .find_map(|step| match step {
-                    SetupStep::WriteFile { path, bytes } if path.as_os_str() == settings_path => {
-                        Some(bytes)
-                    }
-                    _ => None,
-                })
-                .unwrap();
-            let settings: serde_json::Value = serde_json::from_slice(settings).unwrap();
-            let rules = settings["permissions"]["allow"].as_array().unwrap();
-            assert!(rules.contains(&serde_json::json!(r"Read(//outside/first\ image.png)")));
-            assert!(rules.contains(&serde_json::json!("Read(//outside/second.png)")));
-            assert!(!rules.contains(&serde_json::json!("Read(//outside/sibling.png)")));
         }
     }
     Ok(())
@@ -297,11 +231,8 @@ fn temporary_environment_follows_the_plan_for_readers_and_writers() -> Result<()
                 .is_some_and(|spec| spec.launch.model)
         }) {
             let id = entry.adapter.id();
-            let authentication = match id {
-                "codex" | "cursor" | "opencode" => Some("login"),
-                "agy" => Some("keychain"),
-                _ => None,
-            };
+            let declaration = provenant_records::AdapterSpec::get(id).expect("adapter declaration");
+            let authentication = declaration.authentication;
             let plan = fixture_access_plan(access, authentication, false);
             let mut route = route(id, "fixture-model");
             route.account_key = None;
@@ -408,15 +339,12 @@ fn claude_lanes_disable_commit_and_pr_attribution() -> Result<(), ProviderError>
 }
 
 #[test]
-fn claude_requested_permission_modes_are_not_overridden() -> Result<(), ProviderError> {
+fn claude_native_permission_controls_ignore_host_scrub_overrides() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let token = fixture_token();
     let mut route = route("claude", "fixture-model");
     route.account_key = None;
-    for (access, mode) in [
-        (Access::ReadOnly, "dontAsk"),
-        (Access::WorktreeWrite, "bypassPermissions"),
-    ] {
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
         let plan = fixture_access_plan(access, None, false);
         let mut input = fixture_input(
             &route,
@@ -436,372 +364,115 @@ fn claude_requested_permission_modes_are_not_overridden() -> Result<(), Provider
         assert!(
             launch
                 .argv
-                .windows(2)
-                .any(|args| args[0] == "--permission-mode" && args[1] == mode)
+                .windows(crate::launch::CLAUDE_NATIVE_ARGUMENTS.len())
+                .any(|args| {
+                    args.iter().zip(crate::launch::CLAUDE_NATIVE_ARGUMENTS).all(
+                        |(actual, expected)| actual.as_os_str() == std::ffi::OsStr::new(expected),
+                    )
+                })
         );
     }
     Ok(())
 }
 
 #[test]
-fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
+fn model_adapters_follow_declared_prompt_transport_without_exposing_tokens()
+-> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
-    let repo = std::path::Path::new("/fixture/repo");
     let token = fixture_token();
+    let repo = Path::new("/fixture/repo");
     for entry in REGISTRY.iter().filter(|entry| {
         provenant_records::AdapterSpec::get(entry.adapter.id())
             .is_some_and(|spec| spec.launch.model)
     }) {
         let id = entry.adapter.id();
+        let declaration = provenant_records::AdapterSpec::get(id).expect("adapter declaration");
         let mut route = route(id, "fixture-model");
         route.account_key = None;
-        // Codex and Agy read a credential inside the sandbox.
-        let authentication = match id {
-            "codex" | "cursor" | "opencode" => Some("login"),
-            "agy" => Some("keychain"),
-            _ => None,
-        };
-        let confined = read_only_plan("/fixture", authentication);
-        let token = (id == "claude").then_some(&token);
-        let result = entry
-            .adapter
-            .prepare(fixture_input(&route, &confined, &prompt, repo, token));
-        let spec = result?;
-        // Only Agy runs its commands on a pseudo-terminal.
-        assert_eq!(spec.profile.spec.allow_pseudo_tty, id == "agy");
-        // Agy keeps its prompt on argv and has no lane runtime; its own test pins its launch.
-        if matches!(id, "agy" | "cursor" | "opencode") {
-            continue;
-        }
-        let argv: Vec<_> = spec.argv.iter().map(|arg| arg.to_string_lossy()).collect();
-        // Launch controls are required regardless of environment insertion order.
-        let keys: std::collections::BTreeSet<_> = spec
-            .env
-            .iter()
-            .map(|(key, _)| key.to_string_lossy())
-            .collect();
-        let extra: &[&str] = match id {
-            "codex" => &[
-                "CARGO_HOME",
-                "RUSTUP_HOME",
-                "RUSTUP_AUTO_INSTALL",
-                "CARGO_TARGET_DIR",
-                "CARGO_BUILD_BUILD_DIR",
-                "CARGO_CACHE_AUTO_CLEAN_FREQUENCY",
-                "CARGO_NET_OFFLINE",
-                "GIT_CONFIG_GLOBAL",
-                "GIT_CONFIG_NOSYSTEM",
-                "CODEX_HOME",
-                "SHELL",
-            ],
-            "claude" => &[
-                "CLAUDE_CODE_TMPDIR",
-                "DISABLE_AUTOUPDATER",
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-                "CLAUDE_CONFIG_DIR",
-                "GIT_CONFIG_GLOBAL",
-                "GIT_CONFIG_NOSYSTEM",
-            ],
-            _ => &[],
-        };
-        let required: std::collections::BTreeSet<_> = [
-            "PROVENANT_SANDBOX",
-            "PROVENANT_GIT",
-            "HOME",
-            "USER",
-            "PATH",
-            "TMPDIR",
-            "TMPPREFIX",
-            "LANG",
-            "PROVENANT_AGENT_LABEL",
-            "PROVENANT_ROOT",
-            "PROVENANT_STATE_DIR",
-            "PROVENANT_LANE_DEPTH",
-            "PROVENANT_PARENT_ATTEMPT_ID",
-            "PROVENANT_RUN_STATE_DIR",
-        ]
-        .iter()
-        .chain(extra)
-        .copied()
-        .collect();
-        assert!(
-            required.iter().all(|key| keys.contains(*key)),
-            "{id} is missing launch controls: {:?}",
-            required
-                .iter()
-                .filter(|key| !keys.contains(**key))
-                .collect::<Vec<_>>()
+        let plan = read_only_plan("/fixture", declaration.authentication);
+        let prepared = entry.adapter.prepare(fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            repo,
+            (id == "claude").then_some(&token),
+        ))?;
+
+        assert_eq!(
+            cargo_home_path(&prepared),
+            Path::new("/fixture/home/.cargo")
         );
-        for forbidden in [
-            "OPENAI_API_KEY",
-            "CODEX_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-        ] {
+        if declaration.argv_prompt {
+            assert!(prepared.argv.iter().any(|arg| arg == prompt.text()));
+        } else {
+            assert_eq!(
+                prepared.stdin,
+                Stdin::Bytes(prompt.text().as_bytes().to_vec())
+            );
             assert!(
-                !keys.contains(forbidden),
-                "{id} must not expose {forbidden} in its environment"
+                prepared
+                    .argv
+                    .iter()
+                    .all(|arg| !arg.to_string_lossy().contains(prompt.text()))
             );
         }
-        if id == "codex" {
-            // This fixture grants provider-only networking. Cargo must use
-            // cached sources rather than attempting dependency downloads.
+        assert!(prepared.env.iter().all(|(_, value)| value != FIXTURE_TOKEN));
+        if let Some(secret) = &prepared.secret_input {
+            assert_eq!(secret.bytes, FIXTURE_TOKEN.as_bytes());
             assert!(
-                spec.env
+                prepared
+                    .env
                     .iter()
-                    .any(|(key, value)| { key == "CARGO_NET_OFFLINE" && value == "true" })
+                    .all(|(key, _)| key.as_os_str() != secret.descriptor_env.as_str())
             );
         }
-        assert!(
-            spec.env.iter().any(|(key, value)| {
-                key == "PROVENANT_GIT" && value == "/fixture/scratch/read-only-git/git"
-            }),
-            "{id} must select its private Git wrapper"
+    }
+    Ok(())
+}
+
+#[test]
+fn claude_credentials_require_a_host_token_without_profile_authentication() {
+    let prompt = Prompt::new("fixture prompt".into());
+    let token = fixture_token();
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    for (authentication, provide_token) in [(None, false), (Some("login"), true)] {
+        let plan = read_only_plan("/fixture", authentication);
+        let mut input = fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            provide_token.then_some(&token),
         );
-        assert_eq!(spec.stdin, Stdin::Bytes(b"fixture prompt".to_vec()), "{id}");
-        assert!(
-            !argv.iter().any(|arg| arg.contains("fixture prompt")),
-            "{id}"
-        );
-        match id {
-            "codex" => {
-                assert!(argv.iter().any(|arg| arg == "service_tier=\"default\""));
-                assert!(
-                    !argv
-                        .iter()
-                        .any(|arg| arg.contains("fast") || arg.contains("priority"))
-                );
-            }
-            "claude" => {
-                assert_eq!(
-                    spec.env
-                        .iter()
-                        .find(|(key, _)| key == "CLAUDE_CONFIG_DIR")
-                        .map(|(_, value)| Path::new(value)),
-                    Some(
-                        confined
-                            .permissions()
-                            .private_state
-                            .as_ref()
-                            .unwrap()
-                            .path
-                            .join("claude-config")
-                            .as_path()
-                    )
-                );
-                assert!(argv.iter().any(|arg| arg == "--mcp-config"));
-                assert!(argv.iter().any(|arg| arg == "--settings"));
-                assert!(!argv.iter().any(|arg| arg == "--safe-mode"));
-                assert!(spec.argv.windows(2).any(|args| {
-                    args[0] == "--add-dir"
-                        && args[1]
-                            == confined
-                                .permissions()
-                                .private_state
-                                .as_ref()
-                                .unwrap()
-                                .path
-                                .as_os_str()
-                }));
-                assert!(
-                    spec.env
-                        .iter()
-                        .all(|(key, _)| { key != "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD" })
-                );
-                let sources = argv
-                    .iter()
-                    .position(|arg| arg == "--setting-sources")
-                    .expect("isolated settings");
-                assert_eq!(argv[sources + 1], "");
-                let tools = argv.iter().position(|arg| arg == "--tools").expect("tools");
-                assert_eq!(argv[tools + 1], "Read,Grep,Glob,Bash,Skill");
-                // The host's token is the only credential: no keychain or
-                // other credential path is readable. Only Provenant and its hook helpers are added.
-                assert!(
-                    spec.env
-                        .iter()
-                        .all(|(key, _)| key != "CLAUDE_CODE_OAUTH_TOKEN")
-                );
-                let secret = spec.secret_input.as_ref().expect("token pipe");
-                assert_eq!(
-                    secret.descriptor_env,
-                    "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"
-                );
-                assert_eq!(secret.bytes, FIXTURE_TOKEN.as_bytes());
-                let allowed = argv
-                    .iter()
-                    .position(|arg| arg == "--allowedTools")
-                    .expect("allow-list");
-                assert_eq!(argv[allowed + 1], "Bash,Skill,mcp__fabric__*");
-                assert!(spec.profile.spec.authentication.is_empty());
-                assert!(spec.profile.spec.deny_keychain_access);
-                for (key, value) in [
-                    ("GIT_CONFIG_GLOBAL", "/dev/null"),
-                    ("GIT_CONFIG_NOSYSTEM", "1"),
-                ] {
-                    assert!(spec.env.iter().any(|(k, v)| k == key && v == value));
-                }
-                let roots: Vec<_> = spec
-                    .profile
-                    .spec
-                    .tool_exec_roots
-                    .iter()
-                    .map(|grant| grant.path.as_path())
-                    .collect();
-                assert_eq!(
-                    roots,
-                    [
-                        "/bin",
-                        "/usr/bin",
-                        "/usr/libexec",
-                        "/fixture/scratch/bin",
-                        "/fixture/scratch/read-only-git"
-                    ]
-                    .map(Path::new)
-                );
-                assert!(spec.setup.iter().any(|step| matches!(
-                    step, crate::launch::SetupStep::WriteExecutable { path, bytes }
-                        if path == Path::new("/fixture/scratch/bin/git")
-                            && String::from_utf8_lossy(bytes).contains("GIT_CONFIG_NOSYSTEM=1")
-                )));
-                assert!(
-                    spec.profile
-                        .spec
-                        .process_executables
-                        .iter()
-                        .any(|grant| grant.path
-                            == std::path::Path::new("/fixture/provenant/bin/provenant"))
-                );
-                assert!(matches!(
-                    entry
-                        .adapter
-                        .prepare(fixture_input(&route, &confined, &prompt, repo, None)),
-                    Err(ProviderError::UnsupportedPolicy)
-                ));
-                let with_login = read_only_plan("/fixture", Some("login"));
-                assert!(matches!(
-                    entry.adapter.prepare(fixture_input(
-                        &route,
-                        &with_login,
-                        &prompt,
-                        repo,
-                        Some(&fixture_token())
-                    )),
-                    Err(ProviderError::UnsupportedPolicy)
-                ));
-            }
-            _ => {}
-        }
-        // Shared install prefixes fall back to the exact executable. Their
-        // `var/` trees stay outside the lane profile.
-        let shared = PrepareInput {
-            executable: std::path::Path::new("/opt/homebrew/bin/provider"),
-            ..fixture_input(&route, &confined, &prompt, repo, token)
-        };
-        let shared_spec = entry.adapter.prepare(shared)?;
-        let shared_var = Path::new("/opt/homebrew/var");
-        assert!(shared_spec.profile.spec.runtime_reads.iter().any(|grant| {
-            grant.path == Path::new("/opt/homebrew/bin/provider")
-                && grant.scope == provenant_confinement::permissions::PathScope::Exact
-        }));
-        assert!(shared_spec.profile.spec.runtime_reads.iter().all(|grant| {
-            !grant.path.starts_with(shared_var)
-                && !shared_var.starts_with(&grant.path)
-                && grant.path != Path::new("/opt/homebrew")
-        }));
-        assert!(
-            shared_spec
-                .profile
-                .spec
-                .tool_exec_roots
-                .iter()
-                .all(|grant| {
-                    !grant.path.starts_with(shared_var)
-                        && !shared_var.starts_with(&grant.path)
-                        && grant.path != Path::new("/opt/homebrew")
-                })
-        );
-        assert!(
-            provenant_confinement::write_grants(confined.permissions(), &shared_spec.profile)
-                .iter()
-                .all(|grant| {
-                    !grant.path.starts_with(shared_var)
-                        && !shared_var.starts_with(&grant.path)
-                        && !Path::new("/opt/homebrew/bin/provider").starts_with(&grant.path)
-                })
-        );
-        assert!(shared_spec.omitted_discovery.iter().any(|omitted| {
-            omitted.path == Path::new("/opt/homebrew")
-                && omitted.source == crate::OmissionSource::ProviderPackage
-        }));
-        let package = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0");
-        // Host-detected Homebrew Node toolchain directories (launch::node_tools).
-        let homebrew_node = |path: &Path| {
-            ["/opt/homebrew", "/usr/local"].iter().any(|prefix| {
-                [
-                    "bin",
-                    "sbin",
-                    "Cellar",
-                    "opt",
-                    "lib",
-                    "libexec",
-                    "etc",
-                    "share",
-                    "include",
-                    "Frameworks",
-                ]
-                .iter()
-                .any(|name| path == Path::new(prefix).join(name))
-            })
-        };
-        assert!(spec.profile.spec.runtime_reads.iter().all(|grant| {
-            grant.path == package
-                || homebrew_node(&grant.path)
-                || (id == "codex"
-                    && (grant.path.starts_with("/fixture/home")
-                        || grant.path == Path::new("/Library/Developer/CommandLineTools")
-                        || grant.path == Path::new("/private/etc/ssl")))
-                || [
-                    "/fixture/provenant/bin/provenant",
-                    "/fixture/git/bin/git",
-                    "/fixture/provenant/release.json",
-                    "/fixture/state/config.toml",
-                    "/fixture/state/host-id",
-                    "/fixture/state/projects",
-                ]
-                .iter()
-                .any(|path| grant.path == std::path::Path::new(path))
-                || ([
-                    "/fixture/state/fabric/fabric.sqlite3",
-                    "/fixture/state/fabric/fabric.sqlite3-wal",
-                    "/fixture/state/fabric/fabric.sqlite3-shm",
-                    "/fixture/state/fabric/fabric.sqlite3-journal",
-                ]
-                .iter()
-                .any(|path| grant.path == Path::new(path))
-                    && grant.scope == provenant_confinement::permissions::PathScope::Exact)
-        }));
-        assert!(
-            spec.profile
-                .spec
-                .tool_exec_roots
-                .iter()
-                .all(|grant| grant.path == package
-                    || homebrew_node(&grant.path)
-                    || (grant.scope == provenant_confinement::permissions::PathScope::Exact
-                        && grant.path.starts_with("/opt/homebrew"))
-                    || !grant.path.starts_with("/opt")),
-            "{id}: {:?}",
-            spec.profile.spec.tool_exec_roots
-        );
-        // A read-only launch may only start inside a declared read root.
+        input.account = None;
+        assert!(matches!(
+            claude::Claude.prepare(input),
+            Err(ProviderError::UnsupportedPolicy)
+        ));
+    }
+}
+
+#[test]
+fn read_only_launch_requires_cwd_inside_a_declared_read_root() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture prompt".into());
+    let token = fixture_token();
+    for entry in REGISTRY.iter().filter(|entry| {
+        provenant_records::AdapterSpec::get(entry.adapter.id())
+            .is_some_and(|declaration| declaration.launch.model)
+    }) {
+        let id = entry.adapter.id();
+        let declaration = provenant_records::AdapterSpec::get(id).expect("adapter declaration");
+        let plan = read_only_plan("/fixture", declaration.authentication);
+        let mut route = route(id, "fixture-model");
+        route.account_key = None;
         assert!(matches!(
             entry.adapter.prepare(fixture_input(
                 &route,
-                &confined,
+                &plan,
                 &prompt,
-                std::path::Path::new("/fixture/elsewhere"),
-                token,
+                Path::new("/fixture/elsewhere"),
+                (id == "claude").then_some(&token),
             )),
             Err(ProviderError::InvalidPath)
         ));
@@ -810,7 +481,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
 }
 
 #[test]
-fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), ProviderError> {
+fn cursor_uses_outer_confinement_for_fresh_and_resumed_tool_access() -> Result<(), ProviderError> {
     let prompt = Prompt::new("--literal prompt".into());
     let route = route("cursor", "fixture-model");
     let continuation = Continuation::retained("cursor", "fixture-session", &route, "fixture")?;
@@ -820,46 +491,43 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
             let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
             input.continuation = resume.then_some(&continuation);
             let spec = cursor::Cursor.prepare(input)?;
-            let mut expected = vec![
-                "/opt/homebrew/Cellar/provider/1.0/bin/provider",
-                "--print",
-                "--output-format",
-                "stream-json",
-                "--workspace",
-                "/fixture/repo",
-                "--trust",
-                "--sandbox",
-                "disabled",
-            ];
-            match access {
-                Access::ReadOnly => expected.extend(["--mode", "ask"]),
-                Access::WorktreeWrite => expected.push("--force"),
-            }
+            let has_flag = |flag: &str| spec.argv.iter().any(|arg| arg == flag);
+            let has_pair = |flag: &str, value: &str| {
+                spec.argv
+                    .windows(2)
+                    .any(|pair| pair[0] == flag && pair[1] == value)
+            };
+            assert!(has_flag("--print"));
+            assert!(has_pair("--output-format", "stream-json"));
+            assert!(has_pair("--workspace", "/fixture/repo"));
+            assert!(has_flag("--trust"));
+            assert!(has_pair("--sandbox", "disabled"));
+            assert!(has_flag("--force"));
             if resume {
-                expected.extend(["--resume", "fixture-session"]);
+                assert!(has_pair("--resume", "fixture-session"));
+            } else {
+                assert!(!has_flag("--resume"));
             }
-            expected.extend(["--model", "fixture-model", "--", "--literal prompt"]);
-            assert_eq!(
-                spec.argv,
-                expected
-                    .iter()
-                    .map(std::ffi::OsString::from)
-                    .collect::<Vec<_>>()
-            );
+            assert!(has_pair("--model", "fixture-model"));
+            assert!(spec.argv.iter().any(|arg| arg == prompt.text()));
             assert_eq!(spec.stdin, Stdin::Null);
             assert_eq!(spec.cwd, Path::new("/fixture/repo"));
         }
     }
     let plan = read_only_plan("/fixture", Some("login"));
     let prompt = Prompt::new("x".repeat(65_537));
+    let mut strict = provenant_records::policy::Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([(
+            "ARGV_PROMPT".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Project,
+    );
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.policy = &strict;
     assert!(matches!(
-        cursor::Cursor.prepare(fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            Path::new("/fixture/repo"),
-            None
-        )),
+        cursor::Cursor.prepare(input),
         Err(ProviderError::PromptTooLarge { .. })
     ));
     Ok(())
@@ -932,65 +600,6 @@ fn agy_turns_are_bounded_only_by_the_supervisor_deadline() -> Result<(), Provide
             .windows(2)
             .any(|pair| { pair[0] == "--print-timeout" && pair[1] == "0s" })
     );
-    Ok(())
-}
-
-#[test]
-fn agy_writers_exec_what_codex_writers_exec() -> Result<(), ProviderError> {
-    let prompt = Prompt::new("fixture prompt".into());
-    let repo = Path::new("/fixture/repo");
-    let agy_route = route("agy", "fixture-model");
-    let account = legacy_agy_account();
-    let mut codex_route = route("codex", "fixture-model");
-    codex_route.account_key = None;
-    for access in [Access::ReadOnly, Access::WorktreeWrite] {
-        let plan = fixture_access_plan(access, Some("keychain"), false);
-        let mut input = fixture_input(&agy_route, &plan, &prompt, repo, None);
-        input.account = Some(&account);
-        let spec = agy::Agy.prepare(input)?;
-        assert!(
-            spec.env
-                .iter()
-                .any(|(key, value)| key == "SHELL" && value == "/bin/zsh")
-        );
-        assert_eq!(spec.profile.spec.process_executables.len(), 4);
-        let exec = &spec.profile.spec.tool_exec_roots;
-        if access == Access::ReadOnly {
-            assert_eq!(
-                exec,
-                &vec![
-                    crate::launch::subtree("/bin"),
-                    crate::launch::subtree("/usr/bin"),
-                    crate::launch::subtree("/usr/libexec"),
-                    crate::launch::subtree("/fixture/scratch/read-only-git")
-                ]
-            );
-            assert!(spec.profile.spec.tool_writes.is_empty());
-            assert!(plan.permissions().write_roots.is_empty());
-            for (key, value) in [
-                ("PATH", "/fixture/scratch/read-only-git:/usr/bin:/bin"),
-                ("GIT_CONFIG_GLOBAL", "/dev/null"),
-                ("GIT_CONFIG_NOSYSTEM", "1"),
-            ] {
-                assert!(spec.env.iter().any(|(k, v)| k == key && v == value));
-            }
-            continue;
-        }
-        let plan = fixture_access_plan(access, Some("login"), false);
-        let codex =
-            codex::Codex.prepare(fixture_input(&codex_route, &plan, &prompt, repo, None))?;
-        // Everything but Codex's own package directory.
-        let package = Path::new("/opt/homebrew/Cellar/provider/1.0");
-        let expected: Vec<_> = codex
-            .profile
-            .spec
-            .tool_exec_roots
-            .into_iter()
-            .filter(|grant| grant.path != package)
-            .collect();
-        assert_eq!(exec, &expected);
-        assert!(exec.iter().any(|grant| grant.path == Path::new("/bin")));
-    }
     Ok(())
 }
 
@@ -1092,53 +701,19 @@ fn claude_read_only_adds_read_roots_outside_the_working_directory() -> Result<()
 }
 
 #[test]
-fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), ProviderError> {
-    let prompt = Prompt::new("fixture prompt".into());
-    let route = route("cursor", "fixture-model");
-    let payload = Path::new("/fixture/home/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4");
-    let launcher = payload.join("cursor-agent");
-    for access in [Access::ReadOnly, Access::WorktreeWrite] {
-        let plan = fixture_access_plan(access, Some("login"), false);
-        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
-        input.executable = &launcher;
-        let spec = cursor::Cursor.prepare(input)?.profile.spec;
-        let mut executables = vec![crate::launch::exact(&launcher)];
-        executables.push(crate::launch::exact("/bin/sh"));
-        executables.push(crate::launch::exact("/fixture/git/bin/git"));
-        assert_eq!(spec.process_executables, executables);
-        assert!(
-            spec.runtime_reads
-                .contains(&crate::launch::subtree(payload))
-        );
-        assert_eq!(
-            spec.tool_exec_roots,
-            ["/bin", "/usr/bin"]
-                .map(crate::launch::subtree)
-                .into_iter()
-                .chain([crate::launch::subtree(payload)])
-                .chain([crate::launch::subtree(if access == Access::WorktreeWrite {
-                    "/fixture/scratch/bin"
-                } else {
-                    "/fixture/scratch/read-only-git"
-                })])
-                .collect::<Vec<_>>()
-        );
-    }
-    Ok(())
-}
-
-#[test]
 fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result<(), ProviderError>
 {
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("opencode", "configured/model");
+    let home = Path::new("/fixture/home");
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         for (git_context, sandboxed) in [(false, true), (true, true), (false, false), (true, false)]
         {
             let plan = fixture_access_plan(access, Some("login"), false);
-            let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+            let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+            input.home = home;
             let sandbox_mode = |key: &str| {
-                (key == provenant_confinement::run_config::SANDBOX_ENV)
+                (key == provenant_core::consumer_env::SANDBOX)
                     .then(|| if sandboxed { "on" } else { "off" }.into())
             };
             let spec = opencode::OpenCode.prepare(PrepareInput {
@@ -1152,25 +727,25 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                     .find(|(name, _)| name == key)
                     .map(|(_, value)| value)
             };
-            let expected_home = if sandboxed {
-                Some(std::ffi::OsString::from("/fixture/home"))
-            } else {
-                std::env::var_os("HOME")
-            };
-            assert_eq!(env("HOME"), expected_home.as_ref());
-            for (key, expected) in [
-                ("XDG_CONFIG_HOME", "/fixture/state/config"),
-                ("XDG_DATA_HOME", "/fixture/state/data"),
-                ("XDG_CACHE_HOME", "/fixture/state/cache"),
-                ("XDG_STATE_HOME", "/fixture/state/state"),
+            assert_eq!(Path::new(env("HOME").expect("home")), home);
+            let state_root = &plan
+                .permissions()
+                .private_state
+                .as_ref()
+                .expect("fixture private state")
+                .path;
+            for (key, suffix) in [
+                ("XDG_CONFIG_HOME", "config"),
+                ("XDG_DATA_HOME", "data"),
+                ("XDG_CACHE_HOME", "cache"),
+                ("XDG_STATE_HOME", "state"),
             ] {
-                let values: Vec<_> = spec
-                    .env
-                    .iter()
-                    .filter(|(name, _)| name == key)
-                    .map(|(_, value)| value.as_os_str())
-                    .collect();
-                assert_eq!(values, [std::ffi::OsStr::new(expected)], "{key}");
+                let expected = state_root.join(suffix);
+                assert_eq!(
+                    env(key).map(Path::new),
+                    Some(expected.as_path()),
+                    "{key}"
+                );
             }
             // Repository context may omit this optional selector. When present,
             // it must be unambiguous.
@@ -1197,8 +772,8 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
             );
             let config_home = Path::new(env("XDG_CONFIG_HOME").expect("config home"));
             let data_home = Path::new(env("XDG_DATA_HOME").expect("data home"));
-            assert_eq!(config_home, Path::new("/fixture/state/config"));
-            assert_eq!(data_home, Path::new("/fixture/state/data"));
+            assert_eq!(config_home, state_root.join("config"));
+            assert_eq!(data_home, state_root.join("data"));
             if config_home.join("opencode/skills").is_dir() {
                 assert!(
                     spec.profile
@@ -1207,13 +782,11 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                         .contains(&crate::launch::subtree(config_home.join("opencode/skills")))
                 );
             }
-            assert!(
-                spec.profile.spec.authentication[0]
-                    .roots
-                    .contains(&crate::launch::exact(
-                        "/fixture/home/.local/share/opencode/auth.json"
-                    ))
-            );
+            assert!(spec.profile.spec.authentication.iter().any(|grant| {
+                grant.roots.contains(&crate::launch::exact(
+                    home.join(".local/share/opencode/auth.json"),
+                ))
+            }));
             let auth = data_home.join("opencode/auth.json");
             assert!(spec.profile.spec.state_writes.iter().all(|grant| {
                 match grant.scope {
@@ -1229,24 +802,45 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                     .to_string_lossy(),
             )
             .expect("JSON config");
-            if access == Access::WorktreeWrite {
-                assert_eq!(config["permission"], serde_json::json!({"*": "allow"}));
-            } else {
-                assert_eq!(config["permission"]["edit"], "deny");
-                assert_eq!(config["permission"]["bash"], "allow");
+            let permissions = config["permission"]
+                .as_object()
+                .expect("OpenCode permission entries");
+            let native = crate::launch::OPENCODE_NATIVE_PERMISSIONS;
+            assert_eq!(
+                permissions
+                    .get(native.default_key)
+                    .and_then(serde_json::Value::as_str),
+                Some(native.default_value)
+            );
+            if access == Access::ReadOnly {
                 let scratch = format!("{}/**", plan.permissions().scratch.path.display());
+                let state = format!("{}/**", state_root.display());
+                let external = config["permission"][native.external_directory_key]
+                    .as_object()
+                    .expect("external directory permissions");
+                let reads = config["permission"][native.read_key]
+                    .as_object()
+                    .expect("read permissions");
+                assert_eq!(
+                    external.get(&state).and_then(serde_json::Value::as_str),
+                    Some(native.path_value)
+                );
+                assert_eq!(
+                    reads.get(&state).and_then(serde_json::Value::as_str),
+                    Some(native.path_value)
+                );
                 if git_context {
                     assert_eq!(
-                        config["permission"]["external_directory"],
-                        serde_json::json!({ scratch.clone(): "allow", "/fixture/state/**": "allow" })
+                        external.get(&scratch).and_then(serde_json::Value::as_str),
+                        Some(native.path_value)
                     );
-                    assert_eq!(config["permission"]["read"][&scratch], "allow");
-                } else {
                     assert_eq!(
-                        config["permission"]["external_directory"],
-                        serde_json::json!({"/fixture/state/**": "allow"})
+                        reads.get(&scratch).and_then(serde_json::Value::as_str),
+                        Some(native.path_value)
                     );
-                    assert_eq!(config["permission"]["read"]["/fixture/state/**"], "allow");
+                } else {
+                    assert!(!external.contains_key(&scratch));
+                    assert!(!reads.contains_key(&scratch));
                 }
             }
         }
@@ -1312,101 +906,6 @@ fn cursor_and_claude_keep_sessions_private_with_or_without_skills() -> Result<()
     Ok(())
 }
 
-/// Composite readers start in a pinned source view, while progress lives in a
-/// sibling private directory. Exercise the provider's native launch controls,
-/// independently of the outer confinement write grant.
-#[test]
-fn read_only_handoff_native_permissions_match_private_state() -> Result<(), ProviderError> {
-    let prompt = Prompt::new("publish progress atomically".into());
-    let token = fixture_token();
-    for id in ["codex", "claude", "agy", "opencode", "cursor"] {
-        let auth = match id {
-            "codex" | "opencode" | "cursor" => Some("login"),
-            "agy" => Some("keychain"),
-            _ => None,
-        };
-        let plan = read_only_plan("/fixture/composite/member", auth);
-        let cwd = Path::new("/fixture/composite/member/repo");
-        let private = &plan.permissions().private_state.as_ref().unwrap().path;
-        assert!(!private.starts_with(cwd));
-        let mut route = route(id, "fixture-model");
-        route.account_key = None;
-        let entry = REGISTRY
-            .iter()
-            .find(|entry| entry.adapter.id() == id)
-            .unwrap();
-        let spec = entry.adapter.prepare(fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            cwd,
-            (id == "claude").then_some(&token),
-        ))?;
-        assert_eq!(spec.cwd, cwd);
-        match id {
-            "cursor" => assert!(
-                spec.argv
-                    .windows(2)
-                    .any(|args| args[0] == "--mode" && args[1] == "ask")
-            ),
-            "codex" => assert!(
-                spec.argv
-                    .iter()
-                    .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
-            ),
-            "claude" | "agy" => {
-                assert!(
-                    spec.argv
-                        .windows(2)
-                        .any(|args| args[0] == "--add-dir" && args[1] == private.as_os_str())
-                );
-                if id == "agy" {
-                    assert!(
-                        spec.argv
-                            .iter()
-                            .any(|arg| arg == "--dangerously-skip-permissions")
-                    );
-                } else {
-                    assert!(spec.argv.windows(2).any(|args| {
-                        args[0] == "--tools"
-                            && args[1]
-                                .to_string_lossy()
-                                .split(',')
-                                .any(|tool| tool == "Bash")
-                    }));
-                    assert!(spec.argv.windows(2).any(|args| args[0] == "--allowedTools"
-                        && args[1].to_string_lossy().contains("Bash")));
-                }
-            }
-            "opencode" => {
-                let config = spec
-                    .env
-                    .iter()
-                    .find(|(key, _)| key == "OPENCODE_CONFIG_CONTENT")
-                    .unwrap();
-                let config: serde_json::Value =
-                    serde_json::from_str(&config.1.to_string_lossy()).unwrap();
-                let pattern = format!("{}/**", private.display());
-                assert_eq!(config["permission"]["bash"], "allow");
-                assert_eq!(config["permission"]["edit"], "deny");
-                assert_eq!(
-                    config["permission"]["external_directory"][&pattern],
-                    "allow"
-                );
-                assert!(
-                    config["permission"]["external_directory"][format!("{}/**", cwd.display())]
-                        .is_null()
-                );
-            }
-            _ => unreachable!(),
-        }
-        let writes = provenant_confinement::write_grants(plan.permissions(), &spec.profile);
-        assert!(writes.iter().any(|grant| grant.path == *private));
-        assert!(writes.iter().all(|grant| !grant.path.starts_with(cwd)));
-    }
-    Ok(())
-}
-
 #[test]
 fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
 -> Result<(), ProviderError> {
@@ -1435,15 +934,25 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
             Some(&token),
         );
         input.host_var =
-            &|name| (name == provenant_confinement::run_config::SANDBOX_ENV).then(|| "off".into());
+            &|name| (name == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
         let native = adapter.prepare(input)?;
         for (key, value) in &host {
-            // These selectors bind the child to its provider and Fabric context.
+            // These selectors bind the child to its provider, Fabric context
+            // and private Cargo configuration/target with shared downloads.
             if key.to_str().is_some_and(|key| {
                 key.starts_with("PROVENANT_")
                     || matches!(
                         key,
                         "PATH"
+                            | "HOME"
+                            | "TMPDIR"
+                            | "TMPPREFIX"
+                            | "CARGO_HOME"
+                            | "RUSTUP_HOME"
+                            | "RUSTUP_AUTO_INSTALL"
+                            | "CARGO_TARGET_DIR"
+                            | "CARGO_BUILD_BUILD_DIR"
+                            | "CARGO_CACHE_AUTO_CLEAN_FREQUENCY"
                             | "CODEX_HOME"
                             | "CLAUDE_CONFIG_DIR"
                             | "CLAUDE_CODE_TMPDIR"
@@ -1461,6 +970,14 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
                 "native adapter dropped a host environment binding"
             );
         }
+        let homes: Vec<_> = native
+            .env
+            .iter()
+            .filter(|(key, _)| key == "CARGO_HOME")
+            .collect();
+        assert_eq!(homes.len(), 1);
+        assert_eq!(homes[0].1, "/fixture/home/.cargo");
+        assert_eq!(cargo_home_path(&native), Path::new("/fixture/home/.cargo"));
         if let Some((_, host_path)) = host.iter().find(|(key, _)| key == "PATH") {
             let child_path = &native.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
             let child_paths: Vec<_> = std::env::split_paths(child_path).collect();
@@ -1478,6 +995,98 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
                 Some(&token),
             ))?;
             assert!(!confined.tool_requirements.exec.is_empty());
+        }
+    }
+    Ok(())
+}
+
+/// Small: all adapters use the same identity/cache bindings, including a
+/// sparse native environment. No process-global environment mutation is needed.
+#[test]
+fn every_adapter_finalises_missing_lane_environment() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture".into());
+    let token = fixture_token();
+    let argv = vec!["/bin/echo".to_owned(), "fixture".to_owned()];
+    for entry in REGISTRY {
+        let id = entry.adapter.id();
+        for native in [false, true] {
+            let auth = match id {
+                "codex" | "cursor" | "opencode" => Some("login"),
+                "agy" => Some("keychain"),
+                _ => None,
+            };
+            let plan = fixture_access_plan(Access::ReadOnly, auth, false);
+            let mut route = route(id, if id == "command" { "" } else { "fixture-model" });
+            route.account_key = None;
+            let host_var = |name: &str| {
+                (native && name == provenant_core::consumer_env::SANDBOX).then(|| "off".into())
+            };
+            let mut input = fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                (id == "claude").then_some(&token),
+            );
+            input.host_var = &host_var;
+            if id == "command" {
+                input.command = Some(command::Invocation {
+                    argv: &argv,
+                    program: Path::new("/bin/echo"),
+                    runtimes: &[],
+                });
+            }
+            let mut spec = entry.adapter.prepare(input)?;
+            let selected_home = spec
+                .env
+                .iter()
+                .find(|(key, _)| key == "HOME")
+                .map(|(_, value)| value.clone())
+                .expect("adapter HOME");
+            if native {
+                assert_eq!(selected_home, std::ffi::OsString::from("/fixture/home"));
+            }
+            let assert_bindings = |spec: &LaunchSpec| {
+                for (key, expected) in [
+                    ("HOME", Path::new(&selected_home).to_path_buf()),
+                    ("TMPDIR", plan.permissions().scratch.path.clone()),
+                    ("CARGO_HOME", cargo_home_path(spec)),
+                ] {
+                    let values: Vec<_> = spec
+                        .env
+                        .iter()
+                        .filter(|(name, _)| name == key)
+                        .map(|(_, value)| value.as_os_str())
+                        .collect();
+                    assert_eq!(
+                        values,
+                        vec![expected.as_os_str()],
+                        "{id} native={native} {key}"
+                    );
+                }
+            };
+            assert_bindings(&spec);
+            spec.env
+                .retain(|(key, _)| !matches!(key.to_str(), Some("TMPDIR" | "CARGO_HOME")));
+            let mut input = fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                (id == "claude").then_some(&token),
+            );
+            input.host_var = &host_var;
+            crate::launch::finalise_provider_env(&input, &mut spec)?;
+            assert_bindings(&spec);
+            spec.env.retain(|(key, _)| key != "HOME");
+            crate::launch::finalise_provider_env(&input, &mut spec)?;
+            let homes: Vec<_> = spec
+                .env
+                .iter()
+                .filter(|(key, _)| key == "HOME")
+                .map(|(_, value)| value.as_os_str())
+                .collect();
+            assert_eq!(homes, [input.home.as_os_str()]);
         }
     }
     Ok(())

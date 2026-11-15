@@ -8,8 +8,8 @@ import uuid
 from urllib.parse import urlparse
 
 def main():
-    if len(sys.argv) != 4 or sys.argv[3] not in ("2", "3"):
-        sys.exit("usage: verify-ci-runner REMOTE COMMIT 2|3")
+    if len(sys.argv) != 4 or not sys.argv[3]:
+        sys.exit("usage: verify-ci-runner REMOTE COMMIT TIER")
     remote, commit, tier = sys.argv[1:]
     refs = subprocess.check_output(["git", "ls-remote", "--heads", remote], text=True)
     branches = [line.split()[1].removeprefix("refs/heads/") for line in refs.splitlines()
@@ -24,7 +24,7 @@ def main():
     repo = parsed.hostname + parsed.path.rstrip("/")
     request = uuid.uuid4().hex
     subprocess.run(["gh", "workflow", "run", "verify-tiers.yml", "--repo", repo, "--ref", branches[0],
-                    "-f", f"commit={commit}", "-f", f"tier={tier}", "-f", f"request={request}"], check=True, stdout=sys.stderr)
+                    "-f", f"commit={commit}", "-f", "task=tier", "-f", f"tier={tier}", "-f", f"request={request}"], check=True, stdout=sys.stderr)
     deadline = time.monotonic() + 3600
     while time.monotonic() < deadline:
         runs = json.loads(subprocess.check_output(["gh", "run", "list", "--repo", repo, "--workflow", "verify-tiers.yml",

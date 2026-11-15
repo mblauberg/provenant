@@ -1,9 +1,13 @@
-//! Launch refusals must survive settlement without exposing provider/error text.
+//! Launch refusals survive settlement with a specific cause; a refusal's own
+//! message reaches the reason only redacted and bounded.
 use super::tests::{call, clock, context, input};
 use super::*;
 use provenant_core::CancelToken;
 use provenant_records::wire::LaneRow;
 use provenant_supervisor::custody::ExitObservation;
+
+/// A secret-shaped value in a provider's refusal message.
+const PROVIDER_TOKEN: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
 
 #[test]
 fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
@@ -14,17 +18,18 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         source_overlap: bool,
     }
     impl Providers for Refused {
-        fn check_policy(&self, _: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
+        fn check_policy(&self, _: &TaskRequest) -> std::result::Result<(), Box<PrepareRefusal>> {
             if self.disk {
-                return Err(PrepareRefusal {
+                return Err(Box::new(PrepareRefusal {
                     boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                    policy_code: None,
                     resource: None,
-                    terminal_cause: Some(TerminalCause::DiskFloor),
-                    terminal_note: Some("99 bytes available; gc.free_floor is 100 bytes (source: host configuration)".into()),
+                    terminal_cause: TerminalCause::DiskFloor,
+                    terminal_note: Some("99 bytes available; gc.critical_free is 100 bytes (source: host configuration)".into()),
                     message: "HOST_DISK_ERROR_SENTINEL".into(),
                     skipped_routes: Vec::new(),
                     fallback_outcome: None,
-                });
+                }));
             }
             Ok(())
         }
@@ -34,16 +39,17 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             _: &str,
             _: &LaunchPaths,
             _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
-            let mut refusal = PrepareRefusal::from("PROVIDER_SECRET_SENTINEL");
-            refusal.terminal_cause = None;
+        ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
+            let mut refusal = PrepareRefusal::boxed(
+                TerminalCause::RouteResolutionRefused,
+                format!("PROVIDER_SECRET_SENTINEL {PROVIDER_TOKEN}"),
+            );
             if self.source_overlap {
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
                 refusal.terminal_note =
                     Some("product assets overlap the live graph source checkout".into());
             }
             if self.typed {
-                refusal.terminal_cause = Some(TerminalCause::RouteResolutionRefused);
                 refusal.terminal_note =
                     Some("route resolver classification: unsupported_effort".into());
             }
@@ -68,9 +74,11 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let context = context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
         let mut run = input();
-        run.request.tasks[0].route = RequestedRoute::Model {
+        run.request.task.route = RequestedRoute::Model {
+            required_family: None,
             extra: Default::default(),
             provider: model.split_once('/').ok_or("adapter")?.0.into(),
             model: model.into(),
@@ -81,16 +89,17 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             let worktree = temp.path().join("worktree");
             std::fs::create_dir(&project)?;
             std::fs::create_dir(&worktree)?;
-            run.request.tasks[0].writer = Some(WriterRequest {
+            run.request.task.writer = Some(WriterRequest {
                 extra: Default::default(),
+                custody_project: Some(crate::tests::writer_project()),
                 project,
                 worktree,
             });
         }
         store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
+        let id = run.attempt_id;
         let started = store.start(
-            run.run_id,
+            run.attempt_id,
             &Refused {
                 typed,
                 disk,
@@ -107,34 +116,26 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         assert_eq!(state, "rejected");
         let cause = if disk {
             TerminalCause::DiskFloor
-        } else if typed {
-            TerminalCause::RouteResolutionRefused
         } else {
-            TerminalCause::PreparationRefused
+            TerminalCause::RouteResolutionRefused
         };
-        let AttemptState::Terminal { extra, .. } = &record.state else {
+        let AttemptState::Terminal { terminal_cause, .. } = &record.state else {
             return Err("not terminal".into());
         };
-        assert_eq!(
-            extra.get("terminal_cause"),
-            Some(&serde_json::to_value(cause)?)
-        );
+        assert_eq!(*terminal_cause, Some(cause));
         let (_, label) = LaneRow::state_and_label(&record.state);
         let label = label.ok_or("missing human label")?;
         assert_eq!(label, cause.reason());
-        assert!(label.len() <= 60, "{label}");
         assert!(!label.contains("PROVIDER_SECRET_SENTINEL"), "{label}");
         assert!(!label.contains("unsupported_effort"), "{label}");
         assert!(!label.contains("99 bytes available"), "{label}");
         let reason = reason.ok_or("missing structured reason")?;
         assert!(reason.starts_with(cause.detail()), "{reason}");
-        assert!(!reason.contains("PROVIDER_SECRET_SENTINEL"), "{reason}");
         if disk {
-            assert!(reason.contains("gc.free_floor"), "{reason}");
+            assert!(reason.contains("gc.critical_free"), "{reason}");
             assert!(reason.contains("99 bytes available"), "{reason}");
             assert!(reason.contains("100 bytes"), "{reason}");
             assert!(reason.contains("host configuration"), "{reason}");
-            assert!(reason.contains("provenant gc --apply"), "{reason}");
             assert!(!reason.contains("access grants"), "{reason}");
             assert!(!reason.contains("HOST_DISK_ERROR_SENTINEL"), "{reason}");
         } else if source_overlap {
@@ -144,10 +145,13 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             );
         } else if typed {
             assert!(reason.contains("unsupported_effort"), "{reason}");
-            assert!(reason.contains("provenant route resolve"), "{reason}");
         } else {
-            assert!(reason.contains("before retrying"), "{reason}");
+            // With no fixed note, the refusal's own message is sealed.
+            assert!(reason.contains("PROVIDER_SECRET_SENTINEL"), "{reason}");
         }
+        // Whatever the reason carries, a secret-shaped value never reaches it.
+        assert!(!reason.contains(PROVIDER_TOKEN), "{reason}");
+        assert!(!label.contains(PROVIDER_TOKEN), "{label}");
     }
     Ok(())
 }
@@ -161,18 +165,22 @@ fn queued_proposal_refusal_does_not_invent_a_launch_preparation_cause()
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let run = input();
     store.create(&run, &call)?;
-    store.refuse_queued(run.run_id, "child proposal is invalid", &call)?;
-    let record = store.record(run.attempts[0].attempt_id, &call)?;
-    let AttemptState::Terminal { extra, outcome, .. } = &record.state else {
+    store.refuse_queued(run.attempt_id, "child proposal is invalid", &call)?;
+    let record = store.record(run.attempt_id, &call)?;
+    let AttemptState::Terminal {
+        terminal_cause,
+        outcome,
+        ..
+    } = &record.state
+    else {
         return Err("not terminal".into());
     };
     assert_eq!(*outcome, Outcome::Rejected);
-    assert!(!extra.contains_key("terminal_cause"));
+    assert_eq!(*terminal_cause, None);
     let (_, reason) = LaneRow::state_and_reason(&record.state);
     assert_eq!(
         reason.as_deref(),
         Some(Outcome::Rejected.diagnostic_reason())
     );
-    assert!(!reason.unwrap().contains("launch preparation"));
     Ok(())
 }

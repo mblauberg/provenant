@@ -6,7 +6,7 @@ fn fixture_route() -> Value {
 }
 
 fn decide(id: &str, timeout: Option<u64>) -> Value {
-    let mut spec = json!({"question":"Ship the change?", "default":"hold",
+    let mut spec = json!({"question":"Ship the change?", "on_unanswered":"block_dependants", "default":"hold",
         "options":[{"id":"ship", "label":"Ship"}, {"id":"hold", "label":"Hold"}]});
     if let Some(seconds) = timeout {
         spec["timeout_seconds"] = json!(seconds);
@@ -49,6 +49,7 @@ fn at(seconds: i64) -> provenant_core::WallTime {
 fn decide_answer_becomes_the_verdict_and_routes_the_chosen_edge() {
     let document = routed(None);
     let mut owner = FakeOwner {
+        now: Some(at(0)),
         actor: "chair".into(),
         observations: [terminal(AttemptOutcome::Succeeded)].into(),
         ..Default::default()
@@ -61,8 +62,18 @@ fn decide_answer_becomes_the_verdict_and_routes_the_chosen_edge() {
     assert_eq!(ask.ask_id, "choose.ask-1");
     assert_eq!(ask.kind, AskKind::Decide);
     assert_eq!(ask.session, "chair-session");
-    assert!(ask.body.contains("Ship the change?"));
-    assert!(ask.wake_at.is_none() && waiting.checkpoint.wake_at.is_none());
+    assert_eq!(ask.request, "choose.ask-1");
+    assert_eq!(
+        ask.timeout.unwrap().seconds,
+        crate::config::DEFAULT_DECIDE_TIMEOUT_SECONDS
+    );
+    assert_eq!(
+        ask.timeout.unwrap().source,
+        DecideTimeoutSource::DomainDefault
+    );
+    assert!(owner.filed[0].body.contains("Ship the change?"));
+    assert_eq!(ask.wake_at, waiting.checkpoint.wake_at);
+    assert!(ask.wake_at.is_some());
     assert!(owner.calls.is_empty());
     assert_eq!(
         advance(&document, &mut owner, &mut journal)
@@ -88,17 +99,23 @@ fn decide_answer_becomes_the_verdict_and_routes_the_chosen_edge() {
         choose.outputs.as_ref().unwrap().verdict.as_deref(),
         Some("ship")
     );
+    assert_eq!(
+        choose.outputs.as_ref().unwrap().decide_outcome,
+        Some(DecideOutcome::Answered {
+            option: "ship".into(),
+            actor: "chair".into(),
+        })
+    );
     assert!(
         choose
             .deterministic_summary()
             .unwrap()
             .contains("answered by chair")
     );
-    let answer = run.checkpoint.asks[0].answer.as_ref().unwrap();
-    assert_eq!(answer.source, AnswerSource::Answered);
-    assert_eq!(answer.actor.as_deref(), Some("chair"));
-    assert!(run.checkpoint.asks[0].resolved && run.checkpoint.asks[0].closed);
-    assert_eq!(owner.closed_asks, ["choose.ask-1"]);
+    // The inbox keeps the answer; the checkpoint keeps no link once it is applied.
+    assert!(run.checkpoint.asks.is_empty());
+    assert!(owner.closed_asks.is_empty());
+    assert_eq!(owner.filed.len(), 1);
     let replay = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(replay.checkpoint, run.checkpoint);
     assert_eq!(owner.calls.len(), 1);
@@ -108,6 +125,7 @@ fn decide_answer_becomes_the_verdict_and_routes_the_chosen_edge() {
 fn decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again() {
     let document = routed(None);
     let mut owner = FakeOwner {
+        now: Some(at(0)),
         observations: [terminal(AttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
@@ -127,8 +145,9 @@ fn decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again() {
     );
     assert_eq!(state(&run, "hold-work"), NodeState::Succeeded);
 
-    // A rejected answer keeps the node open and the next advance asks again.
+    // A rejected answer keeps the node open and replaces the request at once.
     let mut owner = FakeOwner {
+        now: Some(at(0)),
         observations: [terminal(AttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
@@ -139,23 +158,20 @@ fn decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again() {
     let rejected = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(rejected.status, GraphStatus::Pending);
     assert_eq!(state(&rejected, "choose"), NodeState::Running);
-    let first = &rejected.checkpoint.asks[0];
-    assert_eq!(
-        first.answer.as_ref().unwrap().rejection_code.as_deref(),
-        Some("invalid_decide_option")
-    );
-    assert!(first.resolved && first.closed);
     assert!(owner.calls.is_empty());
-
-    let again = advance(&document, &mut owner, &mut journal).unwrap();
-    let second = &again.checkpoint.asks[0];
+    let [second] = &rejected.checkpoint.asks[..] else {
+        panic!("one link per node");
+    };
     assert_eq!(second.ask_id, "choose.ask-2");
-    assert!(!second.resolved);
+    assert_eq!(owner.filed.len(), 2);
     assert!(
-        second
+        owner.filed[1]
             .body
             .ends_with("The previous answer was not applied: answer must choose one of ship, hold")
     );
+    let again = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(again.checkpoint, rejected.checkpoint);
+    assert_eq!(owner.filed.len(), 2);
     owner
         .answers
         .insert("choose.ask-2".into(), reply(Some("ship"), None));
@@ -167,7 +183,10 @@ fn decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again() {
 #[test]
 fn decide_ids_stay_unique_across_repeated_cancel_and_resume() {
     let document = routed(None);
-    let mut owner = FakeOwner::default();
+    let mut owner = FakeOwner {
+        now: Some(at(0)),
+        ..Default::default()
+    };
     let mut journal = MemoryJournal::default();
     advance(&document, &mut owner, &mut journal).unwrap();
     for _ in 0..2 {
@@ -184,6 +203,14 @@ fn decide_ids_stay_unique_across_repeated_cancel_and_resume() {
         .collect();
     assert_eq!(ids, ["choose.ask-3"]);
     assert_eq!(owner.closed_asks, ["choose.ask-1", "choose.ask-2"]);
+    assert_eq!(
+        owner
+            .filed
+            .iter()
+            .map(|ask| ask.ask_id.as_str())
+            .collect::<Vec<_>>(),
+        ["choose.ask-1", "choose.ask-2", "choose.ask-3"]
+    );
 }
 
 #[test]
@@ -196,6 +223,7 @@ fn waiting_decide_nodes_do_not_use_up_concurrency() {
     }))
     .unwrap();
     let mut owner = FakeOwner {
+        now: Some(at(0)),
         observations: [terminal(AttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
@@ -274,6 +302,7 @@ fn completion_closes_a_pause_ask_left_by_lowered_limits() {
         attempt_ref: Some("host/attempt".into()),
     };
     let mut owner = FakeOwner {
+        now: Some(at(0)),
         observations: [pending(), pending(), pending(), pending()].into(),
         ..Default::default()
     };
@@ -293,7 +322,7 @@ fn completion_closes_a_pause_ask_left_by_lowered_limits() {
     .unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
     assert_eq!(owner.asked, ["pause-1"]);
-    assert!(!paused.checkpoint.asks[0].resolved);
+    assert_eq!(paused.checkpoint.asks.len(), 1);
 
     owner.observations = [
         terminal(AttemptOutcome::Succeeded),
@@ -309,15 +338,130 @@ fn completion_closes_a_pause_ask_left_by_lowered_limits() {
     )
     .unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
-    assert!(run.checkpoint.pause_reason.is_none());
-    assert!(run.checkpoint.pause_code.is_none());
-    assert!(
-        run.checkpoint
-            .asks
-            .iter()
-            .all(|ask| ask.resolved && ask.closed)
-    );
+    assert!(run.checkpoint.pause.is_none());
+    assert!(run.checkpoint.pause.is_none());
+    assert!(run.checkpoint.asks.is_empty());
     assert_eq!(owner.closed_asks, ["pause-1"]);
+}
+
+#[test]
+fn decide_inbox_error_at_deadline_keeps_the_ask_open_for_each_default() {
+    for (default, disposition) in [
+        (Some("hold"), UnansweredDisposition::BlockDependants),
+        (None, UnansweredDisposition::BlockDependants),
+        (None, UnansweredDisposition::SkipDependants),
+    ] {
+        let mut document = routed(Some(60));
+        let spec = document.nodes[0].decide.as_mut().unwrap();
+        spec.default = default.map(str::to_owned);
+        spec.on_unanswered = disposition;
+        let mut owner = FakeOwner {
+            now: Some(at(0)),
+            observations: [terminal(AttemptOutcome::Succeeded)].into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+        let ask_id = waiting.checkpoint.asks[0].ask_id.clone();
+        let deadline = waiting.checkpoint.asks[0].wake_at.unwrap();
+        owner.now = Some(deadline);
+        owner.fail_node_ask_once = true;
+
+        let unread = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(unread.status, GraphStatus::Pending);
+        assert_eq!(state(&unread, "choose"), NodeState::Running);
+        assert_eq!(unread.checkpoint.asks.len(), 1);
+        assert_eq!(unread.checkpoint.asks[0].ask_id, ask_id);
+        assert!(unread.checkpoint.nodes[0].outputs.is_none());
+        assert!(owner.closed_asks.is_empty());
+        assert_ne!(state(&unread, "ship-work"), NodeState::Succeeded);
+        assert_ne!(state(&unread, "hold-work"), NodeState::Succeeded);
+
+        owner.answers.insert(ask_id, reply(Some("ship"), None));
+        let answered = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(answered.status, GraphStatus::Complete);
+        assert_eq!(state(&answered, "ship-work"), NodeState::Succeeded);
+        assert_eq!(state(&answered, "hold-work"), NodeState::Skipped);
+    }
+}
+
+#[test]
+fn handoff_missing_classification_does_not_release_a_dependant() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 1,
+        "graph_id": "handoff-missing-dependant",
+        "nodes": [
+            {"id":"writer", "access":"read_only", "prompt":"review", "route":fixture_route()},
+            {"id":"release", "access":"read_only", "prompt":"release", "depends_on":["writer"], "route":fixture_route()}
+        ]
+    }))
+    .unwrap();
+    let mut owner = FakeOwner {
+        observations: [AttemptObservation::Terminal {
+            attempt_ref: Some("host/handoff-missing".into()),
+            outcome: AttemptOutcome::ReviewRequired,
+            launched: true,
+            result: None,
+            result_warning: None,
+            result_path: None,
+            branch: None,
+            commit: None,
+            stop: Some(provenant_records::StopCause::HandoffMissing),
+            settlement_reason: Some(provenant_records::run::SettlementReason::HandoffMissing),
+        }]
+        .into(),
+        ..Default::default()
+    };
+
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(state(&run, "writer"), NodeState::Failed);
+    assert_ne!(state(&run, "release"), NodeState::Succeeded);
+}
+
+#[test]
+fn repair_scope_decides_have_no_timeout_default_but_ordinary_decides_may() {
+    let make_scope_gate = |option_ids: [&str; 2], default: Option<&str>| -> GraphDocument {
+        let mut decide = json!({
+            "question": "Approve the changed slice?",
+            "on_unanswered": "block_dependants",
+            "options": option_ids.map(|id| json!({"id": id, "label": id}))
+        });
+        if let Some(default) = default {
+            decide["default"] = json!(default);
+        }
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "graph_id": "repair-scope-timeout",
+            "nodes": [{
+                "id": "scope",
+                "kind": "decide",
+                "access": "read_only",
+                "repair_scope_gate": true,
+                "decide": decide
+            }]
+        }))
+        .unwrap()
+    };
+
+    let scope_without_default = make_scope_gate(["approve", "hold"], None);
+    assert!(validate_flat_plan(&scope_without_default, &Default::default()).is_ok());
+    // Ordinary decisions retain their explicit default behavior.
+    assert!(validate_flat_plan(&routed(Some(60)), &Default::default()).is_ok());
+
+    for (default, options) in [
+        ("approve", ["approve", "hold"]),
+        ("hold", ["approve", "hold"]),
+        ("ship", ["ship", "wait"]),
+    ] {
+        let document = make_scope_gate(options, Some(default));
+        let error = validate_flat_plan(&document, &Default::default()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("repair-scope decide must not declare a timeout default"),
+            "{error}"
+        );
+    }
 }
 
 #[test]
@@ -332,7 +476,13 @@ fn decide_timeout_persists_wake_at_and_takes_the_default() {
     let waiting = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(waiting.checkpoint.asks[0].wake_at, Some(at(60)));
     assert_eq!(waiting.checkpoint.wake_at, Some(at(60)));
-    assert_eq!(waiting.checkpoint.asks[0].default.as_deref(), Some("hold"));
+    assert_eq!(owner.filed[0].default.as_deref(), Some("hold"));
+    assert_eq!(owner.filed[0].wake_at, Some(at(60)));
+    assert_eq!(
+        owner.filed[0].timeout.unwrap().source,
+        DecideTimeoutSource::Graph
+    );
+    assert!(owner.filed[0].body.contains("from the decide declaration"));
     assert_eq!(journal.0.as_ref().unwrap().wake_at, Some(at(60)));
     owner.now = Some(at(59));
     assert_eq!(
@@ -347,13 +497,7 @@ fn decide_timeout_persists_wake_at_and_takes_the_default() {
     assert_eq!(run.status, GraphStatus::Complete);
     assert_eq!(state(&run, "hold-work"), NodeState::Succeeded);
     assert_eq!(state(&run, "ship-work"), NodeState::Skipped);
-    let answer = run.checkpoint.asks[0].answer.as_ref().unwrap();
-    assert_eq!(answer.source, AnswerSource::Default);
-    assert_eq!(
-        (answer.option.as_deref(), answer.actor.as_deref()),
-        (Some("hold"), None)
-    );
-    assert_eq!(answer.at, Some(at(61)));
+    assert!(run.checkpoint.asks.is_empty());
     assert!(run.checkpoint.wake_at.is_none());
     let choose = run
         .checkpoint
@@ -361,11 +505,11 @@ fn decide_timeout_persists_wake_at_and_takes_the_default() {
         .iter()
         .find(|n| n.id == "choose")
         .unwrap();
-    assert!(
-        choose
-            .deterministic_summary()
-            .unwrap()
-            .contains("the default at the deadline")
+    assert_eq!(
+        choose.outputs.as_ref().unwrap().decide_outcome,
+        Some(DecideOutcome::AnsweredByDefault {
+            option: "hold".into(),
+        })
     );
 }
 
@@ -399,7 +543,7 @@ fn several_decide_asks_are_open_at_once_and_resolve_independently() {
     assert_eq!(state(&partial, "second"), NodeState::Succeeded);
     assert_eq!(state(&partial, "first"), NodeState::Running);
     assert_eq!(partial.checkpoint.wake_at, Some(at(120)));
-    assert_eq!(owner.closed_asks, ["second.ask-1"]);
+    assert!(owner.closed_asks.is_empty());
 
     owner
         .answers
@@ -422,7 +566,10 @@ fn decide_nodes_run_inside_loop_bodies_once_per_round() {
         ]
     }))
     .unwrap();
-    let mut owner = FakeOwner::default();
+    let mut owner = FakeOwner {
+        now: Some(at(0)),
+        ..Default::default()
+    };
     owner
         .answers
         .insert("revise--r1--choose.ask-1".into(), reply(Some("hold"), None));
@@ -432,16 +579,12 @@ fn decide_nodes_run_inside_loop_bodies_once_per_round() {
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert!(run.checkpoint.successful());
-    let ids: Vec<_> = run
-        .checkpoint
-        .asks
-        .iter()
-        .map(|ask| ask.ask_id.as_str())
-        .collect();
+    let ids: Vec<_> = owner.filed.iter().map(|ask| ask.ask_id.as_str()).collect();
     assert_eq!(
         ids,
         ["revise--r1--choose.ask-1", "revise--r2--choose.ask-1"]
     );
+    assert!(run.checkpoint.asks.is_empty());
 }
 
 #[test]
@@ -449,7 +592,7 @@ fn decide_configuration_is_checked_against_the_inbox_contract() {
     let base = routed(Some(60));
     validate_plan(&base).unwrap();
     type Change = fn(&mut GraphNode);
-    let cases: [(&str, Change); 12] = [
+    let cases: &[(&str, Change)] = &[
         ("one option", |n| {
             n.decide.as_mut().unwrap().options.truncate(1)
         }),
@@ -461,9 +604,6 @@ fn decide_configuration_is_checked_against_the_inbox_contract() {
         }),
         ("unknown default", |n| {
             n.decide.as_mut().unwrap().default = Some("later".into())
-        }),
-        ("timeout without default", |n| {
-            n.decide.as_mut().unwrap().default = None
         }),
         ("zero timeout", |n| {
             n.decide.as_mut().unwrap().timeout_seconds = Some(0)
@@ -515,8 +655,11 @@ fn budget_pause() -> (GraphDocument, FakeOwner, crate::config::GraphBudget) {
         result_path: None,
         branch: None,
         commit: None,
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        stop: None,
     };
     let owner = FakeOwner {
+        now: Some(at(0)),
         observations: [observation(), observation()].into(),
         usage: AttemptUsage {
             tokens: Some(10),
@@ -545,8 +688,9 @@ fn a_budget_pause_raises_one_ask_and_an_extend_answer_resumes() {
     let ask = &paused.checkpoint.asks[0];
     assert_eq!((ask.ask_id.as_str(), ask.kind), ("pause-1", AskKind::Pause));
     assert!(
-        ask.body
-            .contains(paused.checkpoint.pause_reason.as_deref().unwrap())
+        owner.filed[0]
+            .body
+            .contains(paused.checkpoint.pause_reason().unwrap())
     );
     assert_eq!(
         advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget)
@@ -566,16 +710,8 @@ fn a_budget_pause_raises_one_ask_and_an_extend_answer_resumes() {
     assert_eq!(run.status, GraphStatus::Complete);
     assert_eq!(run.checkpoint.extensions, ["budget.per_graph.tokens=30"]);
     assert_eq!(owner.calls.len(), 2);
-    assert_eq!(
-        run.checkpoint.asks[0]
-            .answer
-            .as_ref()
-            .unwrap()
-            .actor
-            .as_deref(),
-        Some("chair")
-    );
-    assert_eq!(owner.closed_asks, ["pause-1"]);
+    assert!(run.checkpoint.asks.is_empty());
+    assert!(owner.closed_asks.is_empty());
 }
 
 #[test]
@@ -594,19 +730,16 @@ fn a_pause_answer_can_cancel_and_a_rejected_answer_asks_again() {
     let rejected =
         advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap();
     assert_eq!(rejected.status, GraphStatus::Paused);
-    let first = &rejected.checkpoint.asks[0];
-    assert_eq!(
-        first.answer.as_ref().unwrap().rejection_code.as_deref(),
-        Some("invalid_pause_answer")
+    // The rejected answer is replaced by a request that says why.
+    assert_eq!(rejected.checkpoint.asks.len(), 1);
+    assert_eq!(rejected.checkpoint.asks[0].ask_id, "pause-2");
+    assert!(
+        owner.filed[1]
+            .body
+            .contains("The previous answer was not applied")
     );
     let again = advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap();
-    let second = again
-        .checkpoint
-        .asks
-        .iter()
-        .find(|ask| ask.ask_id == "pause-2")
-        .unwrap();
-    assert!(second.body.contains("The previous answer was not applied"));
+    assert_eq!(again.checkpoint, rejected.checkpoint);
 
     owner
         .answers
@@ -615,7 +748,7 @@ fn a_pause_answer_can_cancel_and_a_rejected_answer_asks_again() {
         advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap();
     assert_eq!(cancelled.status, GraphStatus::Cancelled);
     assert_eq!(owner.calls.len(), 1);
-    assert!(cancelled.checkpoint.asks.iter().all(|ask| ask.closed));
+    assert!(cancelled.checkpoint.asks.is_empty());
 }
 
 #[test]
@@ -633,6 +766,7 @@ fn a_planner_fragment_can_add_a_decide_node() {
         json!({"schema_version":1, "nodes":[decide("choose", None)]})
     );
     let mut owner = FakeOwner {
+        now: Some(at(0)),
         observations: [
             terminal_with_result(AttemptOutcome::Succeeded, &fragment),
             terminal(AttemptOutcome::Succeeded),
@@ -648,12 +782,11 @@ fn a_planner_fragment_can_add_a_decide_node() {
         run.status,
         GraphStatus::Complete,
         "{:?}",
-        run.checkpoint.pause_reason
+        run.checkpoint.pause_reason()
     );
     assert_eq!(state(&run, "plan--choose"), NodeState::Succeeded);
     assert_eq!(owner.calls.len(), 2);
 }
-
 
 #[test]
 fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
@@ -663,12 +796,13 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
         Some(json!({"within_scope":true,"one_way_door":true})),
         None,
     ] {
-        let within_scope = classification == Some(json!({"within_scope":true,"one_way_door":false}));
+        let within_scope =
+            classification == Some(json!({"within_scope":true,"one_way_door":false}));
         let document: GraphDocument = serde_json::from_value(json!({
             "schema_version":1,"graph_id":"principal-scope","nodes":[
                 {"id":"design","access":"read_only","prompt":"design","route":fixture_route()},
                 {"id":"scope","kind":"decide","access":"read_only","depends_on":["design"],
-                 "repair_scope_gate":true,"decide":{"question":"Approve the changed slice?",
+                 "repair_scope_gate":true,"decide":{"on_unanswered":"block_dependants", "question":"Approve the changed slice?",
                     "options":[{"id":"approve","label":"Approve"},{"id":"hold","label":"Hold"}]}},
                 {"id":"approved","kind":"gate","access":"read_only","depends_on":["scope"],
                  "inputs":[{"node":"scope","outputs":["verdict"]}],
@@ -676,12 +810,20 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
                 {"id":"writer","access":"read_only","depends_on":["approved"],"prompt":"continue","route":fixture_route()}
             ]
         })).unwrap();
-        let report = format!("Principal options and smallest slice\n```findings\n{}\n```",
-            json!({"schema_version":1,"findings":[],"repair_design":classification}));
-        let mut owner = FakeOwner { actor:"chair".into(), observations:[
-            terminal_with_result(AttemptOutcome::Succeeded, &report),
-            terminal(AttemptOutcome::Succeeded),
-        ].into(), ..Default::default() };
+        let report = format!(
+            "Principal options and smallest slice\n```findings\n{}\n```",
+            json!({"schema_version":1,"findings":[],"repair_design":classification})
+        );
+        let mut owner = FakeOwner {
+            now: Some(at(0)),
+            actor: "chair".into(),
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &report),
+                terminal(AttemptOutcome::Succeeded),
+            ]
+            .into(),
+            ..Default::default()
+        };
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
         assert_eq!(owner.owner_notifications, ["scope.owner-notification"]);
@@ -701,19 +843,67 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
             let library = template::TemplateLibrary::bundled();
             let resolvers = std::collections::BTreeMap::new();
             let limits = crate::config::GraphLimits::default();
-            let context = patch::PatchContext { library:&library, resolvers:&resolvers,
-                scan:&patch::scan_for_secrets, journal:None, limits:&limits };
-            patch::retry_node(&mut patch::LiveGraph { document:&document,
-                checkpoint:journal.0.as_mut().unwrap() }, "scope", None, &context).unwrap();
+            let context = patch::PatchContext {
+                library: &library,
+                resolvers: &resolvers,
+                scan: &patch::scan_for_secrets,
+                journal: None,
+                limits: &limits,
+                worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+            };
+            patch::retry_node(
+                &mut patch::LiveGraph {
+                    document: &document,
+                    checkpoint: journal.0.as_mut().unwrap(),
+                },
+                "scope",
+                None,
+                &context,
+            )
+            .unwrap();
             advance(&document, &mut owner, &mut journal).unwrap();
-            assert_eq!(owner.owner_notifications, ["scope.owner-notification", "scope.owner-notification.retry-1"]);
+            assert_eq!(
+                owner.owner_notifications,
+                [
+                    "scope.owner-notification",
+                    "scope.owner-notification.retry-1"
+                ]
+            );
         }
         if !within_scope {
+            let mut unanswered_journal = MemoryJournal(journal.0.clone());
+            let mut unanswered_owner = FakeOwner {
+                now: run.checkpoint.asks[0].wake_at,
+                ..Default::default()
+            };
+            let unanswered =
+                advance(&document, &mut unanswered_owner, &mut unanswered_journal).unwrap();
+            assert_eq!(state(&unanswered, "writer"), NodeState::Blocked);
+            let scope = unanswered
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id == "scope")
+                .unwrap();
+            assert_eq!(scope.state, NodeState::Failed);
+            assert_eq!(scope.outputs.as_ref().unwrap().verdict, None);
+            assert_eq!(
+                scope.outputs.as_ref().unwrap().decide_outcome,
+                Some(DecideOutcome::Unanswered)
+            );
+            assert!(unanswered_owner.calls.is_empty());
+            advance(&document, &mut unanswered_owner, &mut unanswered_journal).unwrap();
             let mut approved_journal = MemoryJournal(journal.0.clone());
-            let mut approved_owner = FakeOwner { actor:"chair".into(),
-                observations:[terminal(AttemptOutcome::Succeeded)].into(),
-                answers:std::collections::BTreeMap::from([("scope.ask-1".into(), reply(Some("approve"), None))]),
-                ..Default::default() };
+            let mut approved_owner = FakeOwner {
+                now: Some(at(0)),
+                actor: "chair".into(),
+                observations: [terminal(AttemptOutcome::Succeeded)].into(),
+                answers: std::collections::BTreeMap::from([(
+                    "scope.ask-1".into(),
+                    reply(Some("approve"), None),
+                )]),
+                ..Default::default()
+            };
             let approved = advance(&document, &mut approved_owner, &mut approved_journal).unwrap();
             assert_eq!(state(&approved, "writer"), NodeState::Succeeded);
             assert_eq!(approved_owner.calls.len(), 1);
@@ -722,22 +912,46 @@ fn principal_scope_gate_notifies_once_and_only_waits_outside_approved_scope() {
             let library = template::TemplateLibrary::bundled();
             let resolvers = std::collections::BTreeMap::new();
             let limits = crate::config::GraphLimits::default();
-            let context = patch::PatchContext { library:&library, resolvers:&resolvers,
-                scan:&patch::scan_for_secrets, journal:None, limits:&limits };
-            patch::retry_node(&mut patch::LiveGraph { document:&document,
-                checkpoint:approved_journal.0.as_mut().unwrap() }, "scope", None, &context).unwrap();
+            let context = patch::PatchContext {
+                library: &library,
+                resolvers: &resolvers,
+                scan: &patch::scan_for_secrets,
+                journal: None,
+                limits: &limits,
+                worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+            };
+            patch::retry_node(
+                &mut patch::LiveGraph {
+                    document: &document,
+                    checkpoint: approved_journal.0.as_mut().unwrap(),
+                },
+                "scope",
+                None,
+                &context,
+            )
+            .unwrap();
             let retried = advance(&document, &mut approved_owner, &mut approved_journal).unwrap();
             assert_eq!(state(&retried, "scope"), NodeState::Running);
-            assert!(retried.checkpoint.asks.iter().any(|ask| ask.ask_id == "scope.ask-2.retry-1" && !ask.resolved));
-            assert_eq!(approved_owner.owner_notifications, ["scope.owner-notification.retry-1"]);
-            owner.answers.insert("scope.ask-1".into(), reply(Some("hold"), None));
+            assert!(
+                retried
+                    .checkpoint
+                    .asks
+                    .iter()
+                    .any(|ask| ask.ask_id == "scope.ask-1.retry-1")
+            );
+            assert_eq!(
+                approved_owner.owner_notifications,
+                ["scope.owner-notification.retry-1"]
+            );
+            owner
+                .answers
+                .insert("scope.ask-1".into(), reply(Some("hold"), None));
             let held = advance(&document, &mut owner, &mut journal).unwrap();
             assert_ne!(state(&held, "writer"), NodeState::Succeeded);
             assert_eq!(owner.calls.len(), 1);
         }
     }
 }
-
 
 #[test]
 fn principal_container_retry_does_not_reuse_owner_decision() {
@@ -746,31 +960,151 @@ fn principal_container_retry_does_not_reuse_owner_decision() {
             {"id":"redesign","kind":"composite","access":"read_only","composite":{"exports":[],"nodes":[
                 {"id":"design","access":"read_only","prompt":"design","route":fixture_route()},
                 {"id":"scope","kind":"decide","access":"read_only","depends_on":["design"],
-                 "repair_scope_gate":true,"decide":{"question":"Approve the changed slice?",
+                 "repair_scope_gate":true,"decide":{"on_unanswered":"block_dependants", "question":"Approve the changed slice?",
                     "options":[{"id":"approve","label":"Approve"},{"id":"hold","label":"Hold"}]}}
             ]}}
         ]
     })).unwrap();
     let report = "First principal slice\n```findings\n{\"schema_version\":1,\"findings\":[],\"repair_design\":{\"within_scope\":false,\"one_way_door\":true}}\n```";
-    let mut owner = FakeOwner { actor:"chair".into(),
-        observations:[terminal_with_result(AttemptOutcome::Succeeded, report)].into(),
-        answers:std::collections::BTreeMap::from([("redesign--scope.ask-1".into(), reply(Some("approve"), None))]),
-        ..Default::default() };
+    let mut owner = FakeOwner {
+        now: Some(at(0)),
+        actor: "chair".into(),
+        observations: [terminal_with_result(AttemptOutcome::Succeeded, report)].into(),
+        answers: std::collections::BTreeMap::from([(
+            "redesign--scope.ask-1".into(),
+            reply(Some("approve"), None),
+        )]),
+        ..Default::default()
+    };
     let mut journal = MemoryJournal::default();
-    assert_eq!(advance(&document, &mut owner, &mut journal).unwrap().status, GraphStatus::Complete);
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal).unwrap().status,
+        GraphStatus::Complete
+    );
     let library = template::TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::new();
     let limits = crate::config::GraphLimits::default();
-    let context = patch::PatchContext { library:&library, resolvers:&resolvers,
-        scan:&patch::scan_for_secrets, journal:None, limits:&limits };
-    patch::retry_node(&mut patch::LiveGraph { document:&document,
-        checkpoint:journal.0.as_mut().unwrap() }, "redesign", None, &context).unwrap();
-    owner.observations.push_back(terminal_with_result(AttemptOutcome::Succeeded,
-        &report.replace("First principal slice", "Revised principal slice")));
+    let context = patch::PatchContext {
+        library: &library,
+        resolvers: &resolvers,
+        scan: &patch::scan_for_secrets,
+        journal: None,
+        limits: &limits,
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+    };
+    patch::retry_node(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: journal.0.as_mut().unwrap(),
+        },
+        "redesign",
+        None,
+        &context,
+    )
+    .unwrap();
+    owner.observations.push_back(terminal_with_result(
+        AttemptOutcome::Succeeded,
+        &report.replace("First principal slice", "Revised principal slice"),
+    ));
     let retried = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(retried.status, GraphStatus::Pending);
     assert_eq!(state(&retried, "redesign--scope"), NodeState::Running);
-    assert_eq!(retried.checkpoint.asks[0].ask_id, "redesign--scope.ask-1.retry-1");
-    assert!(retried.checkpoint.asks[0].body.contains("Revised principal slice"));
-    assert_eq!(owner.owner_notifications, ["redesign--scope.owner-notification", "redesign--scope.owner-notification.retry-1"]);
+    assert_eq!(
+        retried.checkpoint.asks[0].ask_id,
+        "redesign--scope.ask-1.retry-1"
+    );
+    assert!(
+        owner
+            .filed
+            .last()
+            .unwrap()
+            .body
+            .contains("Revised principal slice")
+    );
+    assert_eq!(
+        owner.owner_notifications,
+        [
+            "redesign--scope.owner-notification",
+            "redesign--scope.owner-notification.retry-1"
+        ]
+    );
+}
+
+/// Every declared unanswered disposition records no option and prevents dependants running.
+#[test]
+fn unanswered_decides_follow_their_declared_disposition_without_selecting_an_option() {
+    for (disposition, expected) in [
+        (UnansweredDisposition::BlockDependants, NodeState::Failed),
+        (UnansweredDisposition::SkipDependants, NodeState::Skipped),
+    ] {
+        let mut document = routed(None);
+        let decide = document.nodes[0].decide.as_mut().unwrap();
+        decide.default = None;
+        decide.on_unanswered = disposition;
+        let mut owner = FakeOwner {
+            now: Some(at(0)),
+            observations: [terminal(AttemptOutcome::Succeeded)].into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+        let deadline = waiting.checkpoint.asks[0].wake_at.expect("decide deadline");
+        assert!(deadline > at(0));
+        owner.now = Some(deadline);
+        let settled = advance(&document, &mut owner, &mut journal).unwrap();
+        let choose = settled
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "choose")
+            .unwrap();
+        assert_eq!(choose.state, expected);
+        let outputs = choose.outputs.as_ref().unwrap();
+        assert_eq!(outputs.decide_outcome, Some(DecideOutcome::Unanswered));
+        assert_eq!(outputs.verdict, None);
+        assert!(settled.checkpoint.asks.is_empty());
+        assert_ne!(state(&settled, "ship-work"), NodeState::Succeeded);
+        assert_ne!(state(&settled, "hold-work"), NodeState::Succeeded);
+    }
+}
+
+#[test]
+fn every_decide_outcome_round_trips_and_unanswered_has_no_option() {
+    let outcomes = [
+        DecideOutcome::Answered {
+            option: "ship".into(),
+            actor: "chair".into(),
+        },
+        DecideOutcome::AnsweredByDefault {
+            option: "hold".into(),
+        },
+        DecideOutcome::AnsweredByPolicy {
+            option: "approve".into(),
+            rule: "approved_repair_scope".into(),
+        },
+        DecideOutcome::Unanswered,
+    ];
+    for outcome in outcomes {
+        let encoded = serde_json::to_value(&outcome).unwrap();
+        let decoded: DecideOutcome = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded, outcome);
+        if outcome == DecideOutcome::Unanswered {
+            assert!(encoded.get("option").is_none());
+            assert_eq!(outcome.option(), None);
+        } else {
+            assert!(outcome.option().is_some());
+        }
+    }
+}
+
+#[test]
+fn every_unanswered_disposition_is_encodable() {
+    for disposition in [
+        UnansweredDisposition::BlockDependants,
+        UnansweredDisposition::SkipDependants,
+    ] {
+        let encoded = serde_json::to_value(disposition).unwrap();
+        let decoded: UnansweredDisposition = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, disposition);
+    }
 }

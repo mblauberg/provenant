@@ -87,6 +87,7 @@ pub(crate) fn process(pid: u32) -> ObservationResult<NativeProcess> {
             ppid: bsd.pbi_ppid,
             pgid: bsd.pbi_pgid,
             rss_bytes: info.ptinfo.pti_resident_size,
+            extra: Default::default(),
         },
         start,
     })

@@ -7,62 +7,51 @@ Anchor: [`ci.yml`](../../.github/workflows/ci.yml); [`check-native-inventory`](.
 Keep fixtures independent of host capacity and time: inject `Resources`
 observations, an `AdmissionPolicy` and `provenant_core::TestClock` at admission
 boundaries, and wait on a named condition with `provenant_test_support::wait_for`
-and a bounded deadline instead of sleeping (`tests/workspace_policy.rs` rejects
-direct sleeps). Tests of native process or filesystem behaviour may still need
-real host facts.
+and a bounded deadline instead of sleeping (Clippy rejects
+direct sleeps through `clippy.toml`). Tests of native process or filesystem
+behaviour may still need real host facts.
 
-Pull requests run the tests for each changed workspace crate and its dependents,
-from a deterministic `cargo metadata` graph. Pushes to `main`, and any changed
-path outside a crate directory or that cannot be resolved safely, run the full
-workspace. These paths always force the full workspace: `tools/front-door/Cargo.lock`,
-`Cargo.toml`, `rust-toolchain.toml` and `.config/nextest.toml`,
-`.github/workflows/ci.yml`, any `build.rs`, `tools/front-door/assets/`, and
-`skills/` and `roles/` assets. Keep that list conservative when adding
-build-time inputs; the `main` push is the backstop if a path is missed.
+## Pipeline
+
+`ci-status` is the single required check (also named in `MAINTAINING.md` and
+`github-workflow.md`). PRs select from the merge-base diff. Main and `land/**`
+pushes always run the full pipeline; missing Git history selects conservatively.
+
+The workflow and selectors define the jobs and their scope. Pull requests select
+affected crates and reverse dependencies; uncertain selection expands coverage.
+See [`select-affected-crate-tests`](../../scripts/select-affected-crate-tests)
+and [`select-macos-checks`](../../scripts/select-macos-checks). Prose changes
+still run documentation and harness checks. See [test tiers](test-tiers.md)
+for host verification.
 
 ## Required native test inventory
 
-This table is the policy source for tests that must run natively on macOS.
-`scripts/check-native-inventory` requires each row to appear in the macOS
-nextest list and pass exactly once in its named invocation with the required
-environment, and `scripts/check-nextest-filters` reads the same rows. The checks
-cannot find a native test that has no row, so add a row with the test.
-
-| Exact test name | Platform | Invocation in `rust-macos-tests` | Required environment | Nextest binary ID |
-|---|---|---|---|---|
-| `tests::staged_skills_native_probes` | macOS | `custody` | `PROVENANT_CONFINEMENT_REQUIRED` | `provenant-providers` |
-| `permissions::tests::escape::native_sandbox_blocks_path_escape_probes` | macOS | `custody` | `PROVENANT_CONFINEMENT_REQUIRED` | `provenant-confinement` |
-| `run::provider::project_paths::tests::configured_shared_path_allows_lane_lock_contended_by_host` | macOS | `custody` | `PROVENANT_CONFINEMENT_REQUIRED` | `provenant-cli` |
-| `lane_prepare_isolates_nested_writer_state` | macOS | `capability` | `PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_LANE_TOOLS_REQUIRED` | `provenant::worktrees` |
-| `writer_production_plan_denies_outside_writes` | macOS | `dispatch` | `PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_LANE_TOOLS_REQUIRED` | `provenant::worktrees` |
-| `worktrees::census_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep` | macOS | `census` | `PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED` | `provenant-confinement` |
-| `worktrees::census_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree` | macOS | `census` | `PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED` | `provenant-confinement` |
-| `sys::pid::tests::native_occupancy_reports_image_and_open_file_with_identity_completeness` | macOS | `census` | `PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED` | `provenant-os` |
-| `sys::pid::tests::native_occupancy_never_proves_an_unqueryable_process_empty` | macOS | `census` | `PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED` | `provenant-os` |
-| `sys::pid::tests::native_current_process_is_not_an_eligible_platform_daemon` | macOS | `census` | `PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED` | `provenant-os` |
-| `sys::pid::tests::native_same_user_sleep_is_not_an_eligible_daemon` | macOS | `census` | `PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED` | `provenant-os` |
-| `sys::pid::tests::native_offsealed_platform_process_is_refused_when_present` | macOS | `census` | `PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED` | `provenant-os` |
-| `command_custom_shebang_runtime_keeps_credentials_and_writes_denied` | macOS | `provider-dispatch` | `PROVENANT_CONFINEMENT_REQUIRED` | `provenant::command_adapter` |
-| `tests::claude_network_on_native_tls_files_are_readable` | macOS | `tls` | `PROVENANT_CONFINEMENT_REQUIRED` | `provenant-providers` |
-| `opencode::tests::read_only_search_runs_in_native_profile` | macOS | `custody` | `PROVENANT_CONFINEMENT_REQUIRED` | `provenant-providers` |
+[`config/native-test-inventory.json`](../../config/native-test-inventory.json)
+declares the tests that must run natively on macOS, their invocations and
+required environment. `scripts/check-native-inventory` resolves that declaration
+against the platform test list and passing results. Add required native coverage
+to the declaration with the test change.
 
 ## Time budgets and caches
 
-Pass `--success-output immediate` to `cargo nextest run` to see `SKIP #n` lines
-from passing tests whose native prerequisite is missing; the
-`PROVENANT_CONFINEMENT_REQUIRED`, `PROVENANT_POSTGRES_REQUIRED` and
-`PROVENANT_LANE_TOOLS_REQUIRED` variables make those checks fail instead.
+From `tools/front-door`, use `--features fixture` for development: `cargo build
+--locked --features fixture`, `cargo test --locked --workspace --features fixture`
+(replace `--workspace` with `-p CRATE` for a focused run), `cargo clippy --locked
+--workspace --all-targets --features fixture -- -D warnings`, and `cargo nextest
+run --locked --workspace --features fixture`. Each manifest forwards this feature
+to its dependencies; release and reference-generation commands keep empty
+defaults so they contain no test helpers. The root manifest's dev profile keeps
+workspace line tables, removes dependency/build-script debuginfo and optimises
+proc-macros; test inherits it. CI cache keys name the feature set and profile;
+Linux build and both archives upload Cargo timings for comparison with the prior
+PR run (use `cold_cache` for a cold comparison). The pinned Rust toolchain already
+bundles LLD on x86_64 Linux; macOS keeps Xcode's system linker, with no extra local
+linker installation (see `.cargo/config.toml`).
 
-Nextest marks a test slow after 10 seconds and stops it after three intervals.
-Keep the CI retry count and `fail-on-flaky` unchanged; a test that needs more
-time gets a commented override in `tools/front-door/.config/nextest.toml`. The
-macOS job has a 20-minute ceiling and a 15-minute target, warm or cold; keep the
-serial writer and isolated census invocations. Find slow cases with
-`scripts/nextest-slowest` on a run's JUnit reports. Rust caches cover
-`$GITHUB_WORKSPACE/tools/front-door/target`; a `build.build-dir` outside it must be added to the
-action's `cache-directories`. To measure a cold run:
-`gh workflow run ci.yml --ref BRANCH -f cold_cache=true` (fresh cache keys, no
-caches deleted).
+Keep CI reliable and bounded. Consult the workflow and nextest configuration
+for current budgets, cache and retry settings; investigate failures rather than
+pinning incidental timing or counts. Policy checks live in the repository's
+scripts and tests.
 
 ## Reproduce a CI failure locally
 
@@ -87,11 +76,5 @@ their result in an advisory step. Remove the entry in the PR that fixes the test
 
 ## Tool downloads
 
-Workflow tools not installed by `taiki-e/install-action` use
-`scripts/download-with-retry` (doubling backoff on connection failures, 408, 429
-and 5xx; gives up after 180 seconds or five attempts; other HTTP errors fail at
-once). Every tool-install step has a `timeout-minutes`. The
-`.github/actions/install-nextest` action pins nextest once and falls back to
-`cargo install --locked`; its calling step supplies the timeout because
-composite actions cannot. Tool archive caches are keyed by version and checksum,
-so change a pin and its key together.
+Use [`download-with-retry`](../../scripts/download-with-retry) for workflow
+tool downloads. Keep a tool's version and cache key aligned.

@@ -26,7 +26,6 @@ fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusio
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let cancel = CancelToken::new();
@@ -52,9 +51,10 @@ fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusio
     let store = owner.store(&cancel)?;
     let call = owner.call(&cancel);
     let upstream = provenant_run::Resume {
+extend: Vec::new(),
         prior: fixture.settled.attempt_id, expected_generation: 0,
         operation_id: "family-composition-writer".parse()?,
-        run_id: RunId::from_bytes([71; 16]), attempt_id: AttemptId::from_bytes([72; 16]),
+ attempt_id: AttemptId::from_bytes([72; 16]),
         prompt: "writer".into(), created_at: factory.clock.wall_now()?,
     };
     fixture.store.resume_fresh(&upstream, "fixture", &call)?;
@@ -72,9 +72,11 @@ fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusio
                       require: bool, distinct: &[String]|
      -> Result<(RequestedRoute, Vec<String>), Box<dyn std::error::Error>> {
         let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
-            "graph_id":"sibling-lenses", "node_id":node_id, "route_index":route_index
+            "graph_id":"sibling-lenses", "node_id":node_id, "route_index":route_index, "attempt": route_index + 1
         }))?;
-        bound.observe_or_start(&key, graph::NodeInput { review_launch: false,
+        // The subject is the recorded submission, so the provider launch
+        // stays queued after admission.
+        provenant_cli::run::with_deferred_provider_launch(|| bound.observe_or_start(&key, graph::NodeInput { review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
             prior_attempts: prior, family_peers: peers, context: graph_test_context(&key), read_roots: &[],
             distinct_from_attempts: distinct, require_distinct: require, source_commit: None,
@@ -82,14 +84,14 @@ fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusio
             inputs_dir: None,
         }, &alias, graph::AccessMode::ReadOnly, None, graph::Replay {
             delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
-        })?;
+        }))?;
         let operation = graph_operation("graph-attempt-operation", &key)?;
         let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("lens operation missing")?;
-        let request = store.request(operation.run_id, &owner.call(&cancel))?;
-        let task = request.tasks.first().ok_or("task missing")?;
+        let request = store.request(store.operation_attempt(&operation.operation_id, &owner.call(&cancel))?, &owner.call(&cancel))?;
+        let task = &request.task;
         Ok((task.route.clone(), task.profile.overrides.clone()))
     };
-    let review = |excluded: &[&str]| RequestedRoute::Review {
+    let review = |excluded: &[&str]| RequestedRoute::Review { required_family: None,
         extra: Default::default(),
         name: "junior".into(),
         effort: None,
@@ -100,7 +102,7 @@ fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusio
     };
     // The first sibling has no peers yet and takes the plain alias.
     let (route, _) = submit("one", 0, &[], &[], false, &[])?;
-    assert_eq!(route, RequestedRoute::Named { extra: Default::default(), name: "junior".into(), effort: None });
+    assert_eq!(route, RequestedRoute::Named { required_family: None, extra: Default::default(), name: "junior".into(), effort: None });
     // Later siblings prefer other families. A preference never refuses, so
     // with one family available every lens still runs.
     let peers = ["openai".to_owned(), "anthropic".to_owned()];
@@ -110,7 +112,7 @@ fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusio
     // leaves sibling families as a preference.
     assert_eq!(submit("four", 0, &peers[..1], &[], true, &[])?.0, review(&["openai"]));
     let accepted = submit("five", 0, &peers[1..], &[], true, std::slice::from_ref(&writer))?.0;
-    assert_eq!(accepted, RequestedRoute::Review {
+    assert_eq!(accepted, RequestedRoute::Review { required_family: None,
         extra: Default::default(), name: "junior".into(), effort: None,
         excluded_families: vec!["openai".into()], distinct_families: true,
         preferred_families: vec!["anthropic".into()], require_distinct: true,
@@ -171,7 +173,6 @@ fn graph_submission_refuses_a_push_to_main_before_admission()
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let document = fixture.rig.project.join("protected-push-graph.json");
@@ -271,7 +272,6 @@ fn bare_graph_miss_names_the_scratch_root_and_searches_no_legacy_root()
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let result = factory.graph(
@@ -319,7 +319,6 @@ fn graph_submission_replays_an_accepted_push_after_protection_changes()
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let document = fixture.rig.project.join("replay-push-graph.json");
@@ -418,7 +417,6 @@ fn graph_submission_pins_the_integration_base_across_replay()
         cwd: fixture.rig.project.clone(),
         assets: fixture.rig.project.clone(),
         host_launch: None,
-        mcp_project: None,
         workers: &FreeWorkers,
     };
     let document = fixture.rig.project.join("base-graph.json");
@@ -457,24 +455,10 @@ fn graph_submission_pins_the_integration_base_across_replay()
         "graph-attempt-operation",
         &run.checkpoint.nodes[0].attempts[0].key,
     )?;
-    let operation = store
-        .operation(&operation, &owner.call(&cancel))?
-        .ok_or("graph run not admitted")?;
-    let index_call = provenant_fabric_runtime::chairs::Request {
-        clock: &factory.clock,
-        cancel: &cancel,
-    };
-    let binding = provenant_fabric_runtime::chairs::ChairIndex::open(
-        &factory.context.roots.state,
-        &index_call,
-    )?
-    .read(
-        factory.context.identity.project,
-        operation.run_id,
-        &index_call,
-    )?
-    .ok_or("graph index missing")?;
-    assert!(binding.chair.is_none(), "graph created a chair association");
+    assert!(
+        store.operation(&operation, &owner.call(&cancel))?.is_some(),
+        "graph run not admitted"
+    );
     let base = {
         let journal = FileJournal::open(
             &fixture.roots.state,
@@ -486,6 +470,42 @@ fn graph_submission_pins_the_integration_base_across_replay()
         )?;
         journal.integration_base().ok_or("graph base missing")?
     };
+    let base_text = base.to_string();
+    let expected_bases = Some(
+        provenant_fabric_runtime::graph::GraphBaseBinding::new(Some(base), Some(base))
+            .ok_or("graph base binding missing")?,
+    );
+    assert_eq!(run.checkpoint.bases, expected_bases);
+    let run_json = serde_json::to_value(&run)?;
+    assert_eq!(
+        run_json["checkpoint"]["bound_review_base"].as_str(),
+        Some(base_text.as_str())
+    );
+    assert_eq!(
+        run_json["checkpoint"]["bound_integration_base"].as_str(),
+        Some(base_text.as_str())
+    );
+    let manifest = run.checkpoint.nodes[0].attempts[0]
+        .input_manifest
+        .as_ref()
+        .ok_or("input manifest missing")?;
+    assert_eq!(
+        manifest.graph_review_base.as_deref(),
+        Some(base_text.as_str())
+    );
+    assert_eq!(
+        manifest.integration_base.as_deref(),
+        Some(base_text.as_str())
+    );
+    assert_eq!(
+        FileJournal::execution(
+            &fixture.roots.state,
+            fixture.settled.project_id,
+            "pinned-base",
+        )?
+        .and_then(|execution| execution.bases),
+        expected_bases,
+    );
     assert_eq!(
         Some(base),
         fixture
@@ -528,7 +548,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
         &cancel,
     )?;
     assert_eq!(replay.checkpoint, run.checkpoint);
-    let journal = FileJournal::open(
+    let mut journal = FileJournal::open(
         &fixture.roots.state,
         fixture.settled.project_id,
         "pinned-base",
@@ -537,16 +557,47 @@ fn graph_submission_pins_the_integration_base_across_replay()
         &factory.clock,
     )?;
     assert_eq!(journal.integration_base(), Some(base));
-    let execution = FileJournal::execution(&fixture.roots.state, fixture.settled.project_id, "pinned-base")?.ok_or("execution missing")?;
-    assert_eq!(execution.review_base, Some(base));
+    assert_eq!(
+        provenant_fabric_runtime::graph::GraphJournal::load(&mut journal, "pinned-base")?,
+        Some(run.checkpoint.clone())
+    );
+    let execution = FileJournal::execution(
+        &fixture.roots.state,
+        fixture.settled.project_id,
+        "pinned-base",
+    )?
+    .ok_or("execution missing")?;
+    assert_eq!(execution.bases, expected_bases);
     drop(journal);
+    assert_eq!(replay.checkpoint.bases, expected_bases);
+    let replay_json = serde_json::to_value(&replay)?;
+    assert_eq!(
+        replay_json["checkpoint"]["bound_review_base"].as_str(),
+        Some(base_text.as_str())
+    );
+    assert_eq!(
+        replay_json["checkpoint"]["bound_integration_base"].as_str(),
+        Some(base_text.as_str())
+    );
+    let replay_manifest = replay.checkpoint.nodes[0].attempts[0]
+        .input_manifest
+        .as_ref()
+        .ok_or("replayed input manifest missing")?;
+    assert_eq!(
+        replay_manifest.graph_review_base.as_deref(),
+        Some(base_text.as_str())
+    );
+    assert_eq!(
+        replay_manifest.integration_base.as_deref(),
+        Some(base_text.as_str())
+    );
     let head_output = fixture.rig.execute(&git, &["rev-parse", "HEAD"], None)?;
     let head = String::from_utf8(head_output.stdout.bytes)?.trim().to_owned();
     // A later lens admitted after the reference moved still reads the pinned
     // review base, independently of the integration base.
     use provenant_fabric_runtime::graph::{self, AttemptOwner};
     let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
-        "graph_id":"pinned-base", "node_id":"later-lens", "route_index":0
+        "graph_id":"pinned-base", "node_id":"later-lens", "route_index":0, "attempt": 1
     }))?;
     let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
     let mut bound = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
@@ -565,17 +616,19 @@ fn graph_submission_pins_the_integration_base_across_replay()
     })?;
     let operation = graph_operation("graph-attempt-operation", &key)?;
     let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("later lens operation missing")?;
-    let request = store.request(operation.run_id, &owner.call(&cancel))?;
-    let base_text = base.to_string();
-    assert_eq!(request.tasks[0].base.as_deref(), Some(base_text.as_str()));
+    let request = store.request(store.operation_attempt(&operation.operation_id, &owner.call(&cancel))?, &owner.call(&cancel))?;
+    assert_eq!(request.task.base.as_deref(), Some(base_text.as_str()));
     assert_ne!(base_text, head);
     // A different integration base does not displace the pinned review base.
-    bound.integration_base = Some(BoundGraphBases {
-        integration: Some(provenant_core::GitOid::parse(&head)?),
-        review: Some(base),
-    });
+    bound.integration_base = Some(
+        provenant_fabric_runtime::graph::GraphBaseBinding::new(
+            Some(base),
+            Some(provenant_core::GitOid::parse(&head)?),
+        )
+        .ok_or("graph base binding missing")?,
+    );
     let second: graph::AttemptKey = serde_json::from_value(serde_json::json!({
-        "graph_id":"pinned-base", "node_id":"second-lens", "route_index":0
+        "graph_id":"pinned-base", "node_id":"second-lens", "route_index":0, "attempt": 1
     }))?;
     let actor = bound.actor();
     bound.observe_or_start(&second, graph::NodeInput { review_launch: false,
@@ -589,9 +642,12 @@ fn graph_submission_pins_the_integration_base_across_replay()
     })?;
     let operation = graph_operation("graph-attempt-operation", &second)?;
     let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("second lens operation missing")?;
-    let request = store.request(operation.run_id, &owner.call(&cancel))?;
-    assert_eq!(request.tasks[0].base.as_deref(), Some(base_text.as_str()));
-    bound.integration_base = Some(BoundGraphBases { integration: None, review: Some(base) });
+    let request = store.request(store.operation_attempt(&operation.operation_id, &owner.call(&cancel))?, &owner.call(&cancel))?;
+    assert_eq!(request.task.base.as_deref(), Some(base_text.as_str()));
+    bound.integration_base = Some(
+        provenant_fabric_runtime::graph::GraphBaseBinding::new(Some(base), None)
+            .ok_or("graph base binding missing")?,
+    );
     for (id, reference, expected) in [("review-base", "old-review", base_text.as_str()), ("empty-review-base", "", head.as_str())] {
         let path = fixture.rig.project.join(format!("{id}.json"));
         std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
@@ -601,9 +657,9 @@ fn graph_submission_pins_the_integration_base_across_replay()
         let result = factory.graph(GraphInput::Run { extra: Default::default(), document: path }, budget, &cancel)?;
         let operation = graph_operation("graph-attempt-operation", &result.checkpoint.nodes[0].attempts[0].key)?;
         let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("operation missing")?;
-        let request = store.request(operation.run_id, &owner.call(&cancel))?;
-        assert_eq!(request.tasks[0].base.as_deref(), Some(expected));
-        assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
+        let request = store.request(store.operation_attempt(&operation.operation_id, &owner.call(&cancel))?, &owner.call(&cancel))?;
+        assert_eq!(request.task.base.as_deref(), Some(expected));
+        assert_eq!(request.task.head.as_deref(), Some(head.as_str()));
     }
     Ok(())
 }
@@ -615,7 +671,7 @@ fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error
     let git = provenant_os::git::git_executable().ok_or("git")?;
     let output = fixture.rig.execute(&git, &["-C", fixture.worktree.to_str().ok_or("path")?, "checkout", "--detach"], None)?;
     assert_eq!(crate::worktree_tests::support::code(&output), 0);
-    let factory = Factory { context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?, project_attribution: false, clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(), cwd: fixture.rig.project.clone(), assets: fixture.rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers };
+    let factory = Factory { context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?, project_attribution: false, clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(), cwd: fixture.rig.project.clone(), assets: fixture.rig.project.clone(), host_launch: None, workers: &FreeWorkers };
     let document = fixture.rig.project.join("detached-writer.json");
     std::fs::write(&document, serde_json::to_vec(&serde_json::json!({"schema_version":1,"graph_id":"detached-writer", "template_library":{},"nodes":[{"id":"writer","prompt":"write","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]}))?)?;
     let cancel = CancelToken::new();
@@ -623,7 +679,7 @@ fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error
     let run = factory.graph(GraphInput::Run { extra: Default::default(), document }, budget, &cancel)?;
     let node = &run.checkpoint.nodes[0];
     assert!(node.advance_error.as_deref().is_some_and(|error| error.contains("writer needs a branch")), "{node:#?}");
-    let detached_factory = Factory { context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.worktree)?, project_attribution: false, clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(), cwd: fixture.worktree.clone(), assets: fixture.rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers };
+    let detached_factory = Factory { context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.worktree)?, project_attribution: false, clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(), cwd: fixture.worktree.clone(), assets: fixture.rig.project.clone(), host_launch: None, workers: &FreeWorkers };
     let head = fixture.rig.execute(&git, &["-C", fixture.worktree.to_str().ok_or("path")?, "rev-parse", "HEAD"], None)?;
     let head = String::from_utf8(head.stdout.bytes)?.trim().to_owned();
     let document = fixture.worktree.join("detached-review.json");
@@ -635,7 +691,7 @@ fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error
     // reaches preparation, whose refusal now has an explicit graph cause.
     assert_eq!(node.advance_error_code.as_deref(), Some("preparation_refused"), "{node:#?}");
     let attempt = node.attempts.first().ok_or("review attempt missing")?;
-    assert_eq!(attempt.outcome, Some(provenant_fabric_runtime::graph::AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::PreparationRefused)), "{node:#?}");
+    assert_eq!(attempt.outcome, Some(provenant_fabric_runtime::graph::AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::AccessPolicyRefused)), "{node:#?}");
     assert!(!attempt.launched, "{node:#?}");
     let key = &attempt.key;
     let operation = graph_operation("graph-attempt-operation", key)?;
@@ -661,7 +717,7 @@ fn retained_lane_settlement_leaves_output_and_cache_for_gc()
     std::fs::write(
         fixture.rig.state.join("config.toml"),
         format!(
-            "schema_version=1\n[gc.projects.\"{}\"]\nregenerable=['build','saved']\nkeep=['saved']\nforeign_worktrees='merged-clean'\n",
+            "schema_version=1\n[gc.projects.\"{}\"]\nregenerable=['build','saved']\nkeep=['saved']\nforeign_worktrees='collect'\n",
             fixture.settled.project_id
         ),
     )?;
@@ -715,28 +771,6 @@ fn retained_lane_settlement_leaves_output_and_cache_for_gc()
         },
         integration: None,
     };
-    let collection = crate::worktrees::collection_lock(&fixture.roots)?;
-    settle_owned_worktree(
-        &fixture.settled,
-        &fixture.roots,
-        &FreeWorkers,
-        Some(&delivery),
-    )?;
-    assert!(fixture.worktree.join("build/artifact").exists());
-    assert!(cache.exists());
-    let clock = SystemClock;
-    let cancel = CancelToken::new();
-    let call = provenant_run::Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let busy = fixture
-        .store
-        .worktree_settlement(fixture.settled.attempt_id, &call)?
-        .ok_or("missing busy settlement receipt")?;
-    assert_eq!(busy["state"], "retained", "{busy}");
-    assert_eq!(busy["cleanup_deferred"], true);
-    drop(collection);
     let state = provenant_os::fs::Directory::open_anchor(
         &fixture
             .rig
@@ -783,65 +817,5 @@ fn retained_lane_settlement_leaves_output_and_cache_for_gc()
         );
         assert!(orphan.exists(), "unrelated cache collected");
     }
-    Ok(())
-}
-
-#[test]
-fn explicit_writer_defers_tracking_ref_refresh_while_collection_is_busy()
--> Result<(), Box<dyn std::error::Error>> {
-    if host_test(
-        "fabric::peer_tests::peer_graph_submission::explicit_writer_defers_tracking_ref_refresh_while_collection_is_busy",
-    )? {
-        return Ok(());
-    }
-    let fixture = SettlementFixture::resumed()?;
-    let clock = SystemClock;
-    let cancel = CancelToken::new();
-    let owner_path = worktrees::with_context(
-        &fixture.roots,
-        &fixture.rig.home,
-        &fixture.rig.project,
-        &clock,
-        &cancel,
-        |context| {
-            let tree = provenant_confinement::verify_worktree(context.repo, &fixture.worktree)?;
-            Ok(tree.repo().private_git_dir().join("provenant-owner.json"))
-        },
-    )?;
-    std::fs::remove_file(owner_path)?;
-    let git = provenant_os::git::git_executable().ok_or("git")?;
-    let remote = fixture.rig.root.join("remote.git");
-    for args in [
-        vec!["init", "--bare", remote.to_str().ok_or("remote path")?],
-        vec![
-            "remote",
-            "add",
-            "origin",
-            remote.to_str().ok_or("remote path")?,
-        ],
-        vec![
-            "push",
-            "origin",
-            "refs/heads/resumed-lane:refs/heads/resumed-lane",
-        ],
-        vec!["update-ref", "-d", "refs/remotes/origin/resumed-lane"],
-    ] {
-        let output = fixture.rig.execute(&git, &args, None)?;
-        assert_eq!(
-            crate::worktree_tests::support::code(&output),
-            0,
-            "{}",
-            String::from_utf8_lossy(&output.stderr.bytes)
-        );
-    }
-    let collection = crate::worktrees::collection_lock(&fixture.roots)?;
-    settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
-    let output = fixture.rig.execute(
-        &git,
-        &["rev-parse", "--verify", "refs/remotes/origin/resumed-lane"],
-        None,
-    )?;
-    assert_ne!(crate::worktree_tests::support::code(&output), 0);
-    drop(collection);
     Ok(())
 }

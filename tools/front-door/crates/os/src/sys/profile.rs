@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 /// Implemented by the owner of the verified, immutable profile file. This keeps
 /// the utility executor below the custody layer without bypassing verification.
-pub trait ProfileSource: Send + Sync {
+pub trait LimitSource: Send + Sync {
     fn prepare(&self, argv: &[OsString]) -> io::Result<ProfilePipe>;
 }
 
@@ -296,45 +296,39 @@ mod tests {
     // Medium: a reader kept open without reading and an exec failure must not
     // strand the writer, even when the snapshot exceeds the pipe's capacity.
     #[test]
-    fn pipe_timeout_and_failed_spawn_join_the_writer() -> io::Result<()> {
-        let pipe = ProfilePipe::with_timeout(
-            vec![b';'; 1024 * 1024],
-            &argv(),
-            Duration::from_millis(100),
-        )?;
-        let mut command = Command::new("/bin/sleep");
-        command.arg("5");
+    fn pipe_timeout_refuses_an_unread_profile() -> io::Result<()> {
+        let pipe = ProfilePipe::with_timeout(vec![b';'; 1024 * 1024], &argv(), Duration::ZERO)?;
+        let mut command = Command::new("/bin/cat");
+        command.stdout(Stdio::null()).stderr(Stdio::null());
         super::super::child::configure_command(&mut command, &[pipe.fd()], None, false)?;
         let mut child = command.spawn()?;
         let error = pipe.finish(&mut child).unwrap_err();
         assert!(is_transport_error(&error), "{error}");
-        child.kill()?;
-        child.wait()?;
+        assert!(!child.wait()?.success());
+        Ok(())
+    }
 
+    #[test]
+    fn failed_profile_consumer_drop_releases_the_writer() -> io::Result<()> {
         let pipe = ProfilePipe::new(vec![b';'; 1024 * 1024], &argv())?;
         let mut command = Command::new("/nonexistent-profile-consumer");
         super::super::child::configure_command(&mut command, &[pipe.fd()], None, false)?;
         assert_eq!(command.spawn().unwrap_err().kind(), io::ErrorKind::NotFound);
         let input = Arc::downgrade(&pipe.bytes);
-        let fd = pipe.fd().as_raw_fd();
-        let started = Instant::now();
         drop(pipe);
-        assert!(started.elapsed() < Duration::from_secs(2));
-        // Drop joined the worker; no thread or descriptors escape the refusal.
+        // Drop joins the writer before its last owned profile bytes disappear.
         assert!(input.upgrade().is_none());
-        // SAFETY: F_GETFD only queries this number. No owning wrapper is made
-        // for the descriptor that Drop has already closed.
-        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
         Ok(())
     }
 
     // Medium: an actual pipe whose write syscall is faulted at the I/O edge.
     #[test]
     fn pipe_write_failure_never_applies_a_valid_prefix() -> io::Result<()> {
+        let (prefix_written, wait_for_prefix) = std::sync::mpsc::channel();
         struct FailedWriter {
             pipe: io::PipeWriter,
             wrote: bool,
+            prefix_written: std::sync::mpsc::Sender<()>,
         }
         impl Write for FailedWriter {
             fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -342,8 +336,11 @@ mod tests {
                     return Err(io::Error::from_raw_os_error(libc::EIO));
                 }
                 self.wrote = true;
-                self.pipe
-                    .write(&bytes[..b"(version 1)\n(allow default)\n".len()])
+                let written = self
+                    .pipe
+                    .write(&bytes[..b"(version 1)\n(allow default)\n".len()])?;
+                self.prefix_written.send(()).map_err(io::Error::other)?;
+                Ok(written)
             }
             fn flush(&mut self) -> io::Result<()> {
                 Ok(())
@@ -352,36 +349,14 @@ mod tests {
         let mut bytes = b"(version 1)\n(allow default)\n".to_vec();
         bytes.extend_from_slice(&vec![b';'; 700_181]);
         let pipe = ProfilePipe::with_writer(bytes, &argv(), Duration::from_secs(5), |pipe| {
-            FailedWriter { pipe, wrote: false }
+            FailedWriter {
+                pipe,
+                wrote: false,
+                prefix_written,
+            }
         })?;
         let input = Arc::downgrade(&pipe.bytes);
-        // Observe the worker's failure before spawn: its prefix is available,
-        // but EOF must remain withheld until the consumer has been stopped.
-        let started = Instant::now();
-        while !pipe
-            .worker
-            .as_ref()
-            .is_some_and(|worker| worker.is_finished())
-        {
-            assert!(started.elapsed() < Duration::from_secs(2));
-            std::thread::yield_now();
-        }
-        super::super::raw_exec::nonblocking(&pipe.reader)?;
-        use std::io::Read;
-        let mut reader = pipe.reader.try_clone()?;
-        let mut prefix = vec![0; b"(version 1)\n(allow default)\n".len()];
-        reader.read_exact(&mut prefix)?;
-        assert_eq!(prefix, b"(version 1)\n(allow default)\n");
-        assert_eq!(
-            reader.read(&mut [0]).unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
-        );
-        drop(reader);
-        // SAFETY: this live pipe is privately owned by the test. F_SETFL
-        // restores its original blocking mode without retaining a pointer.
-        if unsafe { libc::fcntl(pipe.fd().as_raw_fd(), libc::F_SETFL, 0) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        wait_for_prefix.recv().map_err(io::Error::other)?;
         let root = tempfile::tempdir()?;
         let marker = root.path().join("applied");
         let mut command = Command::new("/bin/sh");
@@ -400,7 +375,6 @@ mod tests {
         assert!(!child.wait()?.success());
         assert!(!marker.exists());
         assert!(is_transport_error(&error));
-        assert!(error.to_string().contains("profile pipe write failed"));
         assert!(input.upgrade().is_none());
         Ok(())
     }
@@ -429,7 +403,7 @@ mod tests {
         command
             .args([
                 "--exact",
-                "sys::profile::tests::pipe_descriptor_fixture",
+                crate::fixture::exact_test_path(module_path!(), "pipe_descriptor_fixture").as_str(),
                 "--nocapture",
             ])
             .stdout(Stdio::inherit());

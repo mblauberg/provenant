@@ -4,6 +4,8 @@
 import test_git_env
 test_git_env.isolate()
 
+import importlib.machinery
+import importlib.util
 import json
 from pathlib import Path
 import shutil
@@ -14,6 +16,9 @@ import unittest
 
 SCRIPTS = Path(__file__).resolve().parent
 FIXTURES = SCRIPTS / "fixtures/doc-truth"
+_loader = importlib.machinery.SourceFileLoader("check_doc_truth", str(SCRIPTS / "check-doc-truth"))
+check_doc_truth = importlib.util.module_from_spec(importlib.util.spec_from_loader(_loader.name, _loader))
+_loader.exec_module(check_doc_truth)
 
 
 class DocTruthTests(unittest.TestCase):
@@ -39,52 +44,95 @@ class DocTruthTests(unittest.TestCase):
         path.write_text(text)
         return path
 
-    def test_test_citations_resolve_and_fail_strictly(self):
-        source = self.root / "tools/front-door/crates/example/src/lib.rs"
-        source.parent.mkdir(parents=True)
-        source.write_text("mod tests { fn present() {} }\n")
-        spec = self.root / "docs/specs/example.md"
-        spec.write_text("# Example\n\nOwner: example\nAnchor: example\n\n"
-                        "- Test: `crates/example/src/lib.rs::present`;\n"
-                        "  `crates/example/src/lib.rs::missing`\n")
-        result = self.check("--inventory-only", "--strict-citations", source=False)
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("lib.rs::missing", result.stdout)
-        self.assertNotIn("lib.rs::present", result.stdout)
-        source.write_text("mod tests { fn present() {} fn missing() {} }\n")
-        self.assertEqual(self.check("--inventory-only", "--strict-citations", source=False).returncode, 0)
+    def spec(self, text="## Admission\n"):
+        path = self.root / "docs/specs/example.md"
+        path.write_text("# Example\nOwner: maintainers\n"
+                        "Anchor: `tools/front-door/src/main.rs`\n\n" + text)
+        return path
 
-    def test_grouped_and_shorthand_citations_share_only_the_current_test_block(self):
-        source = self.root / "tools/front-door/tests/example.rs"
-        source.parent.mkdir(parents=True)
-        source.write_text("fn first() {} fn second() {} fn third() {}\n")
-        spec = self.root / "docs/specs/example.md"
-        spec.write_text("# Example\nOwner: example\nAnchor: tests/example.rs\n\n"
-                        "- Test: `tests/example.rs::tests::{first, second}`;\n"
-                        "  `::third`; `::missing`\n"
-                        "- Why: grouped lists have one source.\n\n"
-                        "- Test: `::first`\n")
-        result = self.check("--inventory-only", "--strict-citations", source=False)
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertEqual(result.stdout.count("unresolved test citation"), 2, result.stdout)
-        self.assertIn("example.md:6:", result.stdout)
-        self.assertIn("(no preceding path)::first", result.stdout)
+    def test_spec_comments_resolve_and_always_fail_on_missing_file_or_heading(self):
+        self.spec()
+        source = self.root / "tools/front-door/src/main.rs"
+        source.write_text("// Spec: docs/specs/example.md#admission\n"
+                          "// Spec: docs/specs/example.md#missing\n"
+                          "// Spec: docs/specs/absent.md#admission\n")
+        for args in ((), ("--inventory-only",)):
+            with self.subTest(args=args):
+                result = self.check(*args)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertEqual(result.stdout.count("unresolved spec citation"), 2, result.stdout)
+                self.assertIn("src/main.rs:2: error:", result.stdout)
+                self.assertIn("src/main.rs:3: error:", result.stdout)
+        source.write_text("// Spec: docs/specs/example.md#admission\n")
+        self.assertEqual(self.check("--inventory-only", source=False).returncode, 0)
 
-    def test_plural_hash_and_file_citations_are_checked(self):
-        source = self.root / "tools/front-door/tests/example.rs"
-        source.parent.mkdir(parents=True)
-        source.write_text("fn present() {}\n")
-        spec = self.root / "docs/specs/example.md"
-        spec.write_text("# Example\nOwner: example\nAnchor: tools/front-door\n\n"
-                        "Tests: `tests/example.rs#present`; `tests/example.rs#missing`;\n"
-                        "  `tests/absent.rs`\n")
-        result = self.check("--inventory-only", "--strict-citations", source=False)
+    def test_spec_citations_require_a_file_and_section(self):
+        self.spec()
+        source = self.root / "tools/front-door/src/main.rs"
+        for reference in ("docs/specs/example.md", "docs/specs/example.md#",
+                          "docs/specs/../example.md#admission", "", "other.md#admission"):
+            with self.subTest(reference=reference):
+                source.write_text(f"// Spec: {reference}\n")
+                result = self.check("--inventory-only", source=False)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("unresolved spec citation", result.stdout)
+
+    def test_rust_comments_include_doc_and_nested_blocks_but_skip_literals(self):
+        self.spec()
+        source = self.root / "tools/front-door/src/main.rs"
+        source.write_text(
+            '// Spec: `docs/specs/example.md#admission`.\n'
+            '/// Spec: docs/specs/example.md#admission\n'
+            '//! Spec: docs/specs/example.md#admission\n'
+            '/* outer /* Spec: docs/specs/example.md#admission */\n'
+            ' * Spec: docs/specs/example.md#admission */\n'
+            'let text = "// Spec: docs/specs/absent.md#missing";\n'
+            'let raw = r##"/* Spec: docs/specs/absent.md#missing */"##;\n'
+            'let byte = b"// Spec: docs/specs/absent.md#missing";\n'
+            'let slash = \'/\'; let quote = \'"\';\n'
+            'let adapter = AdapterSpec::get(name); // no citation\n'
+            '/* /* nested */ Spec: docs/specs/example.md#missing */\n')
+        result = self.check("--inventory-only", source=False)
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertEqual(result.stdout.count("unresolved test citation"), 2, result.stdout)
-        self.assertNotIn("#present", result.stdout)
-        source.write_text("fn present() {} fn missing() {}\n")
-        (source.parent / "absent.rs").write_text("fn file_level_coverage() {}\n")
-        self.assertEqual(self.check("--inventory-only", "--strict-citations", source=False).returncode, 0)
+        self.assertEqual(result.stdout.count("unresolved spec citation"), 1, result.stdout)
+        self.assertIn("src/main.rs:11: error:", result.stdout)
+        source.write_text(source.read_text().replace('#missing */\n', '#admission */\n'))
+        self.assertEqual(self.check("--inventory-only", source=False).returncode, 0)
+
+    def test_spec_citations_scan_all_rust_sources_only_under_front_door(self):
+        self.spec()
+        for relative in ("tools/front-door/tests/example.rs", "tools/front-door/crates/example/src/lib.rs"):
+            source = self.root / relative
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("// Spec: docs/specs/absent.md#missing\n")
+        (self.root / "outside.rs").write_text("// Spec: docs/specs/absent.md#missing\n")
+        (self.root / "tools/front-door/guide.md").write_text("Spec: docs/specs/absent.md#missing\n")
+        result = self.check("--inventory-only", source=False)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout.count("unresolved spec citation"), 2, result.stdout)
+
+    def test_github_heading_slugs_render_text_and_disambiguate_collisions(self):
+        self.spec("## Signals: `StopCause` & **custody**!\n"
+                  "## Signals: `StopCause` & **custody**!\n"
+                  "## Signals StopCause  custody-1\n"
+                  "## Café Δ é <em>ready</em> &amp; [safe](target.md)\n"
+                  "## _Read_ `Stop_Cause<T>` and [retry][owner] ###\n"
+                  "Setext heading\n--------------\n"
+                  "```md\n## Not a heading\n```\n"
+                  "~~~md\n## Also hidden\n~~~\n"
+                  "<!--\n## Hidden comment\n-->\n")
+        source = self.root / "tools/front-door/src/main.rs"
+        anchors = ("signals-stopcause--custody", "signals-stopcause--custody-1",
+                   "signals-stopcause--custody-1-1", "café-δ-é-ready--safe",
+                   "caf%C3%A9-%CE%B4-e%CC%81-ready--safe",
+                   "read-stop_causet-and-retry", "setext-heading")
+        source.write_text("".join(f"// Spec: docs/specs/example.md#{anchor}\n" for anchor in anchors))
+        result = self.check("--inventory-only", source=False)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        for anchor in ("not-a-heading", "also-hidden", "hidden-comment"):
+            with self.subTest(anchor=anchor):
+                source.write_text(f"// Spec: docs/specs/example.md#{anchor}\n")
+                self.assertEqual(self.check("--inventory-only", source=False).returncode, 1)
 
     def test_strict_inventory_checks_anchor_paths_index_and_diagram_metadata(self):
         self.document("# Example\nOwner: maintainers\nAnchor: `tools/front-door/missing.rs#check`\n")
@@ -106,27 +154,14 @@ class DocTruthTests(unittest.TestCase):
                                 "accTitle: Example\naccDescr {\nA points to B.\n}\nA --> B\n```\n")
         self.assertEqual(self.check("--inventory-only", "--strict-inventory", source=False).returncode, 0)
 
-    def test_strict_citations_check_every_spec(self):
-        for name in ("disk", "supervisor", "routing"):
-            (self.root / f"docs/specs/{name}.md").write_text(
-                "# Spec\nOwner: maintainers\nAnchor: tools/front-door\n\n"
-                "Test: `tests/missing.rs::missing`\n")
-        result = self.check("--inventory-only", "--strict-citations", source=False)
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertEqual(result.stdout.count("unresolved test citation"), 3, result.stdout)
-        for name in ("disk", "supervisor", "routing"):
-            self.assertIn(f"docs/specs/{name}.md", result.stdout)
-            (self.root / f"docs/specs/{name}.md").unlink()
-        self.assertEqual(self.check("--inventory-only", "--strict-citations", source=False).returncode, 0)
-
     def test_a_spec_over_the_word_cap_warns_without_failing(self):
         spec = self.root / "docs/specs/long.md"
         header = "# Long\nOwner: maintainers\nAnchor: `tools/front-door/src/main.rs`\n\n"
         spec.write_text(header + "word " * 1990)
-        result = self.check("--inventory-only", "--strict-inventory", "--strict-citations", source=False)
+        result = self.check("--inventory-only", "--strict-inventory", source=False)
         self.assertNotIn("word cap", result.stdout)
         spec.write_text(header + "word " * 2001)
-        result = self.check("--inventory-only", "--strict-inventory", "--strict-citations", source=False)
+        result = self.check("--inventory-only", "--strict-inventory", source=False)
         self.assertIn("docs/specs/long.md:1: warning: spec has", result.stdout)
         self.assertIn("2000-word cap", result.stdout)
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -158,6 +193,37 @@ class DocTruthTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn(f"deleted command `provenant {verb}`", result.stdout)
 
+    def test_every_removed_flag_in_the_cli_table_fails_as_a_command(self):
+        # The table is the CLI's own; the check reads it, so a new entry is covered.
+        guide = self.root / "README.md"
+        for path, flag, _ in check_doc_truth.removed_table(
+                SCRIPTS.parent / check_doc_truth.REMOVED_SOURCE):
+            if flag is None:
+                continue
+            command = "provenant " + " ".join(path) + f" NAME --{flag} VALUE"
+            with self.subTest(command=command):
+                guide.write_text(f"```sh\n{command}\n```\n")
+                result = self.check("--inventory-only", source=False)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(f"README.md:2: error: deleted command `provenant {' '.join(path)} --{flag}`",
+                              result.stdout)
+
+    def test_a_removed_flag_fails_across_a_continued_line_and_in_every_guide_kind(self):
+        for relative in ("README.md", "docs/runbooks/example.md", "skills/demo/SKILL.md"):
+            with self.subTest(relative=relative):
+                path = self.root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("```sh\nprovenant run implement BRIEF \\\n  --tier senior --branch b\n```\n")
+                result = self.check("--inventory-only", source=False)
+                self.assertIn(f"{relative}:2: error: deleted command `provenant run --tier`", result.stdout)
+
+    def test_a_removed_flag_in_prose_for_another_command_is_allowed(self):
+        (self.root / "README.md").write_text(
+            "Use `provenant land 12 --tier substantial --wait=30m` and `provenant wait NAME --any`.\n"
+            "Use `provenant route override set --until 1d` and `provenant output NAME --part events`.\n")
+        result = self.check("--inventory-only", source=False)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_global_options_cannot_hide_deleted_verbs(self):
         guide = self.root / "README.md"
         options = (
@@ -176,7 +242,7 @@ class DocTruthTests(unittest.TestCase):
 
     def test_global_option_values_are_not_commands(self):
         (self.root / "README.md").write_text(
-            "Use `provenant --project 'dispatch review' run --use review`.\n"
+            "Use `provenant --project 'dispatch review' run review BRIEF`.\n"
             "Use `provenant --project=cancel --state-dir /tmp/preset status`.\n")
         result = self.check("--inventory-only", source=False)
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -184,13 +250,22 @@ class DocTruthTests(unittest.TestCase):
 
     def test_template_names_fields_and_historical_commands_are_allowed(self):
         (self.root / "README.md").write_text(
-            "Use `provenant run --use review`, `provenant retry ID` and `status`.\n"
+            "Use `provenant run review BRIEF`, `provenant retry ID` and `status`.\n"
             "The `review` template has a `preset` parameter and `lanes` field.\n"
             "Deleted: `provenant cancel ID`.\n"
             "See `src/dispatch.rs#review` and `fabric_graph.schema.json`.\n")
         result = self.check("--inventory-only", source=False)
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(result.stdout, "")
+
+    def test_a_section_headed_as_removed_may_list_old_spellings(self):
+        (self.root / "README.md").write_text(
+            "## Removed spellings\n\n| `lanes`, `fabric graph` | `status` |\n\n"
+            "## Usage\n\nRun `provenant dispatch ID`.\n")
+        result = self.check("--inventory-only", source=False)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertNotIn("README.md:3:", result.stdout)
+        self.assertIn("README.md:7: error: deleted command", result.stdout)
 
     def test_git_deleted_paths_do_not_become_command_errors(self):
         def git(*args):
@@ -243,6 +318,20 @@ class DocTruthTests(unittest.TestCase):
         self.assertEqual(result.stdout.splitlines(), [
             "docs/runbooks/example.md:6: error: unresolved flag `--vanished`",
             "docs/runbooks/example.md:8: error: unresolved command `provenant gone`",
+        ])
+
+    def test_unknown_skill_and_ambient_commands_and_flags_fail(self):
+        skill = self.root / "skills/example/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("# Example\n\nRun `provenant route list --vanished`.\n\n"
+                         "```sh\nprovenant route list --pool example\nprovenant gone --json\n```\n")
+        (self.root / "GLOBAL-AGENTS.md").write_text("Run `provenant gone`.\n")
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "GLOBAL-AGENTS.md:1: error: unresolved command `provenant gone`",
+            "skills/example/SKILL.md:3: error: unresolved flag `--vanished`",
+            "skills/example/SKILL.md:7: error: unresolved command `provenant gone`",
         ])
 
     def test_unknown_commands_in_specs_stay_advisory_even_when_fenced(self):
@@ -301,12 +390,12 @@ class DocTruthTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(result.stdout, "")
 
-    def test_test_name_suffix_is_not_part_of_the_path(self):
+    def test_symbol_suffix_is_not_part_of_the_path(self):
         code = self.root / "tools/front-door/crates/example/src/lib.rs"
         code.parent.mkdir(parents=True)
         code.write_text("// example\n")
         self.document("# Paths\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n"
-                      "Test: `crates/example/src/lib.rs::keeps_order`.\n")
+                      "Declaration: `crates/example/src/lib.rs::Contract`.\n")
         result = self.check()
         self.assertEqual(result.stdout, "")
 
@@ -393,7 +482,7 @@ class DocTruthTests(unittest.TestCase):
     def test_anchor_must_resolve_to_a_source_file(self):
         for anchor, message in (
             ("`tools/front-door/src/gone.rs`", "Anchor path `tools/front-door/src/gone.rs` does not resolve"),
-            ("`tools/front-door/src`", "Anchor names no source file or test"),
+            ("`tools/front-door/src`", "Anchor names no source file or declaration"),
         ):
             with self.subTest(anchor=anchor):
                 self.document(f"# Anchored\nOwner: maintainers\nAnchor: {anchor}\n")
@@ -409,30 +498,6 @@ class DocTruthTests(unittest.TestCase):
         result = self.check("--inventory-only", "--strict-inventory", source=False)
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(result.stdout, "")
-
-    def delivery(self, rows):
-        specs = self.root / "tools/front-door/crates/records/src/adapters.rs"
-        hooks = self.root / "tools/front-door/crates/cli/src/hooks.rs"
-        for path in (specs, hooks):
-            path.parent.mkdir(parents=True, exist_ok=True)
-        specs.write_text('Spec { name: "alpha", local_offer_reader: true },\n'
-                         'Spec { name: "beta", local_offer_reader: false },\n')
-        hooks.write_text("DeliveryCapability { provider: Harness::Alpha, live_injection: true });\n")
-        (self.root / "docs/runbooks/human-inbox.md").write_text(
-            "# Inbox\nOwner: maintainers\nAnchor: `tools/front-door/src/main.rs`\n\n## Delivery service\n\n"
-            "| Adapter | Channel | Reader | Live |\n|---|---|---|---|\n" + rows)
-
-    def test_delivery_table_matches_adapter_capabilities(self):
-        self.delivery("| `alpha` | Fabric mail | Library API | Unavailable |\n"
-                      "| `alpha` | hook | Available | Tool-call boundary |\n"
-                      "| Every other adapter | Fabric mail | Unavailable | Unavailable |\n")
-        result = self.check("--inventory-only", "--strict-inventory", source=False)
-        self.assertEqual(result.returncode, 0, result.stdout)
-        self.delivery("| `beta` | Fabric mail | Library API | Unavailable |\n")
-        result = self.check("--inventory-only", source=False)
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("must end with an 'Every other adapter' row", result.stdout)
-        self.assertIn("library offer readers are ['alpha'], documented ['beta']", result.stdout)
 
     def test_binary_is_used_only_for_help_and_document_snippets_never_run(self):
         binary = self.root / "provenant"

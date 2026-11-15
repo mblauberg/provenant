@@ -39,16 +39,18 @@ case "$1 $2" in
   'root --json') printf '{"data":{"state_directory":"%s"}}\n' "$FIXTURE_STATE" ;;
   'worktree create') git -C "$7" worktree add -q "$7/.worktrees/$3" "$5" ;;
   'worktree remove') exit 1 ;;
-  'dispatch --project') [ "${FAIL_DISPATCH:-0}" = 0 ] || exit 9; printf '{"data":{"run_id":"run"}}\n' ;;
-  'telemetry stats') printf '{"data":null}\n' ;;
+  'run task') [ "${FAIL_RUN:-0}" = 0 ] || exit 9; printf '{"data":{}}\n' ;;
+  'wait '*) printf '{"data":{}}\n' ;;
+  'telemetry cost') printf '{"data":null}\n' ;;
+  *) printf 'unexpected mock command: %s\n' "$*" >&2; exit 64 ;;
 esac
 EOF
 chmod +x "$tmp/bin/provenant"
 export FIXTURE_STATE="$tmp/state" PROVENANT_BIN="$tmp/bin/provenant"
-(cd "$tmp/repo" && FAIL_DISPATCH=1 "$scripts/bench" run --route fixture)
+(cd "$tmp/repo" && FAIL_RUN=1 "$scripts/bench" run --route fixture)
 (cd "$tmp/repo" && "$scripts/bench" run --route fixture)
 printf '%s\n' 'diff --git a/file b/file' '--- a/file' '+++ b/file' '@@ -1 +1 @@' '-original' '+changed' > "$tmp/repo/bench/tasks/task.patch"
 python3 -c 'import hashlib,sys; h=hashlib.sha256(); [(h.update(open(p,"rb").read()),h.update(b"\0")) for p in sys.argv[1:]]; print(h.hexdigest())' "$tmp/repo/bench/tasks/task.toml" "$tmp/repo/bench/tasks/task.patch" > "$tmp/repo/bench/tasks/task.toml.verified"
 (cd "$tmp/repo" && "$scripts/bench" run --route fixture)
-python3 -c 'import json,sys; rows=[json.loads(x) for x in open(sys.argv[1])]; assert [r["reason"] for r in rows] == ["dispatch failed (exit 9)", "hidden patch failed to apply", None]; assert [r["pass"] for r in rows] == [None, None, True]' "$tmp/state/bench.jsonl"
+python3 -c 'import json,sys; rows=[json.loads(x) for x in open(sys.argv[1])]; assert [r["reason"] for r in rows] == ["run or wait failed (exit 9)", "hidden patch failed to apply", None]; assert [r["pass"] for r in rows] == [None, None, True]' "$tmp/state/bench.jsonl"
 echo 'cleanup signal fixtures passed'

@@ -8,6 +8,10 @@ cat > "$scratch/tests.json" <<'JSON'
 {"rust-suites":{"suite":{"package-name":"provenant-cli","testcases":{"network::flaky_case":{},"network::stable_case":{}}}}}
 JSON
 
+cat > "$scratch/macos-tests.json" <<'JSON'
+{"rust-suites":{"suite":{"package-name":"provenant-cli","testcases":{"network::macos_case":{}}}}}
+JSON
+
 write_config() {
   cat > "$scratch/quarantine.toml"
 }
@@ -24,6 +28,17 @@ expires = 2030-01-20
 TOML
 filter=$("$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/quarantine.toml" --test-list "$scratch/tests.json" --today 2030-01-01)
 test "$filter" = '(package(=provenant-cli) & test(=network::flaky_case))'
+cat >> "$scratch/quarantine.toml" <<'TOML'
+[[test]]
+package = "provenant-cli"
+name = "network::macos_case"
+issue = "#2600"
+owner = "maintainer"
+expires = 2030-01-20
+TOML
+filter=$("$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/quarantine.toml" --test-list "$scratch/tests.json" --test-list "$scratch/macos-tests.json" --today 2030-01-01)
+test "$filter" = '(package(=provenant-cli) & test(=network::flaky_case)) | (package(=provenant-cli) & test(=network::macos_case))'
+
 
 expect_failure() {
   expected=$1

@@ -1,4 +1,5 @@
 use crate::{AccountScope, QuotaError, QuotaSnapshot, QuotaStatus};
+use provenant_records::ExtraFields;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -114,19 +115,47 @@ impl QuotaSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshClaim {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub token: String,
     pub deadline_unix_seconds: i64,
 }
 /// Metadata only. Change detection never opens credential or profile files.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CredentialMetadata {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub path: std::path::PathBuf,
     pub stat: Option<CredentialStat>,
 }
+impl CredentialMetadata {
+    /// Compare the observed credential identity without interpreting forward fields.
+    pub fn same_observation(&self, other: &Self) -> bool {
+        self.path == other.path
+            && match (&self.stat, &other.stat) {
+                (Some(left), Some(right)) => left.same_observation(right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
+    /// Adopt a fresh observation at the same path while retaining opaque fields.
+    pub fn updated_from(&self, current: &Self) -> Self {
+        if self.path != current.path {
+            return current.clone();
+        }
+        let mut updated = current.clone();
+        preserve_extra(&self.extra, &mut updated.extra);
+        if let (Some(previous), Some(stat)) = (&self.stat, &mut updated.stat) {
+            preserve_extra(&previous.extra, &mut stat.extra);
+        }
+        updated
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CredentialStat {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub device: u64,
     pub inode: u64,
     pub mode: u32,
@@ -134,8 +163,55 @@ pub struct CredentialStat {
     pub size: u64,
     pub modified_ns: i128,
 }
+impl CredentialStat {
+    /// Compare file metadata without treating opaque forward fields as identity.
+    pub fn same_observation(&self, other: &Self) -> bool {
+        self.device == other.device
+            && self.inode == other.inode
+            && self.mode == other.mode
+            && self.uid == other.uid
+            && self.size == other.size
+            && self.modified_ns == other.modified_ns
+    }
+}
+
+fn preserve_extra(previous: &ExtraFields, current: &mut ExtraFields) {
+    for (key, value) in previous {
+        current.entry(key.clone()).or_insert_with(|| value.clone());
+    }
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthState {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+    /// Provider CLI access-token expiry, informational only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_token_expiry_unix_seconds: Option<i64>,
+    /// Provider CLI `loggedIn`; only false establishes signed-out state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
+    /// Observed need for renewal or revalidation, including an API 401.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub refresh_pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_unix_seconds: Option<i64>,
+}
+impl AuthState {
+    fn valid(&self) -> bool {
+        self.access_token_expiry_unix_seconds
+            .is_none_or(|expiry| jiff::Timestamp::from_second(expiry).is_ok())
+            && self
+                .observed_unix_seconds
+                .is_none_or(|at| jiff::Timestamp::from_second(at).is_ok())
+            && (!self.refresh_pending || self.signed_in == Some(true))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountRecord {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub schema_version: u64,
     pub account: AccountScope,
     pub revision: u64,
@@ -148,6 +224,9 @@ pub struct AccountRecord {
     /// A successful lane is newer account-scoped evidence than ambient detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_verified_unix_seconds: Option<i64>,
+    /// Safe provider auth facts; no credential material is retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_state: Option<AuthState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_metadata: Vec<CredentialMetadata>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -159,6 +238,7 @@ pub struct AccountRecord {
 impl AccountRecord {
     pub fn empty(account: AccountScope) -> Self {
         Self {
+            extra: Default::default(),
             schema_version: 1,
             account,
             revision: 0,
@@ -169,16 +249,38 @@ impl AccountRecord {
             failures: 0,
             last_error: None,
             auth_verified_unix_seconds: None,
+            auth_state: None,
             credential_metadata: Vec::new(),
             auth_retry_pending: false,
             refusals: Vec::new(),
             capacity_cooldowns: Vec::new(),
         }
     }
+    /// Adopt the current registered scope (adapter and key identify the
+    /// account; a renamed label is adopted) across the record and the scoped
+    /// evidence it holds, keeping each scope's unknown fields.
+    pub fn adopt_account(&mut self, current: &AccountScope) -> AccountScope {
+        let stored = self.account.updated_from(current);
+        self.account = stored.clone();
+        // Each held scope keeps its own unknown fields, not the record's.
+        if let Some(snapshot) = self.snapshot.as_mut() {
+            snapshot.account = snapshot.account.updated_from(current);
+        }
+        for refusal in &mut self.refusals {
+            refusal.account = refusal.account.updated_from(current);
+        }
+        for cooldown in &mut self.capacity_cooldowns {
+            cooldown.account = cooldown.account.updated_from(current);
+        }
+        stored
+    }
     pub fn validate(&self) -> Result<(), QuotaError> {
         self.account.validate()?;
         if self.schema_version != 1 || self.claim.as_ref().is_some_and(|c| !component(&c.token)) {
             return Err(QuotaError::Invalid("record header or claim"));
+        }
+        if self.auth_state.as_ref().is_some_and(|state| !state.valid()) {
+            return Err(QuotaError::Invalid("authentication metadata"));
         }
         if let Some(claim) = &self.claim {
             let started = self
@@ -213,7 +315,7 @@ impl AccountRecord {
         }
         if self.refusals.len() > MAX_WINDOWS
             || self.refusals.iter().any(|r| {
-                r.account != self.account
+                !r.account.same_scope(&self.account)
                     || r.model.is_empty()
                     || r.model.len() > 256
                     || r.pool
@@ -225,7 +327,7 @@ impl AccountRecord {
         }
         if self.capacity_cooldowns.len() > MAX_WINDOWS
             || self.capacity_cooldowns.iter().any(|c| {
-                c.account != self.account
+                !c.account.same_scope(&self.account)
                     || c.model.is_empty()
                     || c.model.len() > 256
                     || c.model.chars().any(char::is_control)
@@ -236,14 +338,14 @@ impl AccountRecord {
         }
         if let Some(snapshot) = &self.snapshot {
             snapshot.validate()?;
-            if snapshot.account != self.account || snapshot.revision > self.revision {
+            if !snapshot.account.same_scope(&self.account) || snapshot.revision > self.revision {
                 return Err(QuotaError::Invalid("snapshot identity or revision"));
             }
         }
         Ok(())
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, QuotaError> {
-        let value: Self = provenant_records::decode_v1(bytes, provenant_records::Limits::CONFIG)?;
+        let value: Self = provenant_records::decode(bytes, provenant_records::Limits::CONFIG)?;
         value.validate()?;
         Ok(value)
     }
@@ -253,6 +355,8 @@ impl AccountRecord {
 pub enum ProbeFailure {
     Network,
     RateLimited,
+    /// The selected account is signed in but access-token renewal is pending.
+    RefreshDeferred,
     Auth,
     /// The selected login's recorded credential has expired.
     LoginExpired,
@@ -266,6 +370,21 @@ pub enum ProbeFailure {
     Malformed,
 }
 impl ProbeFailure {
+    /// Every persisted probe-failure class, in declaration order.
+    pub const ALL: &[Self] = &[
+        Self::Network,
+        Self::RateLimited,
+        Self::RefreshDeferred,
+        Self::Auth,
+        Self::LoginExpired,
+        Self::AccountMismatch,
+        Self::IsolatedKeychainUnavailable,
+        Self::MissingCli,
+        Self::ProbeDirectory,
+        Self::Disabled,
+        Self::Malformed,
+    ];
+
     /// Default readiness classification, before provider execution detail.
     pub fn readiness_reason(self) -> crate::ReadinessReason {
         match self {
@@ -311,7 +430,9 @@ pub struct UpdateIntent {
 impl UpdateIntent {
     pub fn check(&self, current: Option<&AccountRecord>) -> Result<(), QuotaError> {
         self.account.validate()?;
-        if current != self.expected.as_ref() || current.is_some_and(|r| r.account != self.account) {
+        if current != self.expected.as_ref()
+            || current.is_some_and(|r| !r.account.same_identity(&self.account))
+        {
             return Err(QuotaError::Conflict);
         }
         if let Some(next) = &self.replacement {
@@ -343,6 +464,9 @@ pub struct AccountRow {
     /// Account-scoped login expiry evidence, independent of quota status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_expiry: Option<LoginExpiryView>,
+    /// Safe authentication facts from the provider CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_state: Option<AuthState>,
     pub snapshot: Option<QuotaSnapshot>,
     pub status: QuotaStatus,
     /// RFC 3339 expiry for an active free-pool refusal, when the provider recorded one.
@@ -435,37 +559,152 @@ mod tests {
     #[test]
     fn persisted_account_accepts_future_fields_and_keeps_version_validation()
     -> Result<(), Box<dyn std::error::Error>> {
-        let record = AccountRecord::empty(AccountScope {
+        let account = AccountScope {
+            extra: Default::default(),
             adapter: "claude".into(),
             account_key: "opaque".into(),
             label: "work".into(),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.snapshot = Some(QuotaSnapshot::test_snapshot(
+            account.clone(),
+            QuotaStatus::Available,
+            10,
+            vec![crate::QuotaWindow {
+                extra: Default::default(),
+                pool: "claude-5h".into(),
+                window_seconds: Some(18_000),
+                used_basis_points: 100,
+                resets_unix_seconds: Some(100),
+            }],
+        ));
+        record.snapshot.as_mut().unwrap().details = Some(crate::QuotaDetails::default());
+        record.last_attempt_unix_seconds = Some(10);
+        record.claim = Some(RefreshClaim {
+            extra: Default::default(),
+            token: "claim".into(),
+            deadline_unix_seconds: 50,
+        });
+        record.auth_state = Some(AuthState::default());
+        record.credential_metadata = vec![CredentialMetadata {
+            extra: Default::default(),
+            path: "/fixture/credential".into(),
+            stat: Some(CredentialStat {
+                extra: Default::default(),
+                device: 1,
+                inode: 2,
+                mode: 0o600,
+                uid: 3,
+                size: 4,
+                modified_ns: 5,
+            }),
+        }];
+        record.refusals.push(crate::Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: "claude/model".into(),
+            pool: Some("claude-5h".into()),
+            observed_unix_seconds: 10,
+            resets_unix_seconds: Some(100),
+        });
+        record.capacity_cooldowns.push(crate::CapacityCooldown {
+            extra: Default::default(),
+            account,
+            model: "claude/model".into(),
+            observed_unix_seconds: 10,
+            expires_unix_seconds: 100,
         });
         let mut value = serde_json::to_value(&record)?;
-        value["future_record"] = serde_json::json!({"value": [1, 2]});
-        let decoded: AccountRecord = serde_json::from_value(value.clone())?;
-        assert_eq!(decoded, record);
-        decoded.validate()?;
+        value["record"] = serde_json::json!({"value": [1, 2]});
+        value["account"]["account"] = serde_json::json!({"value": [1, 2]});
+        value["snapshot"]["snapshot"] = serde_json::json!({"value": [1, 2]});
+        value["snapshot"]["account"]["snapshot_account"] = serde_json::json!({"value": [1, 2]});
+        value["snapshot"]["windows"][0]["window"] = serde_json::json!({"value": [1, 2]});
+        value["snapshot"]["details"]["details"] = serde_json::json!({"value": [1, 2]});
+        value["claim"]["claim"] = serde_json::json!({"value": [1, 2]});
+        value["auth_state"]["auth_state"] = serde_json::json!({"value": [1, 2]});
+        value["credential_metadata"][0]["credential_metadata"] =
+            serde_json::json!({"value": [1, 2]});
+        value["credential_metadata"][0]["stat"]["credential_stat"] =
+            serde_json::json!({"value": [1, 2]});
+        value["refusals"][0]["refusal"] = serde_json::json!({"value": [1, 2]});
+        value["refusals"][0]["account"]["refusal_account"] = serde_json::json!({"value": [1, 2]});
+        value["capacity_cooldowns"][0]["cooldown"] = serde_json::json!({"value": [1, 2]});
+        value["capacity_cooldowns"][0]["account"]["cooldown_account"] =
+            serde_json::json!({"value": [1, 2]});
+        let bytes = serde_json::to_vec(&value)?;
+        let decoded = AccountRecord::decode(&bytes)?;
+        let encoded = provenant_records::encode(&decoded)?;
+        let round_trip: AccountRecord =
+            provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG)?;
+        assert_eq!(serde_json::to_value(&round_trip)?, value);
+        round_trip.validate()?;
+        let observed = &round_trip.credential_metadata[0];
+        let mut refreshed = observed.clone();
+        refreshed
+            .extra
+            .insert("new_metadata".into(), serde_json::json!(true));
+        refreshed.stat.as_mut().unwrap().size += 1;
+        refreshed
+            .stat
+            .as_mut()
+            .unwrap()
+            .extra
+            .insert("new_stat".into(), serde_json::json!(true));
+        let mut same_observation = observed.clone();
+        same_observation.extra.extend(refreshed.extra.clone());
+        same_observation
+            .stat
+            .as_mut()
+            .unwrap()
+            .extra
+            .extend(refreshed.stat.as_ref().unwrap().extra.clone());
+        assert!(observed.same_observation(&same_observation));
+        assert!(!observed.same_observation(&refreshed));
+        let updated = observed.updated_from(&refreshed);
+        let mut expected_extra = refreshed.extra.clone();
+        for (key, value) in &observed.extra {
+            expected_extra
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        let mut expected_stat_extra = refreshed.stat.as_ref().unwrap().extra.clone();
+        for (key, value) in &observed.stat.as_ref().unwrap().extra {
+            expected_stat_extra
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        assert_eq!(updated.extra, expected_extra);
+        assert_eq!(updated.stat.unwrap().extra, expected_stat_extra);
+        for &status in QuotaStatus::ALL {
+            let mut row = round_trip.clone();
+            row.snapshot.as_mut().unwrap().status = status;
+            let encoded = provenant_records::encode(&row)?;
+            let decoded = AccountRecord::decode(&encoded)?;
+            assert_eq!(decoded.snapshot.unwrap().status, status);
+        }
         value["schema_version"] = serde_json::json!(2);
-        assert!(
-            serde_json::from_value::<AccountRecord>(value)?
-                .validate()
-                .is_err()
-        );
+        let future_version = serde_json::to_vec(&value)?;
+        assert!(AccountRecord::decode(&future_version).is_err());
         Ok(())
     }
 
     #[test]
-    fn readiness_failure_metadata_never_enters_the_v1_account_json()
+    fn account_record_round_trip_preserves_auth_failure_fields()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut record = AccountRecord::empty(AccountScope {
+            extra: Default::default(),
             adapter: "agy".into(),
             account_key: "opaque".into(),
             label: "work".into(),
         });
         record.last_error = Some(ProbeFailure::Network);
-        let bytes = serde_json::to_vec(&record)?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        assert!(value.get("readiness_probe_result").is_none());
+        record.auth_state = Some(AuthState {
+            signed_in: Some(true),
+            observed_unix_seconds: Some(10),
+            ..Default::default()
+        });
+        let bytes = provenant_records::encode(&record)?;
         let decoded = AccountRecord::decode(&bytes)?;
         assert_eq!(decoded, record);
         Ok(())
@@ -474,11 +713,13 @@ mod tests {
     #[test]
     fn persisted_claim_cannot_exceed_the_tick_budget_or_exist_without_an_attempt() {
         let mut record = AccountRecord::empty(AccountScope {
+            extra: Default::default(),
             adapter: "claude".into(),
             account_key: "opaque".into(),
             label: "work".into(),
         });
         record.claim = Some(RefreshClaim {
+            extra: Default::default(),
             token: "claim".into(),
             deadline_unix_seconds: i64::MAX,
         });

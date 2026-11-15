@@ -1,17 +1,17 @@
 //! Attempt execution and retained lane observations: `status`, `output`,
 //! `reconcile` and `telemetry stats`, and the provider seam that the
 //! same-binary guardian holder shares.
-use crate::{
-    Cancel, Condition, Lanes, Output, Part, PricesRefresh, Reconcile, Resume, Stats, Switch,
-    Target, Trace, limits,
-};
+use crate::{Output, Part, PricesRefresh, Reconcile, Stats, Switch, Target, Trace, limits};
+#[cfg(test)]
+use provenant_core::ActorId;
 use provenant_core::{
-    ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WallTime,
+    AttemptId, CancelToken, Clock, CredentialRoots, CredentialScope, DeliveryId, OperationId,
+    Roots, WallTime,
 };
 use provenant_fabric_runtime::hosts::plain_text;
-use provenant_os::{clock::SystemClock, fs::entropy_128};
+use provenant_os::clock::SystemClock;
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
-use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
+use provenant_records::{CommandError, CommandResult, Outcome as Status};
 use provenant_routing::{Fallback, ModelId, RouteChoice, RouteName};
 use provenant_run as run;
 use provenant_supervisor::custody::ExitObservation;
@@ -20,14 +20,16 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    io::Read,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 mod cancel;
 mod holder;
+mod key;
 mod launch;
+mod launch_policy;
+pub use launch_policy::seal_launch_policy;
 mod output;
 mod provider;
 mod reconcile;
@@ -35,18 +37,17 @@ mod remote;
 mod resume;
 mod status;
 mod submit;
-mod targets;
 mod telemetry;
 mod telemetry_context;
-mod usage_ledger;
-mod wait;
-mod watch;
 mod worktree;
 pub use cancel::*;
 pub use holder::HostHolder;
+pub use key::{resolve_fail, resolve_target};
 pub use launch::*;
 pub use output::*;
-pub(crate) use provider::find_executable as provider_executable;
+pub fn provider_executable(name: &str) -> Result<PathBuf, String> {
+    provider::find_executable(name)
+}
 #[cfg(feature = "fixture")]
 pub use provider::{apply_fixture_setup, prepare_fixture, writer_fixture_plan};
 pub use provider::{graph_inputs_directory, graph_node_inputs_directory};
@@ -55,8 +56,6 @@ pub use resume::*;
 pub use status::*;
 pub use submit::*;
 pub use telemetry::*;
-pub use usage_ledger::backfill;
-pub use wait::*;
 pub use worktree::*;
 
 /// The first typed refusal is sealed beside the attempt before quota publication.
@@ -160,7 +159,7 @@ pub struct Fail {
     pub status: Status,
     pub kind: ErrorKind,
     pub message: String,
-    /// Safe typed detail retained for the MCP edge, without raw source errors.
+    /// Safe typed detail retained for the command edge, without raw source errors.
     pub detail: Option<Box<provenant_fabric_runtime::coordination::facade::FacadeError>>,
     pub projection: Option<Box<provenant_records::diagnostic::Diagnostic>>,
 }
@@ -246,37 +245,6 @@ fn command_error(fail: &Fail) -> CommandError {
             .and_then(|projection| projection.next.clone()),
     }
 }
-/// A reply whose reader deadline expired still reports what it saw.
-fn reply_waited(command: &str, outcome: Result<(Value, String, bool), Fail>) -> Reply {
-    let mut expired = false;
-    let mut silent = false;
-    let mut out = reply(
-        command,
-        outcome.map(|(data, human, timed_out)| {
-            expired = timed_out;
-            silent = data["reason"].is_string();
-            (data, human)
-        }),
-    );
-    if silent {
-        out.result.status = Status::Failed;
-    } else if expired {
-        out.result.status = Status::Timeout;
-    }
-    apply_launch_policy(&mut out);
-    out
-}
-/// Preserve the launch receipt while projecting a typed launch refusal.
-fn apply_launch_policy(out: &mut Reply) {
-    if out.result.error.is_none()
-        && let Some(started) = out.result.data.get("started")
-        && let Ok(started) = serde_json::from_value::<Vec<run::Started>>(started.clone())
-        && let Err(failure) = check_launch_policy(&started)
-    {
-        out.result.status = failure.status;
-        out.result.error = Some(command_error(&failure));
-    }
-}
 
 pub fn read_only_checkout_warning(state: &Path, source: &Path) -> Option<String> {
     provider::confinement::read_only_checkout_warning(state, source)
@@ -317,6 +285,127 @@ pub struct Registry<'a> {
     pub cancel: Option<&'a CancelToken>,
     pub repo_facts: provenant_confinement::worktrees::RepoFacts,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceAdmissionMode {
+    /// A pinned source must be the project checkout or a registered linked worktree.
+    Registered,
+    /// The caller selected a live directory, which may not be a registered checkout.
+    Live,
+    /// Explain-only target that may not have been materialised yet.
+    Proposed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceWarning {
+    pub path: PathBuf,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceAdmission {
+    pub path: PathBuf,
+    pub warnings: Vec<SourceWarning>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceAdmissionError {
+    pub code: &'static str,
+    pub reason: String,
+}
+
+impl std::fmt::Display for SourceAdmissionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for SourceAdmissionError {}
+
+/// The same source-root decision used by preparation and graph explanation.
+/// Pinned roots are verified against the selected project's Git registration;
+/// live roots retain their selected location. Both modes use declared paths
+/// for credential and state boundaries.
+pub fn admit_source_root(
+    cwd: &Path,
+    state: &Path,
+    source: &Path,
+    credentials: &CredentialRoots,
+    mode: SourceAdmissionMode,
+) -> Result<SourceAdmission, SourceAdmissionError> {
+    const CODE: &str = "CONFINEMENT_SOURCE_CWD_AUTHORITY";
+    let refuse = |reason: &str| SourceAdmissionError {
+        code: CODE,
+        reason: reason.to_owned(),
+    };
+    let check_credentials = |path: &Path| {
+        credentials
+            .refusal(path, CredentialScope::Subtree, true)
+            .map_or(Ok(()), |root| {
+                Err(refuse(&format!(
+                    "graph source checkout overlaps declared credential root {} (source: {})",
+                    root.path.display(),
+                    root.source,
+                )))
+            })
+    };
+    check_credentials(source)?;
+    let candidate = provenant_confinement::permissions::resolve_boundary_path(source)
+        .map_err(|_| refuse("graph source checkout is not an allowed read root"))?;
+    check_credentials(&candidate)?;
+    if !run::access_root_allowed(&candidate, state, true) {
+        return Err(refuse("graph source checkout is not an allowed read root"));
+    }
+    let path = match mode {
+        SourceAdmissionMode::Live => {
+            if !std::fs::metadata(&candidate).is_ok_and(|metadata| metadata.is_dir()) {
+                return Err(refuse("graph source checkout is not an existing directory"));
+            }
+            candidate
+        }
+        SourceAdmissionMode::Proposed => candidate,
+        SourceAdmissionMode::Registered => run::resolve_reader_source(state, cwd, &candidate)
+            .map_err(|_| {
+                refuse("graph source checkout is no longer registered with the project")
+            })?,
+    };
+    check_credentials(&path)?;
+    if !run::access_root_allowed(&path, state, true) {
+        return Err(refuse("graph source checkout is not an allowed read root"));
+    }
+    let mut warnings = Vec::new();
+    for ancestor in path.ancestors() {
+        if let Some(name) = ancestor.file_name().and_then(std::ffi::OsStr::to_str)
+            && provenant_core::PROJECT_AGENT_CONFIG_DIRECTORIES.contains(&name)
+        {
+            warnings.push(SourceWarning {
+                path: ancestor.to_owned(),
+                source: format!("project-local agent configuration ({name})"),
+            });
+        }
+    }
+    // A source root can contain an agent directory without the candidate
+    // itself being below it; that overlap is advisory and keeps its declaration.
+    for name in provenant_core::PROJECT_AGENT_CONFIG_DIRECTORIES {
+        let config = path.join(name);
+        if std::fs::symlink_metadata(&config).is_ok() {
+            warnings.push(SourceWarning {
+                path: config,
+                source: format!("project-local agent configuration ({name})"),
+            });
+        }
+    }
+    warnings.sort_by(|left, right| left.path.cmp(&right.path));
+    warnings.dedup_by(|left, right| left.path == right.path);
+    Ok(SourceAdmission { path, warnings })
+}
+
+/// Resolve the full declared credential table for a launch edge, including
+/// account registrations and host environment overrides.
+pub fn declared_credentials(registry: &Registry<'_>) -> Result<CredentialRoots, String> {
+    provider::declared_credentials(registry)
+}
+
 impl Registry<'_> {
     fn prepare_with_wait(
         &self,
@@ -325,21 +414,7 @@ impl Registry<'_> {
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
         wait: Option<u64>,
-    ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
-        let resume = if task.extra.get("automatic_continuation") == Some(&serde_json::json!(true)) {
-            resume.filter(|prior| {
-                self.check_continuable(prior).is_ok()
-                    && self
-                        .state_root
-                        .zip(self.roots)
-                        .is_some_and(|(state, roots)| {
-                            provider::continuation_available(prior, state, roots.state.as_path())
-                                .is_ok()
-                        })
-            })
-        } else {
-            resume
-        };
+    ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
         let prepared = provider::prepare(self, task, prompt, paths, resume, wait)?;
         #[cfg(feature = "fixture")]
         let prepared = {
@@ -363,47 +438,6 @@ impl Registry<'_> {
                 .is_some_and(|spec| spec.launch.resume)
         })
     }
-    /// Refuse before the attempt's one continuation is spent.
-    fn check_continuable(&self, prior: &run::AttemptRecord) -> Result<(), Fail> {
-        if !matches!(prior.state, run::AttemptState::Terminal { .. }) {
-            return Err(run::RunError::Nonterminal.into());
-        }
-        let unsupported = |message: String| {
-            Fail::new(Status::Refused, ErrorKind::ContinuationUnsupported, message)
-        };
-        if prior
-            .applied_route
-            .as_ref()
-            .is_some_and(|route| route.extra.contains_key("host_native"))
-        {
-            return Err(unsupported(
-                "host-native does not support resume; dispatch a fresh lane with the prior result"
-                    .into(),
-            ));
-        }
-        let adapter = prior
-            .applied_route
-            .as_ref()
-            .and_then(|route| route.provider.as_deref())
-            .ok_or_else(|| unsupported("the attempt launched no provider to resume".into()))?;
-        if !REGISTRY.iter().any(|entry| entry.adapter.id() == adapter) {
-            return Err(unsupported(format!("unknown provider {adapter}")));
-        }
-        if let Some(spec) = provenant_records::AdapterSpec::get(adapter) {
-            spec.check_launch(&provenant_records::LaunchRequest {
-                model: None,
-                resume: true,
-                ..Default::default()
-            })
-            .map_err(|error| unsupported(error.to_string()))?;
-        }
-        if prior.session.is_none() {
-            return Err(unsupported(
-                "the attempt recorded no provider session handle (it predates handle capture or the provider never reported one); dispatch a new lane with the prior result as context".into(),
-            ));
-        }
-        Ok(())
-    }
 }
 const CAPACITY: &str = "provider capacity";
 
@@ -413,18 +447,25 @@ fn capacity_reason(reason: &str) -> bool {
         .is_some_and(|rest| rest.starts_with(": "))
 }
 
-fn writer_gc_settings(state: &Path) -> provenant_config::GcSettings {
+fn writer_gc_settings(
+    state: &Path,
+    policy: &provenant_records::policy::Policy,
+) -> provenant_config::GcSettings {
     provenant_config::GcSettings::read(state).unwrap_or_else(|error| {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: gc.free_floor configuration unavailable ({error}); using compiled gc defaults"
-        );
+        if let provenant_records::policy::Effect::Warn(message) = policy.check(
+            "RUN_WRITER_GC_SETTINGS_NONE",
+            provenant_records::policy::Facts::violation(format!(
+                "gc.free_floor configuration unavailable ({error}); using compiled GC defaults"
+            )),
+        ) {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+        }
         provenant_config::GcSettings::default()
     })
 }
 
-fn disk_policy_refusal(error: DiskCheck) -> run::PrepareRefusal {
+fn disk_policy_refusal(error: DiskCheck) -> Box<run::PrepareRefusal> {
     let resource = match &error {
         DiskCheck::Low {
             available,
@@ -444,18 +485,25 @@ fn disk_policy_refusal(error: DiskCheck) -> run::PrepareRefusal {
             provenant_records::run::TerminalCause::DiskObservationUnavailable
         }
     };
-    let mut refusal = run::PrepareRefusal::from(String::from(error));
-    refusal.terminal_cause = Some(cause);
+    let policy_code = match &error {
+        DiskCheck::Low { .. } => None,
+        DiskCheck::Unobserved(_) => Some("SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"),
+    };
+    let mut refusal = run::PrepareRefusal::boxed(cause, String::from(error));
+    refusal.policy_code = policy_code.map(str::to_owned);
     refusal.resource = resource;
     refusal
 }
 
 impl run::Providers for Registry<'_> {
-    fn write_grant_limit(&self) -> run::WriteGrantLimit {
+    fn write_grant_limit(
+        &self,
+        policy: &provenant_records::policy::Policy,
+    ) -> run::WriteGrantLimit {
         let Some(roots) = self.roots else {
             return run::WriteGrantLimit::default();
         };
-        match provenant_config::read_with_domains(roots, &crate::domains::SECTIONS) {
+        match crate::config_reads::read_for(roots, "run") {
             Ok(config) => {
                 let origin = if matches!(
                     config.origins.get("domains.run.write_grant_limit_bytes"),
@@ -471,25 +519,22 @@ impl run::Providers for Registry<'_> {
                 }
             }
             Err(error) => {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: domains.run.write_grant_limit_bytes unavailable ({error}); using compiled default"
-                );
+                if let provenant_records::policy::Effect::Warn(message) = policy.check(
+                    "WRITE_GRANT_LIMIT_READ_NONE",
+                    provenant_records::policy::Facts::violation(format!(
+                        "domains.run.write_grant_limit_bytes unavailable ({error}); using compiled default"
+                    )),
+                ) {
+                    use std::io::Write;
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                }
                 run::WriteGrantLimit::default()
             }
         }
     }
-    fn runtime_cap(&self, provider: &str) -> Option<u64> {
-        provenant_config::read_with_domains(self.roots?, &crate::domains::SECTIONS)
-            .ok()?
-            .providers
-            .get(provider)?
-            .runtime_deadline_seconds
-    }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         let roots = self.roots.ok_or("routing context is unavailable")?;
-        let priority = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        let priority = crate::config_reads::read_for(roots, "run")
             .map_err(|error| error.to_string())?
             .domains
             .fabric
@@ -500,21 +545,37 @@ impl run::Providers for Registry<'_> {
             task.build_heavy,
         ))
     }
-    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), run::PrepareRefusal> {
+    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), Box<run::PrepareRefusal>> {
         let Some(writer) = &task.writer else {
             return Ok(());
         };
+        let project = task
+            .profile
+            .policy_project
+            .map(|project| project.to_string())
+            .or_else(|| self.project_id.map(|project| project.to_string()))
+            .unwrap_or_default();
+        let policy = self
+            .roots
+            .map_or_else(provenant_records::policy::Policy::default, |roots| {
+                run::launch_policy(roots.state.as_path(), &project, task)
+            });
         let (Some(roots), Some(home)) = (self.roots, self.home) else {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: writer disk policy context unavailable; continuing without a disk check"
-            );
+            if let provenant_records::policy::Effect::Warn(message) = policy.check(
+                "RUN_WRITER_GC_SETTINGS_NONE",
+                provenant_records::policy::Facts::violation(
+                    "writer disk policy context unavailable; continuing without a disk check",
+                ),
+            ) {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            }
             return Ok(());
         };
-        let settings = writer_gc_settings(roots.state.as_path());
+        let settings = writer_gc_settings(roots.state.as_path(), &policy);
         check_writer_disk(
             &settings,
+            &policy,
             roots.state.as_path(),
             &writer.worktree,
             &writer.project,
@@ -605,7 +666,7 @@ impl run::Providers for Registry<'_> {
         prompt: &str,
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
-    ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
+    ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
         self.prepare_with_wait(task, prompt, paths, resume, None)
     }
 
@@ -640,7 +701,7 @@ impl Registry<'_> {
             result: String::new(),
             complete: false,
             observed_route: None,
-            // `source` names why usage is absent; records stay readable by older builds.
+            // `source` names why the current observation has no usage.
             usage: run::UsageRecord {
                 source: result_event_usage.then(|| "absent: no result event".into()),
                 ..run::UsageRecord::default()
@@ -667,6 +728,20 @@ impl Registry<'_> {
             Ok(events) => (events, None),
             Err(error) => (Vec::new(), Some(error.to_string())),
         };
+        // The prepared route key was checked against the provider identity port.
+        // Keep it as observed usage identity only while the adapter still sees an authenticated stream.
+        let account_key = match adapter.account(&state) {
+            Ok(provenant_providers::AccountDetection::Unknown) => route
+                .account_key
+                .as_deref()
+                .filter(|key| {
+                    provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| {
+                        spec.registered_account && !spec.is_unregistered_local(key)
+                    })
+                })
+                .map(str::to_owned),
+            Ok(provenant_providers::AccountDetection::AuthRequired) | Err(_) => None,
+        };
         let code = match exit.termination {
             Some(provenant_os::exec::Termination::Exit(code)) => Some(code),
             _ => None,
@@ -686,12 +761,17 @@ impl Registry<'_> {
             return Ok(failed("provider outcome is malformed"));
         };
         events.extend(outcome.final_events().iter().cloned());
+        let state_root = self
+            .state_root
+            .or_else(|| self.roots.map(|roots| roots.state.as_path()));
         let quota_evidence = QuotaEvidence::read(provider_state)?;
         if let Some(evidence) = &quota_evidence {
-            if let Some(state_root) = provider_state.ancestors().nth(5) {
-                evidence.apply(state_root, route, true)?;
-            } else {
-                return Err("quota evidence has no state root".into());
+            if evidence.shared {
+                evidence.apply(
+                    state_root.ok_or("quota evidence has no state root")?,
+                    route,
+                    true,
+                )?;
             }
             events.insert(
                 0,
@@ -763,6 +843,10 @@ impl Registry<'_> {
             result: String::new(),
             complete: true,
             observed_route: observed_model.map(|model| run::RouteRecord {
+                selection_context: Default::default(),
+                host_native: None,
+                effort_warning: None,
+                availability_warning: None,
                 extra: Default::default(),
                 provider: Some(adapter.id().into()),
                 model: Some(if model.contains('/') {
@@ -774,7 +858,7 @@ impl Registry<'_> {
                     .as_ref()
                     .map_or_else(|| route.effort.clone(), |turn| turn.effort.clone()),
                 account_label: route.account_label.clone(),
-                account_key: route.account_key.clone(),
+                account_key: account_key.clone(),
                 source: Some(
                     if rollout.is_some() {
                         "codex_rollout"
@@ -786,6 +870,7 @@ impl Registry<'_> {
                     .into(),
                 ),
                 pool_selection: None,
+                ..Default::default()
             }),
             usage: run::UsageRecord::default(),
             session: outcome.session().map(str::to_owned),
@@ -856,6 +941,7 @@ impl Registry<'_> {
         if provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.exit_route) {
             decoded.observed_route = Some(run::RouteRecord {
                 source: Some("command_exit".into()),
+                account_key: account_key.clone(),
                 ..route.clone()
             });
             if exit.stdout.bytes > stdout.len() as u64 {
@@ -893,17 +979,15 @@ impl Registry<'_> {
         (decoded.outcome, decoded.reason) = match outcome.status() {
             OutcomeStatus::Success => (run::Outcome::Succeeded, None),
             _ if auth && outcome.status() != OutcomeStatus::Success => {
-                let config = self.roots.and_then(|roots| {
-                    provenant_config::read_with_domains(roots, &crate::domains::SECTIONS).ok()
-                });
+                let config = self
+                    .roots
+                    .and_then(|roots| crate::config_reads::read_for(roots, "run").ok());
                 let key = route.account_key.as_deref();
                 // Preparation marks a route that launched on a registered lane
                 // token; a rotating login copy carries no mark.
                 let registered_token = route
-                    .extra
-                    .get("registered_lane_token")
-                    .or_else(|| route.extra.get("lane_token"))
-                    .and_then(serde_json::Value::as_bool)
+                    .registered_lane_token
+                    .or(route.lane_token)
                     .unwrap_or(false);
                 let entries = config
                     .iter()
@@ -1007,7 +1091,7 @@ impl Registry<'_> {
             let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some();
             if quota_evidence.is_none() && !lane && (pool.is_some() || route.account_key.is_some())
             {
-                if let Some(state_root) = provider_state.ancestors().nth(5) {
+                if let Some(state_root) = state_root {
                     let now = SystemClock::new().unix_seconds();
                     let resets = resets_in_seconds
                         .and_then(|seconds| i64::try_from(seconds).ok())
@@ -1059,7 +1143,7 @@ impl Registry<'_> {
                     || std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_none())
                 && let Some(roots) = self.roots
             {
-                match provenant_config::read_with_domains(roots, &crate::domains::SECTIONS) {
+                match crate::config_reads::read_for(roots, "run") {
                     Ok(config) => {
                         let duration = config.domains.routing.capacity_cooldown_seconds;
                         if duration != 0 {
@@ -1084,7 +1168,11 @@ impl Registry<'_> {
         }
         if provenant_records::AdapterSpec::get(adapter.id())
             .is_some_and(|spec| spec.stdout_error_diagnostic)
-            && let Some(note) = provenant_providers::opencode::stdout_error_diagnostic(stdout)
+            && let Some(note) = provenant_providers::opencode::stdout_error_diagnostic(
+                stdout,
+                route.model.as_deref(),
+                route.effort.as_deref(),
+            )
         {
             decoded.reason = Some(match decoded.reason.take() {
                 Some(reason) => format!("{reason}; {note}"),
@@ -1108,7 +1196,7 @@ impl Registry<'_> {
         }
         if decoded.outcome == run::Outcome::Succeeded
             && std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_none()
-            && let Some(state_root) = provider_state.ancestors().nth(5)
+            && let Some(state_root) = state_root
         {
             // Housekeeping must not change a successful lane's outcome.
             let _ = crate::quota::persist_provider_success(
@@ -1161,31 +1249,15 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
             network: Some(task.access.network(task.writer.is_some())),
             image_input: false,
             skill_location: task.profile.require_skill_location,
-            workload: if matches!(task.route, run::RequestedRoute::Review { .. }) {
-                provenant_routing::Workload::Review
-            } else {
-                match task
-                    .profile
-                    .knobs
-                    .get("routing.workload")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    Some("read_heavy") => provenant_routing::Workload::ReadHeavy,
-                    Some("edit_heavy") => provenant_routing::Workload::EditHeavy,
-                    Some("review") => provenant_routing::Workload::Review,
-                    _ => provenant_routing::Workload::General,
-                }
-            },
+            workload: task
+                .route
+                .workload(&task.profile)
+                .map_err(|error| error.to_string())?,
         },
         choice,
         effort,
         fallback: Fallback::None,
-        confidential: task
-            .profile
-            .extra
-            .get("confidential")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
+        confidential: task.profile.confidential,
     })
 }
 
@@ -1252,11 +1324,6 @@ fn now(clock: &dyn Clock) -> Result<WallTime, Fail> {
     clock
         .wall_now()
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))
-}
-fn fresh<T>(make: fn([u8; 16]) -> T) -> Result<T, Fail> {
-    entropy_128()
-        .map(make)
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Entropy, error.to_string()))
 }
 
 #[cfg(test)]
@@ -1793,30 +1860,30 @@ fn trace_inner(command: Trace, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let selected_run = command
-        .run
+    let selected = command
+        .target
         .as_ref()
-        .map(|target| targets::run_id(edge, target))
+        .map(|target| key::resolve_target(edge, target, crate::Want::Work))
         .transpose()?;
+    let keep = |context: Option<&provenant_records::run::WorkContext>| {
+        selected
+            .as_ref()
+            .is_none_or(|resolved| key::context_matches(context, resolved))
+    };
     let (_, store) = open_read_only(edge, &call)?;
-    let mut facts = store
-        .map(|store| {
-            store
-                .attempts(
-                    run::AttemptFilter {
-                        run_id: selected_run,
-                        task_id: None,
-                    },
-                    &call,
-                )?
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
+    let mut facts = Vec::new();
+    if let Some(store) = store {
+        for fact in store.attempts(&call)? {
+            let fact = fact?;
+            if keep(fact.context.as_ref()) {
+                facts.push(fact);
+            }
+        }
+    }
     let mut hosts = provenant_telemetry::Hosts::default();
     let mut peers = Vec::new();
     if command.peers
-        && let Some(found) = remote::peer_facts(edge, selected_run)?
+        && let Some(found) = remote::peer_facts(edge, &keep)?
     {
         facts.extend(found.facts);
         hosts.local = Some(found.local);
@@ -1886,7 +1953,7 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
         lanes.extend(
             page.lanes
                 .iter()
-                .map(|lane| format!("{}/{}/{}", lane.run_id, lane.task_id, lane.attempt_id)),
+                .map(|lane| format!("{} {}", lane.key, lane.attempt_id)),
         );
         if lanes.len() > 1024 {
             return Err(Fail::new(

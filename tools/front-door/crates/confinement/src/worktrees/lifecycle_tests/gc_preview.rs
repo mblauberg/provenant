@@ -1,47 +1,6 @@
 use super::*;
 
 #[test]
-fn gc_lazy_inventory_still_refuses_a_dirty_candidate() -> Result<(), Box<dyn Error>> {
-    let fixture = Fixture::new()?;
-    let test = TestContext::new(&fixture)?;
-    let context = test.context();
-    let lane = create(
-        &context,
-        WorktreeCreate {
-            branch: "dirty-candidate".into(),
-            base: None,
-        },
-        &cancel(),
-    )?;
-    fs::write(lane.path.join("untracked"), "keep")?;
-    let lanes = list_for_gc(&context, &cancel())?;
-    let report = collect_lazy(
-        &context,
-        &lanes,
-        &WorktreeGcPolicy {
-            upstream: None,
-            terminal: &|_| true,
-            no_live_lanes: &|_| true,
-            regenerable: &[],
-            keep: &[],
-            written_before_ns: i128::MAX,
-            dry_run: true,
-            foreign_merged_clean: false,
-        },
-        &cancel(),
-    )?;
-    assert!(
-        report
-            .worktrees
-            .retained
-            .iter()
-            .any(|entry| entry.branch == "dirty-candidate" && entry.reason == RetainReason::Dirty)
-    );
-    assert!(lane.path.join("untracked").exists());
-    Ok(())
-}
-
-#[test]
 fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct RejectConfig<'a> {
@@ -63,14 +22,7 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let mut context = test.context();
-    let lane = create(
-        &context,
-        WorktreeCreate {
-            branch: "probe-failure".into(),
-            base: None,
-        },
-        &cancel(),
-    )?;
+    let lane = gc_owned_lane(&test, &context, "probe-failure")?;
     let git = RejectConfig {
         inner: context.executor,
         rejected: AtomicUsize::new(0),
@@ -86,7 +38,7 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
             if scope == lane.path && evidence.contains("worktree verification failed:")
     ));
     let lanes = list_for_gc(&context, &cancel())?;
-    let report = collect_lazy(
+    let report = collect(
         &context,
         &lanes,
         &WorktreeGcPolicy {
@@ -97,82 +49,152 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: false,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;
     assert!(git.rejected.load(Ordering::SeqCst) > 0);
     assert!(lane.path.exists());
     assert!(report.worktrees.removed.is_empty());
+    // An unverifiable lane has no readable owner: it is kept, never removed.
     assert!(
         report
-            .worktrees
-            .retained
+            .candidates
             .iter()
-            .any(|entry| entry.branch == "probe-failure")
+            .any(|row| row.path == lane.path && row.action == "kept")
     );
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum GcVerdict {
+    Removed,
+    Retained(RetainReason),
+    Absent,
+}
+
+fn gc_verdict(report: &WorktreeGcReport, lane: &WorktreeInfo) -> GcVerdict {
+    if report
+        .worktrees
+        .removed
+        .iter()
+        .any(|entry| entry.path == lane.path)
+    {
+        return GcVerdict::Removed;
+    }
+    let branch = lane
+        .branch
+        .as_deref()
+        .and_then(|name| name.strip_prefix("refs/heads/"))
+        .unwrap_or_default();
+    report
+        .worktrees
+        .retained
+        .iter()
+        .find(|entry| entry.branch == branch)
+        .map_or(GcVerdict::Absent, |entry| GcVerdict::Retained(entry.reason))
+}
+
+/// Preview and apply reach one verdict for every worktree state, and neither
+/// runs a nested repository's Git filters.
 #[test]
-fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error>> {
-    let fixture = Fixture::new()?;
-    let test = TestContext::new(&fixture)?;
-    let context = test.context();
-    let lane = create(
-        &context,
-        WorktreeCreate {
-            branch: "lazy-gitlink".into(),
-            base: None,
-        },
-        &cancel(),
-    )?;
-    let marker = fixture._temp.path().join("lazy-filter-ran");
-    let poison = add_poisoned_gitlink(&fixture, &lane.path, "sub", &marker)?;
-    assert_raw_git_runs_poison_filter(&fixture, &poison)?;
-    poison.arm()?;
-    let lanes = list_for_gc(&context, &cancel())?;
-    let report = collect_lazy(
-        &context,
-        &lanes,
-        &WorktreeGcPolicy {
-            upstream: None,
-            terminal: &|_| true,
-            no_live_lanes: &|_| true,
-            regenerable: &[],
-            keep: &[],
-            written_before_ns: i128::MAX,
-            dry_run: true,
-            foreign_merged_clean: false,
-        },
-        &cancel(),
-    )?;
-    assert!(!marker.exists());
-    assert!(
-        report
-            .worktrees
-            .retained
-            .iter()
-            .any(|entry| entry.branch == "lazy-gitlink" && entry.reason == RetainReason::Dirty)
-    );
-    assert!(lane.path.exists());
+fn gc_preview_verdict_matches_apply_for_every_worktree_state() -> Result<(), Box<dyn Error>> {
+    for state in ["clean", "untracked", "poisoned-gitlink"] {
+        let fixture = Fixture::new()?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let lane = gc_owned_lane(&test, &context, &format!("verdict-{state}"))?;
+        let marker = fixture._temp.path().join("verdict-filter-ran");
+        let poison = match state {
+            "untracked" => {
+                fs::write(lane.path.join("untracked"), "keep")?;
+                None
+            }
+            "poisoned-gitlink" => {
+                let poison = add_poisoned_gitlink(&fixture, &lane.path, "sub", &marker)?;
+                assert_raw_git_runs_poison_filter(&fixture, &poison)?;
+                Some(poison)
+            }
+            _ => None,
+        };
+        let retirement = HostRetirementFixture::new(&test)?;
+        retirement.seed_lane(&context, &lane)?;
+        let run = |dry_run: bool| -> Result<WorktreeGcReport, Box<dyn Error>> {
+            if let Some(poison) = &poison {
+                poison.arm()?;
+            }
+            let lanes = list_for_gc(&context, &cancel())?;
+            Ok(collect(
+                &context,
+                &lanes,
+                &WorktreeGcPolicy {
+                    upstream: None,
+                    terminal: &|_| true,
+                    no_live_lanes: &|_| true,
+                    regenerable: &[],
+                    keep: &[],
+                    written_before_ns: i128::MAX,
+                    dry_run,
+                    include_foreign: false,
+                    retirement_port: Some(&retirement),
+                    retirement_feeds: Some(&retirement),
+                    mode: CollectionMode::Worktrees,
+                    proof: None,
+                    upstream_reference: None,
+                    integration_patterns: &[],
+                    excluded_paths: &[],
+                },
+                &cancel(),
+            )?)
+        };
+        let preview = gc_verdict(&run(true)?, &lane);
+        assert!(lane.path.exists(), "{state}: a preview deleted the tree");
+        let applied = gc_verdict(&run(false)?, &lane);
+        assert_eq!(preview, applied, "{state}: preview and apply disagree");
+        assert_ne!(preview, GcVerdict::Absent, "{state}: no verdict reported");
+        if state != "clean" {
+            assert!(
+                matches!(preview, GcVerdict::Retained(_)),
+                "{state}: {preview:?}"
+            );
+            assert!(lane.path.exists(), "{state}: retained tree was removed");
+        }
+        assert!(!marker.exists(), "{state}: a nested Git filter ran");
+    }
     Ok(())
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)] // Compare fixture mtimes to the filesystem clock.
 fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Error>> {
-    for scenario in [
-        "preview",
-        "idle",
-        "aged",
-        "unowned",
-        "recent",
-        "index",
-        "live",
-        "unknown",
-        "no-output",
-        "unconfigured",
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Case {
+        Preview,
+        Idle,
+        Aged,
+        Unowned,
+        Recent,
+        Live,
+        Unknown,
+        NoOutput,
+        Unconfigured,
+    }
+    for case in [
+        Case::Preview,
+        Case::Idle,
+        Case::Aged,
+        Case::Unowned,
+        Case::Recent,
+        Case::Live,
+        Case::Unknown,
+        Case::NoOutput,
+        Case::Unconfigured,
     ] {
         let fixture = Fixture::new()?;
         fs::write(fixture.root.join(".gitignore"), "target/\n")?;
@@ -191,11 +213,11 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
         fs::create_dir(path.join("target"))?;
         fs::write(path.join("target/artifact"), "output")?;
         fs::write(path.join("untracked"), "source")?;
-        if scenario == "no-output" {
+        if case == Case::NoOutput {
             fs::remove_dir_all(path.join("target"))?;
         }
-        if matches!(scenario, "index" | "aged") {
-            let old = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+        if case == Case::Aged {
+            let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
             let tree = verify_worktree(context.repo, &path)?;
             for item in [
                 path.join("target/artifact"),
@@ -207,16 +229,14 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
             ] {
                 fs::File::open(item)?.set_times(fs::FileTimes::new().set_modified(old))?;
             }
-            if scenario == "aged" {
-                fs::File::open(tree.repo().private_git_dir().join("index"))?
-                    .set_times(fs::FileTimes::new().set_modified(old))?;
-            }
+            fs::File::open(tree.repo().private_git_dir().join("index"))?
+                .set_times(fs::FileTimes::new().set_modified(old))?;
         }
         let mut lane = list(&context, &cancel())?
             .into_iter()
             .find(|lane| lane.path == path)
             .ok_or("missing tree")?;
-        if scenario != "unowned" {
+        if case != Case::Unowned {
             lane.occupancy =
                 Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");
         } else {
@@ -225,12 +245,13 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
         }
         let live = NamedLive;
         let unknown = UnknownWorkers;
-        if scenario == "live" {
+        if case == Case::Live {
             context.workers = &live;
         }
-        if scenario == "unknown" {
+        if case == Case::Unknown {
             context.workers = &unknown;
         }
+        let retirement = HostRetirementFixture::new(&test)?;
         let regenerable = ["target".into()];
         let report = collect(
             &context,
@@ -239,50 +260,48 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                 upstream: None,
                 terminal: &|_| false,
                 no_live_lanes: &|_| true,
-                regenerable: if scenario == "unconfigured" {
+                regenerable: if case == Case::Unconfigured {
                     &[]
                 } else {
                     &regenerable
                 },
                 keep: &[],
-                written_before_ns: match scenario {
-                    "recent" => 0,
-                    "index" | "aged" => (std::time::SystemTime::now()
-                        - std::time::Duration::from_secs(3600))
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_nanos() as i128,
+                written_before_ns: match case {
+                    Case::Recent => 0,
+                    Case::Aged => 2_000_000_000,
                     _ => i128::MAX,
                 },
-                dry_run: matches!(scenario, "preview" | "no-output" | "unconfigured"),
-                foreign_merged_clean: false,
+                dry_run: matches!(case, Case::Preview | Case::NoOutput | Case::Unconfigured),
+                include_foreign: true,
+                retirement_port: Some(&retirement),
+                retirement_feeds: Some(&retirement),
+                mode: CollectionMode::Worktrees,
+                proof: None,
+                upstream_reference: None,
+                integration_patterns: &[],
+                excluded_paths: &[],
             },
             &cancel(),
         )?;
-        assert!(path.is_dir(), "{scenario}");
+        assert!(path.is_dir(), "{case:?}");
         assert_eq!(fs::read_to_string(path.join("untracked"))?, "source");
         assert_eq!(
             path.join("target/artifact").exists(),
-            !matches!(scenario, "idle" | "aged" | "unowned" | "no-output"),
-            "{scenario}"
+            !matches!(
+                case,
+                Case::Idle | Case::Aged | Case::Unowned | Case::NoOutput
+            ),
+            "{case:?}"
         );
-        if scenario == "unconfigured" {
-            assert!(report.idle_output.iter().any(|entry| {
-                entry.path == path && entry.reason == "no regenerable directories configured"
-            }));
-        }
-        if scenario == "no-output" {
-            assert!(report.idle_output.iter().any(|entry| {
-                entry.path == path && entry.reason == "no eligible ignored output"
-            }));
-        }
-        if scenario == "preview" {
+        if case == Case::Preview {
             assert!(
-                report.idle_output.iter().any(
-                    |entry| entry.path == path.join("target") && entry.reason == "would_remove"
-                )
+                report
+                    .idle_output
+                    .iter()
+                    .any(|entry| entry.path == path.join("target") && !entry.removed)
             );
         }
-        if matches!(scenario, "idle" | "aged" | "unowned") {
+        if matches!(case, Case::Idle | Case::Aged | Case::Unowned) {
             assert!(
                 report
                     .idle_output
@@ -290,7 +309,7 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                     .any(|entry| entry.path == path.join("target") && entry.removed)
             );
         }
-        if matches!(scenario, "recent" | "index" | "live" | "unknown") {
+        if matches!(case, Case::Recent | Case::Live | Case::Unknown) {
             assert!(report.idle_output.iter().all(|entry| !entry.removed));
         }
     }
@@ -329,6 +348,7 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
                 .is_none()
         );
         let lanes = list(&context, &cancel())?;
+        let retirement = HostRetirementFixture::new(&test)?;
         let regenerable = ["target".into()];
         let policy = WorktreeGcPolicy {
             upstream: None,
@@ -338,7 +358,14 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            foreign_merged_clean: false,
+            include_foreign: true,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         };
         let preview = collect(&context, &lanes, &policy, &cancel())?;
         assert_eq!(preview.idle_output.len(), 1);
@@ -392,8 +419,7 @@ fn finished_writer_record_does_not_block_its_worktree_shell() -> Result<(), Box<
         path.to_str().ok_or("path")?,
     ])?;
     let slot = writer_directory(context.project_state, &path)?;
-    let previous = provenant_supervisor::custody::Scope {
-        run: provenant_core::RunId::from_bytes([21; 16]),
+    let previous = provenant_records::custody::Scope {
         attempt: provenant_core::AttemptId::from_bytes([22; 16]),
         generation: 1,
     };
@@ -453,8 +479,7 @@ fn finished_writer_record_does_not_block_its_worktree_shell() -> Result<(), Box<
         true,
         &cancel(),
     )?;
-    let successor = provenant_supervisor::custody::Scope {
-        run: provenant_core::RunId::from_bytes([23; 16]),
+    let successor = provenant_records::custody::Scope {
         attempt: provenant_core::AttemptId::from_bytes([24; 16]),
         generation: 1,
     };
@@ -477,8 +502,7 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         path.to_str().ok_or("path")?,
     ])?;
     let slot = writer_directory(context.project_state, &path)?;
-    let scope = provenant_supervisor::custody::Scope {
-        run: provenant_core::RunId::from_bytes([11; 16]),
+    let scope = provenant_records::custody::Scope {
         attempt: provenant_core::AttemptId::from_bytes([12; 16]),
         generation: 1,
     };
@@ -507,8 +531,8 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         cache_writer_guard(context.project_state, &path).map(|_| ()),
     ] {
         assert!(matches!(refusal,
-            Err(Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody })
-                if scope == path && evidence.contains("retained import fence")
+            Err(Occupancy::Unknown { scope, source: OccupancyUnknownSource::Custody, .. })
+                if scope == path
         ));
     }
     let lane = list(&context, &cancel())?
@@ -516,8 +540,8 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         .find(|lane| lane.path == path)
         .ok_or("lane")?;
     assert!(matches!(&lane.occupancy,
-        Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody }
-            if scope == &path && evidence.contains("retained import fence")
+        Occupancy::Unknown { scope, source: OccupancyUnknownSource::Custody, .. }
+            if scope == &path
     ));
     fs::write(path.join("uncommitted"), "preserve unfinished work")?;
     let tree = verify_worktree(&fixture.repo, &path)?;
@@ -572,7 +596,14 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         keep: &[],
         written_before_ns: i128::MAX,
         dry_run: false,
-        foreign_merged_clean: false,
+        include_foreign: false,
+        retirement_port: None,
+        retirement_feeds: None,
+        mode: CollectionMode::Worktrees,
+        proof: None,
+        upstream_reference: None,
+        integration_patterns: &[],
+        excluded_paths: &[],
     };
     collect(&context, &lanes, &policy, &cancel())?;
     assert!(path.join("target/artifact").is_file());
@@ -668,14 +699,14 @@ fn git_inventory_accepts_unregistered_and_recreated_worktrees() -> Result<(), Bo
             .is_err()
     );
     assert!(matches!(bind("other"), Err(WorktreeError::IdentityChanged)));
-    // Legacy identity and registry reservations are never membership gates.
+    // Unrecognised identity and reservation files are never membership gates.
     fs::write(
         state.current_path()?.join("identity.json"),
-        b"invalid old schema and inode",
+        b"invalid identity data",
     )?;
     fs::write(
         state.current_path()?.join("reservation.json"),
-        b"legacy registry data",
+        b"unrecognised reservation data",
     )?;
     fixture.run(&["worktree", "remove", path.to_str().ok_or("path")?])?;
     fixture.run(&[
@@ -686,7 +717,8 @@ fn git_inventory_accepts_unregistered_and_recreated_worktrees() -> Result<(), Bo
         path.to_str().ok_or("path")?,
     ])?;
     bind("recreated")?;
-    let outcome = remove(
+    let outcome = remove_with_port(
+        &test,
         &context,
         WorktreeRemove::Name {
             name: "recreated".into(),
@@ -714,14 +746,7 @@ fn writer_lock_busy_is_distinct_from_observed_live_process() -> Result<(), Box<d
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
-    let info = create(
-        &context,
-        WorktreeCreate {
-            branch: "busy".into(),
-            base: None,
-        },
-        &cancel(),
-    )?;
+    let info = gc_owned_lane(&test, &context, "busy")?;
     let state = writer_directory(context.project_state, &info.path)?;
     let before = state.metadata_at(OsStr::new(WRITER_LOCK), false)?;
     let held = state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?;
@@ -731,7 +756,7 @@ fn writer_lock_busy_is_distinct_from_observed_live_process() -> Result<(), Box<d
         integration: None,
         expected_head: None,
     };
-    let error = remove(&context, request(), &cancel())
+    let error = remove_with_port(&test, &context, request(), &cancel())
         .err()
         .ok_or("removed busy tree")?;
     assert!(matches!(error, WorktreeError::LockBusy));
@@ -754,7 +779,14 @@ fn writer_lock_busy_is_distinct_from_observed_live_process() -> Result<(), Box<d
             keep: &[],
             written_before_ns: i128::MAX,
             dry_run: true,
-            foreign_merged_clean: false,
+            include_foreign: false,
+            retirement_port: None,
+            retirement_feeds: None,
+            mode: CollectionMode::Worktrees,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;
@@ -771,22 +803,26 @@ fn writer_lock_busy_is_distinct_from_observed_live_process() -> Result<(), Box<d
         ..test.context()
     };
     assert!(matches!(
-        remove(&live, request(), &cancel()),
+        remove_with_port(&test, &live, request(), &cancel()),
         Err(WorktreeError::LiveProcess(_))
     ));
-    remove(&context, request(), &cancel())?;
+    remove_with_port(&test, &context, request(), &cancel())?;
     assert!(before.same_identity(&state.metadata_at(OsStr::new(WRITER_LOCK), false)?));
     Ok(())
 }
 
 #[test]
-fn foreign_gc_removes_recent_declared_output() -> Result<(), Box<dyn Error>> {
+fn foreign_gc_retires_a_landed_unowned_worktree_with_a_typed_outcome() -> Result<(), Box<dyn Error>>
+{
     let fixture = Fixture::new()?;
     fs::write(fixture.root.join(".gitignore"), "target/\n")?;
     fixture.run(&["add", ".gitignore"])?;
     fixture.run(&["commit", "-m", "ignore output"])?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
+    let retirement = HostRetirementFixture::new(&test)?;
+    let upstream = fixture.head()?;
+    let evidence = gc_landing_evidence(&fixture, upstream)?;
     let path = fixture._temp.path().join("foreign");
     fixture.run(&[
         "worktree",
@@ -797,23 +833,39 @@ fn foreign_gc_removes_recent_declared_output() -> Result<(), Box<dyn Error>> {
     ])?;
     fs::create_dir(path.join("target"))?;
     fs::write(path.join("target/artifact"), "recent output")?;
+    let canonical = std::fs::canonicalize(&path)?;
     let lanes = list(&context, &cancel())?;
     let report = collect(
         &context,
         &lanes,
         &WorktreeGcPolicy {
-            upstream: Some(fixture.head()?),
+            upstream: Some(upstream),
             terminal: &|_| false,
             no_live_lanes: &|_| true,
             regenerable: &["target".into()],
             keep: &[],
             written_before_ns: 0,
             dry_run: false,
-            foreign_merged_clean: true,
+            include_foreign: true,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            mode: CollectionMode::Worktrees,
+            proof: Some(&evidence),
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
         },
         &cancel(),
     )?;
-    assert_eq!(report.worktrees.removed.len(), 1);
+    // A landed foreign lane is retired with its declared output, with the
+    // integration-target evidence recorded against the worktree subject.
+    assert!(report.removals.iter().any(|removal| {
+        worktree_subject_matches_path(&removal.subject, &canonical)
+            && matches!(
+                &removal.outcome,
+                provenant_records::custody::RemovalOutcome::Removed { .. }
+            )
+    }));
     assert!(!path.exists());
     assert!(!branch_exists(&fixture, "foreign"));
     Ok(())

@@ -2,10 +2,10 @@
 
 Shared guidance: [review-lenses.md](../review-lenses.md).
 
-- Where does over-engineering add complexity beyond the current need?
+- Where does indirection add cost without making change easier?
 - What can be deleted while keeping behaviour? Name the lines.
-- Flag speculative or rigid abstraction, thin wrappers that only move
-  complexity, options nothing uses, and layers with one caller.
+- Flag rigid abstractions and wrappers that merely move complexity. Consider
+  foreseeable change before proposing deletion.
 - Prefer a reframe that removes concepts, branches or synchronisation points,
   but only one local enough to validate. Do not demand redesign beyond the
   dependency cone.

@@ -59,17 +59,17 @@ impl Factory {
         let routes: Vec<String> = record
             .skipped_routes
             .iter()
-            .map(|route| format!("{}: {}", route.route, route.detail))
+            .map(provenant_records::run::SkippedRoute::describe)
             .collect();
         if !routes.is_empty() {
             return Some(routes.join("; "));
         }
         match record.state {
-            provenant_records::run::AttemptState::Terminal { extra, reason, .. } => extra
-                .get("terminal_note")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .or(reason),
+            provenant_records::run::AttemptState::Terminal {
+                terminal_note,
+                reason,
+                ..
+            } => terminal_note.or(reason),
             _ => None,
         }
     }

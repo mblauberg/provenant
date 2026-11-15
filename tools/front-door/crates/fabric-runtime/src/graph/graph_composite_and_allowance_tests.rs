@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn advisory_composite_failure_preserves_cause_and_launches_dependant() {
+fn advisory_composite_settlement_preserves_cause_and_launches_dependant() {
     for outcome in [AttemptOutcome::ReviewRequired, AttemptOutcome::TaskFailed] {
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":1, "graph_id":"advisory", "nodes":[
@@ -33,7 +33,11 @@ fn advisory_composite_failure_preserves_cause_and_launches_dependant() {
                 .state,
             NodeState::Succeeded
         );
-        assert!(owner.prompts.last().unwrap().contains("scout: unavailable"));
+        if outcome == AttemptOutcome::TaskFailed {
+            assert!(owner.prompts.last().unwrap().contains("scout: unavailable"));
+        } else {
+            assert_eq!(scout.state, NodeState::Succeeded);
+        }
     }
 }
 
@@ -65,9 +69,17 @@ fn cumulative_allowance_counts_graph_attempts_and_survives_observation_replay() 
         .push_back(terminal(AttemptOutcome::UsageLimited));
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
-    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 2);
-    assert_eq!(run.checkpoint.nodes[0].extra["retry"]["retries"], 1);
-    assert_eq!(owner.calls.len(), 3); // One observation replay and one allowed route switch.
+    assert_eq!(run.checkpoint.nodes[0].recorded_attempts().count(), 2);
+    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 1);
+    assert_eq!(run.checkpoint.nodes[0].previous_attempts.len(), 1);
+    assert_eq!(
+        run.checkpoint.nodes[0]
+            .retry
+            .as_ref()
+            .map(|retry| retry.retries),
+        Some(1)
+    );
+    assert_eq!(owner.calls.len(), 3); // One observation replay and one stop-policy restart.
     assert_eq!(owner.retry_budgets, vec![Some(1), Some(1), Some(0)]);
     assert_eq!(owner.calls[0].0, owner.calls[1].0);
     advance(&document, &mut owner, &mut journal).unwrap();
@@ -134,6 +146,8 @@ fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source() {
         result_path: None,
         branch: Some("writer".into()),
         commit: Some(head_2.clone()),
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        stop: None,
     };
     let lens_done = terminal(AttemptOutcome::Succeeded);
 
@@ -553,15 +567,25 @@ fn empty_review_range_stops_before_lens_launch() {
     let head = "1".repeat(40);
     let mut review = node("review", route("review"));
     review.role = Some("lens.correctness-spec".into());
-    review.source = Some(SourceBinding::Commit { commit: head.clone() });
+    review.source = Some(SourceBinding::Commit {
+        commit: head.clone(),
+    });
     let mut owner = FakeOwner {
         graph_bases: (Some(head.parse().unwrap()), None),
         ..Default::default()
     };
-    let run = advance(&graph(vec![review]), &mut owner, &mut MemoryJournal::default()).unwrap();
+    let run = advance(
+        &graph(vec![review]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
     assert!(owner.calls.is_empty());
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
-    assert_eq!(run.checkpoint.nodes[0].advance_error_code.as_deref(), Some("review_empty_range"));
+    assert_eq!(
+        run.checkpoint.nodes[0].advance_error_code.as_deref(),
+        Some("review_empty_range")
+    );
 }
 
 #[test]

@@ -37,7 +37,7 @@ if "$script" | sed -n '1,/^## /p' | grep -F '../../' > /dev/null; then exit 1; f
 # Area order: small sections list entries flat, in area order, untagged last.
 rm -f "$dir"/*.md
 printf 'Intro.\n' > "$dir/_intro.md"
-printf '## Fixes\n### Fabric and MCP\n\n- Fabric fix.\n' > "$dir/a.md"
+printf '## Fixes\n### Fabric\n\n- Fabric fix.\n' > "$dir/a.md"
 printf '## Fixes\n### CLI and install\n\n- CLI fix.\n' > "$dir/b.md"
 printf '## Fixes\n\n- Untagged fix.\n' > "$dir/c.md"
 printf '## Additions\n### Git and safety\n\n- Git addition.\n' > "$dir/d.md"
@@ -54,7 +54,7 @@ actual=$(sed -n '/^## Fixes/,$p' "$tmp/out")
 # A section with more than 12 entries renders area sub-headings.
 rm -f "$dir"/*.md
 printf 'Intro.\n' > "$dir/_intro.md"
-printf '## Fixes\n### Fabric and MCP\n\n- Fabric fix.\n' > "$dir/a.md"
+printf '## Fixes\n### Fabric\n\n- Fabric fix.\n' > "$dir/a.md"
 printf '## Fixes\n### CLI and install\n\n- CLI fix.\n' > "$dir/b.md"
 printf '## Fixes\n\n- Untagged fix.\n' > "$dir/c.md"
 for n in 1 2 3 4 5 6 7 8 9 10; do
@@ -66,7 +66,7 @@ grep -qxF '### CLI and install' "$tmp/out"
 grep -qxF '### Git and safety' "$tmp/out"
 if grep -qxF '### Lanes and settlement' "$tmp/out"; then exit 1; fi
 awk '/^## Fixes/ { f = 1 } f && /^### / { print }' "$tmp/out" | head -3 | paste -sd'|' - > "$tmp/headings"
-[ "$(cat "$tmp/headings")" = '### CLI and install|### Git and safety|### Fabric and MCP' ] || { echo "unexpected sub-headings" >&2; exit 1; }
+[ "$(cat "$tmp/headings")" = '### CLI and install|### Git and safety|### Fabric' ] || { echo "unexpected sub-headings" >&2; exit 1; }
 [ "$(tail -n 1 "$tmp/out")" = '- Untagged fix.' ]
 sed -n '/^## Additions/,/^## Fixes/p' "$tmp/out" | grep -q '^### ' && { echo "small section got sub-headings" >&2; exit 1; }
 printf '## fIxEs  \n### nowhere\n\n- Bad.\n' > "$dir/e.md"

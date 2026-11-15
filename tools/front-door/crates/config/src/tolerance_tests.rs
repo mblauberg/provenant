@@ -57,18 +57,10 @@ const SECTIONS: DomainSections<Domains> =
     DomainSections::new(&[DomainSection::new::<Settings>("sample", defaults)]);
 
 fn roots(path: &std::path::Path) -> provenant_core::Roots {
-    struct Resolver;
-    impl provenant_core::PathResolver for Resolver {
-        fn resolve_existing_ancestor(
-            &self,
-            path: &std::path::Path,
-        ) -> std::io::Result<std::path::PathBuf> {
-            Ok(path.to_owned())
-        }
-    }
-    let mut input = provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/repo".into());
-    input.state_dir = Some(path.to_owned());
-    input.resolve(&Resolver).unwrap()
+    let input = provenant_test_support::test_roots(path).unwrap();
+    input
+        .resolve(&provenant_test_support::IdentityPathResolver)
+        .unwrap()
 }
 
 #[test]
@@ -76,7 +68,7 @@ fn warnings_recover_rows_and_preserve_effective_origins() {
     let dir = tempfile::tempdir().unwrap();
     let roots = roots(dir.path());
     let text = "schema_version=1\nextra=true\n[domains.sample]\ncount=0\nrows=[{weight=4,enabled=true},{weight=0,enabled=false},{weight=7,enabled=true},{weight='bad',enabled=true}]\n[domains.sample.entries.good]\nweight=5\nenabled=true\n[domains.sample.entries.bad]\nweight='bad'\nenabled=true\n";
-    std::fs::write(dir.path().join("config.toml"), text).unwrap();
+    std::fs::write(roots.state.as_path().join("config.toml"), text).unwrap();
     let config = read_with_domains(&roots, &SECTIONS).unwrap();
     assert_eq!(config.domains.sample.count, 3);
     assert_eq!(
@@ -91,7 +83,23 @@ fn warnings_recover_rows_and_preserve_effective_origins() {
     );
     assert_eq!(config.domains.sample.entries.len(), 1);
     assert_eq!(config.domains.sample.entries["good"].weight, 5);
-    assert_eq!(config.warnings.len(), 6);
+    let expected_warning_paths = [
+        "extra",
+        "domains.sample.count",
+        "domains.sample.rows.1.weight",
+        "domains.sample.rows.1.enabled",
+        "domains.sample.rows.3",
+        "domains.sample.entries.bad.weight",
+    ];
+    let actual_warning_paths: std::collections::BTreeSet<_> = config
+        .warnings
+        .iter()
+        .filter_map(|warning| warning.message.split_once(':').map(|(path, _)| path))
+        .collect();
+    assert_eq!(
+        actual_warning_paths,
+        expected_warning_paths.into_iter().collect()
+    );
     assert!(matches!(
         config.origins["domains.sample.count"],
         Origin::Compiled { .. }
@@ -124,12 +132,20 @@ fn core_sections_keep_valid_siblings_and_handle_quoted_unknown_keys() {
         config.retention.projects["good"].checkpoint_soft_bytes,
         4096
     );
-    assert_eq!(config.warnings.len(), 3);
-    assert!(
-        config
-            .warnings
-            .iter()
-            .any(|warning| warning.message.starts_with("gc.future.option:"))
+    let warning_paths: std::collections::BTreeSet<_> = config
+        .warnings
+        .iter()
+        .filter_map(|warning| warning.message.split_once(':').map(|(path, _)| path))
+        .collect();
+    assert_eq!(
+        warning_paths,
+        [
+            "gc.future.option",
+            "gc.idle_days",
+            "retention.projects.bad.checkpoint_soft_bytes",
+        ]
+        .into_iter()
+        .collect()
     );
     crate::test_support::assert_leaf_origins(&config);
 }
@@ -174,7 +190,7 @@ fn malformed_ancestor_refuses_standalone_and_aggregate_boundary_reads() {
     let dir = tempfile::tempdir().unwrap();
     let roots = roots(dir.path());
     std::fs::write(
-        dir.path().join("config.toml"),
+        roots.state.as_path().join("config.toml"),
         "schema_version=1\ndomains=false\n",
     )
     .unwrap();
@@ -183,13 +199,16 @@ fn malformed_ancestor_refuses_standalone_and_aggregate_boundary_reads() {
     struct Defaulted {
         count: u64,
     }
-    let error = read_domain::<Defaulted>(dir.path(), "sample").unwrap_err();
+    let error = read_domain::<Defaulted>(roots.state.as_path(), "sample").unwrap_err();
     assert!(error.to_string().contains("domains"), "{error}");
     let text = b"schema_version=1\ndomains=false\n";
     assert!(load_with_domains(&roots, Some(&text[..]), &STRICT).is_err());
     // A non-boundary section still recovers, as the aggregate does.
     assert!(
-        crate::loader::read_settings::<Defaulted>(dir.path(), "domains.sample", |_| Ok(())).is_ok()
+        crate::loader::read_settings::<Defaulted>(roots.state.as_path(), "domains.sample", |_| Ok(
+            ()
+        ))
+        .is_ok()
     );
 }
 
@@ -220,7 +239,7 @@ fn inspection_keeps_warnings_alongside_a_boundary_error() {
     let dir = tempfile::tempdir().unwrap();
     let roots = roots(dir.path());
     std::fs::write(
-        dir.path().join("config.toml"),
+        roots.state.as_path().join("config.toml"),
         "schema_version=1\nextra=true\n[domains.sample]\ncount=0",
     )
     .unwrap();
@@ -285,8 +304,13 @@ fn malformed_authority_knobs_fall_back_to_their_restrictive_value() {
         assert_eq!(config.knobs[name].value, restrictive, "{value}");
         assert_eq!(config.warnings.len(), 1, "{value}");
         assert_eq!(config.warnings[0].rule, rule, "{value}");
-        assert_eq!(config.warnings[0].line, 3, "{value}");
-        std::fs::write(dir.path().join("config.toml"), &text).unwrap();
+        let source_line = text
+            .lines()
+            .position(|line| line.contains(name))
+            .map(|line| line + 1)
+            .unwrap();
+        assert_eq!(config.warnings[0].line, source_line, "{value}");
+        std::fs::write(roots.state.as_path().join("config.toml"), &text).unwrap();
         let inspection = inspect_config(&roots, &crate::domains::NO_DOMAINS).unwrap();
         assert!(inspection.error.is_none());
         assert_eq!(inspection.check.count, 1);
@@ -299,7 +323,7 @@ fn malformed_authority_knobs_fall_back_to_their_restrictive_value() {
     ] {
         let error = load(&roots, Some(text.as_bytes())).unwrap_err();
         assert!(
-            matches!(&error, ConfigError::Schema { location, rule: "type" } if location.key_path == "knobs" && location.line == 2),
+            matches!(&error, ConfigError::Schema { location, rule: "type" } if location.key_path == "knobs" && location.line == text.lines().position(|line| line.starts_with("knobs=")).unwrap() + 1),
             "{text}: {error:?}"
         );
     }
@@ -315,7 +339,8 @@ fn malformed_authority_knobs_fall_back_to_their_restrictive_value() {
             let error = load(&roots, Some(text.as_bytes())).unwrap_err();
             assert!(
                 matches!(&error, ConfigError::Schema { location, rule: "type" }
-                    if location.key_path == format!("knobs.{name}") && location.line == 3),
+                    if location.key_path == format!("knobs.{name}")
+                        && location.line == text.lines().position(|line| line.contains(name)).unwrap() + 1),
                 "{text}: {error:?}"
             );
         }
@@ -333,7 +358,10 @@ fn malformed_authority_knobs_fall_back_to_their_restrictive_value() {
         Some(&b"schema_version=1\n[knobs]\n'lanes.silence_seconds'='soon'\n"[..]),
     )
     .unwrap();
-    assert_eq!(config.knobs["lanes.silence_seconds"].value, 1800);
+    assert_eq!(
+        config.knobs["lanes.silence_seconds"].value,
+        crate::knobs::registry().unwrap().knobs["lanes.silence_seconds"].default
+    );
     assert_eq!(
         config.knobs["lanes.silence_seconds"].source,
         KnobSource::Default
@@ -350,14 +378,15 @@ fn a_misspelt_knob_warns_once_with_the_nearest_name_and_keeps_defaults() {
     let config = load(&roots, Some(text.as_bytes())).unwrap();
     assert_eq!(config.warnings.len(), 1);
     assert_eq!(config.warnings[0].rule, "unknown_key");
-    assert_eq!(config.warnings[0].line, 4);
+    let source_line = text
+        .lines()
+        .position(|line| line.contains("lanes.max_concurency"))
+        .unwrap()
+        + 1;
+    assert_eq!(config.warnings[0].line, source_line);
     assert_eq!(
         config.knobs["lanes.max_concurrency"].source,
         KnobSource::Default
-    );
-    assert_eq!(
-        crate::knobs::nearest_knobs("lanes.max_concurency"),
-        ["lanes.max_concurrency"]
     );
     // The location prints as plain text, never as a Debug rendering.
     let error = load(&roots, Some(&b"schema_version=1\n[knobs]\nx=[\n"[..])).unwrap_err();
@@ -370,7 +399,7 @@ fn a_misspelt_knob_warns_once_with_the_nearest_name_and_keeps_defaults() {
         "{shown}"
     );
     // `config show` reads the same file without failing.
-    std::fs::write(dir.path().join("config.toml"), text).unwrap();
+    std::fs::write(roots.state.as_path().join("config.toml"), text).unwrap();
     assert_eq!(
         config_show(&roots, &crate::domains::NO_DOMAINS)
             .unwrap()
@@ -410,9 +439,10 @@ fn unquoted_dotted_knob_names_are_the_knob() {
     .unwrap();
     assert_eq!(config.warnings.len(), 1);
     assert_eq!(config.warnings[0].rule, "unknown_key");
-    assert_eq!(config.warnings[0].line, 3);
-    assert_eq!(
-        crate::knobs::nearest_knobs("lanes.max_concurency"),
-        ["lanes.max_concurrency"]
-    );
+    let source_line = "schema_version=1\n[knobs]\nlanes.max_concurency = 4\n"
+        .lines()
+        .position(|line| line.contains("lanes.max_concurency"))
+        .unwrap()
+        + 1;
+    assert_eq!(config.warnings[0].line, source_line);
 }

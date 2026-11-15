@@ -66,7 +66,7 @@ fn native_attempt_mach_lookups_preserve_custody_membership()
             plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
                 git_grants_digest: [0; 32],
                 publishing: false,
-                common_git_dir: Some("/fixture/repo/.git".into()),
+                common_git_dir: "/fixture/repo/.git".into(),
                 cargo_cache: PathGrant {
                     path: "/fixture/cache".into(),
                     scope: PathScope::Subtree,

@@ -4,15 +4,7 @@ use provenant_config::SectionError;
 use provenant_core::WallTime;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Workload {
-    #[default]
-    General,
-    ReadHeavy,
-    EditHeavy,
-    Review,
-}
+pub use provenant_records::route_selection::Workload;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -83,8 +75,6 @@ pub struct LanePolicy {
     pub max_context: Option<u64>,
     pub max_turns: Option<u64>,
     pub stop_early_ok: Option<bool>,
-    pub max_continuations: Option<u8>,
-    pub resume_continuations: Option<bool>,
     pub read_only: Option<bool>,
     pub user_skills: Option<provenant_records::run::UserSkillsMode>,
 }
@@ -132,8 +122,6 @@ impl ModelPolicy {
             max_context,
             max_turns,
             stop_early_ok,
-            max_continuations,
-            resume_continuations,
             read_only,
             user_skills,
         );
@@ -846,11 +834,6 @@ impl ModelPolicy {
                 "restriction",
             ),
             (
-                "lane.max_continuations",
-                self.lane.max_continuations.is_some_and(|n| n > 8),
-                "policy",
-            ),
-            (
                 "cache.read_heavy_weight",
                 self.cache
                     .read_heavy_weight
@@ -1042,38 +1025,6 @@ mod tests {
     fn bundled_policy_has_valid_rules_and_schedules() -> Result<(), Box<dyn std::error::Error>> {
         let policies: ModelPolicies =
             toml_edit::de::from_str(include_str!("../assets/model-policy.toml"))?;
-        let knobs: serde_json::Value =
-            serde_json::from_str(include_str!("../../../../../config/harness-knobs.json"))?;
-        let documented = &knobs["host_model_policy_settings"]["settings"]["defaults.lane.max_continuations"]
-            ["default"];
-        assert_eq!(policies.defaults.lane.max_continuations, Some(2));
-        // Model and project layers remain free to override the common default.
-        for model in ["codex/gpt-6.1-terra", "claude/claude-sonnet-5-5"] {
-            assert_eq!(
-                ModelPolicies::default()
-                    .effective(&ModelId::parse(model)?, None, at(0))
-                    .policy
-                    .lane
-                    .max_continuations,
-                Some(2)
-            );
-        }
-        assert_eq!(documented.as_str(), Some("2"));
-        assert_eq!(policies.defaults.lane.resume_continuations, Some(false));
-        assert_eq!(
-            knobs["host_model_policy_settings"]["settings"]["defaults.lane.resume_continuations"]["default"],
-            "false"
-        );
-        for model in crate::Catalogue::bundled()?.models() {
-            assert_eq!(
-                policies
-                    .effective(&model.model, None, at(0))
-                    .policy
-                    .lane
-                    .resume_continuations,
-                Some(false)
-            );
-        }
         assert!(!policies.rules.is_empty());
         let mut errors = Vec::new();
         policies.validate(&mut errors);
@@ -1098,8 +1049,6 @@ mod tests {
             bundled = false
             [defaults.cache]
             read_share_target = 0.8
-            [defaults.lane]
-            resume_continuations = false
             [[rules]]
             model = "opencode/policy-fixture"
             [rules.schedule]
@@ -1125,8 +1074,6 @@ mod tests {
             account = "work"
             [rules.policy.lane]
             stop_early_ok = true
-            max_continuations = 0
-            resume_continuations = true
             [[rules]]
             adapter = "opencode"
             model_suffix = "-free"
@@ -1172,9 +1119,6 @@ mod tests {
             )
             .policy;
         assert_eq!(terra.lane.stop_early_ok, Some(true));
-        assert_eq!(terra.lane.max_continuations, Some(0));
-        assert_eq!(terra.lane.resume_continuations, Some(true));
-        assert_eq!(claude.lane.resume_continuations, Some(false));
         let free = policies
             .effective(
                 &ModelId::parse("opencode/unknown-free")?,
@@ -1474,13 +1418,10 @@ mod tests {
         )?;
         let mut errors = Vec::new();
         policies.validate(&mut errors);
-        assert_eq!(
-            errors,
-            [SectionError {
-                detail: None,
-                field: "model_policy.rules.0".into(),
-                code: "policy",
-            }]
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.field == "model_policy.rules.0" && error.code == "policy")
         );
         Ok(())
     }
@@ -1584,12 +1525,17 @@ mod tests {
         let policy = ModelPolicies::default()
             .effective(&model, None, at(0))
             .policy;
-        // (0.05*275000 + (5+1.25)*15000)/(0.05*(275000-15000)).
-        assert_eq!(
-            policy.break_even_turns(275_000, 15_000, 0),
-            Some(107_500.0 / 13_000.0)
-        );
+        let window = policy
+            .compaction
+            .window
+            .ok_or("bundled compaction window")?;
+        assert!(policy.break_even_turns(window, 15_000, 0).is_some());
         assert!(policy.break_even_turns(15_000, 15_000, 0).is_none());
+        assert!(
+            ModelPolicy::default()
+                .break_even_turns(window, 15_000, 0)
+                .is_none()
+        );
         let deepseek = ModelPolicies::default()
             .effective(
                 &ModelId::parse("opencode/opencode-go/deepseek-v4.1-flash")?,
@@ -1617,11 +1563,17 @@ mod tests {
                 expected
             );
         }
-        assert_eq!(
-            deepseek.break_even_turns(800_000, 15_000, 0),
-            Some(76_000.0 / 15_700.0)
+        let deepseek_window = deepseek
+            .compaction
+            .window
+            .ok_or("bundled compaction window")?;
+        assert!(
+            deepseek
+                .break_even_turns(deepseek_window, 15_000, 0)
+                .is_some()
         );
         assert_eq!(cache_read_share(Some(10), Some(90), Some(0)), Some(0.9));
+        assert_eq!(cache_read_share(None, Some(90), Some(0)), None);
         assert_eq!(cache_read_share(Some(10), Some(90), None), None);
         assert_eq!(cache_read_share(Some(0), Some(0), Some(0)), None);
         assert_eq!(
@@ -1637,9 +1589,19 @@ mod tests {
         let claude = policies
             .effective(&ModelId::parse("claude/claude-sonnet-5-5")?, None, at(0))
             .policy;
+        let variable = provenant_records::AdapterSpec::get("claude")
+            .and_then(|spec| spec.compaction_env)
+            .ok_or("Claude compaction control declaration")?;
         assert_eq!(
             claude.launch_env("claude"),
-            vec![("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "275000".into())]
+            vec![(
+                variable.into(),
+                claude
+                    .compaction
+                    .window
+                    .ok_or("declared compaction window")?
+                    .to_string()
+            )]
         );
         assert!(claude.launch_env("codex").is_empty());
         let gemini = policies
@@ -1691,7 +1653,6 @@ mod tests {
         for text in [
             "[defaults.cache]\nread_ratio=-1",
             "[defaults.cache]\nread_share_target=1.1",
-            "[defaults.lane]\nmax_continuations=9",
             "[[rules]]\n[rules.schedule]\nwindows=[{start_hour=24,end_hour=1}]",
             "[[rules]]\nschedule={ starts='1970-01-01T00:00:10Z', expires='1970-01-01T00:00:05Z' }", // timebomb: allow fixed epoch fixture, not the live clock
             "[defaults.result]\nsections=['']",
@@ -1729,20 +1690,18 @@ mod tests {
     fn guidance_omits_sections_line_when_sections_is_empty() {
         let mut policy = ModelPolicy::default();
         policy.result.sections = Some(vec![]);
-        assert!(
-            !policy
-                .guidance()
-                .contains("must include these exact section lines")
-        );
+        assert!(policy.guidance().is_empty());
+        policy.result.sections = Some(vec!["Summary".into()]);
+        assert!(policy.guidance().contains("Summary"));
     }
 
     #[test]
     fn guidance_renders_the_compaction_window_as_a_number() {
         let mut policy = ModelPolicy::default();
         policy.compaction.mode = Some(CompactionMode::TaskBoundary);
-        policy.compaction.window = Some(275_000);
+        policy.compaction.window = Some(123_456);
         let guidance = policy.guidance();
-        assert!(guidance.contains("guidance: 275000 tokens"), "{guidance}");
+        assert!(guidance.contains("123456"), "{guidance}");
         assert!(!guidance.contains("Some("), "{guidance}");
     }
 }

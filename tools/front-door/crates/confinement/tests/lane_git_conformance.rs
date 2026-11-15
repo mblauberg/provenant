@@ -53,7 +53,8 @@ fn lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only()
     let lane = root.join("lane");
     let scratch = root.join("scratch");
     let push = root.join("push");
-    for path in [&home, &source, &repo, &scratch, &push] {
+    let state = root.join("state");
+    for path in [&home, &source, &repo, &scratch, &push, &state] {
         fs::create_dir(path)?;
     }
     fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
@@ -301,7 +302,7 @@ fn lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only()
     fs::create_dir_all(repo_git.join("logs/refs/remotes/origin/lane"))?;
     let executor = SystemExecutor::new(2)?;
     let cancel = CancelToken::new();
-    let runtime = UtilityRuntime::new(&git_path, &home)?;
+    let runtime = UtilityRuntime::new(&git_path, &home, &state)?;
     let verified = runtime.open_repo(
         &executor,
         &repo,
@@ -310,8 +311,9 @@ fn lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only()
     )?;
     let linked = verify_worktree(&verified, &lane)?;
     let selected = GitRefName::branch("lane/test")?;
-    let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected, &home)?;
-    prepare_writer_directories(&linked, &selected, &authority, &home)?;
+    let credentials = provenant_core::CredentialRoots::for_home(&home);
+    let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected, &home, &credentials)?;
+    prepare_writer_directories(&linked, &selected, &authority, &home, &credentials)?;
     let grant = |path: PathBuf| PathGrant {
         path,
         scope: PathScope::Subtree,
@@ -346,6 +348,7 @@ fn lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only()
         observations: Default::default(),
     };
     let plan = PlanPermissions {
+        credential_roots: provenant_core::CredentialRoots::for_home(&home),
         policy: Some(
             provenant_confinement::run_config::RunConfig::default().policy_for_launch(
                 &root.join("state"),
@@ -906,7 +909,8 @@ fn read_only_lane_fetches_into_private_git_with_host_metadata_denied() -> Result
     let source = root.join("source");
     let lane = root.join("lane");
     let scratch = root.join("scratch");
-    for path in [&home, &source, &scratch] {
+    let state = root.join("state");
+    for path in [&home, &source, &scratch, &state] {
         fs::create_dir(path)?;
     }
     fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
@@ -966,7 +970,9 @@ fn read_only_lane_fetches_into_private_git_with_host_metadata_denied() -> Result
     ));
     let executor = SystemExecutor::new(2)?;
     let cancel = CancelToken::new();
-    let runtime = UtilityRuntime::new(&git_path, &home)?;
+    let state = root.join("state");
+    provenant_os::fixture::private_state_dir(&state)?;
+    let runtime = UtilityRuntime::new(&git_path, &home, &state)?;
     let repo = runtime.open_read_repo(
         &executor,
         &lane,
@@ -974,8 +980,7 @@ fn read_only_lane_fetches_into_private_git_with_host_metadata_denied() -> Result
         &cancel,
     )?;
     let mut inputs = RootInputs::new(home.clone(), lane.clone());
-    inputs.state_dir = Some(root.join("state"));
-    fs::create_dir_all(root.join("state"))?;
+    inputs.state_dir = Some(state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     let binding = provenant_config::bind_project(
         &roots,
@@ -991,14 +996,13 @@ fn read_only_lane_fetches_into_private_git_with_host_metadata_denied() -> Result
         extensions: ExtensionPolicy::Deny,
         agy_state: None,
         permissions: PlanPermissions {
+            credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+                "/fixture/home",
+            )),
             policy: Some(
                 provenant_confinement::run_config::RunConfig::default().policy_for_launch(
-                    &root.join("state"),
-                    provenant_confinement::permissions::MandatoryRoots::new(
-                        &home,
-                        &root.join("state"),
-                        &lane,
-                    )?,
+                    &state,
+                    provenant_confinement::permissions::MandatoryRoots::new(&home, &state, &lane)?,
                 ),
             ),
             read_only: None,

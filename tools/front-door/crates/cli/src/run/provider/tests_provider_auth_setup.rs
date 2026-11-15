@@ -4,51 +4,20 @@ fn provider_preparation_fallback_preserves_authority_and_identity_failures() {
     use provenant_routing::FallbackOutcome;
     for error in [
         ProviderError::LoginRequired,
-        ProviderError::CredentialUnavailable,
         ProviderError::CredentialNotFound,
         ProviderError::CredentialExpired,
     ] {
-        let outcome = provider_preparation_fallback(&error);
-        assert_eq!(outcome, FallbackOutcome::AuthRequired);
-        let policy = provenant_routing::FallbackPolicy {
-            outcome,
-            handoff: provenant_routing::FallbackHandoff::Local,
-            custody_released: true,
-            read_only: false,
-            budget_remaining: true,
-            pinned: false,
-        };
-        assert!(policy.allows_switch());
-        assert!(
-            !provenant_routing::FallbackPolicy {
-                pinned: true,
-                ..policy
-            }
-            .allows_switch()
-        );
-        assert!(
-            !provenant_routing::FallbackPolicy {
-                budget_remaining: false,
-                ..policy
-            }
-            .allows_switch()
-        );
-        assert!(
-            !provenant_routing::FallbackPolicy {
-                custody_released: false,
-                ..policy
-            }
-            .allows_switch()
-        );
-        assert!(
-            !provenant_routing::FallbackPolicy {
-                handoff: provenant_routing::FallbackHandoff::UncertainOrLaunched,
-                ..policy
-            }
-            .allows_switch()
+        assert_eq!(
+            provider_preparation_fallback(&error),
+            FallbackOutcome::AuthRequired
         );
     }
+    assert_eq!(
+        provider_preparation_fallback(&ProviderError::RefreshDeferred),
+        FallbackOutcome::Other
+    );
     for error in [
+        ProviderError::CredentialUnavailable,
         ProviderError::UnsupportedPolicy,
         ProviderError::IdentityMismatch,
         ProviderError::UnknownIdentity,
@@ -149,7 +118,10 @@ fn cursor_auth_reprobe_accepts_only_selected_host_login() -> Result<(), Box<dyn 
             Ok(ExecOutcome {
                 termination: Termination::Exit(0),
                 stdout: CapturedStream {
-                    bytes: b"Logged in successfully".to_vec(),
+                    bytes: include_bytes!(
+                        "../../../../../tests/fixtures/providers/cursor/status.stdout"
+                    )
+                    .to_vec(),
                     ..Default::default()
                 },
                 stderr: Default::default(),
@@ -280,7 +252,9 @@ fn writer_dependency_preparation_installs_skips_and_reports_failure()
         Err(error),
         true,
         &provenant_records::run::HarnessProfile::default(),
-    );
+        &provenant_records::policy::Policy::default(),
+    )
+    .expect("default policy records the warning");
     let warning = event["reason"].as_str().expect("retained warning reason");
     assert_eq!(event["outcome"], "warning");
     assert!(warning.contains("pnpm install --frozen-lockfile"));
@@ -447,7 +421,7 @@ fn cleared_preparation_injects_host_recorded_github_credentials()
     })?;
     let executor = provenant_os::exec::SystemExecutor::new(1)?;
     let mut environment = Vec::new();
-    let warning = super::gh_auth::inject(
+    let injected = super::gh_auth::inject(
         &executor,
         &gh,
         &home,
@@ -456,7 +430,7 @@ fn cleared_preparation_injects_host_recorded_github_credentials()
         &mut None,
         &mut environment,
     );
-    assert!(warning.is_none(), "{warning:?}");
+    assert!(injected.is_ok(), "{injected:?}");
     assert!(environment.contains(&("GH_TOKEN".into(), "fixture-secret".into())));
     assert!(environment.contains(&("GH_CONFIG_DIR".into(), config.into_os_string())));
     Ok(())
@@ -965,13 +939,22 @@ fn credential_refresh_skip_retains_selected_account_login_only_for_typed_causes(
         assert!(!diagnostic.contains("/fixture/account work"));
         assert_eq!(skipped.diagnostic().code, "REFUSED");
     }
+    let deferred = credential_failure_skip(
+        "claude/model",
+        &ProviderError::RefreshDeferred,
+        &entry.label,
+        &entry.directory,
+    );
+    assert_eq!(deferred.kind, SkipKind::Refused);
+    assert_eq!(deferred.cause, None);
+    assert!(!deferred.detail.contains("claude auth login"));
     for error in [
         ProviderError::CredentialReadFailed("TOKEN_SENTINEL /private/provider\u{1b}".into()),
         ProviderError::CredentialUnavailable,
     ] {
         let skipped =
             credential_failure_skip("claude/model", &error, &entry.label, &entry.directory);
-        assert_eq!(skipped.kind, SkipKind::AuthRequired);
+        assert_eq!(skipped.kind, SkipKind::Refused);
         assert_eq!(skipped.cause, None);
         assert!(!skipped.detail.contains("TOKEN_SENTINEL"));
         assert!(!skipped.detail.contains("/private/provider"));
@@ -987,7 +970,6 @@ fn prompt_paths(attempt: &Path) -> Result<run::LaunchPaths, Box<dyn std::error::
         operation_id: provenant_core::OperationId::parse("spill-prompt")?,
         task_index: 0,
         lane_depth: 1,
-        run_id: provenant_core::RunId::from_bytes([2; 16]),
         deadline_unix_ms: u64::MAX,
         scratch: attempt.join("scratch"),
         provider_state: attempt.join("provider-state"),
@@ -1012,6 +994,7 @@ fn launch_prompt_preserves_admitted_text_when_host_additions_exceed_one_mib()
                 adapter,
                 65_536,
                 provenant_records::diagnostic::SettingSource::Configuration,
+                &provenant_records::policy::Policy::default(),
             )?;
             assert_eq!(prompt.text(), text);
             assert!(prompt.file().is_none());
@@ -1024,6 +1007,7 @@ fn launch_prompt_preserves_admitted_text_when_host_additions_exceed_one_mib()
             adapter,
             65_536,
             provenant_records::diagnostic::SettingSource::Configuration,
+            &provenant_records::policy::Policy::default(),
         )?;
         if AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt) {
             assert_eq!(
@@ -1056,6 +1040,7 @@ fn launch_prompt_keeps_oversized_stdin_prompts_in_memory() -> Result<(), Box<dyn
                     adapter,
                     65_536,
                     provenant_records::diagnostic::SettingSource::Configuration,
+                    &provenant_records::policy::Policy::default(),
                 )?;
                 assert_eq!(prompt.text(), text);
                 assert!(prompt.file().is_none());
@@ -1070,6 +1055,14 @@ fn launch_prompt_keeps_oversized_stdin_prompts_in_memory() -> Result<(), Box<dyn
 fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt;
+    let mut strict_policy = provenant_records::policy::Policy::default();
+    strict_policy.overlay(
+        &std::collections::BTreeMap::from([(
+            "ARGV_PROMPT".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Dispatch,
+    );
     for adapter in ["cursor", "agy"] {
         let temp = tempfile::tempdir()?;
         let attempt = canonical(temp.path())?;
@@ -1083,12 +1076,18 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
             adapter,
             65_536,
             provenant_records::diagnostic::SettingSource::Configuration,
+            &strict_policy,
         )
         .err()
         .ok_or("nested argv spill accepted")?;
-        assert!(
-            matches!(error, LaunchPromptError::NestedArgvTooLarge { .. }),
-            "{error}"
+        assert!(matches!(
+            error,
+            LaunchPromptError::Provider(provenant_providers::ProviderError::PromptTooLarge { .. })
+        ));
+        assert_eq!(strict_policy.rule("ARGV_PROMPT").rule.code, "ARGV_PROMPT");
+        assert_eq!(
+            strict_policy.rule("ARGV_PROMPT").rule.strength,
+            provenant_records::policy::Strength::Refuse
         );
         assert!(!attempt.join("prompt.md").exists());
 
@@ -1101,6 +1100,7 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
                 adapter,
                 65_536,
                 provenant_records::diagnostic::SettingSource::Configuration,
+                &strict_policy,
             )?;
             assert_eq!(prompt.file(), Some(attempt.join("prompt.md").as_path()));
             assert!(prompt.text().len() < 1024);
@@ -1121,7 +1121,8 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
                 &attempt,
                 adapter,
                 65_536,
-                provenant_records::diagnostic::SettingSource::Configuration
+                provenant_records::diagnostic::SettingSource::Configuration,
+                &strict_policy,
             )
             .is_err()
         );
@@ -1140,17 +1141,82 @@ fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std
     let mut paths = prompt_paths(&attempt)?;
     paths.lane_depth = 2;
     let text = "a".repeat(65_537);
+    let warn_policy = provenant_records::policy::Policy::default();
+    let warned = launch_prompt(
+        &text,
+        &paths,
+        &attempt,
+        "cursor",
+        65_536,
+        provenant_records::diagnostic::SettingSource::Configuration,
+        &warn_policy,
+    )?;
+    assert_eq!(warned.text(), text);
+    assert!(warned.file().is_none());
+    assert_eq!(warn_policy.rule("ARGV_PROMPT").rule.code, "ARGV_PROMPT");
+    assert_eq!(
+        warn_policy.rule("ARGV_PROMPT").rule.strength,
+        provenant_records::policy::Strength::Warn
+    );
+    assert!(!attempt.join("prompt.md").exists());
+
+    let mut off_policy = warn_policy.clone();
+    off_policy.overlay(
+        &std::collections::BTreeMap::from([(
+            "ARGV_PROMPT".into(),
+            provenant_records::policy::Strength::Off,
+        )]),
+        provenant_records::policy::Source::Dispatch,
+    );
+    let off = launch_prompt(
+        &text,
+        &paths,
+        &attempt,
+        "cursor",
+        65_536,
+        provenant_records::diagnostic::SettingSource::Configuration,
+        &off_policy,
+    )?;
+    assert_eq!(off.text(), text);
+    assert!(off.file().is_none());
+    assert_eq!(
+        off_policy.rule("ARGV_PROMPT").rule.strength,
+        provenant_records::policy::Strength::Off
+    );
+    assert_eq!(
+        off_policy.rule("ARGV_PROMPT").source,
+        provenant_records::policy::Source::Dispatch
+    );
+    assert!(!attempt.join("prompt.md").exists());
+
+    let mut strict_policy = warn_policy.clone();
+    strict_policy.overlay(
+        &std::collections::BTreeMap::from([(
+            "ARGV_PROMPT".into(),
+            provenant_records::policy::Strength::Refuse,
+        )]),
+        provenant_records::policy::Source::Dispatch,
+    );
+    let error = launch_prompt(
+        &text,
+        &paths,
+        &attempt,
+        "cursor",
+        65_536,
+        provenant_records::diagnostic::SettingSource::Configuration,
+        &strict_policy,
+    )
+    .err()
+    .ok_or("strict nested argv policy continued")?;
     assert!(matches!(
-        launch_prompt(
-            &text,
-            &paths,
-            &attempt,
-            "cursor",
-            65_536,
-            provenant_records::diagnostic::SettingSource::Configuration
-        ),
-        Err(LaunchPromptError::NestedArgvTooLarge { limit: 65_536, .. })
+        error,
+        LaunchPromptError::Provider(provenant_providers::ProviderError::PromptTooLarge { .. })
     ));
+    assert_eq!(
+        strict_policy.rule("ARGV_PROMPT").rule.strength,
+        provenant_records::policy::Strength::Refuse
+    );
+    assert!(!attempt.join("prompt.md").exists());
     let prompt = launch_prompt(
         &text,
         &paths,
@@ -1158,6 +1224,7 @@ fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std
         "cursor",
         131_072,
         provenant_records::diagnostic::SettingSource::Configuration,
+        &warn_policy,
     )?;
     assert_eq!(prompt.text(), text);
     assert!(prompt.file().is_none());
@@ -1178,7 +1245,8 @@ fn launch_prompt_refuses_symlinked_attempt_ancestors() -> Result<(), Box<dyn std
             &state,
             "cursor",
             65_536,
-            provenant_records::diagnostic::SettingSource::Configuration
+            provenant_records::diagnostic::SettingSource::Configuration,
+            &provenant_records::policy::Policy::default(),
         )
         .is_err()
     );

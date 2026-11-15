@@ -1,7 +1,7 @@
 //! Best-effort local capture. Never substitute the current host for history.
 use provenant_core::WallTime;
 use provenant_records::{
-    ExtraFields, VersionInfo,
+    VersionInfo,
     run::TaskRequest,
     telemetry_context::{HashedBytes, Observation, TelemetryContext},
 };
@@ -96,7 +96,7 @@ fn release_for_executable(exe: &Path, build: &VersionInfo) -> Option<InstalledRe
     })
 }
 
-pub(crate) fn capture(task: &TaskRequest, at: WallTime) -> ExtraFields {
+pub(crate) fn capture(task: &TaskRequest, at: WallTime) -> TelemetryContext {
     let mut context = TelemetryContext {
         provenant_version: Some(observe(
             env!("CARGO_PKG_VERSION").into(),
@@ -155,11 +155,7 @@ pub(crate) fn capture(task: &TaskRequest, at: WallTime) -> ExtraFields {
             at,
         ));
     }
-    let mut extra = ExtraFields::new();
-    if let Ok(value) = serde_json::to_value(context) {
-        extra.insert(TelemetryContext::TRACE_KEY.into(), value);
-    }
-    extra
+    context
 }
 
 #[cfg(test)]

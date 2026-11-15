@@ -1,22 +1,17 @@
 //! Host-local project identity indexed by the canonical Git common directory.
 use crate::ConfigError;
-use provenant_core::{CancelToken, Clock, ProjectId, Roots, WaitBudget};
-use provenant_os::{
-    clock::SystemClock,
-    fs::{Directory, FileKind, LockMode, Metadata, PublishMode, effective_uid, entry_names},
-};
+use provenant_core::{ProjectId, Roots};
+use provenant_os::fs::{Directory, FileKind, Metadata, PublishMode, effective_uid};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
 
 const PROJECTS_DIR: &str = "projects";
-const BINDING_LOCK: &str = "project-binding.lock";
 const RECORD: &str = "project.json";
 const STAGE_PREFIX: &str = ".project-stage-";
 const RECORD_LIMIT: u64 = 4096;
 const MAX_PROJECTS: usize = 16_384;
-const LOCK_WAIT_SECONDS: u64 = 60;
 
 /// A canonical Git common directory, or the canonical directory for a
 /// non-Git workspace. Discovery and canonicalisation belong to confinement.
@@ -57,18 +52,18 @@ impl ProjectBinding {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ProjectBindingRecord {
     schema_version: u64,
     project: ProjectId,
     /// Lowercase hex of native absolute path bytes, keeping the record
     /// portable across non-UTF-8 Unix directory names.
     canonical_common_dir: String,
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
-/// Find or allocate the host-local identity while holding the project-binding
-/// lock. A malformed record aborts the scan rather than allowing a second ID
-/// to be assigned to a location whose existing binding cannot be read.
+/// Find or allocate the host-local identity for this canonical location.
+/// The path-derived ID makes concurrent first bindings converge on one record.
 pub fn bind_project(
     roots: &Roots,
     location: ProjectLocation,
@@ -79,97 +74,15 @@ pub fn bind_project(
     }
 
     let state = provenant_os::fs::Directory::open_anchor(roots.state.as_path())?;
-    verify_directory(&state, false)?;
+    verify_directory(&state)?;
     let projects = open_or_create_projects(&state)?;
-    verify_directory(&projects, true)?;
-
-    let clock = SystemClock::new();
-    let budget = WaitBudget::cli(clock.mono_now(), LOCK_WAIT_SECONDS)
-        .map_err(|_| ConfigError::ProjectBindingBudget)?;
-    let cancel = CancelToken::new();
-    let _lock = projects.lock(
-        OsStr::new(BINDING_LOCK),
-        LockMode::Exclusive,
-        budget,
-        &cancel,
-        &clock,
-    )?;
-
-    remove_stale_stages(&projects)?;
+    verify_directory(&projects)?;
 
     if let Some(binding) = find_binding(&projects, &location.canonical_common_dir)? {
         return Ok(binding);
     }
 
     create_binding(&projects, location.canonical_common_dir)
-}
-
-fn remove_stale_stages(projects: &Directory) -> Result<(), ConfigError> {
-    let mut stages = Vec::new();
-    for entry in projects.entries()? {
-        let entry = entry?;
-        if let Some(name) = entry.to_str()
-            && let Some(project) = name.strip_prefix(STAGE_PREFIX)
-        {
-            let project =
-                ProjectId::parse(project).map_err(|_| ConfigError::InvalidProjectBinding)?;
-            if format!("{STAGE_PREFIX}{project}") != name {
-                return Err(ConfigError::InvalidProjectBinding);
-            }
-            stages.push(entry);
-            if stages.len() > MAX_PROJECTS {
-                return Err(ConfigError::InvalidProjectBinding);
-            }
-        }
-    }
-    for stage in stages {
-        remove_stale_stage(projects, &stage)?;
-    }
-    Ok(())
-}
-
-fn remove_stale_stage(projects: &Directory, stage: &OsStr) -> Result<(), ConfigError> {
-    let directory = projects.open_verified_directory(stage)?;
-    verify_directory(&directory, true)?;
-    for entry in entry_names(&directory, MAX_PROJECTS)? {
-        if entry != OsStr::new(RECORD) && !is_staging_record(&entry) {
-            return Err(ConfigError::InvalidProjectBinding);
-        }
-        let metadata = directory.metadata_at(&entry, false)?;
-        if metadata.kind != FileKind::Regular
-            || metadata.uid != effective_uid()
-            || metadata.links != 1
-            || metadata.mode & 0o077 != 0
-        {
-            return Err(ConfigError::InvalidProjectBinding);
-        }
-        directory.unlink(&entry)?;
-    }
-    directory.sync()?;
-    let opened = directory.metadata()?;
-    let named = projects.metadata_at(stage, false)?;
-    if !opened.same_identity(&named) {
-        return Err(ConfigError::InvalidProjectBinding);
-    }
-    projects.rmdir(stage)?;
-    projects.sync()?;
-    Ok(())
-}
-
-fn is_staging_record(name: &OsStr) -> bool {
-    let Some(name) = name.to_str() else {
-        return false;
-    };
-    let Some(random) = name
-        .strip_prefix(".project-.provenant-staging.")
-        .and_then(|name| name.strip_suffix(".tmp"))
-    else {
-        return false;
-    };
-    random.len() == 24
-        && random
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Lookup only: hooks never allocate identities or create state.
@@ -249,7 +162,7 @@ pub fn transient_location(roots: &Roots, path: &Path) -> bool {
 }
 
 fn transient_location_at_state(state: &Path, path: &Path) -> bool {
-    if path.starts_with(state.join("runs")) || path.starts_with(state.join("children")) {
+    if path.starts_with(state.join("attempts")) || path.starts_with(state.join("children")) {
         return true;
     }
     if path
@@ -286,14 +199,17 @@ fn transient_or_existing(
 }
 
 fn transient_binding(location: ProjectLocation) -> ProjectBinding {
-    let digest =
-        provenant_records::CanonicalV1::file_digest(location.common_dir().as_os_str().as_bytes());
-    let mut id = [0; 16];
-    id.copy_from_slice(&digest.bytes()[..16]);
     ProjectBinding {
-        project: ProjectId::from_bytes(id),
+        project: binding_id(location.common_dir()),
         canonical_common_dir: location.canonical_common_dir,
     }
+}
+
+fn binding_id(path: &Path) -> ProjectId {
+    let digest = provenant_records::CanonicalV1::file_digest(path.as_os_str().as_bytes());
+    let mut id = [0; 16];
+    id.copy_from_slice(&digest.bytes()[..16]);
+    ProjectId::from_bytes(id)
 }
 
 fn existing_projects(roots: &Roots) -> Result<Option<Directory>, ConfigError> {
@@ -306,13 +222,13 @@ fn existing_projects_at_state(state: &Path) -> Result<Option<Directory>, ConfigE
         Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    verify_directory(&state, true)?;
+    verify_directory(&state)?;
     let projects = match state.open_verified_directory(OsStr::new(PROJECTS_DIR)) {
         Ok(projects) => projects,
         Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    verify_directory(&projects, true)?;
+    verify_directory(&projects)?;
     Ok(Some(projects))
 }
 
@@ -337,16 +253,8 @@ fn bindings(projects: &Directory) -> Result<Vec<ProjectBinding>, ConfigError> {
     let mut found = Vec::new();
     for entry in projects.entries()? {
         let entry = entry?;
-        if entry == OsStr::new(BINDING_LOCK) {
-            continue;
-        }
-        count += 1;
-        if count > MAX_PROJECTS {
-            return Err(ConfigError::InvalidProjectBinding);
-        }
         let name = entry.to_str().ok_or(ConfigError::InvalidProjectBinding)?;
-        // In-progress binding publication is not a project record. Readers
-        // must not repair it or block unrelated registered projects.
+        // Old staging records and dotfiles are not binding directories.
         if let Some(id) = name.strip_prefix(STAGE_PREFIX)
             && id
                 .parse::<ProjectId>()
@@ -354,15 +262,25 @@ fn bindings(projects: &Directory) -> Result<Vec<ProjectBinding>, ConfigError> {
         {
             continue;
         }
+        count += 1;
+        if count > MAX_PROJECTS {
+            return Err(ConfigError::InvalidProjectBinding);
+        }
         let project = name
             .parse::<ProjectId>()
             .map_err(|_| ConfigError::InvalidProjectBinding)?;
         let directory = projects.open_verified_directory(&entry)?;
-        verify_directory(&directory, true)?;
-        let entry = directory.metadata_at(OsStr::new(RECORD), false)?;
+        verify_directory(&directory)?;
+        let entry = match directory.metadata_at(OsStr::new(RECORD), false) {
+            Ok(entry) => entry,
+            // A concurrent first binding may have made the directory but not
+            // yet atomically published its record. Its deterministic owner
+            // can finish publication; readers leave it alone.
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => return Err(error.into()),
+        };
         let bytes = read_record(&directory, OsStr::new(RECORD), &entry, RECORD_LIMIT)?;
-        let record: ProjectBindingRecord =
-            serde_json::from_slice(&bytes).map_err(|_| ConfigError::InvalidProjectBinding)?;
+        let record = decode_binding_record(&bytes)?;
         if record.schema_version != 1 || record.project != project {
             return Err(ConfigError::InvalidProjectBinding);
         }
@@ -378,45 +296,63 @@ fn create_binding(
     projects: &Directory,
     canonical_common_dir: PathBuf,
 ) -> Result<ProjectBinding, ConfigError> {
-    for _ in 0..16 {
-        let project = ProjectId::from_bytes(provenant_os::fs::entropy_128()?);
-        let name = OsString::from(project.to_string());
-        let stage = OsString::from(format!(".project-stage-{project}"));
-        match projects.mkdir(&stage, 0o700) {
-            Ok(()) => projects.sync()?,
-            Err(error) if error.is_exists() => continue,
-            Err(error) => return Err(error.into()),
-        }
-        let directory = projects.open_verified_directory(&stage)?;
-        verify_directory(&directory, true)?;
-        let record = ProjectBindingRecord {
-            schema_version: 1,
-            project,
-            canonical_common_dir: encode_location(&canonical_common_dir),
-        };
-        let bytes = serde_json::to_vec(&record).map_err(|_| ConfigError::InvalidProjectBinding)?;
-        directory
-            .atomic_write_with_permissions(
-                OsStr::new(RECORD),
-                ".project-",
-                &bytes,
-                0o600,
-                PublishMode::NoReplace,
-            )?
-            .require_durable()
-            .map_err(|_| ConfigError::InvalidProjectBinding)?;
-        match projects.rename_noreplace(&stage, projects, &name) {
-            Ok(()) => {}
-            Err(error) if error.is_exists() => continue,
-            Err(error) => return Err(error.into()),
-        }
-        projects.sync()?;
-        return Ok(ProjectBinding {
-            project,
-            canonical_common_dir,
-        });
+    let project = binding_id(&canonical_common_dir);
+    let name = OsString::from(project.to_string());
+    match projects.mkdir(&name, 0o700) {
+        Ok(()) => projects.sync()?,
+        Err(error) if error.is_exists() => {}
+        Err(error) => return Err(error.into()),
     }
-    Err(ConfigError::InvalidProjectBinding)
+    let directory = projects.open_verified_directory(&name)?;
+    verify_directory(&directory)?;
+    let record = ProjectBindingRecord {
+        schema_version: 1,
+        project,
+        canonical_common_dir: encode_location(&canonical_common_dir),
+        extra: Default::default(),
+    };
+    let bytes =
+        provenant_records::encode(&record).map_err(|_| ConfigError::InvalidProjectBinding)?;
+    match directory.atomic_write_with_permissions(
+        OsStr::new(RECORD),
+        ".project-",
+        &bytes,
+        0o600,
+        PublishMode::NoReplace,
+    ) {
+        Ok(publication) => publication
+            .require_durable()
+            .map_err(|_| ConfigError::InvalidProjectBinding)?,
+        Err(error) if error.is_exists() => {}
+        Err(error) => return Err(error.into()),
+    }
+    directory.sync()?;
+    let entry = directory.metadata_at(OsStr::new(RECORD), false)?;
+    let stored = decode_binding_record(&read_record(
+        &directory,
+        OsStr::new(RECORD),
+        &entry,
+        RECORD_LIMIT,
+    )?)?;
+    if stored.schema_version != 1
+        || stored.project != project
+        || decode_location(&stored.canonical_common_dir)? != canonical_common_dir
+    {
+        return Err(ConfigError::InvalidProjectBinding);
+    }
+    projects.sync()?;
+    Ok(ProjectBinding {
+        project,
+        canonical_common_dir,
+    })
+}
+
+fn decode_binding_record(bytes: &[u8]) -> Result<ProjectBindingRecord, ConfigError> {
+    let limits = provenant_records::Limits {
+        max_bytes: RECORD_LIMIT,
+        ..provenant_records::Limits::CONFIG
+    };
+    provenant_records::decode(bytes, limits).map_err(|_| ConfigError::InvalidProjectBinding)
 }
 
 fn open_or_create_projects(state: &Directory) -> Result<Directory, ConfigError> {
@@ -434,12 +370,11 @@ fn open_or_create_projects(state: &Directory) -> Result<Directory, ConfigError> 
     }
 }
 
-fn verify_directory(directory: &Directory, private: bool) -> Result<(), ConfigError> {
+fn verify_directory(directory: &Directory) -> Result<(), ConfigError> {
     let metadata = directory.metadata()?;
     if metadata.kind != FileKind::Directory
         || metadata.uid != effective_uid()
-        || metadata.mode & 0o022 != 0
-        || (private && metadata.mode & 0o077 != 0)
+        || metadata.mode & 0o077 != 0
     {
         return Err(ConfigError::InvalidProjectBinding);
     }
@@ -497,38 +432,34 @@ fn decode_location(value: &str) -> Result<PathBuf, ConfigError> {
     Ok(path)
 }
 
-/// Initialise the host's random identity once, using the same safe state
-/// anchor and locking contract as project bindings. Never reads legacy roots.
+/// Initialise the host identity once with atomic no-replace publication.
+/// Never reads legacy roots.
 pub fn bind_host(roots: &Roots) -> Result<provenant_core::HostId, ConfigError> {
     let state = provenant_os::fs::Directory::open_anchor(roots.state.as_path())?;
-    verify_directory(&state, true)?;
-    let clock = SystemClock::new();
-    let budget = WaitBudget::cli(clock.mono_now(), LOCK_WAIT_SECONDS)
-        .map_err(|_| ConfigError::ProjectBindingBudget)?;
-    let cancel = CancelToken::new();
-    let _lock = state.lock(
-        OsStr::new("host-binding.lock"),
-        LockMode::Exclusive,
-        budget,
-        &cancel,
-        &clock,
-    )?;
+    verify_directory(&state)?;
     let name = OsStr::new("host-id");
     match read_host(&state, name) {
         Ok(Some(host)) => Ok(host),
         Ok(None) => {
             let id = provenant_core::HostId::from_bytes(provenant_os::fs::entropy_128()?);
-            state
-                .atomic_write_with_permissions(
-                    name,
-                    ".host-",
-                    id.to_string().as_bytes(),
-                    0o600,
-                    PublishMode::NoReplace,
-                )?
-                .require_durable()
-                .map_err(|_| ConfigError::InvalidProjectBinding)?;
-            Ok(id)
+            match state.atomic_write_with_permissions(
+                name,
+                ".host-",
+                id.to_string().as_bytes(),
+                0o600,
+                PublishMode::NoReplace,
+            ) {
+                Ok(publication) => {
+                    publication
+                        .require_durable()
+                        .map_err(|_| ConfigError::InvalidProjectBinding)?;
+                    Ok(id)
+                }
+                Err(error) if error.is_exists() => {
+                    read_host(&state, name)?.ok_or(ConfigError::InvalidProjectBinding)
+                }
+                Err(error) => Err(error.into()),
+            }
         }
         Err(error) => Err(error),
     }
@@ -537,7 +468,7 @@ pub fn bind_host(roots: &Roots) -> Result<provenant_core::HostId, ConfigError> {
 /// Read an existing host identity without creating state or a lock.
 pub fn lookup_host(roots: &Roots) -> Result<Option<provenant_core::HostId>, ConfigError> {
     let state = provenant_os::fs::Directory::open_anchor(roots.state.as_path())?;
-    verify_directory(&state, true)?;
+    verify_directory(&state)?;
     read_host(&state, OsStr::new("host-id"))
 }
 
@@ -573,7 +504,7 @@ fn read_host(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{RootInputs, Roots};
+    use provenant_core::Roots;
 
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -587,18 +518,9 @@ mod tests {
     }
 
     fn roots(temp: &tempfile::TempDir) -> Roots {
-        let base = canonical_base(temp);
-        let home = base.join("home");
-        let state = base.join("state");
-        let checkout = base.join("checkout");
-        fs::create_dir_all(&home).unwrap();
-        fs::create_dir_all(&state).unwrap();
-        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::create_dir_all(&checkout).unwrap();
-        let mut inputs = RootInputs::new(home, checkout);
-        inputs.state_dir = Some(state);
+        let inputs = provenant_test_support::test_roots(temp.path()).unwrap();
         inputs
-            .resolve(&provenant_os::fs::SystemPathResolver)
+            .resolve(&provenant_test_support::IdentityPathResolver)
             .unwrap()
     }
 
@@ -611,6 +533,7 @@ mod tests {
         fs::write(common.join("HEAD"), "ref: refs/heads/main").unwrap();
         let location = ProjectLocation::new(&common).unwrap();
         let before = bind_project(&roots, location.clone()).unwrap();
+        assert_eq!(before.common_dir(), common);
         fs::remove_file(common.join("HEAD")).unwrap();
         assert_eq!(bind_project(&roots, location.clone()).unwrap(), before);
         assert_eq!(lookup_project(&roots, &location).unwrap(), Some(before));
@@ -632,7 +555,12 @@ mod tests {
             .join(format!("{STAGE_PREFIX}{}", ProjectId::from_bytes([31; 16])));
         fs::create_dir(&stage).unwrap();
         fs::write(stage.join(RECORD), "partial").unwrap();
-        assert_eq!(registered_gc_projects(&roots).unwrap(), vec![binding]);
+        assert!(registered_gc_projects(&roots).unwrap().contains(&binding));
+
+        let next = canonical_base(&temp).join("next/.git");
+        fs::create_dir_all(next.join("objects")).unwrap();
+        fs::write(next.join("HEAD"), "ref: refs/heads/main").unwrap();
+        bind_project(&roots, ProjectLocation::new(&next).unwrap()).unwrap();
         assert_eq!(fs::read_to_string(stage.join(RECORD)).unwrap(), "partial");
     }
 
@@ -642,7 +570,7 @@ mod tests {
         let roots = roots(&temp);
         for path in [
             roots.state.as_path().join("probe-one"),
-            roots.state.as_path().join("runs/run"),
+            roots.state.as_path().join("attempts/run"),
             canonical_base(&temp).join(".provenant-staging.one/.git"),
             canonical_base(&temp).join("scratchpads/x"),
             canonical_base(&temp).join("not-git"),
@@ -693,19 +621,57 @@ mod tests {
         assert_eq!(selection.skipped_transient, excluded);
     }
 
+    // Competing no-replace publishers converge by validating the winning record.
     #[test]
-    fn bind_project_reuses_random_identity_for_the_same_canonical_common_dir() {
+    fn binding_creation_and_lookup_share_private_state_authority() {
+        for mode in [0o700, 0o750, 0o755, 0o777] {
+            let temp = tempdir();
+            let roots = roots(&temp);
+            let common = canonical_base(&temp).join("project/.git");
+            fs::create_dir_all(&common).unwrap();
+            let location = ProjectLocation::new(common).unwrap();
+            fs::set_permissions(roots.state.as_path(), fs::Permissions::from_mode(mode)).unwrap();
+            let created = bind_project(&roots, location.clone());
+            let found = lookup_project(&roots, &location);
+            if mode & 0o077 == 0 {
+                assert_eq!(found.unwrap(), Some(created.unwrap()));
+            } else {
+                assert!(matches!(created, Err(ConfigError::InvalidProjectBinding)));
+                assert!(matches!(found, Err(ConfigError::InvalidProjectBinding)));
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_first_bindings_converge_on_one_atomic_record() {
         let temp = tempdir();
         let roots = roots(&temp);
-        let base = canonical_base(&temp);
-        let location = ProjectLocation::new(base.join("repository/.git")).unwrap();
-        fs::create_dir_all(location.common_dir()).unwrap();
-
-        let first = bind_project(&roots, location.clone()).unwrap();
-        let second = bind_project(&roots, location).unwrap();
-
-        assert_eq!(first, second);
-        assert_eq!(first.canonical_common_dir, base.join("repository/.git"));
+        let common = canonical_base(&temp).join("repo/.git");
+        fs::create_dir_all(&common).unwrap();
+        let location = ProjectLocation::new(&common).unwrap();
+        let barrier = std::sync::Barrier::new(8);
+        let results = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    let roots = &roots;
+                    let location = location.clone();
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        bind_project(roots, location)
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(results.iter().all(|binding| binding == &results[0]));
+        assert_eq!(
+            registered_projects(&roots).unwrap(),
+            vec![results[0].clone()]
+        );
     }
 
     #[test]
@@ -754,8 +720,13 @@ mod tests {
             schema_version: 1,
             project: duplicate_id,
             canonical_common_dir: encode_location(&duplicated_dir),
+            extra: Default::default(),
         };
-        fs::write(duplicate.join(RECORD), serde_json::to_vec(&record).unwrap()).unwrap();
+        fs::write(
+            duplicate.join(RECORD),
+            provenant_records::encode(&record).unwrap(),
+        )
+        .unwrap();
         fs::set_permissions(duplicate.join(RECORD), fs::Permissions::from_mode(0o600)).unwrap();
         assert_ne!(target.project_id(), duplicate_id);
         assert_ne!(duplicated.project_id(), duplicate_id);
@@ -777,10 +748,11 @@ mod tests {
             schema_version: 1,
             project: duplicate_target_id,
             canonical_common_dir: encode_location(&target_dir),
+            extra: Default::default(),
         };
         fs::write(
             duplicate_target.join(RECORD),
-            serde_json::to_vec(&record).unwrap(),
+            provenant_records::encode(&record).unwrap(),
         )
         .unwrap();
         fs::set_permissions(
@@ -791,6 +763,30 @@ mod tests {
         let target_location = ProjectLocation::new(&target_dir).unwrap();
         assert!(lookup_project(&roots, &target_location).is_err());
         assert!(bind_project(&roots, target_location).is_err());
+    }
+
+    #[test]
+    fn project_binding_record_preserves_unknown_fields_with_bounded_decode() {
+        let key = format!("future_{}", "field");
+        let project = ProjectId::from_bytes([24; 16]);
+        let mut payload = serde_json::json!({
+            "schema_version": 1,
+            "project": project,
+            "canonical_common_dir": "2f746d702f7265706f",
+        });
+        let unknown = serde_json::json!({"nested": [true, 7]});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert(key.clone(), unknown.clone());
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let decoded = decode_binding_record(&bytes).unwrap();
+        assert_eq!(decoded.extra.get(&key), Some(&unknown));
+
+        let encoded = provenant_records::encode(&decoded).unwrap();
+        let round_trip = decode_binding_record(&encoded).unwrap();
+        assert_eq!(round_trip.extra.get(&key), Some(&unknown));
+        assert_eq!(round_trip.project, project);
     }
 
     #[test]
@@ -805,46 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_project_removes_only_owned_stale_stage_contents() {
-        let temp = tempdir();
-        let roots = roots(&temp);
-        let base = canonical_base(&temp);
-        let projects = roots.state.as_path().join(PROJECTS_DIR);
-        fs::create_dir(&projects).unwrap();
-        fs::set_permissions(&projects, fs::Permissions::from_mode(0o700)).unwrap();
-
-        let project = ProjectId::from_bytes([8; 16]);
-        let stage = projects.join(format!(".project-stage-{project}"));
-        fs::create_dir(&stage).unwrap();
-        fs::set_permissions(&stage, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::write(stage.join(RECORD), b"partial record").unwrap();
-        fs::set_permissions(stage.join(RECORD), fs::Permissions::from_mode(0o600)).unwrap();
-        fs::write(
-            stage.join(".project-.provenant-staging.aaaaaaaaaaaaaaaaaaaaaaaa.tmp"),
-            b"partial staging file",
-        )
-        .unwrap();
-        fs::set_permissions(
-            stage.join(".project-.provenant-staging.aaaaaaaaaaaaaaaaaaaaaaaa.tmp"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-        for index in 0..1024 {
-            let name = format!(".project-.provenant-staging.{index:024x}.tmp");
-            let file = stage.join(name);
-            fs::write(&file, b"partial staging file").unwrap();
-            fs::set_permissions(file, fs::Permissions::from_mode(0o600)).unwrap();
-        }
-
-        let location = ProjectLocation::new(base.join("repository/.git")).unwrap();
-        fs::create_dir_all(location.common_dir()).unwrap();
-        bind_project(&roots, location).unwrap();
-
-        assert!(!stage.exists());
-    }
-
-    #[test]
-    fn bind_project_refuses_a_stale_stage_symlink_without_touching_its_target() {
+    fn bind_project_ignores_a_stage_symlink_without_touching_its_target() {
         let temp = tempdir();
         let roots = roots(&temp);
         let base = canonical_base(&temp);
@@ -856,13 +813,13 @@ mod tests {
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("keep"), b"outside contents").unwrap();
         let project = ProjectId::from_bytes([9; 16]);
-        let stage = projects.join(format!(".project-stage-{project}"));
+        let stage = projects.join(format!("{STAGE_PREFIX}{project}"));
         std::os::unix::fs::symlink(&outside, &stage).unwrap();
 
         let location = ProjectLocation::new(base.join("repository/.git")).unwrap();
         fs::create_dir_all(location.common_dir()).unwrap();
 
-        assert!(bind_project(&roots, location).is_err());
+        assert!(bind_project(&roots, location).is_ok());
         assert_eq!(fs::read(outside.join("keep")).unwrap(), b"outside contents");
         assert!(
             fs::symlink_metadata(&stage)

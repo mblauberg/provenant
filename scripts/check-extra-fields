@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+"""Reject statically named keys stored in ExtraFields from non-test Rust code."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+import re
+import sys
+import subprocess
+
+ROOT = Path(__file__).resolve().parents[1]
+# Host keys have no exceptions. Unknown user fields remain dynamically keyed.
+ALLOWLIST: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class Token:
+    kind: str
+    value: str
+    start: int
+    end: int
+    line: int
+
+
+def lex(source: str) -> list[Token]:
+    """Tokenize just enough Rust syntax to ignore comments and find key calls."""
+    result: list[Token] = []
+    i = 0
+    line = 1
+    size = len(source)
+
+    def advance(end: int) -> None:
+        nonlocal i, line
+        line += source.count("\n", i, end)
+        i = end
+
+    while i < size:
+        char = source[i]
+        if char.isspace():
+            advance(i + 1)
+            continue
+        if source.startswith("//", i):
+            end = source.find("\n", i + 2)
+            advance(size if end < 0 else end)
+            continue
+        if source.startswith("/*", i):
+            start = i
+            depth = 1
+            i += 2
+            while i < size and depth:
+                if source.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif source.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            line += source.count("\n", start, i)
+            continue
+
+        start, start_line = i, line
+        raw_prefix = i
+        if char == "b" and i + 1 < size and source[i + 1] == "r":
+            raw_prefix = i + 1
+        if source[raw_prefix] == "r":
+            cursor = raw_prefix + 1
+            while cursor < size and source[cursor] == "#":
+                cursor += 1
+            if cursor < size and source[cursor] == '"':
+                hashes = source[raw_prefix + 1:cursor]
+                terminator = '"' + hashes
+                close = source.find(terminator, cursor + 1)
+                end = size if close < 0 else close + len(terminator)
+                result.append(Token("string", source[start:end], start, end, start_line))
+                advance(end)
+                continue
+        if char == '"' or (char == "b" and i + 1 < size and source[i + 1] == '"'):
+            quote = i + (1 if char == '"' else 2)
+            cursor = quote
+            while cursor < size:
+                if source[cursor] == "\\":
+                    cursor += 2
+                elif source[cursor] == '"':
+                    cursor += 1
+                    break
+                else:
+                    cursor += 1
+            result.append(Token("string", source[start:cursor], start, cursor, start_line))
+            advance(cursor)
+            continue
+        if char == "_" or char.isalpha():
+            cursor = i + 1
+            while cursor < size and (source[cursor] == "_" or source[cursor].isalnum()):
+                cursor += 1
+            result.append(Token("ident", source[start:cursor], start, cursor, start_line))
+            advance(cursor)
+            continue
+        if char.isdigit():
+            cursor = i + 1
+            while cursor < size and (source[cursor].isalnum() or source[cursor] in "_."):
+                cursor += 1
+            result.append(Token("number", source[start:cursor], start, cursor, start_line))
+            advance(cursor)
+            continue
+        result.append(Token("punct", char, start, start + 1, start_line))
+        advance(i + 1)
+    return result
+
+
+def matching(tokens: list[Token], start: int, left: str, right: str) -> int | None:
+    if start >= len(tokens) or tokens[start].value != left:
+        return None
+    depth = 0
+    for index in range(start, len(tokens)):
+        if tokens[index].value == left:
+            depth += 1
+        elif tokens[index].value == right:
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def without_test_items(tokens: list[Token]) -> list[Token]:
+    """Remove cfg(test) / #[test] items before looking at production code."""
+    removed: set[int] = set()
+    index = 0
+    while index + 1 < len(tokens):
+        if tokens[index].value != "#" or tokens[index + 1].value != "[":
+            index += 1
+            continue
+        attr_end = matching(tokens, index + 1, "[", "]")
+        if attr_end is None:
+            index += 1
+            continue
+        values = [token.value for token in tokens[index + 2:attr_end]]
+        is_test = values == ["test"] or values == ["cfg", "(", "test", ")"]
+        if not is_test:
+            index = attr_end + 1
+            continue
+        cursor = attr_end + 1
+        body = None
+        while cursor < len(tokens):
+            if tokens[cursor].value == ";":
+                body = cursor
+                break
+            if tokens[cursor].value == "{":
+                body = matching(tokens, cursor, "{", "}") or cursor
+                break
+            cursor += 1
+        if body is not None:
+            removed.update(range(index, body + 1))
+            index = body + 1
+        else:
+            index = attr_end + 1
+    return [token for index, token in enumerate(tokens) if index not in removed]
+
+
+def is_json_type(values: list[str]) -> bool:
+    return "ExtraFields" not in values and ("Map" in values or ("Value" in values and "BTreeMap" not in values))
+
+
+def type_names_in_function(tokens: list[Token], start: int, end: int) -> tuple[set[str], set[str]]:
+    """Collect only parameter/local bindings, never struct field declarations."""
+    names: set[str] = {"extra"}
+    json_names: set[str] = set()
+
+    def record(name: str, ty: list[str]) -> None:
+        if "ExtraFields" in ty:
+            names.add(name)
+        elif is_json_type(ty):
+            json_names.add(name)
+
+    # Function parameters: split the signature list on top-level commas.
+    fn_index = start - 1
+    while fn_index >= 0 and tokens[fn_index].value != "fn":
+        fn_index -= 1
+    if fn_index >= 0:
+        open_paren = next((i for i in range(fn_index + 1, end) if tokens[i].value == "("), None)
+        close_paren = matching(tokens, open_paren, "(", ")") if open_paren is not None else None
+        if close_paren is not None:
+            param_start = open_paren + 1
+            depth = 0
+            for cursor in range(param_start, close_paren + 1):
+                value = tokens[cursor].value if cursor < close_paren else ","
+                if value in {"(", "[", "{", "<"}:
+                    depth += 1
+                elif value in {")", "]", "}", ">"}:
+                    depth -= 1
+                elif value == "," and depth == 0:
+                    param = tokens[param_start:cursor]
+                    colon = next((i for i, part in enumerate(param) if part.value == ":"), None)
+                    if colon is not None:
+                        binder = next((part.value for part in reversed(param[:colon]) if part.kind == "ident"), None)
+                        if binder:
+                            record(binder, [part.value for part in param[colon + 1:]])
+                    param_start = cursor + 1
+
+    # Simple let bindings with explicit ExtraFields/JSON types or a clear
+    # ExtraFields constructor/field copy. More complex inference is left to Rust.
+    for index in range(start, end):
+        if tokens[index].value != "let":
+            continue
+        cursor = index + 1
+        while cursor < end and tokens[cursor].value in {"mut", "ref"}:
+            cursor += 1
+        if cursor >= end or tokens[cursor].kind != "ident":
+            continue
+        name = tokens[cursor].value
+        boundary = cursor + 1
+        while boundary < end and tokens[boundary].value not in {";", ","}:
+            boundary += 1
+        declaration = tokens[cursor + 1:boundary]
+        values = [part.value for part in declaration]
+        if declaration and declaration[0].value == ":":
+            equals = values.index("=") if "=" in values else len(values)
+            record(name, values[1:equals])
+        elif "ExtraFields" in values and ("default" in values or "new" in values):
+            names.add(name)
+        elif is_json_type(values) and ("default" in values or "new" in values):
+            json_names.add(name)
+        elif any(values[pos:pos + 2] == [".", "extra"] for pos in range(len(values) - 1)):
+            names.add(name)
+    return names, json_names
+
+
+def function_bodies(tokens: list[Token]) -> list[tuple[int, int]]:
+    """Return token ranges for function bodies in this source file."""
+    bodies: list[tuple[int, int]] = []
+    for index, token in enumerate(tokens):
+        if token.value != "fn":
+            continue
+        open_paren = next((i for i in range(index + 1, len(tokens)) if tokens[i].value in {"(", ";", "{"}), None)
+        if open_paren is None or tokens[open_paren].value != "(":
+            continue
+        close_paren = matching(tokens, open_paren, "(", ")")
+        if close_paren is None:
+            continue
+        cursor = close_paren + 1
+        while cursor < len(tokens) and tokens[cursor].value != ";":
+            if tokens[cursor].value == "{":
+                close_body = matching(tokens, cursor, "{", "}")
+                if close_body is not None:
+                    bodies.append((cursor, close_body))
+                break
+            cursor += 1
+    return bodies
+
+
+def key_argument(tokens: list[Token], open_paren: int, constants: set[str]) -> tuple[str, bool]:
+    end = matching(tokens, open_paren, "(", ")")
+    if end is None:
+        return "", False
+    depth = 0
+    stop = end
+    for index in range(open_paren + 1, end):
+        value = tokens[index].value
+        if value in {"(", "[", "{"}:
+            depth += 1
+        elif value in {")", "]", "}"}:
+            depth -= 1
+        elif value == "," and depth == 0:
+            stop = index
+            break
+    arg = tokens[open_paren + 1:stop]
+    if not arg:
+        return "", False
+    string = next((token for token in arg if token.kind == "string"), None)
+    if string is not None and all(token.value in {"&", "(" , ")"} or token.kind == "string" for token in arg[:arg.index(string) + 1]):
+        return string.value, True
+    # A host constant is conventionally an uppercase identifier, optionally
+    # namespaced and followed by .into(). Dynamic keys such as `field` are fine.
+    values = [token.value for token in arg]
+    conversions = {"into", "to_owned", "to_string", "as_str"}
+    while (len(values) >= 5 and values[-4] == "."
+           and values[-3] in conversions and values[-2:] == ["(", ")"]):
+        values = values[:-4]
+    identifiers = [token.value for token in arg[:len(values)] if token.kind == "ident"]
+    if identifiers and (identifiers[-1] in constants or re.fullmatch(r"[A-Z][A-Z0-9_]*", identifiers[-1])):
+        return "::".join(identifiers), True
+    return "", False
+
+
+def is_test_source(path: Path) -> bool:
+    return "tests" in path.parts or path.name == "tests.rs" or path.name.endswith(("_tests.rs", "_invariants.rs")) or path.name.startswith("test_")
+
+
+def declared_constants(tokens: list[Token]) -> set[str]:
+    return {tokens[index + 1].value for index, token in enumerate(tokens[:-1])
+            if token.value == "const" and tokens[index + 1].kind == "ident"
+            and tokens[index + 1].value not in {"fn", "unsafe", "impl", "trait"}}
+
+
+def scan(path: Path, constants: set[str] | None = None) -> list[tuple[int, str, str]]:
+    if is_test_source(path):
+        return []
+    source = path.read_text(encoding="utf-8")
+    tokens = without_test_items(lex(source))
+    constants = declared_constants(tokens) | (constants or set())
+    violations: list[tuple[int, str, str]] = []
+    seen: set[tuple[int, str, str]] = set()
+    for body_start, body_end in function_bodies(tokens):
+        typed, json_names = type_names_in_function(tokens, body_start, body_end)
+        for index in range(body_start, body_end - 4):
+            method_index = None
+            if tokens[index].kind == "ident" and tokens[index].value in typed - json_names and tokens[index + 1].value == ".":
+                method_index = index + 2
+            elif tokens[index].value == "." and tokens[index + 1].value == "extra" and tokens[index + 2].value == ".":
+                # Named `extra` fields on repository records use ExtraFields;
+                # serde_json objects are indexed by string/bracket syntax.
+                method_index = index + 3
+            if method_index is None or tokens[method_index].value not in {"get", "insert"}:
+                continue
+            open_paren = method_index + 1
+            if tokens[open_paren].value != "(":
+                continue
+            key, static = key_argument(tokens, open_paren, constants)
+            if static and key not in ALLOWLIST:
+                item = (tokens[index].line, tokens[method_index].value, key)
+                if item not in seen:
+                    seen.add(item)
+                    violations.append(item)
+    return violations
+
+
+def main() -> int:
+    failures: list[tuple[Path, int, str, str]] = []
+    tracked = subprocess.check_output(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "tools/front-door"],
+        cwd=ROOT,
+    ).decode().split("\0")
+    paths = [ROOT / name for name in sorted(set(name for name in tracked if name.endswith(".rs")))]
+    constants = set().union(*(declared_constants(without_test_items(lex(path.read_text(encoding="utf-8"))))
+                              for path in paths if not is_test_source(path)))
+    for path in paths:
+        failures.extend((path.relative_to(ROOT), line, method, key) for line, method, key in scan(path, constants))
+    if failures:
+        for path, line, method, key in failures:
+            print(f"{path}:{line}: ExtraFields.{method} uses host key {key}", file=sys.stderr)
+        print(f"{len(failures)} statically named ExtraFields accesses; allowlist is empty", file=sys.stderr)
+        return 1
+    print("No statically named ExtraFields keys found (allowlist empty).")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

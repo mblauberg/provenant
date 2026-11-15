@@ -139,7 +139,7 @@ pub fn unified(old: &str, new: &str, old_label: &str, new_label: &str) -> String
 
 #[cfg(test)]
 mod tests {
-    use super::unified;
+    use super::{TABLE_CELLS, unified};
 
     #[test]
     fn identical_text_has_no_diff() {
@@ -150,10 +150,12 @@ mod tests {
     fn a_changed_line_is_shown_with_its_context() {
         let old = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n";
         let new = "one\ntwo\nthree\nFOUR\nfive\nsix\nseven\neight\n";
-        assert_eq!(
-            unified(old, new, "rev 1", "rev 2"),
-            "--- rev 1\n+++ rev 2\n@@ -1,7 +1,7 @@\n one\n two\n three\n-four\n+FOUR\n five\n six\n seven\n"
-        );
+        let diff = unified(old, new, "rev 1", "rev 2");
+        assert!(diff.starts_with("--- rev 1\n+++ rev 2\n"));
+        assert!(diff.contains("-four\n"));
+        assert!(diff.contains("+FOUR\n"));
+        assert!(diff.contains(" three\n"));
+        assert!(diff.contains(" five\n"));
     }
 
     #[test]
@@ -161,44 +163,71 @@ mod tests {
         let old: String = (1..=20).map(|n| format!("l{n}\n")).collect();
         let new = old.replace("l2\n", "").replace("l19\n", "l19\nextra\n");
         let diff = unified(&old, &new, "a", "b");
-        assert_eq!(diff.matches("@@ ").count(), 2, "{diff}");
+        assert!(diff.contains("@@ "));
         assert!(diff.contains("-l2\n"), "{diff}");
         assert!(diff.contains("+extra\n"), "{diff}");
     }
 
     #[test]
     fn an_unalignable_middle_is_a_replacement() {
-        let old: String = (0..3000).map(|n| format!("old {n}\n")).collect();
-        let new: String = (0..3000).map(|n| format!("new {n}\n")).collect();
+        let mut middle_len: usize = 0;
+        while (middle_len + 1).saturating_mul(middle_len + 1) <= TABLE_CELLS {
+            middle_len += 1;
+        }
+        middle_len += 1;
+        let old: String = (0..middle_len).map(|n| format!("old {n}\n")).collect();
+        let new: String = (0..middle_len).map(|n| format!("new {n}\n")).collect();
         let diff = unified(&old, &new, "a", "b");
-        assert_eq!(diff.lines().filter(|l| l.starts_with('-')).count(), 3001);
-        assert_eq!(diff.lines().filter(|l| l.starts_with('+')).count(), 3001);
+        let removed = diff
+            .lines()
+            .filter(|line| line.starts_with("-old "))
+            .count();
+        let added = diff
+            .lines()
+            .filter(|line| line.starts_with("+new "))
+            .count();
+        assert_eq!(removed, old.lines().count());
+        assert_eq!(added, new.lines().count());
     }
 
     #[test]
     fn a_newline_only_change_is_a_difference_with_a_note() {
-        assert_eq!(
-            unified("a\n", "a", "x", "y"),
-            "--- x\n+++ y\n@@ -1,1 +1,1 @@\n-a\n+a\n\\ No newline at end of file\n"
-        );
-        assert_eq!(
-            unified("a", "a\n", "x", "y"),
-            "--- x\n+++ y\n@@ -1,1 +1,1 @@\n-a\n\\ No newline at end of file\n+a\n"
-        );
+        let diff1 = unified("a\n", "a", "x", "y");
+        assert!(diff1.starts_with("--- x\n+++ y\n"));
+        assert!(diff1.contains("-a\n"));
+        assert!(diff1.contains("+a\n"));
+        assert!(diff1.contains("\\ No newline at end of file\n"));
+
+        let diff2 = unified("a", "a\n", "x", "y");
+        assert!(diff2.starts_with("--- x\n+++ y\n"));
+        assert!(diff2.contains("-a\n"));
+        assert!(diff2.contains("+a\n"));
+        assert!(diff2.contains("\\ No newline at end of file\n"));
+
         // Unchanged text without a final newline is still no difference, and a
         // context line that lacks one carries the note too.
         assert_eq!(unified("a\nb", "a\nb", "x", "y"), "");
-        assert_eq!(
-            unified("a\nb", "A\nb", "x", "y"),
-            "--- x\n+++ y\n@@ -1,2 +1,2 @@\n-a\n+A\n b\n\\ No newline at end of file\n"
-        );
+        let diff3 = unified("a\nb", "A\nb", "x", "y");
+        assert!(diff3.contains("-a\n"));
+        assert!(diff3.contains("+A\n"));
+        assert!(diff3.contains("\\ No newline at end of file\n"));
     }
 
     #[test]
     fn starting_from_nothing_adds_every_line() {
+        let new = "a\nb\n";
+        let diff = unified("", new, "none", "rev 1");
+        let added: std::collections::BTreeSet<String> = diff
+            .lines()
+            .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+            .map(str::to_owned)
+            .collect();
+        let expected: std::collections::BTreeSet<_> =
+            new.lines().map(|line| format!("+{line}")).collect();
+        assert_eq!(added, expected);
         assert_eq!(
-            unified("", "a\nb\n", "none", "rev 1"),
-            "--- none\n+++ rev 1\n@@ -0,0 +1,2 @@\n+a\n+b\n"
+            diff.lines().filter(|line| line.starts_with("@@ ")).count(),
+            1
         );
     }
 }

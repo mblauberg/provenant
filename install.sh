@@ -1,6 +1,6 @@
 #!/bin/sh
 # Bootstrap a verified release. Exit: 2 usage, 3 toolchain consent, 4 download/checksum,
-# 5 build/package; installation failures retain the CLI's exit code.
+# 5 build/package; other installation failures retain the CLI's exit code.
 # Parse the entire download before executing any of it.
 main() {
 set -eu
@@ -17,15 +17,21 @@ ask() {
 }
 
 yes=false
+preflight_only=false
+non_interactive=false
 source_dir=
 tag=
-state=${PROVENANT_STATE_DIR:-"$HOME/.local/share/provenant/v1"}
+# 2.0 runs from a fresh root. The first install copies the 1.x owner
+# configuration out of the 1.x root and never writes that root.
+default_state=$HOME/.local/share/provenant/v2
+legacy_state=$HOME/.local/share/provenant/v1
+state=${PROVENANT_STATE_DIR:-"$default_state"}
 bin_dir=
 upgrade=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --yes) yes=true; shift ;;
-        --source|--from-source)
+        --source)
             source_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
             shift
             if [ "$#" -gt 0 ] && [ "${1#--}" = "$1" ]; then source_dir=$1; shift; fi ;;
@@ -34,8 +40,10 @@ while [ "$#" -gt 0 ]; do
             case "$1" in --tag) tag=$2 ;; --state-dir) state=$2 ;; --bin-dir) bin_dir=$2 ;; esac
             shift 2 ;;
         --upgrade) upgrade=true; shift ;;
+        --preflight-only) preflight_only=true; shift ;;
+        --non-interactive) non_interactive=true; shift ;;
         --help)
-            printf '%s\n' 'Usage: install.sh [--yes] [--upgrade] [--source|--from-source [DIR]] [--tag TAG] [--state-dir DIR] [--bin-dir DIR]'
+            printf '%s\n' 'Usage: install.sh [--yes] [--upgrade] [--source [DIR]] [--tag TAG] [--state-dir DIR] [--bin-dir DIR]'
             exit 0 ;;
         *) die 2 "Unknown option: $1" ;;
     esac
@@ -49,11 +57,22 @@ if [ -z "$source_dir" ]; then
         *) die 4 'only macOS arm64 release packages are published; use --source' ;;
     esac
 fi
+# A 1.x upgrade names the 1.x root; 2.0 installs at its own default instead.
+if [ "$state" = "$legacy_state" ]; then
+    printf '%s\n' "Provenant 2 keeps its state in $default_state; $legacy_state stays in place and its configuration is copied." >&2
+    state=$default_state
+fi
 receipt=$state/install/receipt.json
-if "$upgrade" && [ ! -f "$receipt" ]; then die 2 'No install receipt; run install first'; fi
+# The 1.x receipt counts until the first 2.0 install copies it.
+installed() {
+    [ -f "$receipt" ] || { [ "$state" = "$default_state" ] && [ -f "$legacy_state/install/receipt.json" ]; }
+}
+if "$upgrade" && ! installed; then die 2 'No install receipt; run install first'; fi
+
+if "$preflight_only" && ! "$upgrade"; then die 2 '--preflight-only requires --upgrade'; fi
 
 guided=false
-if ! "$yes" && [ ! -f "$receipt" ]; then
+if ! "$non_interactive" && ! "$yes" && ! installed; then
     if { [ -t 1 ] && ( : </dev/tty ) 2>/dev/null; } || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; then guided=true; fi
 fi
 umask 077
@@ -185,7 +204,7 @@ if [ -n "$source_dir" ]; then
     export PATH
     if ! command -v rustup >/dev/null 2>&1 || ! rustup run "$toolchain" rustc --version </dev/null >/dev/null 2>&1; then
         if ! "$yes"; then
-            if ( : </dev/tty ) 2>/dev/null || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; then
+            if ! "$non_interactive" && { ( : </dev/tty ) 2>/dev/null || [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; }; then
                 ask "Install Rust $toolchain with rustup? y/n" n
                 case "$answer" in y|Y|yes) ;; *) die 3 'Toolchain installation declined' ;; esac
             else die 3 'Pinned Rust toolchain missing; rerun with --yes to install it'; fi
@@ -224,15 +243,7 @@ else
     actual=$(shasum -a 256 "$scratch/package.tar.gz")
     actual=${actual%% *}
     [ "$actual" = "$expected" ] || die 4 'Release checksum mismatch'
-    legacy_app_stage=false
-    for candidate in "$HOME"/Applications/.provenant-upgrade.*; do
-        [ -x "$candidate/Provenant Console.app/Contents/MacOS/provenant-console" ] || continue
-        [ -x "$candidate/Provenant Console.app/Contents/MacOS/quota-menubar" ] || continue
-        legacy_app_stage=true
-        break
-    done
-    # Older upgrade wrappers stage the app before invoking this packaged installer.
-    if [ "$target" = aarch64-apple-darwin ] && ! "$legacy_app_stage"; then
+    if [ "$target" = aarch64-apple-darwin ]; then
         apps_archive=provenant-apps-aarch64-apple-darwin.tar.gz
         apps_status=$(curl -LsS --proto '=https' --tlsv1.2 -w '%{http_code}' "$base/$apps_archive" -o "$scratch/$apps_archive" </dev/null) || die 4 'Cannot download bundled app archive'
         case "$apps_status" in
@@ -262,15 +273,15 @@ fi
 [ -x "$release/bin/provenant" ] || die 4 'Release binary is missing'
 
 if "$upgrade"; then
+    # The staged binary previews every target and checks the release first.
     if "$release/bin/provenant" --state-dir "$state" install --source "$release" --upgrade-preflight </dev/null; then
         :
     else
         preflight_status=$?
-        [ "$preflight_status" -eq 2 ] || die "$preflight_status" 'Upgrade preflight could not inspect state'
-        if ! "$yes"; then die 2 'Upgrade stopped by preflight; resolve the findings or rerun with --yes'; fi
-        printf '%s\n' 'Proceeding despite upgrade preflight findings (--yes).' >&2
+        die "$preflight_status" 'Upgrade preflight failed; nothing was changed'
     fi
 fi
+if "$preflight_only"; then exit 0; fi
 
 # Existing receipts always use their recorded selection, paths and hooks, and
 # every registered account directory is installed too.
@@ -392,8 +403,12 @@ if [ -n "$app_stage" ]; then
         helper_path="$HOME/Applications/$app/$helper_executable"
         agent_temp=$(mktemp "${agent}.update.XXXXXX") || die 4 'Could not prepare the menu bar LaunchAgent update'
         cp -p "$agent" "$agent_temp" || die 4 'Could not prepare the menu bar LaunchAgent update'
-        plutil -replace ProgramArguments.0 -string "$helper_path" "$agent_temp" || die 4 'Could not update the Provenant menu bar LaunchAgent'
+        plutil -replace ProgramArguments -array "$agent_temp" || die 4 'Could not reset the Provenant menu bar LaunchAgent arguments'
+        plutil -insert ProgramArguments.0 -string "$helper_path" "$agent_temp" || die 4 'Could not update the Provenant menu bar LaunchAgent'
         [ "$(plutil -extract ProgramArguments.0 raw -o - "$agent_temp")" = "$helper_path" ] || die 4 'Could not verify the Provenant menu bar LaunchAgent'
+        if plutil -extract ProgramArguments.1 raw -o - "$agent_temp" >/dev/null 2>&1; then
+            die 4 'Could not verify the Provenant menu bar LaunchAgent arguments'
+        fi
         mv -f "$agent_temp" "$agent" || die 4 'Could not publish the menu bar LaunchAgent'
         agent_temp=
         [ -x "$helper_path" ] || die 4 'The installed Provenant app has no menu bar helper'

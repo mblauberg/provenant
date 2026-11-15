@@ -10,6 +10,8 @@ use std::{
 
 /// Bound on one retained rollout line; longer lines are drained and skipped.
 const LINE_LIMIT: u64 = 1024 * 1024;
+/// Maximum entries traversed during a bounded full scan for a rollout.
+pub(crate) const MAX_ROLLOUT_SCAN_DIRECTORIES: usize = 4096;
 
 /// The record kind alone; payloads of other kinds are never deserialised.
 #[derive(Deserialize)]
@@ -243,7 +245,7 @@ fn date_component(value: &OsStr, len: usize) -> bool {
 
 fn visit(count: &mut usize) -> Result<(), ProviderError> {
     *count += 1;
-    if *count > 4096 {
+    if *count > MAX_ROLLOUT_SCAN_DIRECTORIES {
         Err(ProviderError::Overflow)
     } else {
         Ok(())

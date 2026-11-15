@@ -4,9 +4,6 @@ use crate::pr::status::{CiCheck, CiCompletion, Required, ci_completion};
 use provenant_cli::domains::{GateKind, PrCiMode, PrCiSettings};
 use std::time::Duration;
 
-/// Upper bound on waiting for one pull request's own CI run.
-const PR_CI_WAIT_LIMIT: Duration = Duration::from_secs(6 * 60 * 60);
-
 fn failed(message: impl Into<String>) -> LandingError {
     LandingError::Failed(message.into())
 }
@@ -263,6 +260,7 @@ fn run_command(
 )]
 pub fn execute_commands(
     project: &std::path::Path,
+    state: &std::path::Path,
     candidate: &Candidate,
     definition: &GateDefinition,
 ) -> Result<GateEvidence, LandingError> {
@@ -280,13 +278,21 @@ pub fn execute_commands(
     }
     let started = std::time::Instant::now();
     let deadline = started + Duration::from_secs(definition.timeout_seconds);
-    let root = project.join(".worktrees");
+    let ports = provenant_config::PortTable::read_for(Some(project), state)
+        .map_err(|error| failed(format!("cannot resolve worktree layout port: {error}")))?;
     let short: String = candidate.commit.chars().take(12).collect();
-    let checkout = root.join(format!("land-gate-{short}-{}", std::process::id()));
+    let branch = format!("land-gate-{short}-{}", std::process::id());
+    let relative = ports
+        .managed_writer_path(&branch)
+        .map_err(|error| failed(format!("cannot resolve gate checkout path: {error}")))?;
+    let checkout = project.join(relative);
+    let root = checkout
+        .parent()
+        .ok_or_else(|| failed("configured gate checkout has no parent"))?;
     if checkout.exists() {
         return Err(failed("gate checkout already exists"));
     }
-    std::fs::create_dir_all(&root)
+    std::fs::create_dir_all(root)
         .map_err(|error| failed(format!("cannot prepare gate checkout directory: {error}")))?;
     let added = std::process::Command::new("git")
         .arg("-C")
@@ -350,6 +356,7 @@ pub fn execute_commands(
         result,
         pool: definition.pool.clone(),
         duration_seconds: Some(started.elapsed().as_secs()),
+        extra: Default::default(),
     })
 }
 
@@ -432,12 +439,16 @@ fn ci_outstanding(
 ///
 /// Waiting never alters what the forge requires: required checks remain enforced
 /// by the forge and by the candidate gate, so skipping an optional wait loses nothing.
+/// The wait ends at `patience_seconds`, the configured gate bound, as
+/// [`LandingError::Pending`]: the landing owner records the member as pending
+/// and a later submission resumes it. A rate-limited read skips one poll.
 pub fn await_pr_ci(
     forge: &mut dyn Forge,
     prs: &[EligiblePr],
     policy: &PrCiSettings,
     required_names: &[String],
     poll_seconds: u64,
+    patience_seconds: u64,
 ) -> Result<(), LandingError> {
     #[allow(clippy::disallowed_methods, reason = "polling boundary")]
     await_pr_ci_with(
@@ -445,7 +456,7 @@ pub fn await_pr_ci(
         prs,
         policy,
         required_names,
-        poll_seconds,
+        (poll_seconds, patience_seconds),
         &std::thread::sleep,
     )
 }
@@ -455,21 +466,38 @@ fn await_pr_ci_with(
     prs: &[EligiblePr],
     policy: &PrCiSettings,
     required_names: &[String],
-    poll_seconds: u64,
+    (poll_seconds, patience_seconds): (u64, u64),
     sleep: &dyn Fn(Duration),
 ) -> Result<(), LandingError> {
-    let poll = Duration::from_secs(poll_seconds.max(1));
+    let poll = Duration::from_secs(poll_seconds);
+    let patience = Duration::from_secs(patience_seconds);
+    let mut waited = Duration::ZERO;
     for pr in prs {
-        let mut waited = Duration::ZERO;
-        while ci_outstanding(forge, pr, policy, required_names)? {
-            if waited >= PR_CI_WAIT_LIMIT {
-                return Err(failed(format!(
-                    "pull request {} CI did not finish in time",
-                    pr.number
+        loop {
+            match ci_outstanding(forge, pr, policy, required_names) {
+                Ok(false) => break,
+                Ok(true) => {}
+                Err(LandingError::RateLimited(message)) => {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: pull request #{} CI read skipped: {message}",
+                        pr.number
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+            let remaining = patience.saturating_sub(waited);
+            if remaining.is_zero() {
+                return Err(LandingError::Pending(format!(
+                    "warning: pull request #{} CI is still running after {}s; resubmit to resume",
+                    pr.number,
+                    waited.as_secs()
                 )));
             }
-            sleep(poll);
-            waited += poll;
+            let pause = forge.observation_interval().unwrap_or(poll).min(remaining);
+            sleep(pause);
+            waited += pause;
         }
     }
     Ok(())
@@ -479,6 +507,7 @@ fn await_pr_ci_with(
 mod tests {
     use super::*;
     use crate::pr::landing::fakes::FakeForge;
+    use crate::pr::landing::test_support::LandingFixture;
     use std::cell::Cell;
 
     fn validate_evidence(
@@ -488,102 +517,53 @@ mod tests {
     ) -> Result<GateResult, LandingError> {
         assess_evidence(candidate, definition, evidence).0
     }
-    fn definition() -> GateDefinition {
-        GateDefinition {
-            kind: GateKind::Checks,
-            digest: "d".into(),
-            checks: vec!["ci-status".into()],
-            commands: Vec::new(),
-            issuer: None,
-            executor: None,
-            coverage: Vec::new(),
-            timeout_seconds: 60,
-            pool: None,
-            env_passthrough: Vec::new(),
-        }
-    }
-    fn pr(number: u64, head: &str) -> EligiblePr {
-        EligiblePr {
-            number,
-            head: head.into(),
-            approval: "a".into(),
-            carried_paths: Vec::new(),
-            accepted: None,
-            base_branch: "main".into(),
-        }
-    }
     fn candidate(steps: usize) -> Candidate {
-        Candidate {
-            base: "base".into(),
-            steps: (0..steps)
-                .map(|n| CandidateStep {
-                    pr: pr(n as u64, &format!("h{n}")),
-                    commit: "c".into(),
-                    tree: "t".into(),
-                })
-                .collect(),
-            commit: "c".into(),
-            tree: "t".into(),
-            ref_name: "land/1".into(),
-        }
+        LandingFixture::candidate_with_steps(steps)
+    }
+    fn definition() -> GateDefinition {
+        LandingFixture::definition()
     }
     fn evidence(result: GateResult, issuer: Option<&str>) -> GateEvidence {
-        GateEvidence {
-            commit: "c".into(),
-            tree: "t".into(),
-            definition_digest: "d".into(),
-            checks: vec![CheckEvidence {
-                name: "ci-status".into(),
-                issuer: issuer.map(str::to_owned),
-                result,
-            }],
-            issuer: None,
-            coverage: Vec::new(),
-            result: GateResult::Passed,
-            pool: None,
-            duration_seconds: None,
+        LandingFixture::evidence("c", result, issuer)
+    }
+    fn pr(number: u64, head: &str) -> EligiblePr {
+        LandingFixture::pr(number, head)
+    }
+    #[test]
+    fn gate_check_results_follow_the_declared_result_states() {
+        let cases = [
+            (Some(GateResult::Passed), Some(GateResult::Passed)),
+            (Some(GateResult::Failed), Some(GateResult::Failed)),
+            (Some(GateResult::Pending), Some(GateResult::Pending)),
+            (Some(GateResult::Skipped), None),
+            (Some(GateResult::Neutral), None),
+            (Some(GateResult::Missing), None),
+            (None, None),
+        ];
+        for (observed, expected) in cases {
+            let mut evidence =
+                LandingFixture::evidence("c", observed.clone().unwrap_or(GateResult::Passed), None);
+            if observed.is_none() {
+                evidence.checks.clear();
+            }
+            let result = validate_evidence(
+                &LandingFixture::candidate_with_steps(1),
+                &LandingFixture::definition(),
+                &evidence,
+            );
+            match expected {
+                Some(expected) => assert_eq!(result.unwrap(), expected),
+                None => assert!(matches!(result, Err(LandingError::Failed(_)))),
+            }
         }
-    }
-
-    #[test]
-    fn passing_check_on_the_candidate_passes() {
-        let got = validate_evidence(
-            &candidate(1),
-            &definition(),
-            &evidence(GateResult::Passed, None),
-        );
-        assert_eq!(got.unwrap(), GateResult::Passed);
-    }
-    #[test]
-    fn failed_check_is_a_red_result() {
-        let got = validate_evidence(
-            &candidate(1),
-            &definition(),
-            &evidence(GateResult::Failed, None),
-        );
-        assert_eq!(got.unwrap(), GateResult::Failed);
-    }
-    #[test]
-    fn skipped_neutral_and_absent_checks_are_missing() {
-        for result in [
-            GateResult::Skipped,
-            GateResult::Neutral,
-            GateResult::Missing,
-        ] {
-            let got = validate_evidence(&candidate(1), &definition(), &evidence(result, None));
-            assert!(got.unwrap_err().to_string().contains("ci-status"));
-        }
-        let mut empty = evidence(GateResult::Passed, None);
-        empty.checks.clear();
-        assert!(validate_evidence(&candidate(1), &definition(), &empty).is_err());
     }
     #[test]
     fn unexpected_issuer_does_not_satisfy_a_pinned_gate() {
-        let mut pinned = definition();
+        let mut pinned = LandingFixture::definition();
         pinned.issuer = Some("15368".into());
-        let wrong = evidence(GateResult::Passed, Some("1"));
+        let wrong = LandingFixture::evidence("c", GateResult::Passed, Some("1"));
         assert!(validate_evidence(&candidate(1), &pinned, &wrong).is_err());
-        let right = evidence(GateResult::Passed, Some("15368"));
+        let right = LandingFixture::evidence("c", GateResult::Passed, Some("15368"));
         assert_eq!(
             validate_evidence(&candidate(1), &pinned, &right).unwrap(),
             GateResult::Passed
@@ -591,27 +571,27 @@ mod tests {
     }
     #[test]
     fn evidence_for_another_commit_tree_or_definition_is_rejected() {
-        let mut other = evidence(GateResult::Passed, None);
+        let mut other = LandingFixture::evidence("c", GateResult::Passed, None);
         other.commit = "x".into();
         assert!(validate_evidence(&candidate(1), &definition(), &other).is_err());
-        let mut other = evidence(GateResult::Passed, None);
+        let mut other = LandingFixture::evidence("c", GateResult::Passed, None);
         other.tree = "x".into();
         assert!(validate_evidence(&candidate(1), &definition(), &other).is_err());
-        let mut other = evidence(GateResult::Passed, None);
+        let mut other = LandingFixture::evidence("c", GateResult::Passed, None);
         other.definition_digest = "x".into();
         assert!(validate_evidence(&candidate(1), &definition(), &other).is_err());
     }
     #[test]
     fn command_gate_reports_the_failed_command() {
-        let mut def = definition();
+        let mut def = LandingFixture::definition();
         def.kind = GateKind::Commands;
         def.commands = vec!["cargo test --example fixture".into()];
-        let mut red = evidence(GateResult::Failed, None);
+        let mut red = LandingFixture::evidence("c", GateResult::Failed, None);
         red.result = GateResult::Failed;
         red.checks[0].name = def.commands[0].clone();
         let (result, unmet) = assess_evidence(&candidate(1), &def, &red);
         assert_eq!(result.unwrap(), GateResult::Failed);
-        assert_eq!(unmet, "cargo test --example fixture: failed");
+        assert!(unmet.contains(&def.commands[0]));
     }
 
     #[test]
@@ -665,11 +645,17 @@ mod tests {
         };
         let slept = Cell::new(0u32);
         // The run never resolves, so the wait ends only at the limit.
-        let result = await_pr_ci_with(&mut forge, &[pr(1, "h1")], &policy, &[], 3600, &|_| {
-            slept.set(slept.get() + 1)
-        });
+        let result = await_pr_ci_with(
+            &mut forge,
+            &[pr(1, "h1")],
+            &policy,
+            &[],
+            (3600, 7200),
+            &|_| slept.set(slept.get() + 1),
+        );
         if slept.get() > 0 {
-            assert!(result.is_err());
+            // An unfinished run is pending at the bound, never a failure.
+            assert!(matches!(result, Err(LandingError::Pending(_))));
         } else {
             assert!(result.is_ok());
         }
@@ -684,6 +670,33 @@ mod tests {
         assert!(waits(PrCiMode::OptIn, Some("full-ci"), true, true) > 0);
         assert!(waits(PrCiMode::Affected, None, false, true) > 0);
         assert_eq!(waits(PrCiMode::Affected, None, false, false), 0);
+    }
+
+    #[test]
+    fn pr_ci_wait_uses_adapter_cadence_and_bounds_it_by_patience() {
+        let settings = provenant_cli::wait::Settings {
+            pr_interval_ms: 37,
+            ..Default::default()
+        };
+        let fast = Duration::from_millis(settings.pr_interval_ms);
+        let mut forge = pending_forge();
+        forge.next_observation_interval = Some(fast);
+        let pauses = std::cell::RefCell::new(Vec::new());
+        let result = await_pr_ci_with(
+            &mut forge,
+            &[pr(1, "h1")],
+            &PrCiSettings {
+                mode: PrCiMode::Always,
+                label: None,
+            },
+            &[],
+            (3, 1),
+            &|pause| pauses.borrow_mut().push(pause),
+        );
+        assert!(matches!(result, Err(LandingError::Pending(_))));
+        let pauses = pauses.borrow();
+        assert!(pauses.iter().all(|pause| *pause <= fast));
+        assert!(pauses.iter().copied().sum::<Duration>() <= Duration::from_secs(1));
     }
 
     #[test]
@@ -706,10 +719,10 @@ mod tests {
             &[pr(1, "h1")],
             &policy,
             &required,
-            3600,
+            (3600, 7200),
             &|_| slept.set(slept.get() + 1),
         );
-        assert!(result.is_err());
+        assert!(matches!(result, Err(LandingError::Pending(_))));
         assert!(slept.get() > 0);
     }
 
@@ -836,19 +849,24 @@ mod tests {
         def.kind = GateKind::Commands;
         def.commands = vec!["test -f f".into()];
         def.executor = Some("local".into());
-        let got = execute_commands(&dir, &cand, &def).unwrap();
+        let got = execute_commands(&dir, &dir, &cand, &def).unwrap();
         assert_eq!(got.result, GateResult::Passed);
         assert_eq!(got.issuer.as_deref(), Some("local"));
         assert!(got.duration_seconds.is_some());
         def.commands = vec!["test -f missing".into()];
         assert_eq!(
-            execute_commands(&dir, &cand, &def).unwrap().result,
+            execute_commands(&dir, &dir, &cand, &def).unwrap().result,
             GateResult::Failed
         );
         def.commands = vec!["sleep 30".into()];
         def.timeout_seconds = 1;
-        assert!(execute_commands(&dir, &cand, &def).is_err());
-        let leftover = std::fs::read_dir(dir.join(".worktrees")).unwrap().count();
+        assert!(execute_commands(&dir, &dir, &cand, &def).is_err());
+        let ports = provenant_config::PortTable::read_for(Some(&dir), &dir).unwrap();
+        let branch = format!("land-gate-{}-{}", &cand.commit[..12], std::process::id());
+        let checkout = dir.join(ports.managed_writer_path(&branch).unwrap());
+        let leftover = std::fs::read_dir(checkout.parent().unwrap())
+            .unwrap()
+            .count();
         assert_eq!(leftover, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }

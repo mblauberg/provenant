@@ -22,16 +22,28 @@ pub(super) fn observe(
     failed_checks_max_bytes: usize,
     max_failed_checks: usize,
 ) -> CiObservation {
-    let read =
-        |args: &[&str]| super::super::successful(super::super::execute(project, args).ok()?).ok();
+    let read = |args: &[&str]| {
+        super::super::successful(
+            super::super::forge_execute(
+                state,
+                project,
+                args,
+                &provenant_config::ports::Request::within(READ_BUDGET),
+                false,
+                None,
+            )
+            .ok()?,
+        )
+        .ok()
+    };
     let evidence = |head: &Head| {
-        Observer::open(state, project, &head.repository, READ_BUDGET)
-            .ok()?
-            .checks(&head.sha, crate::pr::observer::POLL, READ_BUDGET)
-            .ok()
+        let request = provenant_config::ports::Request::within(READ_BUDGET);
+        let mut observer = Observer::open(state, project, &head.repository, &request).ok()?;
+        let max_age = observer.fast_interval();
+        observer.checks(&head.sha, max_age, &request).ok()
     };
     let mut result = observe_with(target, names, &read, evidence, |head| {
-        required_checks(project, &policy_target(target, head, &read)?)
+        required_checks(state, project, &policy_target(target, head, &read)?)
     });
     result.bound_failed_checks(failed_checks_max_bytes, max_failed_checks);
     result

@@ -1,5 +1,5 @@
 //! `pr status`: one compact line per pull request.
-use super::{Result, execute, successful};
+use super::{Result, successful};
 use crate::{emit_summarised, fail, roots};
 use provenant_cli::Globals;
 use provenant_records::{CommandResult, Outcome};
@@ -21,6 +21,22 @@ struct View {
     draft: bool,
     /// The pull request URL names the base repository, whose CI it runs.
     url: String,
+}
+#[derive(Deserialize)]
+struct RestWaitPull {
+    state: String,
+    head: RestWaitHead,
+    #[serde(default)]
+    merged_at: Option<String>,
+    #[serde(default)]
+    mergeable_state: Option<String>,
+    #[serde(default)]
+    draft: bool,
+    html_url: String,
+}
+#[derive(Deserialize)]
+struct RestWaitHead {
+    sha: String,
 }
 #[derive(Deserialize)]
 struct Check {
@@ -65,8 +81,22 @@ impl Line {
             "pending"
         } else if self.draft {
             "draft"
+        } else if self.review == "unknown" {
+            "review_unknown"
         } else {
             "ready"
+        }
+    }
+    /// What a waiter takes from this pull request: `Some(true)` once it
+    /// merged or its checks passed, `Some(false)` once they failed or it
+    /// closed unmerged, and `None` while checks run or the read failed.
+    pub(crate) fn verdict(&self) -> Option<bool> {
+        match self.class() {
+            "merged" => Some(true),
+            "closed" | "failing" => Some(false),
+            "unavailable" | "pending" => None,
+            _ => (self.checks_pending.unwrap_or(0) == 0 && self.checks_total.is_some())
+                .then_some(true),
         }
     }
     fn text(&self) -> String {
@@ -159,9 +189,17 @@ fn observe_ci_with(
 
 // Both classic protection and rulesets may apply. Only trust the resolved
 // policy when both sources are readable.
-pub(super) fn required_checks(project: &Path, target: &str) -> Option<Vec<String>> {
+pub(super) fn required_checks(state: &Path, project: &Path, target: &str) -> Option<Vec<String>> {
     required_policy(target, &|argv| {
-        super::execute_for(project, argv, std::time::Duration::from_secs(60), false).ok()
+        super::forge_execute(
+            state,
+            project,
+            argv,
+            &provenant_config::ports::Request::within(std::time::Duration::from_secs(60)),
+            false,
+            None,
+        )
+        .ok()
     })
     .map(|policy| policy.checks.into_iter().map(|check| check.name).collect())
     .filter(|names: &Vec<String>| !names.is_empty())
@@ -477,35 +515,93 @@ fn summarise_ci(
         truncated: false,
     }
 }
-fn open_numbers(project: &Path) -> Result<Vec<u64>> {
+fn open_numbers(state: &Path, project: &Path) -> Result<Vec<u64>> {
     #[derive(Deserialize)]
     struct Listed {
         number: u64,
     }
-    let bytes = successful(execute(
+    let bytes = successful(super::forge_execute(
+        state,
         project,
         &[
             "gh", "pr", "list", "--author", "@me", "--state", "open", "--limit", "50", "--json",
             "number",
         ],
+        &provenant_config::ports::Request::within(std::time::Duration::from_secs(60)),
+        false,
+        None,
     )?)?;
     let mut listed: Vec<Listed> = serde_json::from_slice(&bytes)?;
     listed.sort_by_key(|entry| entry.number);
     Ok(listed.into_iter().map(|entry| entry.number).collect())
 }
+/// Resolve the selected repository once before a `wait --pr` observation
+/// loop, within the waiter's request context.
+pub(crate) fn wait_repository(
+    state: &Path,
+    project: &Path,
+    request: &provenant_config::ports::Request,
+) -> Result<String> {
+    Ok(super::observer::repository_for_project(
+        state, project, request,
+    )?)
+}
+
+/// Revalidate PR metadata and its CI through the shared observer during a wait
+/// loop. The metadata read, every check page and the checks read share
+/// `request`'s one deadline and cancellation.
+pub(crate) fn wait_line_observed(
+    project: &Path,
+    state: &Path,
+    repository: &str,
+    number: u64,
+    request: &provenant_config::ports::Request,
+    max_age: std::time::Duration,
+) -> Result<Line> {
+    use super::observer::{ObserveError, Observer};
+    let mut observer = Observer::open(state, project, repository, request)?;
+    let value = observer.resource(
+        &format!("pulls/{number}"),
+        std::time::Duration::ZERO,
+        request,
+    )?;
+    let pull: RestWaitPull = serde_json::from_value(value)?;
+    let state = if pull.merged_at.is_some() {
+        "MERGED".to_owned()
+    } else {
+        pull.state.to_ascii_uppercase()
+    };
+    let view = View {
+        state,
+        head: pull.head.sha,
+        merge: pull
+            .mergeable_state
+            .map_or_else(|| "UNKNOWN".to_owned(), |state| state.to_ascii_uppercase()),
+        review: Some("unknown".to_owned()),
+        draft: pull.draft,
+        url: pull.html_url,
+    };
+    let checks = match observer.checks(&view.head, max_age, request) {
+        Ok(checks) => Some(checks),
+        Err(ObserveError::Unavailable(_)) => None,
+        Err(error) => return Err(error.to_string().into()),
+    };
+    Ok(status_line(number, view, checks.as_deref()))
+}
+
 /// `max_age` is how old an observed CI answer may be: a waiter's poll, or
 /// zero for a one-shot read.
 pub(crate) fn wait_line(
     project: &Path,
     state: &Path,
     number: u64,
-    timeout: std::time::Duration,
+    request: &provenant_config::ports::Request,
     max_age: std::time::Duration,
-    cancel: Option<&provenant_core::CancelToken>,
 ) -> Result<Line> {
     use super::observer::{ObserveError, Observer};
     let text = number.to_string();
-    let bytes = successful(super::execute_cancellable(
+    let bytes = successful(super::forge_execute(
+        state,
         project,
         &[
             "gh",
@@ -515,10 +611,9 @@ pub(crate) fn wait_line(
             "--json",
             "state,headRefOid,mergeStateStatus,reviewDecision,isDraft,url",
         ],
-        timeout,
+        request,
         false,
         None,
-        cancel,
     )?)?;
     let view: View = serde_json::from_slice(&bytes)?;
     let segments: Vec<&str> = view.url.trim_end_matches('/').split('/').collect();
@@ -528,8 +623,8 @@ pub(crate) fn wait_line(
     };
     // Unreadable or incomplete checks leave the row readable, as before; a
     // rate limit or an expired read is a failed row naming why.
-    let checks = match Observer::open(state, project, &repository, timeout)
-        .and_then(|mut observer| observer.checks(&view.head, max_age, timeout))
+    let checks = match Observer::open(state, project, &repository, request)
+        .and_then(|mut observer| observer.checks(&view.head, max_age, request))
     {
         Ok(checks) => Some(checks),
         Err(ObserveError::Unavailable(_)) => None,
@@ -587,50 +682,18 @@ pub(super) fn class_of(head: &str, checks: &[super::observer::Check]) -> &'stati
     status_line(1, view, Some(checks)).class()
 }
 
-/// A change is a row that was readable both times and differs. An error row
-/// says nothing about the pull request.
-fn changed(before: &[Line], after: &[Line]) -> bool {
-    before.len() != after.len()
-        || before
-            .iter()
-            .zip(after)
-            .any(|(was, now)| was.error.is_none() && now.error.is_none() && was != now)
-}
-/// Replace each error row by the last good row for that pull request.
-fn keep_good(previous: &[Line], current: Vec<Line>) -> Vec<Line> {
-    current
-        .into_iter()
-        .map(
-            |line| match previous.iter().find(|old| old.number == line.number) {
-                Some(old) if line.error.is_some() && old.error.is_none() => old.clone(),
-                _ => line,
-            },
-        )
-        .collect()
-}
-
-#[allow(clippy::disallowed_methods)]
-fn snapshot(
-    project: &Path,
-    state: &Path,
-    numbers: &[u64],
-    deadline: Option<std::time::Instant>,
-) -> Vec<Line> {
-    // A waiting snapshot shares answers younger than the wait's poll.
-    let max_age = deadline.map_or(std::time::Duration::ZERO, |_| super::observer::POLL);
+fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
     numbers
         .iter()
         .map(|&number| {
-            let timeout = deadline.map_or(std::time::Duration::from_secs(60), |end| {
-                end.saturating_duration_since(std::time::Instant::now())
-                    .min(std::time::Duration::from_secs(60))
-            });
-            let observed = if timeout.is_zero() {
-                Err("status wait expired".into())
-            } else {
-                wait_line(project, state, number, timeout, max_age, None)
-            };
-            observed.unwrap_or_else(|error| Line {
+            wait_line(
+                project,
+                state,
+                number,
+                &provenant_config::ports::Request::within(std::time::Duration::from_secs(60)),
+                std::time::Duration::ZERO,
+            )
+            .unwrap_or_else(|error| Line {
                 number,
                 state: "UNAVAILABLE".into(),
                 head: "unknown".into(),
@@ -647,60 +710,22 @@ fn snapshot(
         .collect()
 }
 
-// CLI polling owns the real clock and wait interval.
-#[allow(clippy::disallowed_methods)]
-pub(super) fn run(numbers: Vec<u64>, wait: Option<u64>, globals: &Globals) -> u8 {
+pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
     const LEAF: &str = "pr status";
-    let result = (|| -> Result<(Vec<Line>, bool)> {
+    let result = (|| -> Result<Vec<Line>> {
         let project = roots::selected_project(globals.project.as_deref(), true)?;
         let state = roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional)?
             .roots
             .state;
-        let state = state.as_path();
         let numbers = if numbers.is_empty() {
-            open_numbers(&project)?
+            open_numbers(state.as_path(), &project)?
         } else {
             numbers
         };
-        let deadline =
-            wait.map(|seconds| std::time::Instant::now() + std::time::Duration::from_secs(seconds));
-        let initial = snapshot(&project, state, &numbers, deadline);
-        let Some(deadline) = deadline else {
-            return Ok((initial, false));
-        };
-        if std::time::Instant::now() >= deadline {
-            return Ok((initial, true));
-        }
-        if initial.is_empty() || initial.iter().all(|line| line.error.is_some()) {
-            return Ok((initial, false));
-        }
-        // The latest good row of each PR; a transient read failure neither
-        // replaces it nor counts as a change.
-        let mut latest = initial.clone();
-        let mut baseline = initial;
-        loop {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
-                return Ok((latest, true));
-            }
-            std::thread::sleep(left.min(std::time::Duration::from_secs(5)));
-            if std::time::Instant::now() >= deadline {
-                return Ok((latest, true));
-            }
-            let current = snapshot(&project, state, &numbers, Some(deadline));
-            latest = keep_good(&latest, current.clone());
-            if std::time::Instant::now() >= deadline {
-                return Ok((latest, true));
-            }
-            if changed(&baseline, &current) {
-                return Ok((latest, false));
-            }
-            // Rows that recovered become the new baseline for later comparison.
-            baseline = keep_good(&baseline, current);
-        }
+        Ok(snapshot(&project, state.as_path(), &numbers))
     })();
     match result {
-        Ok((lines, timed_out)) => {
+        Ok(lines) => {
             let attribution = std::cell::OnceCell::new();
             for line in &lines {
                 if matches!(line.state.as_str(), "CLOSED" | "MERGED") {
@@ -716,14 +741,9 @@ pub(super) fn run(numbers: Vec<u64>, wait: Option<u64>, globals: &Globals) -> u8
                     }
                 }
             }
-            let mut text: String = lines.iter().map(|line| line.text() + "\n").collect();
-            if timed_out {
-                text.push_str("snapshot unchanged within wait limit\n");
-            }
-            let summary = summarise(&lines, timed_out);
-            let outcome = if timed_out {
-                Outcome::Timeout
-            } else if !lines.is_empty() && lines.iter().all(|line| line.error.is_some()) {
+            let text: String = lines.iter().map(|line| line.text() + "\n").collect();
+            let summary = summarise(&lines);
+            let outcome = if !lines.is_empty() && lines.iter().all(|line| line.error.is_some()) {
                 Outcome::Unavailable
             } else {
                 Outcome::Ok
@@ -742,7 +762,7 @@ pub(super) fn run(numbers: Vec<u64>, wait: Option<u64>, globals: &Globals) -> u8
 
 /// Counts by state, action rows first (failing, review, pending,
 /// unavailable), then one typed next command.
-fn summarise(lines: &[Line], timed_out: bool) -> provenant_cli::Summary {
+fn summarise(lines: &[Line]) -> provenant_cli::Summary {
     let order = ["failing", "review_required", "pending", "unavailable"];
     let counts: Vec<(&str, usize)> = [
         "failing",
@@ -767,15 +787,12 @@ fn summarise(lines: &[Line], timed_out: bool) -> provenant_cli::Summary {
         .filter(|line| order.contains(&line.class()))
         .collect();
     action.sort_by_key(|line| order.iter().position(|class| *class == line.class()));
-    let mut rows: Vec<String> = action.iter().map(|line| line.text()).collect();
+    let rows: Vec<String> = action.iter().map(|line| line.text()).collect();
     let quiet = lines.len() - action.len();
-    if timed_out {
-        rows.push("snapshot unchanged within wait limit".into());
-    }
     let next = match action.first() {
         Some(line) if line.class() == "failing" => Some(format!("gh pr checks {}", line.number)),
         Some(line) if line.class() == "pending" => {
-            Some(format!("provenant pr status {} --wait", line.number))
+            Some(format!("provenant wait --pr {}", line.number))
         }
         Some(line) => Some(format!("provenant pr status {} --full", line.number)),
         None => lines
@@ -814,36 +831,15 @@ mod tests {
         }
     }
     #[test]
-    fn a_transient_error_row_is_not_a_change_and_never_replaces_a_good_row() {
-        use super::{changed, keep_good};
-        let good = vec![row(1, "a", None), row(2, "b", None)];
-        let flaky = vec![row(1, "a", Some("HTTP 502")), row(2, "b", None)];
-        assert!(!changed(&good, &flaky));
-        assert!(!changed(&flaky, &good));
-        let kept = keep_good(&good, flaky.clone());
-        assert_eq!(kept, good);
-        // A first-time error stays visible; a real difference is a change.
-        assert_eq!(keep_good(&[], flaky.clone()), flaky);
-        assert!(changed(&good, &[row(1, "c", None), row(2, "b", None)]));
-        assert!(changed(&good, &good[..1]));
-    }
-    #[test]
-    fn the_summary_counts_states_and_puts_action_rows_first() {
+    fn the_summary_puts_action_rows_first() {
         let mut failing = row(3, "c", None);
         failing.checks_failed = Some(1);
-        let lines = vec![row(1, "a", None), failing, row(2, "b", Some("HTTP 502"))];
-        let summary = super::summarise(&lines, true);
-        assert_eq!(
-            summary.lines[0],
-            "3 PRs: 1 failing, 1 unavailable, 1 ready (1 need nothing)"
-        );
-        assert!(summary.lines[1].starts_with("#3 "), "{:?}", summary.lines);
-        assert!(summary.lines[2].starts_with("#2 unavailable"));
-        assert_eq!(
-            summary.lines.last().map(String::as_str),
-            Some("snapshot unchanged within wait limit")
-        );
-        assert_eq!(summary.next.as_deref(), Some("gh pr checks 3"));
+        let unavailable = row(2, "b", Some("HTTP 502"));
+        let action_rows = vec![failing.text(), unavailable.text()];
+        let lines = vec![row(1, "a", None), failing, unavailable];
+        let summary = super::summarise(&lines);
+        assert_eq!(&summary.lines[1..], action_rows);
+        assert_eq!(summary.omitted, 0);
     }
 
     #[test]

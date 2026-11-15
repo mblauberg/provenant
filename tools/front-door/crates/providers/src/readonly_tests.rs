@@ -30,6 +30,7 @@ fn reader_shells_create_large_here_documents_in_private_scratch()
             (id == "claude").then_some(&token),
         );
         input.home = &home;
+        input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
         let spec = REGISTRY
             .iter()
             .find(|entry| entry.adapter.id() == id)

@@ -29,7 +29,6 @@ pub enum OutputCustodyError {
 
 /// An edge-built, non-deserializable receipt for one installed file.
 #[derive(Clone, Debug, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct InstalledOutput {
     name: PathWire,
     digest: FileDigest,

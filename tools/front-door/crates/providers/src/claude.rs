@@ -3,9 +3,7 @@ use crate::launch::{
     uuid_v4,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
-use provenant_confinement::permissions::{
-    NetworkAccess, NetworkEndpoint, ProviderProfile, ProviderProfileSpec,
-};
+use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
 use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
 use provenant_os::clock::SystemClock;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
@@ -98,12 +96,18 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
     },
 };
 
-crate::adapter!(Claude, "claude", prepare);
+crate::adapter!(
+    Claude,
+    "claude",
+    prepare;
+    crate::quota_live::claude::session_identity
+);
 const MODEL_ON_WIRE: bool = true;
 
 /// The default config directory's keychain service. A non-default
 /// `CLAUDE_CONFIG_DIR` appends [`keychain_suffix`].
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+pub(crate) const OAUTH_REFRESH_LOCK: &str = "provenant-oauth-refresh.lock";
 /// Refresh when the access token expires within this window.
 const REFRESH_WINDOW_MS: u64 = 15 * 60 * 1000;
 /// After a refresh, the CLI may keep a token that is inside the window; accept
@@ -364,8 +368,9 @@ fn parse_stored_token(bytes: &[u8], now_ms: u64) -> Result<OauthToken, ProviderE
 /// servers, no slash commands, no session file) in the executor's private
 /// working directory. Host callers share an exclusive config-directory lock
 /// across a second read, refresh and reread, so only one CLI can rotate its token.
-/// Every subprocess is capped by the caller's `deadline_ms` on the
-/// `now_ms` clock. The token is never logged, printed or persisted.
+/// Reads and admission use the caller's deadline. Once admitted, the CLI owns
+/// rotation and runs to completion; interrupting it can lose a single-use token.
+/// The token is never logged, printed or persisted.
 pub fn refresh_if_expiring(
     executor: &dyn Executor,
     login: &Login<'_>,
@@ -373,13 +378,96 @@ pub fn refresh_if_expiring(
     deadline_ms: u64,
     authority: Option<&CredentialAuthority>,
 ) -> Result<OauthToken, ProviderError> {
+    refresh_with_policy(
+        executor,
+        login,
+        now_ms,
+        deadline_ms,
+        authority,
+        60_000,
+        false,
+    )
+}
+
+/// `minimum_budget_ms` gates admission, not an in-flight rotation. `force`
+/// asks the CLI to revalidate after an API refusal even if local expiry is fresh.
+pub(super) fn refresh_with_policy(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+    authority: Option<&CredentialAuthority>,
+    minimum_budget_ms: u64,
+    force: bool,
+) -> Result<OauthToken, ProviderError> {
+    let clock = SystemClock::new();
+    refresh_with_clock_and_lock_observer(
+        executor,
+        login,
+        now_ms,
+        deadline_ms,
+        authority,
+        minimum_budget_ms,
+        force,
+        &clock,
+        &|_| {},
+    )
+}
+
+/// Exercise the public refresh path with a controlled clock and lock-boundary
+/// observer. The observer runs immediately before the real lock acquisition.
+#[cfg(test)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each refresh input is passed through unchanged"
+)]
+pub(crate) fn refresh_with_policy_using_clock(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+    authority: Option<&CredentialAuthority>,
+    minimum_budget_ms: u64,
+    force: bool,
+    clock: &dyn Clock,
+    before_lock: &dyn Fn(&Directory),
+) -> Result<OauthToken, ProviderError> {
+    refresh_with_clock_and_lock_observer(
+        executor,
+        login,
+        now_ms,
+        deadline_ms,
+        authority,
+        minimum_budget_ms,
+        force,
+        clock,
+        before_lock,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each refresh input is passed through unchanged"
+)]
+fn refresh_with_clock_and_lock_observer(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+    authority: Option<&CredentialAuthority>,
+    minimum_budget_ms: u64,
+    force: bool,
+    clock: &dyn Clock,
+    before_lock: &dyn Fn(&Directory),
+) -> Result<OauthToken, ProviderError> {
     let source = credential_source(login)?;
+    let io_deadline = std::cell::Cell::new(deadline_ms);
     if let Some(authority) = authority {
         authority.check(&source, now_ms())?;
     }
     let budget = |cap: Duration| -> Result<Duration, ProviderError> {
-        match deadline_ms.saturating_sub(now_ms()) {
-            0 => Err(ProviderError::CredentialUnavailable),
+        match io_deadline.get().saturating_sub(now_ms()) {
+            0 => Err(ProviderError::RefreshDeferred),
             left => Ok(cap.min(Duration::from_millis(left))),
         }
     };
@@ -467,15 +555,17 @@ pub fn refresh_if_expiring(
         }
     };
     match read() {
-        Ok(token) if !token.needs_refresh(now_ms()) => return Ok(token),
+        Ok(token) if !force && !token.needs_refresh(now_ms()) => return Ok(token),
         // An expired token was read successfully, so refreshing is safe: no
         // running lane can still be using it. Read failures never refresh.
         Ok(_) | Err(ProviderError::CredentialExpired) => {}
         Err(error) => return Err(error),
     }
+    if deadline_ms.saturating_sub(now_ms()) < minimum_budget_ms {
+        return Err(ProviderError::RefreshDeferred);
+    }
     // Stable inode, never removed: reread storage under this cross-process
     // lock in case another caller already refreshed the token.
-    let clock = SystemClock::new();
     // A future deadline preserves sub-second waits despite WaitBudget's
     // one-second minimum for its duration constructor.
     let wait_micros = budget(Duration::from_secs(60))?.as_micros() as u64;
@@ -486,19 +576,23 @@ pub fn refresh_if_expiring(
     let wait = WaitBudget::nonblocking(deadline);
     let directory = Directory::open_anchor(login.config_dir)
         .map_err(|_| ProviderError::CredentialUnavailable)?;
-    let _refresh_lock = directory
+    before_lock(&directory);
+    let refresh_lock = directory
         .lock(
-            OsStr::new("provenant-oauth-refresh.lock"),
+            OsStr::new(OAUTH_REFRESH_LOCK),
             LockMode::Exclusive,
             wait,
             &CancelToken::new(),
-            &clock,
+            clock,
         )
         .map_err(|_| ProviderError::CredentialUnavailable)?;
     match read() {
-        Ok(token) if !token.needs_refresh(now_ms()) => return Ok(token),
+        Ok(token) if !force && !token.needs_refresh(now_ms()) => return Ok(token),
         Ok(_) | Err(ProviderError::CredentialExpired) => {}
         Err(error) => return Err(error),
+    }
+    if deadline_ms.saturating_sub(now_ms()) < minimum_budget_ms {
+        return Err(ProviderError::RefreshDeferred);
     }
     if authority.is_some() && credential_source(login)? != source {
         return Err(ProviderError::CredentialUnavailable);
@@ -528,17 +622,31 @@ pub fn refresh_if_expiring(
     let mut options = ExecOptions::new(
         &argv,
         Path::new(PROBE_CWD),
-        budget(Duration::from_secs(60))?,
+        Duration::from_millis(minimum_budget_ms.max(60_000)),
     );
+    options.wait_for_completion = true;
+    // Terminal interruption of the host must not interrupt token persistence.
+    options.process_group = true;
+    // Rotation may outlive a crashing host. The CLI and its descendants keep
+    // the same exclusive lock until persistence has finished.
+    options.inherited_lease = Some(&refresh_lock);
     options.env = Some(&env);
     options.stdout = StreamPolicy::Discard;
     options.stderr = StreamPolicy::Discard;
     executor
         .execute(options)
         .map_err(|_| ProviderError::CredentialUnavailable)?;
-    let token = read()?;
+    // Persistence is complete before the CLI exits. Give the final read its own
+    // budget even when the caller's tick deadline passed during the rotation.
+    io_deadline.set(now_ms().saturating_add(10_000));
+    let token = read().map_err(|error| match error {
+        ProviderError::CredentialExpired | ProviderError::CredentialNotFound => {
+            ProviderError::RefreshDeferred
+        }
+        other => other,
+    })?;
     if token.expires_at_ms.saturating_sub(now_ms()) < MIN_LIFETIME_MS {
-        return Err(ProviderError::CredentialUnavailable);
+        return Err(ProviderError::RefreshDeferred);
     }
     Ok(token)
 }
@@ -563,7 +671,12 @@ pub fn refresh_for_account_authorised(
     deadline_ms: u64,
     authority: &CredentialAuthority,
 ) -> Result<OauthToken, ProviderError> {
-    authority.check(&credential_source(login)?, now_ms())?;
+    authority
+        .check(&credential_source(login)?, now_ms())
+        .map_err(|error| match error {
+            ProviderError::CredentialUnavailable => ProviderError::RefreshDeferred,
+            other => other,
+        })?;
     refresh_account(
         executor,
         login,
@@ -571,6 +684,41 @@ pub fn refresh_for_account_authorised(
         now_ms,
         deadline_ms,
         Some(authority),
+    )
+}
+
+/// Test seam for the same account/status path with deterministic lock time and
+/// a state observer at the real refresh-lock boundary.
+#[cfg(test)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each refresh input is passed through unchanged"
+)]
+pub(crate) fn refresh_for_account_authorised_using_clock(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    account: &crate::identity::RegisteredAccount,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+    authority: &CredentialAuthority,
+    clock: &dyn Clock,
+    before_lock: &dyn Fn(&Directory),
+) -> Result<OauthToken, ProviderError> {
+    authority
+        .check(&credential_source(login)?, now_ms())
+        .map_err(|error| match error {
+            ProviderError::CredentialUnavailable => ProviderError::RefreshDeferred,
+            other => other,
+        })?;
+    refresh_account_with_clock_and_lock_observer(
+        executor,
+        login,
+        account,
+        now_ms,
+        deadline_ms,
+        Some(authority),
+        clock,
+        before_lock,
     )
 }
 fn refresh_account(
@@ -581,13 +729,40 @@ fn refresh_account(
     deadline_ms: u64,
     authority: Option<&CredentialAuthority>,
 ) -> Result<OauthToken, ProviderError> {
+    let clock = SystemClock::new();
+    refresh_account_with_clock_and_lock_observer(
+        executor,
+        login,
+        account,
+        now_ms,
+        deadline_ms,
+        authority,
+        &clock,
+        &|_| {},
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each refresh input is passed through unchanged"
+)]
+fn refresh_account_with_clock_and_lock_observer(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    account: &crate::identity::RegisteredAccount,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+    authority: Option<&CredentialAuthority>,
+    clock: &dyn Clock,
+    before_lock: &dyn Fn(&Directory),
+) -> Result<OauthToken, ProviderError> {
     if account.adapter() != "claude" || login.config_dir != account.directory() {
         return Err(ProviderError::IdentityMismatch);
     }
     let check = || -> Result<(), ProviderError> {
         let remaining = deadline_ms.saturating_sub(now_ms());
         if remaining == 0 {
-            return Err(ProviderError::CredentialUnavailable);
+            return Err(ProviderError::RefreshDeferred);
         }
         let argv = [
             login.executable.into(),
@@ -612,37 +787,58 @@ fn refresh_account(
         options.stop_on_output_limit = true;
         let out = executor
             .execute(options)
-            .map_err(|_| ProviderError::CredentialUnavailable)?;
-        if out.termination != Termination::Exit(0)
+            .map_err(|_| ProviderError::RefreshDeferred)?;
+        if !matches!(out.termination, Termination::Exit(_))
             || out.timed_out
             || out.stdout.truncated
             || out.stdout.read_failed
             || out.drain_truncated
             || out.cancelled
         {
-            return Err(ProviderError::CredentialUnavailable);
+            return Err(ProviderError::RefreshDeferred);
         }
         #[derive(Deserialize)]
         struct Status {
             #[serde(rename = "loggedIn")]
             logged_in: bool,
+            #[serde(default)]
             email: String,
         }
         let status: Status = serde_json::from_slice(&out.stdout.bytes)
             .map_err(|_| ProviderError::UnknownIdentity)?;
-        if !status.logged_in
-            || crate::identity::fingerprint(&status.email).as_deref() != Some(account.key())
-        {
+        if !status.logged_in {
+            return Err(ProviderError::LoginRequired);
+        }
+        if out.termination != Termination::Exit(0) {
+            return Err(ProviderError::RefreshDeferred);
+        }
+        if crate::identity::fingerprint(&status.email).as_deref() != Some(account.key()) {
             return Err(ProviderError::IdentityMismatch);
         }
         Ok(())
     };
     check()?;
-    let mut token = match lane_token(login)? {
-        Some(token) => token,
-        None => refresh_if_expiring(executor, login, now_ms, deadline_ms, authority)?,
+    let token = match lane_token(login)? {
+        Some(token) => Ok(token),
+        None => refresh_with_clock_and_lock_observer(
+            executor,
+            login,
+            now_ms,
+            deadline_ms,
+            authority,
+            MIN_LIFETIME_MS,
+            false,
+            clock,
+            before_lock,
+        ),
     };
     check()?;
+    let mut token = token.map_err(|error| match error {
+        ProviderError::CredentialExpired | ProviderError::CredentialUnavailable => {
+            ProviderError::RefreshDeferred
+        }
+        other => other,
+    })?;
     token.account = Some((account.key().into(), account.directory().to_owned()));
     Ok(token)
 }
@@ -651,7 +847,7 @@ fn refresh_account(
 /// and passes it through an inherited pipe. Sandboxed lanes deny keychain
 /// services and use attempt-private configuration; native lanes keep the
 /// ordinary configuration unless an account selects another directory.
-/// Provenant and its hook helpers are added explicitly for lane MCP use.
+/// Provenant and its hook helpers are added explicitly for lane use.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -659,14 +855,27 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    let mut tool_requirements = crate::launch::ToolRequirements::default();
     // No credential path is granted: the token arrives through a pipe.
     if plan.selected_authentication.is_some() {
-        return Err(ProviderError::UnsupportedPolicy);
+        return Err(input.boundary_error(
+            "CLAUDE_PREPARE_CREDENTIALS",
+            "Claude receives its selected account token through the host pipe",
+            ProviderError::UnsupportedPolicy,
+        ));
     }
-    let token = input.token.ok_or(ProviderError::UnsupportedPolicy)?;
+    let token = input.token.ok_or_else(|| {
+        input.boundary_error(
+            "CLAUDE_PREPARE_CREDENTIALS",
+            "Claude launch requires its selected host-read token",
+            ProviderError::UnsupportedPolicy,
+        )
+    })?;
     if token.account.is_some() && input.account.is_none() {
-        return Err(ProviderError::IdentityMismatch);
+        return Err(input.boundary_error(
+            "CLAUDE_PREPARE_AUTHORITY",
+            "Claude token identity must match the selected account",
+            ProviderError::IdentityMismatch,
+        ));
     }
     if let Some(account) = input.account
         && token
@@ -674,17 +883,29 @@ fn prepare(
             .as_ref()
             .is_none_or(|(key, dir)| key != account.key() || dir != account.directory())
     {
-        return Err(ProviderError::IdentityMismatch);
+        return Err(input.boundary_error(
+            "CLAUDE_PREPARE_AUTHORITY",
+            "Claude token identity must match the selected account",
+            ProviderError::IdentityMismatch,
+        ));
     }
     let session_id = match (session, input.continuation) {
         (Session::Resume, Some(continuation)) => continuation.session().to_owned(),
-        (Session::Resume, None) => return Err(ProviderError::UnknownIdentity),
+        (Session::Resume, None) => {
+            return Err(input.boundary_error(
+                "CLAUDE_PREPARE_AUTHORITY",
+                "resumed Claude invocation has no validated continuation identity",
+                ProviderError::UnknownIdentity,
+            ));
+        }
         (Session::Fresh, _) => uuid_v4(input.nonce),
     };
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "-p".as_ref(),
         "--strict-mcp-config".as_ref(),
+        "--setting-sources".as_ref(),
+        "".as_ref(),
         "--permission-prompts".as_ref(),
         "none".as_ref(),
         "--output-format".as_ref(),
@@ -698,96 +919,45 @@ fn prepare(
         Session::Resume => "--resume".into(),
     });
     argv.push(session_id.clone().into());
-    let shell = access == Access::WorktreeWrite;
-    let web = plan.network == NetworkAccess::Open;
-    let (mode, tools) = match access {
-        Access::ReadOnly => ("dontAsk", "Read,Grep,Glob,Bash,Skill"),
-        Access::WorktreeWrite => ("bypassPermissions", "default"),
-    };
-    let tools = if web && !shell {
-        format!("{tools},WebFetch,WebSearch")
-    } else {
-        tools.to_owned()
-    };
     argv.extend(
-        [
-            "--permission-mode",
-            mode,
-            "--tools",
-            &tools,
-            "--model",
-            input.route.model.as_str(),
-        ]
-        .map(OsString::from),
+        crate::launch::CLAUDE_NATIVE_ARGUMENTS
+            .iter()
+            .map(OsString::from),
     );
+    argv.extend(["--model".into(), input.route.model.as_str().into()]);
     if let Some(effort) = &input.route.effort {
         argv.extend(["--effort".into(), effort.into()]);
     }
-    if !shell && let Some(read_only) = &plan.read_only {
-        // The following MCP flags terminate --add-dir's variadic paths.
+    if access == Access::ReadOnly
+        && let Some(read_only) = &plan.read_only
+    {
+        // The flags that follow terminate --add-dir's variadic paths.
         add_git_dirs(&mut argv, read_only.git_read_paths(), input.cwd);
     }
     if access == Access::ReadOnly {
         // The handoff is beside the pinned source view, outside the cwd.
-        // Bash is pre-approved below; native file tools also need this root.
+        // Provider tools need explicit workspace roots even though the outer
+        // filesystem profile remains the authority for reads and writes.
         if let Some(private) = &plan.private_state {
             argv.extend(["--add-dir".into(), private.path.as_os_str().to_owned()]);
         }
-        // dontAsk mode refuses reads outside the working directory and its
-        // added directories, even where the seatbelt profile would allow them.
-        // A root that holds the working directory still reaches beyond it.
+        // Claude's file tools use their workspace context in addition to the
+        // outer filesystem profile. A root holding the cwd reaches beyond it.
         for root in &plan.read_roots {
-            if !root.path.starts_with(input.cwd) && !input.images.contains(&root.path) {
+            if !root.path.starts_with(input.cwd) {
                 argv.extend(["--add-dir".into(), root.path.as_os_str().to_owned()]);
             }
         }
     }
 
     let mut package_omissions = Vec::new();
-    let package = package_grant(input.executable, &mut package_omissions);
+    let package = package_grant(input.executable, &mut package_omissions, input.policy)?;
     let scratch = &plan.scratch.path;
-    // Filesystem confinement owns writer path access; native permission prompts
-    // would refuse tools that cannot ask for approval in a headless lane.
-    let allowed_tools = if web {
-        "Bash,Skill,mcp__fabric__*,WebFetch,WebSearch"
-    } else {
-        "Bash,Skill,mcp__fabric__*"
-    };
-    let image_rules = if shell {
-        Vec::new()
-    } else {
-        input
-            .images
-            .iter()
-            .map(|image| {
-                let path = image.to_str().ok_or(ProviderError::InvalidPath)?;
-                if !image.is_absolute() {
-                    return Err(ProviderError::InvalidPath);
-                }
-                // Read rules use gitignore patterns; escape metacharacters in filenames.
-                let escaped: String = path
-                    .chars()
-                    .flat_map(|c| {
-                        if matches!(c, '*' | '?' | '[' | ']' | '\\' | ' ') {
-                            vec!['\\', c]
-                        } else {
-                            vec![c]
-                        }
-                    })
-                    .collect();
-                Ok(format!("Read(/{escaped})"))
-            })
-            .collect::<Result<Vec<_>, ProviderError>>()?
-    };
-    let mut setup = input.provenant.claude(
-        scratch,
-        &mut argv,
-        (!shell).then_some(allowed_tools),
-        &image_rules,
-    )?;
+    // All native tools are available; the outer profile supplies the path and
+    // network boundaries for this lane.
+    let mut setup = Vec::new();
 
-    let toolchain = shell || web;
-    let path = crate::launch::tool_search_path(input.home, toolchain);
+    let path = crate::launch::tool_search_path(input.home, true, input.policy)?;
     let mut env = base_env(input, scratch, path);
     if input.account.is_some() {
         // The selected login takes precedence over ambient provider selectors.
@@ -803,9 +973,13 @@ fn prepare(
             .any(|name| key == *name)
         });
     }
-    input
-        .provenant
-        .environment(scratch, &mut env, &mut setup, input.sandboxed())?;
+    input.provenant.environment(
+        scratch,
+        &mut env,
+        &mut setup,
+        input.sandboxed(),
+        input.policy,
+    )?;
     env.extend(
         [
             ("CLAUDE_CODE_TMPDIR", scratch.as_os_str()),
@@ -819,11 +993,14 @@ fn prepare(
     let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
     let omitted_discovery = package_omissions;
     let discover_skills = user_skills.is_some();
-    let private = &plan
-        .private_state
-        .as_ref()
-        .ok_or(ProviderError::UnsupportedPolicy)?
-        .path;
+    let private = crate::launch::private_state_or_scratch(
+        plan.private_state
+            .as_ref()
+            .map(|state| state.path.as_path()),
+        &plan.scratch.path,
+        input.policy,
+        "CLAUDE_PREPARE_NONE",
+    )?;
     let config = if input.sandboxed() {
         private.join("claude-config")
     } else {
@@ -863,18 +1040,6 @@ fn prepare(
     }
     // The git wrapper script remains available to Bash.
     tool_exec_roots.push(subtree(scratch.join("bin")));
-    // Use the same read-only toolchain, public TLS configuration and CLT
-    // selection as Codex. Access still controls private caches and writes.
-    if toolchain && input.sandboxed() {
-        crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
-        crate::launch::node_tools(
-            input.home,
-            access,
-            crate::launch::lane_cache(input),
-            &mut tool_requirements,
-            &mut env,
-        );
-    }
     let mut prompt = input.prompt.text().to_owned();
     if !input.images.is_empty() {
         prompt.push_str("\n\nAttached images:\n");
@@ -894,8 +1059,10 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: staged_skills,
-        tool_requirements,
+        tool_requirements: Default::default(),
         git_wrapper: Default::default(),
+        policy: input.policy.clone(),
+        credential_roots: input.credential_roots.clone(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
@@ -915,10 +1082,7 @@ fn prepare(
         },
         stream,
     };
-    crate::launch::prepare_tool_requirements(input, &mut spec);
-    input
-        .provenant
-        .grant(&mut spec.profile.spec, &mut spec.setup, true);
+    crate::launch::prepare_tool_requirements(input, &mut spec)?;
     Ok(spec)
 }
 
@@ -934,7 +1098,12 @@ pub(super) fn add_git_dirs<'a>(
     }
 }
 
-crate::quota_source!(Claude, "claude");
+crate::quota_source!(
+    Claude,
+    "claude",
+    crate::quota_live::claude::capture_source,
+    crate::quota::claude::decode_source
+);
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum Event {
@@ -1326,27 +1495,20 @@ mod overload_tests {
     }
 
     #[test]
-    fn permission_denial_with_answer_is_a_note() {
-        let events = decode(br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"result":"done","permission_denials":[{"tool_name":"Read"}]}"#).unwrap();
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, E::DeniedNote { action } if action == "Read"))
-        );
-        assert!(events.iter().any(|event| matches!(event, E::Terminal)));
-        assert!(!events.iter().any(|event| matches!(event, E::Denied { .. })));
-    }
-
-    #[test]
-    fn permission_denial_without_answer_is_a_note() {
-        let events = decode(br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"result":"","permission_denials":[{"tool_name":"Read"}]}"#).unwrap();
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, E::DeniedNote { action } if action == "Read"))
-        );
-        assert!(events.iter().any(|event| matches!(event, E::Terminal)));
-        assert!(!events.iter().any(|event| matches!(event, E::Denied { .. })));
+    fn permission_denials_are_notes_with_or_without_an_answer() {
+        for result in ["done", ""] {
+            let input = format!(
+                "{{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"{result}\",\"permission_denials\":[{{\"tool_name\":\"Read\"}}]}}"
+            );
+            let events = decode(input.as_bytes()).unwrap();
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, E::DeniedNote { action } if action == "Read"))
+            );
+            assert!(events.iter().any(|event| matches!(event, E::Terminal)));
+            assert!(!events.iter().any(|event| matches!(event, E::Denied { .. })));
+        }
     }
 
     #[test]
@@ -1577,20 +1739,63 @@ mod overload_tests {
     }
 
     #[test]
-    fn result_529_is_typed_overload_with_provider_reason() {
-        let events = decode(br#"{"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"api_error_status":529,"result":"Overloaded"}"#).unwrap();
-        assert!(events.contains(&E::ModelOverloaded {
-            message: "Overloaded".into()
-        }));
-        let events = decode(br#"{"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"api_error_status":500,"result":"Overloaded"}"#).unwrap();
-        assert!(events.contains(&E::Error));
-        let events = decode(br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"api_error_status":529,"result":"ok"}"#).unwrap();
-        assert!(events.contains(&E::Terminal));
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, E::ModelOverloaded { .. }))
-        );
+    fn overload_causes_are_typed_across_result_and_assistant_events() {
+        enum Expected {
+            Overloaded(&'static str, bool),
+            Error,
+            Terminal,
+        }
+        let mut cases = vec![
+            (
+                br#"{"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"api_error_status":529,"result":"Overloaded"}"#.to_vec(),
+                Expected::Overloaded("Overloaded", false),
+            ),
+            (
+                br#"{"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"api_error_status":500,"result":"Overloaded"}"#.to_vec(),
+                Expected::Error,
+            ),
+            (
+                br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"api_error_status":529,"result":"ok"}"#.to_vec(),
+                Expected::Terminal,
+            ),
+            (
+                br#"{"type":"assistant","session_id":"s","is_api_error_message":true,"api_error_status":529,"message":{"role":"assistant","model":"<synthetic>","content":[]}}"#.to_vec(),
+                Expected::Overloaded("provider overloaded", true),
+            ),
+        ];
+        for error in ["overloaded", "overloaded_error"] {
+            cases.push((
+                format!(
+                    r#"{{"type":"assistant","session_id":"s","error":"{error}","is_api_error_message":true,"message":{{"role":"assistant","model":"<synthetic>","content":[{{"type":"text","text":"service unavailable"}}]}}}}"#
+                )
+                .into_bytes(),
+                Expected::Overloaded("service unavailable", true),
+            ));
+        }
+
+        for (wire, expected) in cases {
+            let events = decode(&wire).expect("provider event decodes");
+            match expected {
+                Expected::Overloaded(message, has_session) => {
+                    assert!(events.iter().any(|event| matches!(
+                        event,
+                        E::ModelOverloaded { message: actual } if actual == message
+                    )));
+                    if has_session {
+                        assert!(events.contains(&E::Session("s".into())));
+                    }
+                }
+                Expected::Error => assert!(events.contains(&E::Error)),
+                Expected::Terminal => {
+                    assert!(events.contains(&E::Terminal));
+                    assert!(
+                        !events
+                            .iter()
+                            .any(|event| matches!(event, E::ModelOverloaded { .. }))
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1671,27 +1876,6 @@ mod overload_tests {
             !events
                 .iter()
                 .any(|event| matches!(event, E::QuotaLimited { .. }))
-        );
-    }
-
-    #[test]
-    fn assistant_typed_overload_keeps_reason_and_session() {
-        for error in ["overloaded", "overloaded_error"] {
-            let raw = format!(
-                r#"{{"type":"assistant","session_id":"s","error":"{error}","is_api_error_message":true,"message":{{"role":"assistant","model":"<synthetic>","content":[{{"type":"text","text":"service unavailable"}}]}}}}"#
-            );
-            let events = decode(raw.as_bytes()).unwrap();
-            assert!(events.contains(&E::Session("s".into())));
-            assert!(events.contains(&E::ModelOverloaded {
-                message: "service unavailable".into()
-            }));
-        }
-        let raw = br#"{"type":"assistant","session_id":"s","is_api_error_message":true,"api_error_status":529,"message":{"role":"assistant","model":"<synthetic>","content":[]}}"#;
-        assert!(
-            decode(raw)
-                .unwrap()
-                .iter()
-                .any(|event| matches!(event, E::ModelOverloaded { .. }))
         );
     }
 }

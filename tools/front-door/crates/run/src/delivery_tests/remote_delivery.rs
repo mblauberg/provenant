@@ -61,7 +61,7 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
     assert!(matches!(
         fixture.prepare(),
         Err(RunError::DeliveryPrepare {
-            step: "integration target",
+            step: DeliveryPrepareStep::IntegrationTarget,
             ..
         })
     ));
@@ -295,8 +295,8 @@ fn delivery_records_dirty_failure_and_checked_out_integration_after_start()
         assert!(matches!(receipt.state, WriterDeliveryState::Failed { .. }));
         if !dirty {
             assert!(matches!(receipt.state, WriterDeliveryState::Failed {
-                stage: WriterDeliveryStage::Integrate, ref extra
-            } if extra.get("reason").and_then(serde_json::Value::as_str).is_some_and(|reason| reason.contains("parent_busy"))));
+                stage: WriterDeliveryStage::Integrate, ref reason, ..
+            } if reason.as_deref().is_some_and(|reason| reason.contains("parent_busy"))));
         }
         let raw =
             artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?.ok_or("delivery")?;
@@ -316,7 +316,8 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
             .ok_or("destination")?;
     let first = fixture.prepare()?;
     let second_writer = WriterRequest {
-        extra: Default::default(),
+        extra: fixture.writer.extra.clone(),
+        custody_project: fixture.writer.custody_project,
         project: fixture.writer.project.clone(),
         worktree: fixture.root.join("second-lane"),
     };
@@ -517,7 +518,7 @@ fn commit_pr_body_is_bounded_and_contains_commit_messages()
             && body.contains("Attempt fixture")
     );
     let capped = cap_pr_body("\u{1f600}".repeat(30_000));
-    assert!(capped.len() <= 60_000 && capped.ends_with("[Commit summary truncated.]\n"));
+    assert!(capped.len() <= PR_BODY_LIMIT && capped.ends_with(PR_BODY_TRUNCATION_NOTE));
     fixture.commit(
         &fixture.writer.worktree,
         &format!("Large commit\n\n{}", "\u{1f600}".repeat(20_000)),
@@ -527,7 +528,7 @@ fn commit_pr_body_is_bounded_and_contains_commit_messages()
         host.head(&fixture.writer)?,
         "Run fixture\nAttempt fixture",
     )?;
-    assert!(body.len() <= 60_000 && body.contains("[Commit summary truncated.]"));
+    assert!(body.len() <= PR_BODY_LIMIT && body.ends_with(PR_BODY_TRUNCATION_NOTE.trim_end()));
     Ok(())
 }
 
@@ -852,13 +853,13 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
     };
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
-    input.request.tasks[0].deliver = Some(fixture.request.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
+    input.request.task.deliver = Some(fixture.request.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let host = fixture.prepare()?;
     let head = host.head(&fixture.writer)?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     artifacts::seal(
         &attempt,
         "writer-terminal.json",
@@ -913,14 +914,11 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
     };
     let receipt = deliver(true)?;
     assert!(flag.exists(), "the commit body was never built");
-    let WriterDeliveryState::Failed { stage, extra } = &receipt.state else {
+    let WriterDeliveryState::Failed { stage, reason, .. } = &receipt.state else {
         panic!("expected a failed delivery, got {:?}", receipt.state);
     };
     assert_eq!(*stage, WriterDeliveryStage::Head);
-    let reason = extra
-        .get("reason")
-        .and_then(serde_json::Value::as_str)
-        .ok_or("reason")?;
+    let reason = reason.as_deref().ok_or("reason")?;
     let expected = provenant_confinement::utility::UtilityError::Truncated { stream: "stdout" };
     assert!(reason.contains(&expected.to_string()), "{reason}");
     Ok(())

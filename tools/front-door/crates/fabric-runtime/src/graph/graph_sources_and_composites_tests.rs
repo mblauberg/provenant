@@ -97,9 +97,7 @@ fn reader_review_base_resolves_in_its_bound_source_writer_and_replays() {
     reader.source = Some(SourceBinding::Node {
         node: "writer".into(),
     });
-    reader
-        .extra
-        .insert("review_base".into(), serde_json::json!("moving-ref"));
+    reader.review_base = Some("moving-ref".into());
     let mut document = graph(vec![reader, writer]);
     document.schema_version = 2;
     let mut written = terminal(AttemptOutcome::Succeeded);
@@ -279,11 +277,17 @@ fn schema_two_refuses_a_host_that_cannot_bind_a_writer() {
     let mut document = graph(vec![writer]);
     document.schema_version = 2;
     let mut journal = MemoryJournal::default();
+    let mut owner = ErrorLauncher::default();
     assert!(matches!(
-        advance(&document, &mut ErrorLauncher::default(), &mut journal),
+        advance(&document, &mut owner, &mut journal),
         Err(GraphError::Refused(_))
     ));
-    assert!(journal.0.is_none());
+    assert!(owner.calls.is_empty());
+    assert!(
+        journal.0.as_ref().is_none_or(|checkpoint| {
+            checkpoint.nodes.iter().all(|node| node.attempts.is_empty())
+        })
+    );
 }
 
 #[test]
@@ -649,39 +653,40 @@ fn composite_running_status_does_not_consume_an_attempt_slot() {
         ..Default::default()
     };
     let mut owner = FakeOwner {
-        observations: [
-            AttemptObservation::Pending { attempt_ref: None },
-            terminal(AttemptOutcome::Succeeded),
-            terminal(AttemptOutcome::Succeeded),
-        ]
-        .into(),
+        admission_policy: Some({
+            use provenant_records::policy::{Policy, Source, Strength};
+            let mut policy = Policy::default();
+            policy.overlay(
+                &[("GRAPH_CONCURRENCY_CAP".to_owned(), Strength::Refuse)].into(),
+                Source::Project,
+            );
+            policy
+        }),
+        observations: [AttemptObservation::Pending { attempt_ref: None }].into(),
         ..Default::default()
     };
-    let mut journal = MemoryJournal::default();
-    let pending = advance_with_budget(
+    let run = advance_with_budget(
         &document,
         &mut owner,
-        &mut journal,
+        &mut MemoryJournal::default(),
         &limits,
         &Default::default(),
     )
     .unwrap();
-    assert_eq!(owner.calls.len(), 1);
+    let member = |id: &str| {
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == format!("group--{id}"))
+            .unwrap()
+    };
+    assert_eq!(member("a").state, NodeState::Running);
+    // A refused admission is terminal for the node; it has no queued state.
+    assert_eq!(member("b").state, NodeState::Failed);
     assert_eq!(
-        pending.checkpoint.nodes.last().unwrap().state,
-        NodeState::Running
+        member("b").advance_error_code.as_deref(),
+        Some("concurrency_cap")
     );
-    let complete = advance_with_budget(
-        &document,
-        &mut owner,
-        &mut journal,
-        &limits,
-        &Default::default(),
-    )
-    .unwrap();
-    assert_eq!(complete.status, GraphStatus::Complete);
-    assert!(complete.checkpoint.successful());
-    assert_eq!(owner.calls.len(), 3);
 }
 
 #[test]
@@ -864,10 +869,7 @@ fn composite_depth_uses_the_same_bound_in_preflight_and_runtime() {
         &Default::default(),
     )
     .unwrap();
-    assert_eq!(
-        run.checkpoint.pause_reason.as_deref(),
-        Some(reason.as_str())
-    );
+    assert_eq!(run.checkpoint.pause_reason(), Some(reason.as_str()));
     assert!(owner.calls.is_empty());
 }
 

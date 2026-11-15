@@ -17,6 +17,7 @@ use thiserror::Error;
 pub const DEFAULT_CAPTURE_LIMIT: usize = 8 * 1024 * 1024;
 pub const MAX_CAPTURE_LIMIT: usize = 64 * 1024 * 1024;
 pub const FRAME_LIMIT: usize = 64 * 1024;
+const DETACHED_RECEIPT_LIMIT: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum Termination {
@@ -152,7 +153,7 @@ pub struct ExecOptions<'a> {
     /// Pass a lane or updater lease through exec, including to descendants.
     pub inherited_lease: Option<&'a crate::fs::LockGuard>,
     /// Verified profile custody; prepare a read pipe at the final exec edge.
-    pub inherited_profile: Option<&'a dyn crate::sys::profile::ProfileSource>,
+    pub inherited_profile: Option<&'a dyn crate::sys::profile::LimitSource>,
     /// Run in a private session and kill the whole group immediately on timeout.
     pub process_group: bool,
     /// Run in a private session and kill remaining group members on every exit,
@@ -169,6 +170,9 @@ pub struct ExecOptions<'a> {
     pub stderr_filter: Option<&'a mut dyn CaptureFilter>,
     pub cancel: Option<&'a CancelToken>,
     pub timeout: Duration,
+    /// Once spawned, finish the operation even after its soft deadline or cancellation.
+    /// For non-interruptible transactions such as single-use credential rotation.
+    pub wait_for_completion: bool,
     pub terminate_grace: Duration,
     pub reap_timeout: Duration,
     pub stop_on_output_limit: bool,
@@ -194,6 +198,7 @@ impl<'a> ExecOptions<'a> {
             stderr_filter: None,
             cancel: None,
             timeout,
+            wait_for_completion: false,
             terminate_grace: Duration::from_millis(250),
             reap_timeout: Duration::from_millis(250),
             stop_on_output_limit: false,
@@ -208,7 +213,9 @@ pub enum ExecError {
     DurationOutOfRange,
     #[error("capture or queue limit exceeds its bound")]
     InvalidLimit,
-    #[error("a group watchdog requires process_group and cleanup_process_group")]
+    #[error(
+        "a group watchdog requires process_group, cleanup_process_group and an interruptible deadline"
+    )]
     WatchdogRequiresGroupCleanup,
     #[error("capture stream has already been finished")]
     CaptureFinished,
@@ -336,37 +343,63 @@ pub fn detached_receipt(
     )
     .map_err(io_error("spawn detached worker"))?;
     let mut output = child.stdout.take().ok_or(ExecError::EmptyArgv)?;
-    let mut receipt = Vec::new();
-    loop {
-        if Instant::now() >= deadline {
-            return Ok(None);
-        }
+    Ok(receipt_until(deadline, Instant::now, |buffer, expired| {
         match child.ready(Some(&output), None, None) {
             Ok(true) => {}
-            Ok(false) => continue,
-            Err(_) => return Ok(Some(receipt)),
+            Ok(false) => return ReceiptStep::Pending,
+            Err(_) => return ReceiptStep::End,
         }
-        if Instant::now() >= deadline {
-            return Ok(None);
+        if expired() {
+            return ReceiptStep::Expired;
         }
-        let mut buf = [0_u8; 4096];
-        match output.read(&mut buf) {
-            Ok(0) => return Ok(Some(receipt)),
-            Ok(n) => {
-                receipt.extend_from_slice(&buf[..n]);
-                if receipt.len() > 1024 * 1024 {
-                    return Ok(Some(receipt));
-                }
-                if receipt.last() == Some(&b'\n') {
-                    return Ok(Some(receipt));
-                }
-            }
+        match output.read(buffer) {
+            Ok(0) => ReceiptStep::End,
+            Ok(count) => ReceiptStep::Bytes(count),
             Err(error)
                 if matches!(
                     error.kind(),
                     io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                ) => {}
-            Err(_) => return Ok(Some(receipt)),
+                ) =>
+            {
+                ReceiptStep::Retry
+            }
+            Err(_) => ReceiptStep::End,
+        }
+    }))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReceiptStep {
+    Pending,
+    Bytes(usize),
+    End,
+    Expired,
+    Retry,
+}
+
+fn receipt_until<T: Copy + Ord>(
+    deadline: T,
+    mut now: impl FnMut() -> T,
+    mut next: impl FnMut(&mut [u8], &mut dyn FnMut() -> bool) -> ReceiptStep,
+) -> Option<Vec<u8>> {
+    let mut receipt = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        if now() >= deadline {
+            return None;
+        }
+        let mut expired = || now() >= deadline;
+        let step = next(&mut buffer, &mut expired);
+        match step {
+            ReceiptStep::Pending | ReceiptStep::Retry => continue,
+            ReceiptStep::End => return Some(receipt),
+            ReceiptStep::Expired => return None,
+            ReceiptStep::Bytes(count) => {
+                receipt.extend_from_slice(&buffer[..count]);
+                if receipt.len() > DETACHED_RECEIPT_LIMIT || receipt.last() == Some(&b'\n') {
+                    return Some(receipt);
+                }
+            }
         }
     }
 }
@@ -411,7 +444,10 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
     if options.stdout.limit() > MAX_CAPTURE_LIMIT || options.stderr.limit() > MAX_CAPTURE_LIMIT {
         return Err(ExecError::InvalidLimit);
     }
-    if options.group_watchdog && !(options.process_group && options.cleanup_process_group) {
+    if options.group_watchdog
+        && (options.wait_for_completion
+            || !(options.process_group && options.cleanup_process_group))
+    {
         return Err(ExecError::WatchdogRequiresGroupCleanup);
     }
     if options.cancel.is_some_and(CancelToken::is_cancelled) {
@@ -524,7 +560,11 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
         let overflow = options.stop_on_output_limit
             && (out_pump.outcome().truncated || err_pump.outcome().truncated);
         let cancelled = options.cancel.is_some_and(CancelToken::is_cancelled);
-        if status.is_none() && term_at.is_none() && (now >= deadline || overflow || cancelled) {
+        if !options.wait_for_completion
+            && status.is_none()
+            && term_at.is_none()
+            && (now >= deadline || overflow || cancelled)
+        {
             stdin = None;
             let delivered = match child.signal(if options.process_group {
                 Signal::Kill

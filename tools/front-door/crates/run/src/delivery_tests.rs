@@ -1,7 +1,7 @@
 //! Host Git conformance with a linked worktree and a local bare remote.
 use super::delivery::*;
 use super::*;
-use provenant_core::{CancelToken, GitOid};
+use provenant_core::{CancelToken, GitOid, ProjectId};
 use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_os::fs::Directory;
 use std::{ffi::OsString, path::Path, time::Duration};
@@ -12,6 +12,56 @@ pub(super) struct PrepareFixture {
     environment: Vec<(OsString, OsString)>,
     pub(super) writer: WriterRequest,
     request: WriterDeliveryRequest,
+}
+
+pub(super) fn registered_writer_project_id(
+    project: &Path,
+    home: &Path,
+    checkout: &Path,
+    state: &Path,
+) -> std::result::Result<ProjectId, Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(home)?;
+    std::fs::create_dir_all(checkout)?;
+    let mut inputs = provenant_core::RootInputs::new(home.to_path_buf(), checkout.to_path_buf());
+    inputs.state_dir = Some(state.to_path_buf());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    std::fs::create_dir_all(roots.state.as_path())?;
+    std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::set_permissions(
+        roots.state.as_path(),
+        std::fs::Permissions::from_mode(0o700),
+    )?;
+    struct Free;
+    impl provenant_confinement::worktrees::WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[std::path::PathBuf],
+        ) -> std::collections::BTreeMap<
+            std::path::PathBuf,
+            provenant_confinement::worktrees::Occupancy,
+        > {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
+                .collect()
+        }
+    }
+    let clock = provenant_os::clock::SystemClock;
+    let cancel = CancelToken::new();
+    let workers = Free;
+    Ok(
+        provenant_confinement::worktrees::with_context_using_workers(
+            &roots,
+            home,
+            project,
+            &clock,
+            &cancel,
+            &workers,
+            |context| Ok(context.binding.project_id()),
+        )?,
+    )
 }
 
 // Medium: real filesystem locking with the remote process edge supplied as a callback.
@@ -125,10 +175,18 @@ impl OriginFixture {
         if let Some(git) = git {
             environment.push(("PROVENANT_GIT".into(), git.as_os_str().to_owned()));
         }
+        let custody_project = registered_writer_project_id(
+            &self.project,
+            &self.home,
+            &self.root.join("checkout"),
+            &self.root.join("state"),
+        )
+        .map_err(|error| crate::RunError::Io(std::io::Error::other(error.to_string())))?;
         let writer = WriterRequest {
+            extra: Default::default(),
+            custody_project: Some(custody_project),
             project: self.project.clone(),
             worktree: self.project.clone(),
-            extra: Default::default(),
         };
         HostDeliveryContext::new(environment)
             .refresh_origin_with(&writer, &self.project.join(".git"))?;
@@ -144,7 +202,7 @@ impl PrepareFixture {
         let home = root.join("home");
         std::fs::create_dir(&project)?;
         std::fs::create_dir(&home)?;
-        let fixture = Self {
+        let mut fixture = Self {
             _temp: temp,
             root: root.clone(),
             environment: vec![
@@ -156,6 +214,7 @@ impl PrepareFixture {
             .collect(),
             writer: WriterRequest {
                 extra: Default::default(),
+                custody_project: None,
                 project,
                 worktree: root.join("lane"),
             },
@@ -180,6 +239,13 @@ impl PrepareFixture {
             "lane",
             fixture.writer.worktree.to_str().ok_or("lane")?,
         ])?;
+        let custody_project = registered_writer_project_id(
+            &fixture.writer.project,
+            &root.join("home"),
+            &root.join("checkout"),
+            &root.join("state"),
+        )?;
+        fixture.writer.custody_project = Some(custody_project);
         Ok(fixture)
     }
     pub(super) fn git(&self, args: &[&str]) -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -204,7 +270,11 @@ impl PrepareFixture {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
     }
     fn prepare(&self) -> Result<HostDeliveryContext> {
-        HostDeliveryContext::new(self.environment.clone()).prepare(&self.writer, &self.request)
+        // Production passes the state root explicitly, so a broken captured
+        // HOME is reported by its own environment check.
+        HostDeliveryContext::new(self.environment.clone())
+            .with_host_state(&self.root.join("state"))
+            .prepare(&self.writer, &self.request)
     }
     pub(crate) fn lane_git(
         &self,
@@ -272,6 +342,7 @@ impl PrepareFixture {
         let utility = UtilityRuntime::new(
             provenant_os::git::git_executable().ok_or("git executable")?,
             self.root.join("home"),
+            &state,
         )?;
         let executor = SystemExecutor::new(1)?;
         let cancel = CancelToken::new();
@@ -294,9 +365,8 @@ impl PrepareFixture {
             base,
             custody: None,
             facts: Default::default(),
-            review_exempt: Default::default(),
         };
-        let scope = provenant_supervisor::custody::Scope {
+        let scope = provenant_records::custody::Scope {
             generation: 1,
             ..tests::exit().scope
         };
@@ -458,7 +528,8 @@ fn stopped_merge_is_restored(
             let attempt_path = fixture.root.join("attempt");
             let scratch = attempt_path.join("tmp/candidate-0");
             std::fs::create_dir_all(&scratch)?;
-            let utility = UtilityRuntime::new(&git, fixture.root.join("home"))?;
+            let utility =
+                UtilityRuntime::new(&git, fixture.root.join("home"), fixture.root.join("state"))?;
             let executor = SystemExecutor::new(1)?;
             let cancel = CancelToken::new();
             let repo = utility.open_repo(
@@ -599,7 +670,7 @@ fn lane_with_committed_merge() -> std::result::Result<
         fixture.root.join("home"),
         std::fs::Permissions::from_mode(0o700),
     )?;
-    let utility = UtilityRuntime::new(&git, fixture.root.join("home"))?;
+    let utility = UtilityRuntime::new(&git, fixture.root.join("home"), fixture.root.join("state"))?;
     let executor = SystemExecutor::new(1)?;
     let cancel = CancelToken::new();
     let repo = utility.open_repo(
@@ -770,7 +841,11 @@ fn unpublished_lane_leaves_the_worktree_clean_and_names_the_commit_and_branch()
         worktree_git(&fixture, &git, &["status", "--porcelain"])?,
         "?? ours.txt"
     );
-    let utility = provenant_confinement::UtilityRuntime::new(&git, fixture.root.join("home"))?;
+    let utility = provenant_confinement::UtilityRuntime::new(
+        &git,
+        fixture.root.join("home"),
+        fixture.root.join("state"),
+    )?;
     let executor = SystemExecutor::new(1)?;
     let repo = utility.open_repo(
         &executor,
@@ -784,7 +859,6 @@ fn unpublished_lane_leaves_the_worktree_clean_and_names_the_commit_and_branch()
         base: GitOid::parse(&base)?,
         custody: None,
         facts: Default::default(),
-        review_exempt: Default::default(),
     };
     let note = launch.unpublish(&Directory::open_anchor(&fixture.root.join("attempt"))?);
     assert!(note.contains(&tip), "{note}");
@@ -829,7 +903,11 @@ fn unpublished_lane_files_move_back_without_touching_foreign_edits()
     let (base_oid, tip_oid) = (GitOid::parse(&base)?, GitOid::parse(&tip)?);
     let scratch_git = scratch.join("git-common");
     let objects = scratch.join("git-objects");
-    let utility = provenant_confinement::UtilityRuntime::new(&git, fixture.root.join("home"))?;
+    let utility = provenant_confinement::UtilityRuntime::new(
+        &git,
+        fixture.root.join("home"),
+        fixture.root.join("state"),
+    )?;
     let executor = SystemExecutor::new(1)?;
     let repo = utility.open_repo(
         &executor,
@@ -964,6 +1042,7 @@ pub(super) fn registered_landed_writer_fixture(
             Ok(context.binding.project_id())
         },
     )?;
+    assert_eq!(fixture.writer.custody_project, Some(execution.project_id));
     Ok(execution)
 }
 
@@ -988,9 +1067,9 @@ fn landed_writer_fence_fixture(
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     let record = store.mark_starting(
         &store.record(id, &call)?,
         &tests::route(),
@@ -1000,7 +1079,7 @@ fn landed_writer_fence_fixture(
         &call,
     )?;
     let scope = RunStore::scope(&record);
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     if !matches!(case, LandedWriterFenceCase::Nonterminal) {
         let mut exit = tests::exit();
         exit.scope = scope;

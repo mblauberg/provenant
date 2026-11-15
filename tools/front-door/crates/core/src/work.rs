@@ -1,4 +1,4 @@
-use crate::{DurationMicros, ProjectId, RunId, WorkspaceId};
+use crate::{DurationMicros, ProjectId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{
@@ -61,10 +61,6 @@ pub enum WorkScope {
     Workspace {
         project: ProjectId,
         workspace: WorkspaceId,
-    },
-    Run {
-        project: ProjectId,
-        run: RunId,
     },
 }
 

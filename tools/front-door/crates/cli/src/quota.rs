@@ -3,7 +3,7 @@
 mod notice;
 use crate::metadata::CatalogueArg;
 use clap::{Args, Subcommand, ValueEnum};
-use provenant_core::{CancelToken, Clock, Roots, WaitBudget};
+use provenant_core::{Clock, Roots};
 use provenant_os::{
     clock::SystemClock,
     fs::{Directory, FsError, LockMode, Publication, PublishMode},
@@ -60,14 +60,6 @@ pub enum Power {
 pub enum Quota {
     /// Show recorded provider quota
     Show(Filter),
-    /// Show recorded use by account and project, with chair sessions and lane tokens
-    Usage {
-        #[command(flatten)]
-        adapter: Filter,
-        /// Days to include, as a rolling window back from now
-        #[arg(long, default_value_t = 7, catalog_u32_range = 1..=365)]
-        days: u32,
-    },
     /// List recorded quota readings with resets, plan changes and the plan price in force
     ///
     /// Readings are kept by `quota tick` and refreshes, one per distinct
@@ -275,6 +267,16 @@ fn read_records(dir: &Directory) -> Result<Vec<AccountRecord>, EdgeError> {
     Ok(records)
 }
 
+/// Quota publications are short. If another writer is publishing, leave this
+/// observation for the next refresh instead of waiting on the quota ledger.
+fn try_quota_lock(dir: &Directory) -> Result<Option<provenant_os::fs::LockGuard>, EdgeError> {
+    match dir.try_lock(OsStr::new("quota.lock"), LockMode::Exclusive) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(FsError::LockTimeout { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Read validated quota state without creating directories or refreshing providers.
 pub(crate) fn read_cache(roots: &Roots) -> Result<Vec<AccountRecord>, EdgeError> {
     read_cache_at(roots.state.as_path())
@@ -332,6 +334,7 @@ pub(crate) fn persist_provider_refusal_once(
         .as_deref()
         .ok_or(QuotaError::Invalid("provider refusal route"))?;
     let account = AccountScope {
+        extra: Default::default(),
         adapter: adapter.to_owned(),
         account_key: route
             .account_key
@@ -346,16 +349,9 @@ pub(crate) fn persist_provider_refusal_once(
 
     let root = private(state_root)?;
     let directory = child(&root, OsStr::new("quota"))?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
-    let _lock = directory.lock(
-        OsStr::new("quota.lock"),
-        LockMode::Exclusive,
-        budget,
-        &cancel,
-        &clock,
-    )?;
+    let Some(_lock) = try_quota_lock(&directory)? else {
+        return Ok(());
+    };
     let mut records = read_records(&directory)?;
     let current = records
         .iter()
@@ -405,6 +401,7 @@ pub(crate) fn persist_capacity_cooldown(
         .as_deref()
         .ok_or(QuotaError::Invalid("capacity cooldown route"))?;
     let account = AccountScope {
+        extra: Default::default(),
         adapter: adapter.to_owned(),
         account_key: route
             .account_key
@@ -419,16 +416,9 @@ pub(crate) fn persist_capacity_cooldown(
 
     let root = private(state_root)?;
     let directory = child(&root, OsStr::new("quota"))?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
-    let _lock = directory.lock(
-        OsStr::new("quota.lock"),
-        LockMode::Exclusive,
-        budget,
-        &cancel,
-        &clock,
-    )?;
+    let Some(_lock) = try_quota_lock(&directory)? else {
+        return Ok(());
+    };
     let mut records = read_records(&directory)?;
     let current = records
         .iter()
@@ -472,16 +462,9 @@ pub(crate) fn persist_provider_success(
         Err(error) => return Err(error.into()),
     };
     check_private(&root)?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
-    let _lock = directory.lock(
-        OsStr::new("quota.lock"),
-        LockMode::Exclusive,
-        budget,
-        &cancel,
-        &clock,
-    )?;
+    let Some(_lock) = try_quota_lock(&directory)? else {
+        return Ok(());
+    };
     let mut records = read_records(&directory)?;
     let current = records
         .iter()
@@ -494,6 +477,7 @@ pub(crate) fn persist_provider_success(
                 return Ok(());
             };
             let account = AccountScope {
+                extra: Default::default(),
                 adapter: adapter.into(),
                 account_key: key.into(),
                 label: label.clone(),
@@ -777,7 +761,9 @@ fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), E
         }
         if let Some((expiry, interval)) = intent.login_probe_expiry {
             file.login = Some(LoginObservation {
+                extra: Default::default(),
                 scope: ReadinessScope {
+                    extra: Default::default(),
                     host: LOCAL_HOST.into(),
                     adapter: adapter.clone(),
                     account_key: key.clone(),
@@ -981,6 +967,7 @@ fn credential_metadata(
                 Ok(metadata) => {
                     let metadata = provenant_os::fs::Metadata::from_std(metadata);
                     Some(CredentialStat {
+                        extra: Default::default(),
                         device: metadata.device,
                         inode: metadata.inode,
                         mode: metadata.mode,
@@ -993,7 +980,11 @@ fn credential_metadata(
                 // An inaccessible path is not a credential change.
                 Err(_) => return None,
             };
-            Some(CredentialMetadata { path, stat })
+            Some(CredentialMetadata {
+                extra: Default::default(),
+                path,
+                stat,
+            })
         })
         .collect()
 }
@@ -1022,6 +1013,7 @@ fn refresh_auth_metadata(
             continue;
         };
         let account = AccountScope {
+            extra: Default::default(),
             adapter: registration.adapter.clone(),
             account_key: registration.key.clone(),
             label: registration.label.clone(),
@@ -1306,6 +1298,7 @@ fn decorate_login(
         row.readiness = Some(read_readiness(
             state,
             &ReadinessScope {
+                extra: Default::default(),
                 host: LOCAL_HOST.into(),
                 adapter: row.account.adapter.clone(),
                 account_key: row.account.account_key.clone(),
@@ -1380,12 +1373,13 @@ pub fn recorded_login_rows(roots: &Roots) -> Result<Vec<AccountRow>, String> {
     recorded_login_rows_inner(roots).map_err(|error| error.to_string())
 }
 fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError> {
-    let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?.domains;
-    let accounts = domains.accounts.with_derived_accounts();
+    let domains = crate::config_reads::read_for(roots, "quota")?.domains;
+    let accounts = domains.accounts.unique_accounts();
     let mut configured: Vec<_> = accounts
         .entries
         .values()
         .map(|entry| AccountScope {
+            extra: Default::default(),
             adapter: entry.adapter.clone(),
             account_key: entry.key.clone(),
             label: entry.label.clone(),
@@ -1449,16 +1443,16 @@ fn probe_account(
     {
         let root = private(roots.state.as_path())?;
         let dir = child(&root, OsStr::new("quota"))?;
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
-        let _lock = dir.lock(
-            OsStr::new("quota.lock"),
-            LockMode::Exclusive,
-            budget,
-            &cancel,
-            &clock,
-        )?;
+        let Some(_lock) = try_quota_lock(&dir)? else {
+            return execute(
+                &Quota::Show(Filter {
+                    adapter: Some(account.adapter.clone()),
+                }),
+                roots,
+                registry,
+                effects,
+            );
+        };
         let mut records = read_records(&dir)?;
         let current = records
             .iter()
@@ -1512,10 +1506,7 @@ pub(crate) fn execute(
 ) -> Result<QuotaReport, EdgeError> {
     let all = Filter { adapter: None };
     let (filter, tick) = match command {
-        Quota::Show(filter)
-        | Quota::Usage {
-            adapter: filter, ..
-        } => (filter, None),
+        Quota::Show(filter) => (filter, None),
         // Dispatched by `run` before execute; reads the cache like `show`.
         Quota::History { .. } => (&all, None),
         Quota::Display { headline, icon } => {
@@ -1543,7 +1534,7 @@ pub(crate) fn execute(
     {
         return Err(EdgeError::Adapter);
     }
-    let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?.domains;
+    let domains = crate::config_reads::read_for(roots, "quota")?.domains;
     let (settings, entries) = (domains.quota, domains.accounts);
     let clock = SystemClock::new();
     let now = clock
@@ -1577,19 +1568,18 @@ pub(crate) fn execute(
     };
     let root = private(roots.state.as_path())?;
     let dir = child(&root, OsStr::new("quota"))?;
-    let cancel = CancelToken::new();
-    let lock = || -> Result<_, EdgeError> {
-        let budget = WaitBudget::cli(clock.mono_now(), 1).map_err(|_| EdgeError::Time)?;
-        Ok(dir.lock(
-            OsStr::new("quota.lock"),
-            LockMode::Exclusive,
-            budget,
-            &cancel,
-            &clock,
-        )?)
-    };
+    let lock = || try_quota_lock(&dir);
     let plan = {
-        let _lock = lock()?;
+        let Some(_lock) = lock()? else {
+            return execute(
+                &Quota::Show(Filter {
+                    adapter: filter.adapter.clone(),
+                }),
+                roots,
+                registry,
+                effects,
+            );
+        };
         let mut records = read_records(&dir)?;
         let home = std::env::var_os("HOME").map(PathBuf::from);
         refresh_auth_metadata(
@@ -1641,7 +1631,7 @@ pub(crate) fn execute(
         }
         let token = format!("quota-{}-{at}", std::process::id());
         let current = {
-            let _lock = lock()?;
+            let Some(_lock) = lock()? else { continue };
             let mut records = read_records(&dir)?;
             let current = records
                 .iter()
@@ -1685,6 +1675,7 @@ pub(crate) fn execute(
             .filter_map(|r| r.quota_source)
             .find(|s| s.adapter_id() == account.adapter);
         let mut login_expiry = None;
+        let mut auth_state = None;
         let outcome = match source {
             Some(source) => {
                 let probe_deadline = schedule::probe_deadline(plan.deadline_unix_seconds, at)?;
@@ -1699,6 +1690,17 @@ pub(crate) fn execute(
                     .and_then(|probe| {
                         let capture = effects.capture(&probe, current.as_ref());
                         login_expiry = effects.login_expiry_unix_seconds();
+                        let access_token_expiry = effects.access_token_expiry_unix_seconds();
+                        let signed_in = effects.signed_in();
+                        if access_token_expiry.is_some() || signed_in.is_some() {
+                            auth_state = Some(AuthState {
+                                extra: Default::default(),
+                                access_token_expiry_unix_seconds: access_token_expiry,
+                                signed_in,
+                                refresh_pending: effects.refresh_pending(),
+                                observed_unix_seconds: Some(at),
+                            });
+                        }
                         let capture = capture?;
                         source
                             .decode(&probe, &capture)
@@ -1707,16 +1709,18 @@ pub(crate) fn execute(
             }
             None => Err(ProbeFailure::Disabled),
         };
-        let readiness_reason = outcome
-            .as_ref()
-            .err()
-            .map(|failure| effects.readiness_reason(*failure));
+        let readiness_reason = match outcome.as_ref() {
+            // Auth status was verified; deferral must not publish an
+            // unavailable account and prevent launch from doing the refresh.
+            Err(ProbeFailure::RefreshDeferred) | Ok(_) => None,
+            Err(failure) => Some(effects.readiness_reason(*failure)),
+        };
         let finished = clock
             .wall_now()
             .map_err(|_| EdgeError::Time)?
             .as_timestamp()
             .as_second();
-        let _lock = lock()?;
+        let Some(_lock) = lock()? else { continue };
         let mut records = read_records(&dir)?;
         if finished <= schedule::probe_deadline(plan.deadline_unix_seconds, at)?
             && let Some(reserved) = records.iter().find(|r| {
@@ -1725,13 +1729,26 @@ pub(crate) fn execute(
         {
             match schedule::complete(reserved, &token, finished, outcome, None) {
                 Ok(mut complete) => {
+                    if let Some(replacement) = complete.replacement.as_mut() {
+                        if auth_state
+                            .as_ref()
+                            .is_some_and(|auth| auth.signed_in == Some(true))
+                            && !replacement
+                                .last_error
+                                .is_some_and(ProbeFailure::needs_login)
+                        {
+                            replacement.auth_verified_unix_seconds = Some(at);
+                        }
+                        // An unobserved login cannot inherit an older signed-in
+                        // assertion after a failed or missing probe.
+                        replacement.auth_state = auth_state;
+                    }
                     // A later failure cannot disprove a previously verified
                     // mismatch: publish the same sticky reason as the account
                     // record until a successful probe establishes recovery.
-                    let reason = if readiness_reason.is_some()
-                        && complete.replacement.as_ref().is_some_and(|record| {
-                            record.last_error == Some(ProbeFailure::AccountMismatch)
-                        }) {
+                    let reason = if complete.replacement.as_ref().is_some_and(|record| {
+                        record.last_error == Some(ProbeFailure::AccountMismatch)
+                    }) {
                         Some(ReadinessReason::AccountMismatch)
                     } else {
                         readiness_reason
@@ -1761,7 +1778,16 @@ pub(crate) fn execute(
             }
         }
     }
-    let _lock = lock()?;
+    let Some(_lock) = lock()? else {
+        return execute(
+            &Quota::Show(Filter {
+                adapter: filter.adapter.clone(),
+            }),
+            roots,
+            registry,
+            effects,
+        );
+    };
     let mut records = read_records(&dir)?;
     add_configured(&mut records, &configured);
     let now = clock
@@ -1836,10 +1862,8 @@ pub(crate) fn execute(
     Ok(shown)
 }
 /// Chair sessions the SessionStart hook recorded in `[since, until)`, with the
-/// tokens read from their transcripts. The hook stores the resolved account
-/// key; lane facts carry labels, so a registered account's key becomes its
-/// label here. A session on an unregistered config directory keeps the
-/// reserved `unattributed` account.
+/// tokens read from their transcripts. Provider identity remains the identity
+/// evidence stored with the session; config paths are used only to locate transcripts.
 pub(crate) fn chair_sessions_with_usage(
     roots: &Roots,
     home: Option<&Path>,
@@ -1847,7 +1871,7 @@ pub(crate) fn chair_sessions_with_usage(
     until: jiff::Timestamp,
 ) -> Result<Vec<provenant_telemetry::usage::ChairSession>, EdgeError> {
     use std::path::Component;
-    let accounts = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+    let accounts = crate::config_reads::read_for(roots, "quota")?
         .domains
         .accounts;
     let mut chairs = provenant_telemetry::usage::chair_sessions(roots, since, until)?;
@@ -1855,7 +1879,17 @@ pub(crate) fn chair_sessions_with_usage(
         accounts
             .entries
             .values()
-            .find(|entry| entry.adapter == chair.adapter && entry.key == chair.account)
+            .find(|entry| match &chair.account_identity.identity {
+                provenant_records::Identity::Known {
+                    provider,
+                    account_key,
+                } => {
+                    entry.adapter == chair.adapter
+                        && entry.adapter.as_str() == provider.as_str()
+                        && entry.key.as_str() == account_key.as_str()
+                }
+                provenant_records::Identity::Unknown { .. } => false,
+            })
             .map(|entry| entry.directory.clone())
             .or_else(|| {
                 // The hook records only a plain relative path under home.
@@ -1867,152 +1901,7 @@ pub(crate) fn chair_sessions_with_usage(
                     .flatten()
             })
     });
-    for chair in &mut chairs {
-        if let Some(entry) = accounts
-            .entries
-            .values()
-            .find(|entry| entry.adapter == chair.adapter && entry.key == chair.account)
-        {
-            chair.account = entry.label.clone();
-        }
-    }
     Ok(chairs)
-}
-
-fn usage_report(
-    roots: &Roots,
-    filter: &Filter,
-    days: u32,
-) -> Result<(serde_json::Value, String), EdgeError> {
-    use provenant_run::{AttemptFilter, AttemptReader, ExecutionContext, Request, RunStore};
-    use provenant_telemetry::{MAX_ATTEMPTS, Window};
-    let clock = SystemClock::new();
-    let until = clock.wall_now().map_err(|_| EdgeError::Time)?;
-    let since = provenant_core::WallTime::from_micros(
-        until.as_timestamp().as_microsecond() - i64::from(days) * 86_400_000_000,
-    )
-    .map_err(|_| EdgeError::Time)?;
-    let window = Window {
-        since: Some(since),
-        until: Some(until),
-        ..Window::default()
-    };
-    let cancel = CancelToken::new();
-    let call = Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let projects = provenant_config::registered_projects(roots)?;
-    let mut facts = Vec::new();
-    for project in &projects {
-        let context = ExecutionContext {
-            state_root: roots.state.clone(),
-            project_id: project.project_id(),
-            // Read-only facts do not use actor authority; prompts are never read.
-            actor_id: provenant_core::ActorId::from_bytes([0; 16]),
-            read_prompts: false,
-        };
-        if let Some(store) = RunStore::open_read_only(&context, &call)? {
-            for fact in store.attempts(AttemptFilter::default(), &call)? {
-                let fact = fact?;
-                if fact.finished_at < since || fact.finished_at >= until {
-                    continue;
-                }
-                if facts.len() as u64 >= MAX_ATTEMPTS {
-                    return Err(provenant_telemetry::TelemetryError::TooLarge(
-                        "100,000 selected attempts",
-                    )
-                    .into());
-                }
-                facts.push(fact);
-            }
-        }
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let chairs = chair_sessions_with_usage(
-        roots,
-        home.as_deref(),
-        since.as_timestamp(),
-        until.as_timestamp(),
-    )?;
-    let mut rows = provenant_telemetry::quota_usage(facts, chairs, &window)?;
-    if let Some(adapter) = &filter.adapter {
-        rows.retain(|row| row.adapter.as_ref() == Some(adapter));
-    }
-    let note = "Chair tokens are read from each recorded chair session's own transcript when this report runs, so they cover sessions the SessionStart hook recorded in this window, sub-agents included. A session on a config directory that is not a registered account is reported under the account `unattributed`; launch the chair with CLAUDE_CONFIG_DIR set to a registered account's directory to attribute it. Sessions whose transcript cannot be read are counted as unread, not as zero. Chair project attribution requires usage.project_attribution=true; otherwise the project is unknown. Usage logs are bounded and rotated. Lane tokens cover terminal attempts in registered projects only, not transient workspaces, and are not provider quota percentages.";
-    let mut human = format!("Recorded use: {since} to {until}\n{note}\n");
-    for row in &rows {
-        let project = projects
-            .iter()
-            .find(|p| Some(p.project_id()) == row.project)
-            .map_or_else(
-                || {
-                    row.project
-                        .map_or_else(|| "unknown project".into(), |p| p.to_string())
-                },
-                |p| p.common_dir().display().to_string(),
-            );
-        human.push_str(&format!(
-            "{} [{}] project={} ({})\n  chair: {} sessions ({} unread)\n  lanes: {} attempts\n",
-            row.account
-                .as_deref()
-                .unwrap_or("unknown account")
-                .escape_debug(),
-            row.adapter
-                .as_deref()
-                .unwrap_or("unknown adapter")
-                .escape_debug(),
-            project.escape_debug(),
-            row.project
-                .map_or_else(|| "unattributed".into(), |p| p.to_string()),
-            row.chair_sessions,
-            row.chair_sessions_unread,
-            row.lane_attempts
-        ));
-        for (source, attempts, usage, cache) in [
-            ("lanes", row.lane_attempts, &row.lane_usage, &row.lane_cache),
-            (
-                "chair",
-                row.chair_sessions.saturating_sub(row.chair_sessions_unread),
-                &row.chair_usage,
-                &row.chair_cache,
-            ),
-        ] {
-            if attempts == 0 {
-                continue;
-            }
-            for (label, total) in [
-                ("uncached input", &usage.uncached_input),
-                ("cache read", &usage.cache_read),
-                ("cache write", &usage.cache_write),
-                (
-                    "output excluding reasoning",
-                    &usage.output_excluding_reasoning,
-                ),
-                ("reasoning", &usage.reasoning),
-            ] {
-                human.push_str(&format!(
-                    "    {source} {label}: {} tokens; {} records missing this category\n",
-                    total.known, total.missing
-                ));
-            }
-            human.push_str(&format!(
-                "    {source} cache-read share: {}\n",
-                cache_share(cache)
-            ));
-        }
-    }
-    if rows.is_empty() {
-        human.push_str("No recorded use in this window.\n");
-    }
-    let data = serde_json::json!({
-        "since": since, "until": until, "rows": rows, "chair_usage_note": note,
-        "projects": projects.iter().map(|p| serde_json::json!({"project":p.project_id(), "common_dir":p.common_dir()})).collect::<Vec<_>>(),
-    });
-    if serde_json::to_vec(&data)?.len() as u64 > MAX_RECORD_BYTES {
-        return Err(EdgeError::TooLarge);
-    }
-    Ok((data, human))
 }
 
 /// Schema of `quota history --json`.
@@ -2029,7 +1918,7 @@ fn history_report(
         .map_err(|_| EdgeError::Time)?
         .as_timestamp()
         .as_second();
-    let accounts = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+    let accounts = crate::config_reads::read_for(roots, "quota")?
         .domains
         .accounts;
     let mut records = crate::quota_history::read(roots.state.as_path(), query)?;
@@ -2548,14 +2437,12 @@ pub fn run(
 ) -> u8 {
     let name = match command {
         Quota::Show(_) => "quota show",
-        Quota::Usage { .. } => "quota usage",
         Quota::History { .. } => "quota history",
         Quota::Display { .. } => "quota display",
         Quota::Tick { .. } => "quota tick",
     };
     let mut summary = None;
     let result = match &command {
-        Quota::Usage { adapter, days } => usage_report(roots, adapter, *days),
         Quota::History {
             account,
             since,
@@ -2589,7 +2476,9 @@ pub fn run(
                 | EdgeError::Quota(
                     QuotaError::Invalid(_) | QuotaError::Record(_) | QuotaError::NumberOutOfRange,
                 ) => Outcome::Invalid,
-                EdgeError::Quota(QuotaError::Refused(_) | QuotaError::Disabled) => Outcome::Refused,
+                EdgeError::Quota(
+                    QuotaError::AllowanceExhausted | QuotaError::Refused(_) | QuotaError::Disabled,
+                ) => Outcome::Refused,
                 EdgeError::Fs(FsError::Cancelled { .. }) => Outcome::Cancelled,
                 _ => Outcome::Error,
             };
@@ -2606,10 +2495,7 @@ pub fn run(
     };
     let mode = globals.render_mode(
         &human,
-        matches!(
-            command,
-            Quota::Show(_) | Quota::Usage { .. } | Quota::History { .. }
-        ),
+        matches!(command, Quota::Show(_) | Quota::History { .. }),
         summary.as_ref(),
     );
     let outcome = crate::render_or_publish(
@@ -2627,6 +2513,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_busy_quota_ledger_is_skipped_without_waiting() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("quota");
+        std::fs::create_dir(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        let directory = Directory::open_anchor(&path)?;
+        let held = directory.try_lock(OsStr::new("quota.lock"), LockMode::Exclusive)?;
+        assert!(try_quota_lock(&directory)?.is_none());
+        drop(held);
+        assert!(try_quota_lock(&directory)?.is_some());
+        Ok(())
+    }
+
+    #[test]
     fn recorded_doctor_rows_use_the_same_login_observation()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -2642,6 +2544,7 @@ mod tests {
         let dir = child(&root, OsStr::new("quota"))?;
         let now = SystemClock::new().unix_seconds();
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "claude".into(),
             account_key: "key".into(),
             label: "work".into(),
@@ -2650,6 +2553,7 @@ mod tests {
         record.revision = 1;
         record.last_error = Some(ProbeFailure::LoginExpired);
         record.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: account.clone(),
             revision: 1,
@@ -2680,6 +2584,7 @@ mod tests {
         let readiness = read_readiness(
             roots.state.as_path(),
             &ReadinessScope {
+                extra: Default::default(),
                 host: LOCAL_HOST.into(),
                 adapter: "claude".into(),
                 account_key: "key".into(),
@@ -2803,12 +2708,14 @@ mod tests {
                 generated_unix_seconds: 0,
                 accounts: vec![AccountRow {
                     account: AccountScope {
+                        extra: Default::default(),
                         adapter: "agy".into(),
                         account_key: "agy-google-abc".into(),
                         label: "work".into(),
                     },
                     readiness: None,
                     login_expiry: None,
+                    auth_state: None,
                     snapshot: None,
                     status: QuotaStatus::AuthRequired,
                     resets_at: None,
@@ -2847,12 +2754,14 @@ mod tests {
     fn decorate_gives_generic_keychain_repair_without_a_matching_registration() {
         let row = |label: &str| AccountRow {
             account: AccountScope {
+                extra: Default::default(),
                 adapter: "agy".into(),
                 account_key: "agy-google-abc".into(),
                 label: label.into(),
             },
             readiness: None,
             login_expiry: None,
+            auth_state: None,
             snapshot: None,
             status: QuotaStatus::KeychainUnavailable,
             resets_at: None,
@@ -2895,13 +2804,14 @@ mod tests {
             schema_version: 1,
             generated_unix_seconds: 0,
             accounts: vec![AccountRow {
-                account: AccountScope {
+                account: AccountScope { extra: Default::default(),
                     adapter: "agy".into(),
                     account_key: "agy-google-abc".into(),
                     label: "legacy".into(),
                 },
                 readiness: None,
                 login_expiry: None,
+                    auth_state: None,
                 snapshot: None,
                 status: QuotaStatus::KeychainUnavailable,
                 resets_at: None,
@@ -2936,12 +2846,14 @@ mod tests {
     fn quota_summary_shows_every_configured_account() {
         let row = |status| AccountRow {
             account: AccountScope {
+                extra: Default::default(),
                 adapter: "test".into(),
                 account_key: "key".into(),
                 label: format!("{status:?}"),
             },
             readiness: None,
             login_expiry: None,
+            auth_state: None,
             snapshot: None,
             status,
             resets_at: None,
@@ -3016,12 +2928,14 @@ mod tests {
         let second = |value: &str| value.parse::<jiff::Timestamp>().unwrap().as_second();
         let row = |label: &str, resets_at: Option<&str>| AccountRow {
             account: AccountScope {
+                extra: Default::default(),
                 adapter: "opencode".into(),
                 account_key: label.into(),
                 label: label.into(),
             },
             readiness: None,
             login_expiry: None,
+            auth_state: None,
             snapshot: None,
             status: QuotaStatus::Exhausted,
             resets_at: resets_at.map(str::to_owned),
@@ -3084,6 +2998,7 @@ mod tests {
         let row = &mut failed.accounts[0];
         row.error = Some(ProbeFailure::Auth);
         row.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: row.account.clone(),
             revision: 0,
@@ -3220,12 +3135,14 @@ mod tests {
         assert_eq!(shared_pool_exhaustions(&ungrouped), None);
         let row = |snapshot, status| AccountRow {
             account: AccountScope {
+                extra: Default::default(),
                 adapter: "agy".into(),
                 account_key: "k".into(),
                 label: "agy".into(),
             },
             readiness: None,
             login_expiry: None,
+            auth_state: None,
             snapshot,
             status,
             resets_at: None,
@@ -3288,6 +3205,7 @@ mod tests {
         let root = private(temp.path())?;
         let dir = child(&root, OsStr::new("quota"))?;
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "codex".into(),
             account_key: "work".into(),
             label: "work".into(),
@@ -3408,6 +3326,7 @@ mod tests {
             ..Default::default()
         };
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "codex".into(),
             account_key: "work".into(),
             label: "work".into(),
@@ -3573,6 +3492,7 @@ mod tests {
         let mut records = Vec::new();
         for key in ["first", "second", "mismatch"] {
             let account = AccountScope {
+                extra: Default::default(),
                 adapter: "claude".into(),
                 account_key: key.into(),
                 label: key.into(),
@@ -3587,6 +3507,7 @@ mod tests {
             });
             record.failures = 1;
             record.claim = Some(RefreshClaim {
+                extra: Default::default(),
                 token: "old".into(),
                 deadline_unix_seconds: 155,
             });
@@ -3624,6 +3545,10 @@ mod tests {
             PublishMode::Replace,
         )?)?;
         let route = provenant_records::run::RouteRecord {
+            selection_context: Default::default(),
+            host_native: None,
+            effort_warning: None,
+            availability_warning: None,
             extra: Default::default(),
             provider: Some("claude".into()),
             model: None,
@@ -3632,6 +3557,7 @@ mod tests {
             account_key: Some("first".into()),
             source: None,
             pool_selection: None,
+            ..Default::default()
         };
         persist_provider_success(temp.path(), &route, 120)?;
         let mut mismatch_route = route.clone();
@@ -3698,6 +3624,7 @@ mod tests {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
         }
         let scope = ReadinessScope {
+            extra: Default::default(),
             host: LOCAL_HOST.into(),
             adapter: "codex".into(),
             account_key: "key".into(),
@@ -3705,6 +3632,7 @@ mod tests {
         };
         let mut file = ReadinessFile::default();
         let mut account = AccountRecord::empty(provenant_quota::AccountScope {
+            extra: Default::default(),
             adapter: "codex".into(),
             account_key: "key".into(),
             label: "work".into(),
@@ -3738,7 +3666,7 @@ mod tests {
     }
 
     #[test]
-    fn unverified_login_preserves_mismatch_refusal_and_newer_auth()
+    fn login_expiry_metadata_does_not_create_readiness_refusal()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir()?;
@@ -3749,12 +3677,14 @@ mod tests {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
         }
         let scope = ReadinessScope {
+            extra: Default::default(),
             host: LOCAL_HOST.into(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             route: "opencode/model".into(),
         };
         let account = AccountRecord::empty(provenant_quota::AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             label: "go".into(),
@@ -3786,6 +3716,7 @@ mod tests {
         );
         file = ReadinessFile::default();
         file.login = Some(provenant_quota::LoginObservation {
+            extra: Default::default(),
             scope: ReadinessScope {
                 route: provenant_quota::ACCOUNT_ROUTE.into(),
                 ..scope.clone()
@@ -3795,20 +3726,19 @@ mod tests {
             expires_unix_seconds: Some(120),
         });
         write(&file)?;
-        assert_eq!(
-            read_readiness(state, &scope, 150).reason,
-            Some(ReadinessReason::LoginExpired)
-        );
+        // Login expiry is display metadata, not route readiness evidence.
+        let expiry_only = read_readiness(state, &scope, 150);
+        assert_eq!(expiry_only.reason, Some(ReadinessReason::NotProbed));
+        assert!(expiry_only.observed_scope.is_none());
         assert_eq!(
             read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(120)))
                 .reason,
             Some(ReadinessReason::NotProbed)
         );
-        assert_eq!(
-            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(90)))
-                .reason,
-            Some(ReadinessReason::LoginExpired)
-        );
+        let older_probe =
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(90)));
+        assert_eq!(older_probe.reason, Some(ReadinessReason::NotProbed));
+        assert!(older_probe.observed_scope.is_none());
         file.login = None;
         file.sync_probe_result(
             &account,
@@ -3891,6 +3821,7 @@ mod tests {
         let state = temp.path();
         let now = SystemClock::new().unix_seconds();
         let scope = |adapter: &str, key: &str, route: &str| ReadinessScope {
+            extra: Default::default(),
             host: LOCAL_HOST.into(),
             adapter: adapter.into(),
             account_key: key.into(),
@@ -3957,6 +3888,7 @@ mod tests {
         let mut next = current.clone();
         next.revision += 1;
         next.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: next.account.clone(),
             revision: 0,
@@ -3966,6 +3898,7 @@ mod tests {
             authority_ref: None,
             details: None,
             windows: vec![QuotaWindow {
+                extra: Default::default(),
                 pool: "pool".into(),
                 window_seconds: None,
                 used_basis_points: 1000,
@@ -4013,6 +3946,7 @@ mod tests {
         impl QuotaEffects for Effects {
             fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
                 Ok(vec![AccountScope {
+                    extra: Default::default(),
                     adapter: "codex".into(),
                     account_key: "key".into(),
                     label: "fixture".into(),
@@ -4038,6 +3972,7 @@ mod tests {
             }
         }
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "codex".into(),
             account_key: "key".into(),
             label: "fixture".into(),
@@ -4096,6 +4031,7 @@ mod tests {
         impl QuotaEffects for Effects {
             fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
                 Ok(vec![AccountScope {
+                    extra: Default::default(),
                     adapter: "codex".into(),
                     account_key: "key".into(),
                     label: "fixture".into(),
@@ -4127,6 +4063,7 @@ mod tests {
         }
         for (failure, malformed, expected) in [
             (None, false, None),
+            (Some(ProbeFailure::RefreshDeferred), false, None),
             (None, true, Some(ReadinessReason::CommandFailure)),
             (
                 Some(ProbeFailure::MissingCli),
@@ -4188,6 +4125,10 @@ mod tests {
                     failure
                 }
             );
+            if failure == Some(ProbeFailure::RefreshDeferred) {
+                assert_eq!(report.accounts[0].status, QuotaStatus::RefreshPending);
+                assert!(report.accounts[0].repair.is_none());
+            }
             let login = report.accounts[0].login_expiry.as_ref().unwrap();
             assert_eq!(login.expires_unix_seconds, expiry);
             assert_eq!(
@@ -4225,6 +4166,7 @@ mod tests {
             let read = read_readiness(
                 roots.state.as_path(),
                 &ReadinessScope {
+                    extra: Default::default(),
                     host: LOCAL_HOST.into(),
                     adapter: "codex".into(),
                     account_key: "key".into(),
@@ -4260,15 +4202,18 @@ mod tests {
         let _account = child(&readiness, OsStr::new("key"))?;
         let path = temp.path().join("readiness/key/claude.json");
         let scope = ReadinessScope {
+            extra: Default::default(),
             host: LOCAL_HOST.into(),
             adapter: "claude".into(),
             account_key: "key".into(),
             route: "claude/model".into(),
         };
         let file = ReadinessFile {
+            extra: Default::default(),
             schema_version: 1,
             login: None,
             records: vec![provenant_quota::RouteReadiness {
+                extra: Default::default(),
                 schema_version: 1,
                 scope: scope.clone(),
                 state: ReadinessState::Ready,
@@ -4310,6 +4255,7 @@ mod tests {
         let state = temp.path();
         let dir = child(&private(state)?, OsStr::new("quota"))?;
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "agy".into(),
             account_key: "work".into(),
             label: "work".into(),
@@ -4354,6 +4300,7 @@ mod tests {
         };
         write_intent(&dir, state, &failure, &mut records)?;
         let route = ReadinessScope {
+            extra: Default::default(),
             host: LOCAL_HOST.into(),
             adapter: "agy".into(),
             account_key: "work".into(),
@@ -4399,6 +4346,7 @@ mod tests {
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
         let dir = private(temp.path())?;
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             label: "go".into(),
@@ -4443,12 +4391,14 @@ mod tests {
     fn quota_human_and_json_display_partial_ledger_with_calibration()
     -> Result<(), Box<dyn std::error::Error>> {
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             label: "go".into(),
         };
         let mut record = AccountRecord::empty(account.clone());
         record.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: account.clone(),
             revision: 0,
@@ -4457,12 +4407,16 @@ mod tests {
             source_ref: "quota.provider.opencode".into(),
             authority_ref: None,
             windows: vec![QuotaWindow {
+                extra: Default::default(),
                 pool: "five_hour".into(),
                 used_basis_points: 401,
                 resets_unix_seconds: None,
                 window_seconds: Some(18_000),
             }],
-            details: None,
+            details: Some(QuotaDetails {
+                plan: Some("go".into()),
+                ..Default::default()
+            }),
         });
         let mut records = vec![record];
         let mut settings = Settings::default();
@@ -4519,6 +4473,7 @@ mod tests {
         let accounts =
             [("claude", "michael"), ("claude", "pro"), ("codex", "work")].map(|(adapter, key)| {
                 AccountScope {
+                    extra: Default::default(),
                     adapter: adapter.into(),
                     account_key: key.into(),
                     label: key.into(),
@@ -4530,6 +4485,7 @@ mod tests {
                 let mut r = AccountRecord::empty(a.clone());
                 r.revision = 1;
                 r.snapshot = Some(QuotaSnapshot {
+                    extra: Default::default(),
                     schema_version: 1,
                     account: a.clone(),
                     revision: 1,
@@ -4546,6 +4502,7 @@ mod tests {
         // Include an unregistered cached account and an unsupported source adapter.
         let mut all_records = records;
         all_records.push(AccountRecord::empty(AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             label: "go".into(),
@@ -4698,6 +4655,7 @@ mod tests {
             quota: policy,
         };
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "claude".into(),
             account_key: "michael".into(),
             label: "michael".into(),
@@ -4713,7 +4671,7 @@ mod tests {
     fn registry_only_quota_source_is_probed_and_reported() -> Result<(), Box<dyn std::error::Error>>
     {
         struct Source;
-        impl QuotaSource for Source {
+        impl provenant_providers::QuotaSource for Source {
             fn adapter_id(&self) -> &'static str {
                 "fixture-provider"
             }
@@ -4728,12 +4686,21 @@ mod tests {
                     input: input.clone(),
                 })
             }
+            fn capture(
+                &self,
+                _: &provenant_providers::quota_live::LiveQuota,
+                _: &QuotaProbePlan,
+                _: Option<&AccountRecord>,
+            ) -> Result<ProbeCapture, ProbeFailure> {
+                Err(ProbeFailure::Disabled)
+            }
             fn decode(
                 &self,
                 plan: &QuotaProbePlan,
                 _: &ProbeCapture,
             ) -> Result<QuotaSnapshot, QuotaError> {
                 Ok(QuotaSnapshot {
+                    extra: Default::default(),
                     schema_version: 1,
                     account: plan.account.clone(),
                     revision: 0,
@@ -4750,6 +4717,7 @@ mod tests {
         impl QuotaEffects for Effects {
             fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
                 Ok(vec![AccountScope {
+                    extra: Default::default(),
                     adapter: "fixture-provider".into(),
                     account_key: "work".into(),
                     label: "work".into(),

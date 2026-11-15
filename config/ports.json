@@ -1,0 +1,155 @@
+{
+  "schema_version": 2,
+  "verify": {
+    "source": "project",
+    "backend": {
+      "kind": "command",
+      "command": {
+        "argv": [
+          "scripts/verify-tier",
+          "--tier",
+          "{tier}"
+        ],
+        "exit_codes": {
+          "success": [
+            0
+          ],
+          "unknown": [],
+          "other": "refused"
+        }
+      }
+    },
+    "base": "origin/main",
+    "workspace": "tools/front-door",
+    "remote": "origin",
+    "load_per_cpu": 1.0,
+    "package_paths": [
+      {
+        "paths": [
+          "scripts/verify-nextest"
+        ],
+        "package": "provenant"
+      }
+    ],
+    "quarantine_command": [
+      "scripts/flaky-quarantine"
+    ],
+    "tiers": {
+      "0": {
+        "commands": [
+          "cargo fmt {packages} -- --check",
+          "cargo check --locked {packages}",
+          "../../scripts/verify-nextest --profile lane --locked {packages} --lib --bins"
+        ],
+        "selection": "packages",
+        "warn_for_host_load": false
+      },
+      "1": {
+        "commands": [
+          "../../scripts/verify-nextest --profile lane --locked {integration_args}"
+        ],
+        "selection": "integrations",
+        "warn_for_host_load": false
+      },
+      "2": {
+        "commands": [
+          "../../scripts/verify-nextest --profile ci --workspace --locked --features provenant-providers/recording {quarantine_args}",
+          "cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result"
+        ],
+        "selection": "all",
+        "warn_for_host_load": true
+      },
+      "3": {
+        "commands": [
+          "../../scripts/verify-nextest --profile ci --workspace --locked --features provenant-providers/recording {quarantine_args} --stress-count 20",
+          "../../scripts/run-mutants"
+        ],
+        "selection": "all",
+        "warn_for_host_load": true
+      }
+    },
+    "integrations": [
+      {
+        "paths": [
+          "tools/front-door/src/build_slot.rs",
+          "tools/front-door/tests/build_slot.rs",
+          "tools/front-door/crates/os/src/build_slots.rs"
+        ],
+        "package": "provenant",
+        "binary": "build_slot"
+      },
+      {
+        "paths": [
+          "tools/front-door/crates/cli/src/run/*",
+          "scripts/verify-nextest",
+          "tools/front-door/src/fabric/interface.rs",
+          "tools/front-door/src/fabric/graph_execution.rs",
+          "tools/front-door/tests/graph_provider.rs"
+        ],
+        "package": "provenant",
+        "binary": "graph_provider"
+      }
+    ],
+    "runners": {
+      "ci": [
+        "scripts/verify-ci-runner",
+        "{remote}",
+        "{commit}",
+        "{tier}"
+      ]
+    },
+    "default_tier": "0"
+  },
+  "land": {
+    "source": "project",
+    "backend": {
+      "kind": "builtin"
+    }
+  },
+  "ci_observation": {
+    "source": "project",
+    "backend": {
+      "kind": "builtin"
+    }
+  },
+  "worktree_layout": {
+    "source": "project",
+    "backend": {
+      "kind": "builtin"
+    },
+    "roots": [
+      ".worktrees"
+    ],
+    "default": ".worktrees/<branch>"
+  },
+  "naming": {
+    "source": "project",
+    "backend": {
+      "kind": "builtin"
+    }
+  },
+  "post_create": {
+    "source": "project",
+    "backend": {
+      "kind": "builtin"
+    }
+  },
+  "tracker": {
+    "source": "project",
+    "backend": {
+      "kind": "builtin"
+    }
+  },
+  "release": {
+    "source": "project",
+    "backend": {
+      "kind": "builtin"
+    }
+  },
+  "admission": {
+    "source": "project",
+    "backend": {
+      "kind": "builtin"
+    }
+  }
+}

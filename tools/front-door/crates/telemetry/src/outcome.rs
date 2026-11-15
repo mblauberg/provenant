@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 pub enum OutcomeError {
     #[error("outcome evidence: {0}")]
     Evidence(String),
+    #[error("outcome Git output exceeded its configured bound")]
+    OutputLimit,
 }
 type Result<T> = std::result::Result<T, OutcomeError>;
 
@@ -160,57 +162,74 @@ struct Commit {
     body: String,
 }
 
+/// The process boundary used by outcome attribution. Tests can supply bounded
+/// outputs without shell wrappers or helper interpreters.
+pub trait GitRunner {
+    fn run(&self, repo: &Path, args: &[&str]) -> std::result::Result<String, OutcomeError>;
+}
+
 /// All Git operations use the shared executable resolver, with inherited Git
 /// repository/config overrides removed. No network or working-tree writes.
-fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-    let executable = provenant_os::git::git_executable()
-        .ok_or_else(|| OutcomeError::Evidence("Git unavailable".into()))?;
-    let mut env: Vec<_> = std::env::vars_os()
-        .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
-        .collect();
-    env.extend(
-        [
-            ("GIT_CONFIG_NOSYSTEM", "1"),
-            ("GIT_CONFIG_GLOBAL", "/dev/null"),
-            ("GIT_OPTIONAL_LOCKS", "0"),
-        ]
-        .map(|(k, v)| (OsString::from(k), OsString::from(v))),
-    );
-    let mut argv = vec![executable.into_os_string()];
-    argv.extend(
-        [
-            "--no-pager",
-            "--literal-pathspecs",
-            "-c",
-            "core.quotePath=false",
-        ]
-        .map(OsString::from),
-    );
-    argv.extend(args.iter().map(OsString::from));
-    let mut options = ExecOptions::new(&argv, repo, Duration::from_secs(30));
-    options.env = Some(&env);
-    options.stdout = StreamPolicy::Capture {
-        limit: 64 * 1024 * 1024,
-    };
-    options.stop_on_output_limit = true;
-    let output = SystemExecutor::new(1)
-        .and_then(|executor| executor.execute(options))
-        .map_err(|e| OutcomeError::Evidence(e.to_string()))?;
-    if output.termination != Termination::Exit(0)
-        || output.timed_out
-        || output.drain_truncated
-        || output.stdout.truncated
-        || output.stdout.read_failed
-        || output.cancelled
-        || output.overflow_stopped
-    {
-        return Err(OutcomeError::Evidence(format!(
-            "Git failed or evidence truncated: {}",
-            String::from_utf8_lossy(&output.stderr.bytes).trim()
-        )));
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemGitRunner;
+
+impl GitRunner for SystemGitRunner {
+    fn run(&self, repo: &Path, args: &[&str]) -> Result<String> {
+        use provenant_os::exec::{
+            ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+        };
+        let executable = provenant_os::git::git_executable()
+            .ok_or_else(|| OutcomeError::Evidence("Git unavailable".into()))?;
+        let mut env: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
+            .collect();
+        env.extend(
+            [
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+                ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                ("GIT_OPTIONAL_LOCKS", "0"),
+            ]
+            .map(|(k, v)| (OsString::from(k), OsString::from(v))),
+        );
+        let mut argv = vec![executable.into_os_string()];
+        argv.extend(
+            [
+                "--no-pager",
+                "--literal-pathspecs",
+                "-c",
+                "core.quotePath=false",
+            ]
+            .map(OsString::from),
+        );
+        argv.extend(args.iter().map(OsString::from));
+        let mut options = ExecOptions::new(&argv, repo, Duration::from_secs(30));
+        options.env = Some(&env);
+        options.stdout = StreamPolicy::Capture {
+            limit: 64 * 1024 * 1024,
+        };
+        options.stop_on_output_limit = true;
+        let output = SystemExecutor::new(1)
+            .and_then(|executor| executor.execute(options))
+            .map_err(|e| OutcomeError::Evidence(e.to_string()))?;
+        if output.drain_truncated || output.stdout.truncated || output.overflow_stopped {
+            return Err(OutcomeError::OutputLimit);
+        }
+        if output.termination != Termination::Exit(0)
+            || output.timed_out
+            || output.stdout.read_failed
+            || output.cancelled
+        {
+            return Err(OutcomeError::Evidence(format!(
+                "Git failed or evidence truncated: {}",
+                String::from_utf8_lossy(&output.stderr.bytes).trim()
+            )));
+        }
+        String::from_utf8(output.stdout.bytes).map_err(|e| OutcomeError::Evidence(e.to_string()))
     }
-    String::from_utf8(output.stdout.bytes).map_err(|e| OutcomeError::Evidence(e.to_string()))
+}
+
+fn git(repo: &Path, args: &[&str]) -> Result<String> {
+    SystemGitRunner.run(repo, args)
 }
 
 fn number(text: &str) -> Option<u64> {
@@ -255,28 +274,42 @@ pub fn attribute(
     window_days: u32,
     now: i64,
 ) -> Result<Outcomes> {
+    attribute_with_runner(&SystemGitRunner, repo, main, evidence, ci, window_days, now)
+}
+
+/// Attribute outcomes with an injected Git command runner.
+pub fn attribute_with_runner(
+    runner: &dyn GitRunner,
+    repo: &Path,
+    main: &str,
+    evidence: Vec<Evidence>,
+    ci: Option<&[CiRun]>,
+    window_days: u32,
+    now: i64,
+) -> Result<Outcomes> {
     if window_days == 0 || evidence.len() > 100_000 || main.starts_with('-') {
         return Err(OutcomeError::Evidence(
             "invalid window, history ref or evidence limit".into(),
         ));
     }
     // Resolve once, preventing option injection and a moving ref during analysis.
-    let head = git(
+    let head = runner.run(
         repo,
         &["rev-parse", "--verify", &format!("{main}^{{commit}}")],
     )?;
     let ci_coverage_from = ci.and_then(|runs| runs.iter().map(|r| r.created_at).min());
-    let history = git(
-        repo,
-        &[
-            "log",
-            "--first-parent",
-            "--reverse",
-            "--format=%H%x00%ct%x00%P%x00%s%x00%x00%x1e",
-            head.trim(),
-        ],
-    )
-    .and_then(|log| parse_commits(&log));
+    let history = runner
+        .run(
+            repo,
+            &[
+                "log",
+                "--first-parent",
+                "--reverse",
+                "--format=%H%x00%ct%x00%P%x00%s%x00%x00%x1e",
+                head.trim(),
+            ],
+        )
+        .and_then(|log| parse_commits(&log));
     let mut commits = match history {
         Ok(commits) => commits,
         Err(_) => {
@@ -316,7 +349,7 @@ pub fn attribute(
             .iter_mut()
             .filter(|c| c.parents.len() > 1 && c.time <= now)
         {
-            match git(repo, &["show", "-s", "--format=%b", &commit.sha]) {
+            match runner.run(repo, &["show", "-s", "--format=%b", &commit.sha]) {
                 Ok(body) => commit.body = body,
                 Err(_) => incomplete_issue_history = true,
             }
@@ -344,7 +377,7 @@ pub fn attribute(
             }
             // Reachability, rather than timestamp order, assigns a run to the
             // nearest preceding main-line merge, including ordinary main commits.
-            let ancestors = match git(repo, &["rev-list", "--first-parent", &run.head_sha]) {
+            let ancestors = match runner.run(repo, &["rev-list", "--first-parent", &run.head_sha]) {
                 Ok(value) => value,
                 Err(_) => {
                     skipped_ci_runs += 1;
@@ -405,19 +438,20 @@ pub fn attribute(
         .min()
         .map(|index| &commits[*index]);
     let descendants = if let Some(first) = first_relevant {
-        git(
-            repo,
-            &[
-                "log",
-                "--ancestry-path",
-                "--topo-order",
-                "--reverse",
-                "--format=%H%x00%ct%x00%P%x00%s%x00%x00%x1e",
-                &format!("{}..{}", first.sha, head.trim()),
-            ],
-        )
-        .and_then(|log| parse_commits(&log))
-        .map(|history| index_descendants(history, first, &merge_indices))
+        runner
+            .run(
+                repo,
+                &[
+                    "log",
+                    "--ancestry-path",
+                    "--topo-order",
+                    "--reverse",
+                    "--format=%H%x00%ct%x00%P%x00%s%x00%x00%x1e",
+                    &format!("{}..{}", first.sha, head.trim()),
+                ],
+            )
+            .and_then(|log| parse_commits(&log))
+            .map(|history| index_descendants(history, first, &merge_indices))
     } else {
         Ok(Vec::new())
     };
@@ -440,6 +474,7 @@ pub fn attribute(
                     ..Signals::default()
                 };
                 if measure_merge(
+                    runner,
                     repo,
                     commit,
                     &descendants,
@@ -556,7 +591,12 @@ fn index_descendants(
     candidates
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one merge's evidence inputs, passed through from the scan loop"
+)]
 fn measure_merge(
+    runner: &dyn GitRunner,
     repo: &Path,
     commit: &Commit,
     descendants: &Result<Vec<Candidate>>,
@@ -569,6 +609,7 @@ fn measure_merge(
         .as_ref()
         .map_err(|e| OutcomeError::Evidence(e.to_string()))?;
     let (changed, mut files_used, mut hunks_used) = changed_lines(
+        runner,
         repo,
         &commit.parents[0],
         &commit.sha,
@@ -579,10 +620,17 @@ fn measure_merge(
     let mut lines = BTreeSet::new();
     for (file, ranges) in changed {
         for (start, count) in ranges {
-            lines.extend(blamed_lines(repo, &commit.sha, &file, start, count)?);
+            lines.extend(blamed_lines(
+                runner,
+                repo,
+                &commit.sha,
+                &file,
+                start,
+                count,
+            )?);
         }
     }
-    let merged = git(
+    let merged = runner.run(
         repo,
         &[
             "rev-list",
@@ -607,7 +655,11 @@ fn measure_merge(
         let body = cache
             .bodies
             .entry(later.sha.clone())
-            .or_insert_with(|| git(repo, &["show", "-s", "--format=%b", &later.sha]).ok())
+            .or_insert_with(|| {
+                runner
+                    .run(repo, &["show", "-s", "--format=%b", &later.sha])
+                    .ok()
+            })
             .as_ref()
             .ok_or_else(|| OutcomeError::Evidence("commit body unavailable".into()))?;
         let reverts = body.split("This reverts commit ").skip(1).any(|part| {
@@ -622,6 +674,7 @@ fn measure_merge(
         }
         if !cache.fixes.contains_key(&later.sha) {
             let (changed, files, hunks) = changed_lines(
+                runner,
                 repo,
                 &later.parents[0],
                 &later.sha,
@@ -632,7 +685,14 @@ fn measure_merge(
             let mut blamed = BTreeSet::new();
             for (file, ranges) in changed {
                 for (start, count) in ranges {
-                    blamed.extend(blamed_lines(repo, &later.parents[0], &file, start, count)?);
+                    blamed.extend(blamed_lines(
+                        runner,
+                        repo,
+                        &later.parents[0],
+                        &file,
+                        start,
+                        count,
+                    )?);
                 }
             }
             cache
@@ -657,6 +717,7 @@ fn measure_merge(
 
 type Ranges = BTreeMap<String, Vec<(u64, u64)>>;
 fn changed_lines(
+    runner: &dyn GitRunner,
     repo: &Path,
     before: &str,
     after: &str,
@@ -664,7 +725,7 @@ fn changed_lines(
     max_files: usize,
     max_hunks: usize,
 ) -> Result<(Ranges, usize, usize)> {
-    let files = git(
+    let files = runner.run(
         repo,
         &[
             "diff",
@@ -695,7 +756,7 @@ fn changed_lines(
         if file_count > max_files {
             return Err(OutcomeError::Evidence("file limit exceeded".into()));
         }
-        let diff = git(
+        let diff = runner.run(
             repo,
             &[
                 "diff",
@@ -739,6 +800,7 @@ fn changed_lines(
 }
 
 fn blamed_lines(
+    runner: &dyn GitRunner,
     repo: &Path,
     commit: &str,
     file: &str,
@@ -750,7 +812,7 @@ fn blamed_lines(
             "changed-line range exceeds 100,000".into(),
         ));
     }
-    let text = git(
+    let text = runner.run(
         repo,
         &[
             "blame",

@@ -415,7 +415,8 @@ pub(crate) fn check_wait(
     if cancel.is_cancelled() {
         return Err(WaitStop::Cancelled);
     }
-    if budget.deadline().is_expired(clock.mono_now()) {
+    // A nonblocking budget is one immediate attempt: it has no wait to expire.
+    if !budget.is_nonblocking() && budget.deadline().is_expired(clock.mono_now()) {
         return Err(WaitStop::Deadline);
     }
     Ok(())

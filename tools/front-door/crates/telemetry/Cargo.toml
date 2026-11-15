@@ -1,14 +1,23 @@
 [package]
 name = "provenant-telemetry"
-version = "1.11.2"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+fixture = [
+    "provenant-core/fixture",
+    "provenant-records/fixture",
+    "provenant-routing/fixture",
+    "provenant-os/fixture",
+]
+
 [dependencies]
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
+provenant-routing = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 jiff = { workspace = true }
@@ -19,6 +28,7 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 provenant-os = { workspace = true, features = ["fixture"] }
+provenant-test-support = { path = "../test-support" }
 tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

@@ -3,15 +3,26 @@
 
 mod adapters;
 pub use adapters::{
-    ADAPTER_SPECS, AdapterSpec, COMMAND_OUTPUT_TAIL_BYTES, GithubAuth, LaunchCapabilities,
-    LaunchField, LaunchRequest, LoginObservation, LoginReprobe, ModelObservation, NamedEntry,
-    QuotaProbeKind, SetupRoot, SkillLocation, UnsupportedLaunch,
+    ADAPTER_SPECS, AccountModelPlan, AccountQuota, AdapterSpec, COMMAND_OUTPUT_TAIL_BYTES,
+    CapabilitySupport, GithubAuth, HarnessInstall, HookAction, HookEvent, HookProtocol,
+    HookTimeoutUnit, INSTRUCTION_ASSET, LaunchCapabilities, LaunchField, LaunchRequest,
+    LoginObservation, LoginReprobe, ModelObservation, NamedEntry, QuotaProbeKind, SetupRoot,
+    SkillLocation, UnsupportedLaunch,
 };
+
+/// The instruction content bound into this product build and projected into
+/// each isolated harness configuration.
+pub const INSTRUCTION_CONTENT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../../GLOBAL-AGENTS.md"
+));
+
 mod artifact_ref;
 mod attempt_fact;
 mod attempt_file;
 mod canonical;
 pub mod control;
+pub mod custody;
 pub mod diagnostic;
 mod finding;
 pub mod handoff;
@@ -20,9 +31,13 @@ mod install;
 mod json;
 mod jsonc;
 mod path_wire;
+pub mod policy;
+pub mod port_receipt;
+pub mod ports;
 mod source;
 pub mod telemetry_context;
 mod trace;
+pub mod usage_identity;
 
 pub use artifact_ref::ArtifactRef;
 pub use attempt_fact::{
@@ -38,14 +53,23 @@ pub use input::{InputWarning, decode_input};
 pub use json::{DecodeError, EncodeError, Limits, RecordHeader, decode, decode_v1, encode};
 pub use jsonc::{JsoncDocument, JsoncToken, JsoncTokenKind, decode_jsonc};
 pub use path_wire::{PathWire, PathWireError, StructuredPathWire};
+pub use port_receipt::{
+    DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, PORT_COMMAND_RECEIPT_SCHEMA_VERSION, PortCommandBackend,
+    PortCommandDisposition, PortCommandReceipt, PortReceiptLifetime,
+};
+pub use ports::{CommandExitCodes, ExitDisposition, PortCommand, PortSource};
 pub use source::{SourceDigest, SourceDigestError, SourceInput, source_digest};
 pub use trace::Trace;
+pub use usage_identity::{
+    AccountIdentity, Identity, IdentityEpoch, IdentityEvidenceSource, UnknownIdentityReason,
+};
 
 pub mod inbox;
+pub mod landing;
 pub mod workflow;
 
 pub use install::{
-    AbsolutePath, BASELINE_STATE_FORMAT_VERSION, Harness, InstallReceipt, OwnedEntry, OwnedValue,
+    AbsolutePath, Harness, INSTALL_RECEIPT_SCHEMA_VERSION, InstallReceipt, OwnedEntry, OwnedValue,
     ReleaseFile, ReleaseManifest, ResolvedHarnessTarget, STATE_FORMAT_VERSION, VersionInfo,
 };
 
@@ -57,15 +81,33 @@ pub use command_result::{
 };
 
 mod resolved_route;
+pub mod route_selection;
 pub use resolved_route::{
     ResolvedRoute, RouteAlternative, RouteAlternatives, RouteConfidentiality, RouteEligibility,
     RouteExclusion, RouteExclusionReason, RouteReadiness, RouteSelectionCandidate,
-    RouteSelectionReceipt, RouteSelectionRedraw, SKIPPED_ACCOUNTS, SkippedAccount,
-    TooManyAlternatives,
+    RouteSelectionReceipt, RouteSelectionRedraw, SkippedAccount, TooManyAlternatives,
 };
 
 pub mod result_capture;
 pub mod run;
+
+// Format-2 records (#3078). Callers adopt them in later slices.
+pub mod finding_decision;
+pub mod graph;
+pub mod limit;
+pub mod pause;
+pub mod stop;
+pub mod work_key;
+pub use finding_decision::{FindingDecision, FindingDisposition};
+pub use limit::{
+    BudgetAction, BudgetGrace, BudgetPolicy, CeilingError, LaneLimits, Limit, LimitSource,
+    LimitStrength,
+};
+pub use pause::{Pause, PauseCause};
+pub use stop::{Continuation, NextStep, OnStop, STOP_TABLE, Stop, StopCause, StopFacts, StopRule};
+pub use work_key::WorkKey;
+#[cfg(test)]
+mod format2_tests;
 pub use run::UserSkillsMode;
 
 /// Fields from newer writers, retained in canonical record bytes.

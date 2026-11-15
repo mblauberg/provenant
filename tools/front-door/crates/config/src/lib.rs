@@ -11,29 +11,55 @@ mod edit;
 mod gc;
 mod github_policy;
 mod history;
-mod migrate;
+mod install_artifacts;
 mod schema;
 pub use gc::{
-    ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold,
-    PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings,
-    WRITER_LANES_CEILING, deserialize_auto, parse_cache_size,
+    ByteObservation, DISK_FLOOR, DiskGate, DiskLevel, DiskLimits, ForeignWorktrees, GcSettings,
+    LaneBuildSettings, MemoryPressureThreshold, PROJECT_WRITER_LANES_CEILING, ProjectGcSettings,
+    RETENTION_CLASSES, RemoteBranches, RetentionAdapter, RetentionBytes, RetentionClass,
+    RetentionCollector, RetentionEligibility, RetentionIssue, RetentionKind, RetentionMeasurements,
+    RetentionOwner, RetentionTrigger, STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings,
+    WRITER_LANES_CEILING, deserialize_auto, parse_cache_size, retention_schedule,
 };
-pub use github_policy::GithubPolicy;
+pub use github_policy::{
+    DEFAULT_GH_BUDGET, GH_INVOCATIONS_FILE, GithubPolicy, label_events_trigger_ci,
+};
 mod harness;
+pub use harness::legacy_harness_selectors;
 mod hooks;
-pub use harness::mcp_entry;
-pub use hooks::{CLAUDE_HOOKS, claude_lane_settings};
+pub use hooks::{hook_plugin_source, lane_hook_settings, registrations as hook_registrations};
 mod inspection;
 mod knobs;
 mod loader;
 mod managed;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
+pub const NATIVE_CAPABILITY_UNAVAILABLE: &str = "native_capability_unavailable";
+pub mod policy;
 mod presets;
 mod providers;
 pub use providers::{ProviderSettings, ProviderUpdate};
+pub mod ports;
 mod project_binding;
+pub use ports::{
+    Adapter, CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition, Forge,
+    ForgeOperation, ForgePort, ForgeResponse, HeadersObservation, Integration, LandBackend,
+    LandPort, PORTS_CONFIG, PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend, PortBackendKind,
+    PortCommand, PortCommandBackend, PortCommandDisposition, PortCommandExecution,
+    PortCommandPublication, PortCommandReceipt, PortCommandReceiptCollectionLock,
+    PortCommandReceiptEntry, PortCommandReceiptInventory, PortCommandReceiptProof, PortError,
+    PortEvidenceError, PortExecution, PortReceiptIssue, PortReceiptLifetime, PortSource, PortTable,
+    VerifyPort, VerifySelection, VerifyTier, WorktreeLayoutPort, dispatch_port_backend,
+    execute_port_command, execute_port_command_with_input, land_backend, port_command_environment,
+    port_command_receipt_proof, port_command_receipts, record_port_command,
+    remove_port_command_receipt, try_lock_port_command_receipts,
+};
 mod release;
+pub mod repository_files;
+mod repository_policy;
+pub use repository_policy::{REPOSITORY_CONFIG, RepositoryPolicy, read_land};
+pub mod removed;
 mod retention;
+pub use removed::{REMOVED, Removed};
 mod worktrees;
 pub use worktrees::{ProjectWorktreeSettings, WorktreeSettings, WorktreeSetup};
 pub mod shared_settings;
@@ -54,11 +80,14 @@ pub use domains::{
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
-pub use knobs::{KnobEdit, KnobSource, KnobValue};
+pub use install_artifacts::{
+    ArtifactDisposition, LEGACY_1X_ARTIFACTS, LegacyArtifact, STABLE_BINARY_NAME,
+    legacy_launch_agent_label, legacy_launch_agent_path,
+};
+pub use knobs::{KnobEdit, KnobSource, KnobValue, knob_source};
 pub use loader::{
     config_show, inspect_config, load, load_with_domains, read, read_knobs, read_with_domains,
 };
-pub use migrate::{MigrateReport, Migration, migrate};
 pub use presets::Profile;
 pub use project_binding::{
     GcProjectSelection, ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_host,
@@ -66,7 +95,9 @@ pub use project_binding::{
     registered_gc_projects, registered_projects, transient_location,
 };
 pub use provenant_records::Finding;
-pub use schema::{Layer, Schema, SchemaField, apply_patch, schema};
+pub use schema::{
+    DeclaredEnum, Layer, Schema, SchemaField, apply_patch, declared_enums, probe_field, schema,
+};
 
 use serde::{Deserialize, Serialize, Serializer};
 use std::{collections::BTreeMap, fmt, path::PathBuf};
@@ -94,7 +125,7 @@ pub enum ConfigError {
     InvalidUtf8 { path: PathBuf },
     #[error("invalid TOML at {location}")]
     Syntax { location: Location },
-    #[error("{rule} at {location}; next: delete the line or run `provenant config migrate`")]
+    #[error("{rule} at {location}; next: run `provenant config check` and edit the reported key")]
     Schema {
         location: Location,
         rule: &'static str,
@@ -105,7 +136,9 @@ pub enum ConfigError {
     UnsupportedVersion { location: Location },
     #[error("config exceeds collection bounds at {location}")]
     CollectionLimit { location: Location },
-    #[error("invalid domain configuration at {location}: {source}{rejected}{}; next: provenant config check", retired_repair(.source))]
+    #[error(
+        "invalid domain configuration at {location}: {source}{rejected}; next: provenant config check"
+    )]
     Domain {
         location: Location,
         #[source]
@@ -131,6 +164,8 @@ pub enum ConfigError {
     InvalidProjectLocation,
     #[error("project GitHub policy is invalid")]
     InvalidGithubPolicy,
+    #[error("repository launch policy is invalid (.provenant/config.toml [launch_policy])")]
+    InvalidRepositoryPolicy,
     #[error("project binding state is invalid")]
     InvalidProjectBinding,
     #[error("project binding lock budget is invalid")]
@@ -161,6 +196,24 @@ pub enum Origin {
     User {
         path: provenant_records::PathWire,
     },
+}
+
+impl Origin {
+    /// Retain the source in a forward-extensible record without making the
+    /// configuration resolver's own origin an input codec.
+    pub fn receipt(&self) -> provenant_records::run::OriginReceipt {
+        use provenant_records::run::OriginReceipt;
+        match self {
+            Self::Compiled { profile } => OriginReceipt::Compiled {
+                profile: Some(profile.as_str().into()),
+                extra: Default::default(),
+            },
+            Self::User { path } => OriginReceipt::User {
+                path: path.clone(),
+                extra: Default::default(),
+            },
+        }
+    }
 }
 
 /// One-based character line/column and the dotted key path in the source.
@@ -271,8 +324,8 @@ pub use managed::{
     InstallContext, InstallError, InstallFinding, InstallInspection, InstallOutcome, InstallPlan,
     InstallReporter, ManualInclude, ReleaseSmoke, SelectorChange, Snapshots, Targets,
     inspect_accounts, inspect_install, install, installed_binary, peer_agent_plist,
-    plan_and_install, plan_install, private_directory, release_root, systemd_user_dir,
-    tick_agent_plist, tick_service_path, tick_timer_path, uninstall, user_dir_in,
+    plan_and_install, plan_install, private_directory, release_instruction_asset, release_root,
+    systemd_user_dir, tick_agent_plist, tick_service_path, tick_timer_path, uninstall, user_dir_in,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};
@@ -281,18 +334,5 @@ pub use release::{Release, package_release};
 pub const CONFIG_SCHEMA_VERSION: u64 = 1;
 
 pub use managed::HookRegistration;
-
-/// The repair a retired key calls for, appended to the refusal.
-fn retired_repair(source: &SectionError) -> &'static str {
-    if is_retired_key_code(source.code) {
-        "; repair: run `provenant config migrate`"
-    } else {
-        ""
-    }
-}
-
-pub(crate) fn is_retired_key_code(code: &str) -> bool {
-    code.starts_with("moved_to_schedule.") || code.starts_with("retired.")
-}
 
 pub use knobs::documented_field;

@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """Check provenant commands, long flags, repo paths and ADRs against the CLI.
 
-Unknown commands and flags in runbooks fail, inline or in fenced `provenant`
-lines; in other documents, and for paths and ADRs, they are advisory warnings.
+Unknown commands and flags in runbooks, skills and ambient instructions fail,
+inline or in fenced `provenant` lines; in other documents, and for paths and
+ADRs, they are advisory warnings.
 Deleted commands, research index omissions and projection mismatches fail;
-strict options enforce inventory, Anchor paths, diagram metadata and explicit
-test citations. Runtime absolute paths and templates are excluded. Commands
+strict inventory enforces headers, Anchor paths and diagram metadata. Rust
+comments citing Spec: sections always resolve strictly. Runtime absolute paths
+and templates are excluded. Commands
 scope flags to their own help; flags are checked only after a provenant command.
 Lines that say removed, replaced or retired are skipped. Documentation snippets
 are never executed.
 """
 
 import argparse
+import html
 import json
 from pathlib import Path
 import re
 import shlex
 import subprocess
+import unicodedata
+from urllib.parse import unquote
 
 
 def warn(path, line, kind, reference, level="warning"):
@@ -165,7 +170,7 @@ def path_reference(word):
 
 RETIRED = re.compile(r"\b(?:deleted|removed|replaced|retired|deprecated)\b", re.I)
 # Internal commands hidden from `help --json` (clap `hide = true`).
-HIDDEN = {"provenant fabric peer", "provenant fabric peer-agent"}
+HIDDEN = {"provenant fabric peer", "provenant fabric peer-agent", "provenant hook claude"}
 
 
 def resolves_path(root, document, reference, gone):
@@ -182,32 +187,56 @@ def resolves_path(root, document, reference, gone):
     return False
 
 
+AMBIENT_DOCS = ("AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md", "MAINTAINING.md")
+
+
+def is_strict(root, document):
+    """Runbooks, skills and ambient instructions must name only real commands and flags."""
+    return (document.parent == root / "docs/runbooks"
+            or (root / "skills") in document.parents
+            or (document.parent == root and document.name in AMBIENT_DOCS))
+
+
+def retired_section_lines(text):
+    """Line numbers under a heading that names removed or retired spellings, listed on purpose."""
+    lines, heading = set(), ""
+    for number, line in enumerate(text.splitlines(), 1):
+        if match := re.match(r"^#{1,6}\s+(.*)", line):
+            heading = match[1]
+        if RETIRED.search(heading):
+            lines.add(number)
+    return lines
+
+
 def check_references(root, document, commands, adrs, gone):
     """Report unresolved references; return the number that fail the check."""
     display = document.relative_to(root)
     text = document.read_text()
-    runbook = document.parent == root / "docs/runbooks"
-    level = "error" if runbook else "warning"
+    strict = is_strict(root, document)
+    level = "error" if strict else "warning"
     failures = 0
     references = list(inline_code(text))
-    if runbook:
+    if strict:
         references += list(fenced_commands(text))
+    retired_lines = retired_section_lines(text)
     for line, reference, context in references:
-        if RETIRED.search(context):
+        if RETIRED.search(context) or line in retired_lines:
             continue
         scopes, missing = command_scope(reference, commands) if commands else (None, None)
         if missing and missing not in HIDDEN:
             warn(display, line, "command", missing, level)
-            failures += runbook
+            failures += strict
         if commands and scopes:
             known_flags = (set().union(*(flags(commands[scope]) for scope in scopes))
                            | flags(commands["provenant"]))
             if re.match(r"^(?:\$ )?provenant help\b", reference):
                 known_flags.add("--all")
-            for flag in dict.fromkeys(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", reference)):
+            # Flags inside a shell substitution belong to another command.
+            own = re.sub(r"\$\((?:[^()]|\([^()]*\))*\)", "", reference)
+            for flag in dict.fromkeys(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", own)):
                 if flag not in known_flags:
                     warn(display, line, "flag", flag, level)
-                    failures += runbook
+                    failures += strict
         for number in dict.fromkeys(re.findall(r"\bADR[ -]+(\d{1,4})\b", reference, re.I)):
             if int(number) not in adrs:
                 warn(display, line, "ADR", f"ADR {number}")
@@ -219,47 +248,100 @@ def check_references(root, document, commands, adrs, gone):
 
 
 
-def check_test_citations(root, document):
-    """Resolve explicit, grouped and same-file shorthand Rust Test citations."""
-    count = 0
-    text = document.read_text()
-    blocks = re.finditer(
-        r"^\s*(?:[-*]\s*)?(?:\*\*)?Tests?:(?:\*\*)?([^\n]*(?:\n(?!\s*$|\s*(?:[-*]\s*)?(?:\*\*)?(?:Why(?: \(default\))?|Owner):)[^\n]*)*)",
-        text, re.M,
-    )
-    for block in blocks:
-        current_path = None
-        for citation in re.finditer(r"`([^`]+)`", block[1]):
-            reference = " ".join(citation[1].split())
-            match = re.fullmatch(r"([^ ]+\.rs)(?:::|#)(.+)", reference)
-            if match:
-                current_path, symbols = match.groups()
-            elif reference.startswith("::"):
-                symbols = reference[2:]
-            elif reference.endswith(".rs"):
-                if not any((base / reference).is_file() for base in
-                           (root, document.parent, root / "tools/front-door")):
-                    line = text.count("\n", 0, block.start(1) + citation.start()) + 1
-                    warn(document.relative_to(root), line, "test citation", reference)
-                    count += 1
-                current_path = reference
-                continue
-            else:
-                continue
-            # tests::{one, two} is a same-file list, never a wildcard family.
-            names = symbols.split("{", 1)[-1].rstrip("}").split(",")
-            source = next((base / current_path for base in
-                           (root, document.parent, root / "tools/front-door")
-                           if current_path and (base / current_path).is_file()), None)
-            for symbol in names:
-                name = symbol.strip().split("::")[-1]
-                if (source is None or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name)
-                        or not re.search(r"\b(?:fn|mod)\s+" + re.escape(name) + r"\b", source.read_text())):
-                    line = text.count("\n", 0, block.start(1) + citation.start()) + 1
-                    warn(document.relative_to(root), line, "test citation",
-                         f"{current_path or '(no preceding path)'}::{symbol.strip()}")
-                    count += 1
-    return count
+def heading_anchors(text):
+    """GitHub heading slugs: inline text, punctuation removal and unique suffixes."""
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    used, fence, previous = set(), None, ""
+    for line in text.splitlines():
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if fence:
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
+                fence = None
+            continue
+        if marker:
+            fence, previous = marker[1], ""
+            continue
+        atx = re.match(r"^ {0,3}#{1,6}(?:[ \t]+(.*?)|$)$", line)
+        setext = re.fullmatch(r" {0,3}(?:=+|-+)[ \t]*", line)
+        if atx:
+            title = re.sub(r"[ \t]+#+[ \t]*$", "", atx[1] or "")
+        elif setext and previous.strip():
+            title = previous.strip()
+        else:
+            previous = line if not line.startswith(("    ", "\t")) else ""
+            continue
+        # Protect code spans: underscores and angle brackets there are literal.
+        code = []
+        def protect(match):
+            code.append(match[2])
+            return f"\x00{len(code) - 1}\x00"
+        title = re.sub(r"(`+)(.*?)\1", protect, title)
+        # Render links as labels and HTML as its visible text before slugging.
+        title = re.sub(r"!?\[([^]]*)\]\((?:[^()]|\([^()]*\))*\)", r"\1", title)
+        title = re.sub(r"!?\[([^]]*)\]\[[^]]*\]", r"\1", title)
+        title = re.sub(r"<((?:https?://|mailto:)[^>]+)>", r"\1", title)
+        title = re.sub(r"<[^>]*>", "", title)
+        title = re.sub(r"(?<!\w)(_+)(.*?)\1(?!\w)", r"\2", title)
+        title = html.unescape(title)
+        title = re.sub(r"\x00(\d+)\x00", lambda match: code[int(match[1])], title).lower()
+        slug = "".join(char for char in title if char in "-_ " or
+                       unicodedata.category(char)[0] in "LMN").replace(" ", "-")
+        anchor, suffix = slug, 0
+        while anchor in used:
+            suffix += 1
+            anchor = f"{slug}-{suffix}"
+        used.add(anchor)
+        previous = ""
+    return used
+
+
+# Skip Rust strings and character literals so examples cannot become evidence.
+RUST_TOKENS = re.compile(
+    r'\b(?:br|cr|r)(?P<hashes>\#{0,255})".*?"(?P=hashes)'
+    r'|"(?:\\.|[^"\\])*"'
+    r"|'(?:\\(?:u\{[^}]*\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'"
+    r'|(?P<line>//[^\n]*)|(?P<block>/\*)', re.S,
+)
+
+
+def rust_comments(text):
+    """Yield comment offsets and text, including nested Rust block comments."""
+    offset = 0
+    while token := RUST_TOKENS.search(text, offset):
+        offset = token.end()
+        if token.lastgroup == "line":
+            yield token.start(), token[0]
+        elif token.lastgroup == "block":
+            depth = 1
+            while depth and (marker := re.search(r"/\*|\*/", text[offset:])):
+                depth += 1 if marker[0] == "/*" else -1
+                offset += marker.end()
+            if depth:
+                offset = len(text)
+            yield token.start(), text[token.start():offset]
+
+
+def check_spec_citations(root):
+    """Rust comments point to a living spec section; dangling links always fail."""
+    cache, errors = {}, 0
+    for source in sorted((root / "tools/front-door").rglob("*.rs")):
+        text = source.read_text()
+        for offset, comment in rust_comments(text):
+            for match in re.finditer(r"(?<![\w:])Spec:(?!:)\s*([^\s*]+)?", comment):
+                reference = (match[1] or "").strip("`.,;()[]{}")
+                target = re.fullmatch(r"(docs/specs/[\w.-]+\.md)#([^#]+)", reference)
+                valid = False
+                if target:
+                    path = root / target[1]
+                    if path.is_file():
+                        if path not in cache:
+                            cache[path] = heading_anchors(path.read_text())
+                        valid = unquote(target[2]) in cache[path]
+                if not valid:
+                    line = text.count("\n", 0, offset + match.start()) + 1
+                    warn(source.relative_to(root), line, "spec citation", reference or "Spec: (missing target)", "error")
+                    errors += 1
+    return errors
 
 
 def check_anchors(root, document):
@@ -312,7 +394,7 @@ def check_spec_length(root):
         words = len(spec.read_text().split())
         if words > SPEC_WORD_CAP:
             print(f"{spec.relative_to(root)}:1: warning: spec has {words} words, "
-                  f"over the {SPEC_WORD_CAP}-word cap; cite tests instead of narrating")
+                  f"over the {SPEC_WORD_CAP}-word cap; name owning symbols instead of narrating")
 
 
 def check_diagrams(root, document):
@@ -398,129 +480,163 @@ def anchors(root, document):
             return 1
         found.append(target)
     if not any(path.is_file() for path in found):
-        print(f"{display}:{index + 1}: error: Anchor names no source file or test")
+        print(f"{display}:{index + 1}: error: Anchor names no source file or declaration")
         return 1
     return 0
-
-
-def table_rows(text, heading):
-    """First-column cells and rows of the first table after a Markdown heading."""
-    section = text.split(heading, 1)[1] if heading in text else ""
-    rows = []
-    for line in section.splitlines():
-        if line.startswith("|---"):
-            continue
-        if line.startswith("|"):
-            rows.append([cell.strip() for cell in line.strip().strip("|").split("|")])
-        elif rows:
-            break
-    return rows[1:]
-
-
-def check_projections(root):
-    """Compare hand-kept runbook tables with the source they project."""
-    errors = []
-    inbox = root / "docs/runbooks/human-inbox.md"
-    specs = root / "tools/front-door/crates/records/src/adapters.rs"
-    hooks = root / "tools/front-door/crates/cli/src/hooks.rs"
-    if inbox.exists() and specs.exists() and hooks.exists():
-        rows = table_rows(inbox.read_text(), "## Delivery service")
-        readers = set(re.findall(r'name: "([\w-]+)",(?:(?!name: ").)*?local_offer_reader: true', specs.read_text(), re.S))
-        injected = {name.lower() for name in re.findall(
-            r"DeliveryCapability \{\s*provider: Harness::(\w+),(?:(?!\}\);).)*?live_injection: true", hooks.read_text(), re.S)}
-        documented_readers = {row[0].strip("`") for row in rows if len(row) == 4 and row[2] == "Library API"}
-        documented_injected = {row[0].strip("`") for row in rows if len(row) == 4 and row[3] not in ("Unavailable", "")}
-        if not rows or rows[-1][0] != "Every other adapter":
-            errors.append(f"{inbox.relative_to(root)}: error: delivery table must end with an 'Every other adapter' row")
-        if documented_readers != readers:
-            errors.append(f"{inbox.relative_to(root)}: error: library offer readers are {sorted(readers)}, documented {sorted(documented_readers)}")
-        if documented_injected != injected:
-            errors.append(f"{inbox.relative_to(root)}: error: live injection providers are {sorted(injected)}, documented {sorted(documented_injected)}")
-    for error in errors:
-        print(error)
-    return len(errors)
 
 
 # Cutover surfaces are explicit so archived ADRs, release notes and source-symbol
 # citations remain usable evidence. These are the maintained command guides.
 COMMAND_GUIDES = (
-    "README.md", "docs/worktrees.md",
-    "tools/front-door/crates/run/README.md", "docs/runbooks/ci.md",
+    "README.md", "AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md", "MAINTAINING.md",
+    "docs/worktrees.md", "docs/ARCHITECTURE.md", "docs/glossary.md",
+    "config/harness-knobs.json", "tools/front-door/crates/run/README.md",
 )
-DELETED_VERBS = r"(?:dispatch|review|lanes|resume|cancel|preset|fabric_graph)"
+# Bare verb names in code spans are read as removed commands only here; elsewhere
+# (skills, other runbooks) a span such as `review set` is ordinary prose.
+SHORTHAND_GUIDES = (
+    "README.md", "docs/worktrees.md", "tools/front-door/crates/run/README.md",
+    "docs/runbooks/ci.md",
+)
+# Directories whose Markdown (or template) files are command guides too.
+COMMAND_GUIDE_GLOBS = (
+    "docs/runbooks/*.md", "docs/specs/*.md", "skills/**/*.md",
+    "tools/front-door/crates/fabric-runtime/assets/templates/*.toml",
+)
 GLOBAL_SWITCHES = {"--json", "--full", "--help", "--version", "-h", "-V"}
 GLOBAL_VALUES = {"--project", "--state-dir"}
+# The one source of removed spellings is the CLI's own REMOVED table.
+REMOVED_SOURCE = "tools/front-door/crates/config/src/removed.rs"
 
 
-def deleted_command(reference):
-    """Read only the command path, consuming global option values as shell words."""
-    lexer = shlex.shlex(reference.split("`", 1)[0], posix=True)
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    words = iter(lexer)
+def removed_table(source):
+    """Read (command words, flag or None, replacement) from the CLI's REMOVED table."""
+    text = source.read_text()
+    block = text.split("pub const REMOVED", 1)[1].split("\n];", 1)[0]
+    entries = []
+    for match in re.finditer(
+            r"\b(verb|flag)\(\s*&\[([^\]]*)\]\s*,\s*(?:\"([^\"]+)\"\s*,\s*)?\"([^\"]+)\"", block):
+        words = tuple(re.findall(r'"([^"]+)"', match[2]))
+        flag = match[3] if match[1] == "flag" else None
+        entries.append((words, flag, match[4]))
+    if not entries or len(entries) != len(re.findall(r"\b(?:verb|flag)\(", block)):
+        raise ValueError(f"{source}: cannot read every REMOVED entry")
+    return entries
+
+
+def command_words(text):
+    """Command words and long flags of one command, after `provenant`, up to a shell operator."""
+    segment = re.split(r"\|\||&&|[|;]|\s>|\s2>|`", text, maxsplit=1)[0]
     try:
-        for word in words:
-            option, equal, _ = word.partition("=")
-            if option in GLOBAL_VALUES:
-                if not equal:
-                    next(words)  # A quoted path is one value, even if it names a verb.
-                continue
-            if option in GLOBAL_SWITCHES:
-                continue
-            if word == "help":
-                continue
-            verb = word.rstrip(".,;:)")
-            if re.fullmatch(DELETED_VERBS, verb):
-                return "provenant " + verb
-            if verb == "fabric":
-                child = next(words).rstrip(".,;:)")
-                if child in ("graph", "dispatch"):
-                    return "provenant fabric " + child
-            return None
-    except (ValueError, StopIteration):
-        # Malformed examples remain visible to the advisory reference check.
-        pass
+        tokens = shlex.split(segment)
+    except ValueError:
+        tokens = segment.split()
+    words, flags, tokens = [], [], iter(tokens)
+    for token in tokens:
+        token = token.strip("[]").rstrip(".,;:)")
+        option, equal, _ = token.partition("=")
+        if option in GLOBAL_VALUES:
+            if not equal:
+                next(tokens, None)  # A quoted path is one value, even if it names a verb.
+        elif option in GLOBAL_SWITCHES or not token:
+            continue
+        elif option.startswith("--"):
+            flags.append(option[2:])
+        elif not token.startswith("-") and token != "help":
+            words.append(token)
+    return words, flags
+
+
+def removed_use(text, table):
+    """The table entry a command uses (as the CLI's own parser matches it), or None."""
+    words, flags = command_words(text)
+    for entry in table:
+        path, flag, _ = entry
+        if (words[:len(path)] == list(path)) and (flag is None or flag in flags):
+            return entry
     return None
 
 
+def spelling(entry):
+    path, flag, _ = entry
+    return "provenant " + " ".join(path) + (f" --{flag}" if flag else "")
+
+
+def command_guides(root):
+    found = {root / name for name in COMMAND_GUIDES}
+    for pattern in COMMAND_GUIDE_GLOBS:
+        found |= set(root.glob(pattern))
+    return sorted(path for path in found if path.is_file())
+
+
 def check_deleted_commands(root):
-    """Fail on command uses, keeping template names, wire fields and prose valid."""
+    """Fail on removed command and flag uses, keeping template names, wire fields and prose valid."""
+    try:
+        table = removed_table(Path(__file__).resolve().parent.parent / REMOVED_SOURCE)
+    except (OSError, IndexError, ValueError) as error:
+        print(f"check-doc-truth: error: cannot read the CLI's removed spellings: {error}")
+        return 1
+    verbs = sorted({path[0] for path, flag, _ in table if flag is None and len(path) == 1})
+    verb_pattern = "(?:" + "|".join(re.escape(verb) for verb in verbs) + ")"
+    # A bare code span such as `output --trace` names its command by its first
+    # word, so only a removed flag of that command is read from it.
+    flagged = {path[0] for path, flag, _ in table if flag}
     count = 0
-    for relative in sorted(set(COMMAND_GUIDES) |
-                           {str(path.relative_to(root)) for path in (root / "docs/specs").glob("*.md")}):
-        document = root / relative
-        if not document.exists():
-            continue
+    for document in command_guides(root):
+        relative = document.relative_to(root)
         text = document.read_text()
         findings = {}
-        # Explicit commands include fenced shell examples and table cells.
+        retired_lines = retired_section_lines(text)
+        # Explicit commands include fenced shell examples and table cells; a
+        # command continued with a trailing backslash is one command.
+        joined, pending = [], None
         for number, line in enumerate(text.splitlines(), 1):
-            if RETIRED.search(line):
+            if pending:
+                pending = (pending[0], pending[1] + " " + line.strip())
+            else:
+                pending = (number, line)
+            if pending[1].rstrip().endswith("\\"):
+                pending = (pending[0], pending[1].rstrip()[:-1])
+                continue
+            joined.append(pending)
+            pending = None
+        if pending:
+            joined.append(pending)
+        for number, line in joined:
+            if RETIRED.search(line) or number in retired_lines:
                 continue
             for match in re.finditer(r"\bprovenant\s+", line):
-                if command := deleted_command(line[match.end():]):
-                    findings.setdefault(number, set()).add(command)
+                if entry := removed_use(line[match.end():], table):
+                    findings.setdefault(number, {})[spelling(entry)] = entry[2]
         for number, reference, context in inline_code(text):
-            if RETIRED.search(context):
+            if RETIRED.search(context) or number in retired_lines:
+                continue
+            if re.match(r"(?:\$ )?provenant\s", reference):
+                continue  # Read above, on its own line.
+            if (reference.split(" ", 1)[0] in flagged
+                    and (entry := removed_use(reference, table)) and entry[1]):
+                findings.setdefault(number, {})[spelling(entry)] = entry[2]
+                continue
+            if relative.as_posix() not in SHORTHAND_GUIDES and relative.parent.as_posix() != "docs/specs":
                 continue
             # Bare names may be template names or structured field values. A
             # following argument, or an explicit command/tool label, makes the
             # command intent unambiguous. Symbols and file paths do not match.
             shorthand = re.match(
                 r"^(?:fabric\s+graph|graph\s+(?:resume|cancel))(?=\s|$)"
-                r"|^fabric_graph$|^" + DELETED_VERBS + r"\s+\S", reference,
+                r"|^fabric_graph$|^" + verb_pattern + r"\s+\S", reference,
             )
-            labelled = (re.fullmatch(DELETED_VERBS, reference)
+            labelled = (re.fullmatch(verb_pattern, reference)
                         and re.search(
                             r"(?:\b(?:command|verb|tool|run|use|invoke|call)\s+`"
                             + re.escape(reference) + r"`(?!\s+(?:template|field|parameter)\b)"
                             r"|`" + re.escape(reference) + r"`\s+(?:command|verb|tool)\b)",
                             context, re.I))
             if shorthand or labelled:
-                findings.setdefault(number, set()).add(reference)
+                findings.setdefault(number, {})[reference] = "the graph CLI"
         for number, references in sorted(findings.items()):
-            for reference in sorted(references):
-                print(f"{relative}:{number}: error: deleted command `{reference}`; use the graph CLI")
+            for reference, replacement in sorted(references.items()):
+                print(f"{relative}:{number}: error: deleted command `{reference}`; use {replacement}")
                 count += 1
     return count
 
@@ -531,7 +647,6 @@ def main():
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--binary", help="worktree-built CLI (reuses the CI build)")
     source.add_argument("--help-json", help="CLI help catalogue fixture, with or without result envelope")
-    parser.add_argument("--strict-citations", action="store_true", help="fail on unresolved Rust Test citations")
     parser.add_argument("--inventory-only", action="store_true", help="check documentation evidence without loading the CLI catalogue")
     parser.add_argument("--strict-inventory", action="store_true", help="fail on missing headers, Anchor paths, spec index entries or diagram metadata")
     args = parser.parse_args()
@@ -565,17 +680,16 @@ def main():
     check_spec_length(root)
     adr_documents = sorted((root / "docs/adr").glob("*.md"))
     missing += sum(check_diagrams(root, document) for document in evidence + adr_documents)
-    citations = sum(check_test_citations(root, document) for document in evidence
-                    if document.parent == root / "docs/specs")
+    citations = check_spec_citations(root)
     missing += sum(anchors(root, document) for document in evidence
                    if document in documents)
-    projection_errors = check_projections(root)
     reference_errors = 0
     if not args.inventory_only:
-        agents = [root / name for name in ("AGENTS.md", "GLOBAL-AGENTS.md")]
-        for document in [path for path in agents if path.exists()] + documents + maintained + adr_documents:
+        ambient = [root / name for name in AMBIENT_DOCS]
+        skills = sorted((root / "skills").rglob("*.md"))
+        for document in [path for path in ambient if path.exists()] + skills + documents + maintained + adr_documents:
             reference_errors += check_references(root, document, commands, adrs, gone)
-    return int(bool(command_errors) or bool(projection_errors) or bool(reference_errors) or (args.strict_inventory and bool(missing)) or (args.strict_citations and bool(citations)))
+    return int(bool(command_errors) or bool(reference_errors) or (args.strict_inventory and bool(missing)) or bool(citations))
 
 
 if __name__ == "__main__":

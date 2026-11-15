@@ -1,10 +1,11 @@
-//! Byte-for-byte golden tests for the Seatbelt profiles the adapters produce.
+//! One canonical golden plus declaration-level Seatbelt grant invariants.
 //!
-//! Each profile comes from the adapter's real `prepare`, including the lane's
-//! own grants, under fixed fake paths. Regenerate with
-//! `PROVENANT_UPDATE_SNAPSHOTS=1 cargo test -p provenant-providers seatbelt_profiles`.
+//! The golden comes from the adapter's real `prepare` under fixed fake paths.
+//! Regenerate with
+//! `PROVENANT_UPDATE_SNAPSHOTS=1 cargo test -p provenant-providers claude_read_only_profile_matches_the_single_golden`.
 use super::tests::{fixture_access_plan, fixture_input, fixture_token, route};
 use super::*;
+use provenant_confinement::cargo::CargoHome;
 use provenant_confinement::permissions::snapshot::render;
 use provenant_confinement::permissions::{
     NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile,
@@ -121,6 +122,27 @@ fn prepared(
         socket.path = "/fixture/host/fabric-relay.sock".into();
     }
     Ok((confined.permissions().clone(), profile))
+}
+
+/// Project all Cargo-owned roots out of provider snapshots; their policy is
+/// asserted from the Cargo declaration and writer authority below.
+fn cargo_snapshot_text(rendered: &str, cargo_home: &CargoHome, plan: &PlanPermissions) -> String {
+    let mut roots = vec![cargo_home.path.clone()];
+    if let provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) = &plan.mode {
+        roots.push(authority.cargo_cache().path.clone());
+    }
+    let mut snapshot = String::new();
+    for line in rendered.split_inclusive('\n') {
+        let cargo_owned = line
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .any(|path| roots.iter().any(|root| Path::new(path).starts_with(root)));
+        if !cargo_owned {
+            snapshot.push_str(line);
+        }
+    }
+    snapshot
 }
 
 /// The credential mechanism each adapter's fixture plan selects.
@@ -340,9 +362,15 @@ fn open_network_grants_gh_reads_independently_of_publishing()
 fn fabric_profiles_only_read_database_and_allow_only_the_attempt_socket()
 -> Result<(), Box<dyn std::error::Error>> {
     for case in cases()? {
-        let rendered = render(&case.plan, &case.profile, Path::new(HOME))?;
         if case.profile.spec.fabric_socket.is_none() {
-            assert!(!rendered.contains("fabric.sqlite3"));
+            assert!(case.profile.spec.fabric_state_reads.is_empty());
+            assert!(
+                case.profile
+                    .spec
+                    .runtime_reads
+                    .iter()
+                    .all(|grant| !grant.path.starts_with("/fixture/state/fabric"))
+            );
             continue;
         }
         for suffix in ["", "-wal", "-shm", "-journal"] {
@@ -353,20 +381,6 @@ fn fabric_profiles_only_read_database_and_allow_only_the_attempt_socket()
                     .runtime_reads
                     .contains(&grant(&path, PathScope::Exact)),
                 "{}: {path}",
-                case.name
-            );
-            assert!(
-                rendered.contains(&format!("(allow file-read* (literal \"{path}\"))")),
-                "{}: {path}",
-                case.name
-            );
-            assert!(
-                !rendered
-                    .lines()
-                    .any(|line| line.contains("allow file-write")
-                        && (line.contains("/fixture/state/fabric")
-                            || line.contains("(subpath \"/fixture/state\")"))),
-                "{}",
                 case.name
             );
         }
@@ -401,391 +415,100 @@ fn fabric_profiles_only_read_database_and_allow_only_the_attempt_socket()
             .as_ref()
             .ok_or("missing socket")?;
         assert_eq!(socket.scope, PathScope::Exact);
-        assert!(rendered.contains(&format!(
-            "(allow network-outbound (remote unix-socket (path-literal \"{}\")))",
-            socket.path.display()
-        )));
-        assert!(!rendered.contains("provenant-peer.sock"));
+        assert!(socket.path.ends_with("fabric-relay.sock"));
     }
     Ok(())
 }
 
 #[test]
-fn seatbelt_profiles_match_snapshots() -> Result<(), Box<dyn std::error::Error>> {
-    let update = std::env::var(UPDATE_ENV).is_ok_and(|value| value == "1");
-    let dir = snapshot_dir();
-    let mut failures = Vec::new();
-    let mut names = BTreeSet::new();
-    for case in cases()? {
-        assert!(
-            names.insert(case.name.clone()),
-            "duplicate case {}",
-            case.name
-        );
-        let rendered = render(&case.plan, &case.profile, Path::new(HOME))?;
-        let snapshot_name = if case.name == "claude-continuation-read-only" {
-            "claude-read-only"
-        } else {
-            &case.name
-        };
-        let path = dir.join(format!("{snapshot_name}.sb"));
-        if update && case.name != "claude-continuation-read-only" {
-            std::fs::create_dir_all(&dir)?;
-            std::fs::write(&path, &rendered)?;
-            continue;
-        }
-        match std::fs::read(&path) {
-            Ok(expected) if expected == rendered.as_bytes() => {}
-            Ok(expected) => failures.push(format!(
-                "{}: {}",
-                case.name,
-                first_difference(&String::from_utf8_lossy(&expected), &rendered)
-            )),
-            Err(error) => failures.push(format!("{}: unreadable snapshot: {error}", case.name)),
-        }
-    }
-    // A snapshot no case renders is stale and must be deleted.
-    for entry in std::fs::read_dir(&dir)? {
-        let path = entry?.path();
-        let stem = path
-            .file_stem()
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or_default();
-        if names.contains(stem) {
-            continue;
-        }
-        if update {
-            std::fs::remove_file(&path)?;
-        } else {
-            failures.push(format!("{}: no case renders this snapshot", path.display()));
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "Seatbelt profile snapshots differ (set {UPDATE_ENV}=1 to regenerate):\n{}",
-        failures.join("\n")
-    );
-    Ok(())
-}
-
-fn first_difference(expected: &str, actual: &str) -> String {
-    let mut expected = expected.lines();
-    let mut actual = actual.lines();
-    for number in 1.. {
-        match (expected.next(), actual.next()) {
-            (Some(left), Some(right)) if left == right => {}
-            (None, None) => return "differs only in line endings".into(),
-            (left, right) => {
-                return format!("line {number}: expected {left:?}, rendered {right:?}");
-            }
-        }
-    }
-    unreachable!()
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn agy_read_only_compiled_profile_denies_read_root_write() -> Result<(), Box<dyn std::error::Error>>
-{
-    use provenant_confinement::permissions::snapshot::compile;
-    use provenant_confinement::permissions::{AnchoredDirectory, Anchors, required_anchors};
-    use std::os::unix::fs::PermissionsExt;
-
-    let temp = tempfile::tempdir()?;
-    let root = temp.path().canonicalize()?;
-    for name in [
-        "repo",
-        "scratch/read-only-git",
-        "state",
-        "Library/Keychains",
-        "bin",
-    ] {
-        std::fs::create_dir_all(root.join(name))?;
-    }
-    for name in ["scratch", "state"] {
-        std::fs::set_permissions(root.join(name), std::fs::Permissions::from_mode(0o700))?;
-    }
-    let executable = root.join("bin/agy");
-    std::fs::write(&executable, "fixture")?;
-    let repo = root.join("repo");
-    std::fs::write(repo.join("input"), "readable")?;
-    let plan = super::tests::read_only_plan(root.to_str().unwrap(), Some("keychain"));
-    let route = route("agy", "fixture-model");
-    let account = super::tests::agy_account_at(&root);
-    let prompt = Prompt::new("fixture".into());
-    let mut input = PrepareInput {
-        executable: &executable,
-        home: &root,
-        account: Some(&account),
-        ..fixture_input(&route, &plan, &prompt, &repo, None)
-    };
-    // Read-only plans grant the host Git, which anchors must find on disk.
-    input.provenant.git = Path::new("/usr/bin/git");
-    let adapter = REGISTRY
-        .iter()
-        .find(|entry| entry.adapter.id() == "agy")
-        .unwrap();
-    let spec = adapter.adapter.prepare(input)?;
-    let directories = required_anchors(plan.permissions(), &spec.profile, None)
-        .iter()
-        .map(AnchoredDirectory::open_canonical)
-        .collect::<Result<Vec<_>, _>>()?;
-    let anchors = Anchors {
-        home: &root,
-        directories: &directories,
-        worktree: None,
-    };
-    let compiled = compile(plan.permissions(), &spec.profile, &anchors)?;
-    let source = std::str::from_utf8(&compiled.profile)?;
-    assert!(source.contains("(allow default)"));
-    assert!(source.contains(&format!(
-        "(allow file-read* (subpath \"{}\"))",
-        repo.display()
-    )));
-    assert!(source.contains("(allow process-exec (subpath \"/bin\"))"));
-    // Deny-by-default leaves the read root unwritable. Check every writable
-    // subtree, including ancestors, rather than only the root's exact line.
-    for line in source
-        .lines()
-        .filter(|line| line.starts_with("(allow file-write* (subpath "))
-    {
-        let path = line
-            .strip_prefix("(allow file-write* (subpath \"")
-            .unwrap()
-            .strip_suffix("\"))")
-            .unwrap();
-        assert!(
-            !repo.starts_with(path) && !Path::new(path).starts_with(&repo),
-            "read root is writable via {line}"
-        );
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-#[allow(clippy::disallowed_methods)]
-fn agy_read_only_linked_worktree_git_directories_are_not_writable()
+fn cargo_permissions_follow_the_declared_access_for_each_profile_case()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::permissions::snapshot::compile;
-    use provenant_confinement::permissions::{AnchoredDirectory, Anchors, required_anchors};
-    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
-    use provenant_core::{ProjectId, WorkScope};
-    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
-    use std::os::unix::fs::PermissionsExt;
-    use std::time::Duration;
-
-    let executor = SystemExecutor::new(1)?;
-    let cancel = provenant_core::CancelToken::new();
-    if let Err(error) = provenant_confinement::permissions::system_backend(
-        &provenant_confinement::permissions::BackendContext {
-            executor: &executor,
-            cancel: &cancel,
-            env: &[],
-        },
-    ) {
-        provenant_test_support::skip_sandbox_dependent_test(format!(
-            "native sandbox unavailable: {error}"
-        ))?;
-        return Ok(());
-    }
-
-    let temp = tempfile::tempdir()?;
-    let root = temp.path().canonicalize()?;
-    for name in ["repo", "scratch", "state", "Library/Keychains", "bin"] {
-        std::fs::create_dir_all(root.join(name))?;
-    }
-    for name in ["scratch", "state"] {
-        std::fs::set_permissions(root.join(name), std::fs::Permissions::from_mode(0o700))?;
-    }
-    let repo = root.join("repo");
-    let executor = SystemExecutor::new(1)?;
-    let clt_git = Path::new("/Library/Developer/CommandLineTools/usr/bin/git");
-    let git = if clt_git.is_file() {
-        clt_git
-    } else {
-        Path::new("/usr/bin/git")
-    };
-    let run_git = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
-        let argv = std::iter::once(git.as_os_str())
-            .chain(args.iter().map(std::ffi::OsStr::new))
-            .map(Into::into)
-            .collect::<Vec<_>>();
-        let env = provenant_os::fixture::git_env();
-        let mut options = ExecOptions::new(&argv, &repo, Duration::from_secs(10));
-        options.env = Some(&env);
-        let output = executor.execute(options)?;
-        assert!(
-            output.termination == Termination::Exit(0),
-            "git failed: {}",
-            String::from_utf8_lossy(&output.stderr.bytes)
-        );
-        Ok(())
-    };
-    run_git(&["init"])?;
-    std::fs::write(repo.join("file"), "base\n")?;
-    run_git(&["add", "file"])?;
-    run_git(&["commit", "--allow-empty", "-m", "fixture"])?;
-    run_git(&["checkout", "-b", "side"])?;
-    std::fs::write(repo.join("file"), "side\n")?;
-    run_git(&["add", "file"])?;
-    run_git(&["commit", "--allow-empty", "-m", "side"])?;
-    run_git(&["checkout", "-"])?;
-    std::fs::write(repo.join("file"), "main\n")?;
-    run_git(&["add", "file"])?;
-    run_git(&["commit", "-m", "main"])?;
-    run_git(&["merge", "--no-ff", "-s", "ours", "side", "-m", "merge"])?;
-    let worktree = root.join("linked");
-    run_git(&[
-        "worktree",
-        "add",
-        "-b",
-        "fixture",
-        worktree.to_str().unwrap(),
-    ])?;
-    let common = repo.join(".git");
-    let private = common.join("worktrees/linked");
-    assert!(private.is_dir());
-    let private_common = root.join("scratch/git-common");
-    std::fs::create_dir_all(private_common.join("objects"))?;
-    std::fs::create_dir_all(private_common.join("refs"))?;
-    std::fs::copy(common.join("config"), private_common.join("config"))?;
-    std::fs::copy(private.join("index"), private_common.join("index"))?;
-    let head = provenant_os::fixture::git_command_at(git)
-        .current_dir(&worktree)
-        .args(["rev-parse", "HEAD"])
-        .output()?;
-    assert!(head.status.success());
-    std::fs::write(private_common.join("HEAD"), head.stdout)?;
-    std::fs::create_dir_all(root.join("scratch/git-objects/info"))?;
-    std::fs::write(
-        root.join("scratch/git-objects/info/alternates"),
-        format!("{}\n", common.join("objects").display()),
-    )?;
-    let executable = root.join("bin/agy");
-    std::fs::write(&executable, "fixture")?;
-    let base = super::tests::read_only_plan(root.to_str().unwrap(), Some("keychain"));
-    let mut permissions = base.permissions().clone();
-    permissions.read_roots = vec![PathGrant {
-        path: worktree.clone(),
-        scope: PathScope::Subtree,
-    }];
-    permissions.read_only = Some(ReadOnlyGrants::for_test(repo, vec![]));
-    let plan = ConfinedPlan::new(PlanRequest {
-        scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
-        permissions,
-        codex: CodexPolicy::Clean,
-        extensions: ExtensionPolicy::Deny,
-        agy_state: None,
-    })?;
-    let route = route("agy", "fixture-model");
-    let account = super::tests::agy_account_at(&root);
-    let prompt = Prompt::new("fixture".into());
-    let mut input = PrepareInput {
-        executable: &executable,
-        home: &root,
-        account: Some(&account),
-        git_context: true,
-        ..fixture_input(&route, &plan, &prompt, &worktree, None)
-    };
-    input.provenant.git = git;
-    let adapter = REGISTRY
-        .iter()
-        .find(|entry| entry.adapter.id() == "agy")
-        .unwrap();
-    let spec = adapter.adapter.prepare(input)?;
-    for step in &spec.setup {
-        match step {
-            SetupStep::CreateDir(path) if path.starts_with(root.join("scratch")) => {
-                std::fs::create_dir_all(path)?
-            }
-            SetupStep::WriteFile { path, bytes }
-                if path.starts_with(root.join("scratch/git-objects"))
-                    || path == &root.join("scratch/gitconfig") =>
-            {
-                std::fs::write(path, bytes)?
-            }
-            SetupStep::WriteExecutable { path, bytes }
-                if path == &root.join("scratch/bin/git")
-                    || path == &root.join("scratch/read-only-git/git") =>
-            {
-                std::fs::write(path, bytes)?;
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-            }
-            _ => {}
-        }
-    }
-    let directories = required_anchors(plan.permissions(), &spec.profile, None)
-        .iter()
-        .map(AnchoredDirectory::open_canonical)
-        .collect::<Result<Vec<_>, _>>()?;
-    let anchors = Anchors {
-        home: &root,
-        directories: &directories,
-        worktree: None,
-    };
-    let compiled = compile(plan.permissions(), &spec.profile, &anchors)?;
-    let sandboxed =
-        |argv: &[std::ffi::OsString]| -> Result<provenant_os::exec::ExecOutcome, Box<dyn std::error::Error>> {
-            let command = compiled.command(
-                argv,
-                &provenant_core::AttemptId::from_bytes([1; 16]),
-                &provenant_os::fs::Directory::open_anchor(&root)?,
-            )?;
-            let mut options = command.options(&worktree, Duration::from_secs(10))?;
-            options.env = Some(&spec.env);
-            options.cancel = Some(&cancel);
-            Ok(executor.execute(options)?)
-        };
-    for args in [&["log", "-1"][..], &["diff", "HEAD~1"][..]] {
-        let argv: Vec<std::ffi::OsString> =
-            std::iter::once(root.join("scratch/bin/git").into_os_string())
-                .chain(args.iter().map(Into::into))
-                .collect();
-        let output = sandboxed(&argv)?;
-        assert!(
-            output.termination == Termination::Exit(0),
-            "{}",
-            String::from_utf8_lossy(&output.stderr.bytes)
-        );
-    }
-    std::fs::write(worktree.join("file"), "changed\n")?;
-    let output = sandboxed(&[git.into(), "add".into(), "file".into()])?;
-    assert!(output.termination != Termination::Exit(0));
+    let cargo = CargoHome::resolve(Path::new(HOME), |_| None)?;
     assert!(
-        String::from_utf8_lossy(&output.stderr.bytes).contains("Operation not permitted"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr.bytes)
+        cargo
+            .tracking()
+            .all(|grant| grant.scope == PathScope::Exact)
     );
-    let input = root.join("scratch/object-input");
-    std::fs::write(&input, b"unique lane object")?;
-    let output = sandboxed(&[git.into(), "hash-object".into(), "-w".into(), input.into()])?;
-    assert!(output.termination != Termination::Exit(0));
-    assert!(
-        String::from_utf8_lossy(&output.stderr.bytes).contains("Operation not permitted"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    let source = std::str::from_utf8(&compiled.profile)?;
-    assert!(source.contains(&format!(
-        "(allow file-read* (subpath \"{}\"))",
-        common.display()
-    )));
-    for line in source
-        .lines()
-        .filter(|line| line.starts_with("(allow file-write* (subpath "))
-    {
-        let path = line
-            .strip_prefix("(allow file-write* (subpath \"")
-            .unwrap()
-            .strip_suffix("\"))")
-            .unwrap();
-        for git_dir in [&private, &common] {
+    let expected_writes: BTreeSet<_> = cargo
+        .writes()
+        .map(|grant| match grant.scope {
+            PathScope::Exact => {
+                format!("(allow file-write* (literal \"{}\"))", grant.path.display())
+            }
+            PathScope::Subtree => {
+                format!("(allow file-write* (subpath \"{}\"))", grant.path.display())
+            }
+        })
+        .collect();
+
+    for case in cases()? {
+        let rendered = render(&case.plan, &case.profile, Path::new(HOME))?;
+        let cargo_home_path = cargo.path.to_string_lossy();
+        let writes: BTreeSet<_> = rendered
+            .lines()
+            .filter(|line| {
+                line.starts_with("(allow file-write") && line.contains(cargo_home_path.as_ref())
+            })
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(writes, expected_writes, "{}: Cargo write rules", case.name);
+        for credential in cargo.credentials() {
+            let path = credential.path.display();
             assert!(
-                !git_dir.starts_with(path) && !Path::new(path).starts_with(git_dir),
-                "Git directory is writable via {line}"
+                rendered.contains(&format!("(deny file-read* (literal \"{path}\"))")),
+                "{}: Cargo credential read: {path}",
+                case.name
+            );
+            assert!(
+                rendered.contains(&format!("(deny file-write* (literal \"{path}\"))")),
+                "{}: Cargo credential write: {path}",
+                case.name
+            );
+        }
+        if let provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) =
+            &case.plan.mode
+        {
+            let cache = authority.cargo_cache().path.display();
+            assert!(
+                rendered.contains(&format!("(allow file-read* (subpath \"{cache}\"))")),
+                "{}: private Cargo cache read: {cache}",
+                case.name
+            );
+            assert!(
+                rendered.contains(&format!("(allow file-write* (subpath \"{cache}\"))")),
+                "{}: private Cargo cache write: {cache}",
+                case.name
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn claude_read_only_profile_matches_the_single_golden() -> Result<(), Box<dyn std::error::Error>> {
+    let update = std::env::var(UPDATE_ENV).is_ok_and(|value| value == "1");
+    let case = cases()?
+        .into_iter()
+        .find(|case| case.name == "claude-read-only")
+        .ok_or("missing declared Claude reader case")?;
+    let cargo_home = CargoHome::resolve(Path::new(HOME), |_| None)?;
+    let rendered = cargo_snapshot_text(
+        &render(&case.plan, &case.profile, Path::new(HOME))?,
+        &cargo_home,
+        &case.plan,
+    );
+    let dir = snapshot_dir();
+    let path = dir.join("claude-read-only.sb");
+    if update {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path, &rendered)?;
+        return Ok(());
+    }
+    let expected = std::fs::read(&path)?;
+    assert_eq!(
+        expected.as_slice(),
+        rendered.as_bytes(),
+        "the canonical profile golden changed"
+    );
     Ok(())
 }

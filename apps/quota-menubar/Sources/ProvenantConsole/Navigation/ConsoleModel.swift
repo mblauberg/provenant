@@ -57,13 +57,20 @@ final class ConsoleModel {
     // MARK: Navigation
 
     func select(_ item: SidebarItem) {
+        guard let destination = updateSelection(item) else { return }
+        Task { await load(destination) }
+    }
+
+    /// Applies navigation without deciding when its screen should read. Deep links use this to select a screen,
+    /// then await one fresh read before selecting the linked row.
+    private func updateSelection(_ item: SidebarItem) -> Destination? {
         self.item = item
         // Request search belongs to the Inbox; elsewhere the field defaults to searching results.
         if item.destination == .inbox { if searchScope != .requests, searchText.isEmpty { searchScope = .requests } }
         else if item.destination != .search, searchScope == .requests { searchScope = .results }
         if case .inbox(let scope) = item { inbox.show(scope) }
         if item.destination != .search { defaults?.set(item.destination.rawValue, forKey: Self.defaultsKey) }
-        if stale.contains(item.destination) { Task { await load(item.destination) } }
+        return stale.contains(item.destination) ? item.destination : nil
     }
 
     func show(_ destination: Destination) {
@@ -76,6 +83,25 @@ final class ConsoleModel {
     func showAttempt(_ id: String) {
         inspectorShown = true
         Task { await attempt.show(id) }
+    }
+
+    /// Opens a live request from a menu-bar link against a fresh inbox read.
+    func openRequest(_ id: String) async {
+        searchText = ""
+        stale.insert(.inbox)
+        _ = updateSelection(.inbox(.all))
+        await load(.inbox)
+        if inbox.visibleRequests.contains(where: { $0.id == id }) { inbox.selection = id }
+    }
+
+    /// Opens an attempt in the inspector and brings its Runs context forward.
+    func openAttempt(_ id: String) async {
+        stale.insert(.runs)
+        _ = updateSelection(.runs)
+        inspectorShown = true
+        async let runsRead: Void = load(.runs)
+        await attempt.show(id)
+        await runsRead
     }
 
     // MARK: Reading

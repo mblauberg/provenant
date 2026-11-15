@@ -201,9 +201,9 @@ fn qualified_propagations_group_colliding_originals() {
         vec!["a:F1", "a:F1", "b:F1", "b:F1"]
     );
     assert_eq!(findings[0].extra["original"], "a-original");
-    assert_eq!(findings[1].extra["verification"], "a-verified");
+    assert_eq!(findings[1].verification.as_deref().unwrap(), "a-verified");
     assert_eq!(findings[2].extra["original"], "b-original");
-    assert_eq!(findings[3].extra["verification"], "b-verified");
+    assert_eq!(findings[3].verification.as_deref().unwrap(), "b-verified");
 }
 
 #[test]
@@ -274,8 +274,8 @@ fn multiple_verifiers_share_one_disposition_and_keep_evidence() {
             .iter()
             .all(|f| f.id == "F1" && f.disposition.as_deref() == Some("accepted"))
     );
-    assert_eq!(findings[1].extra["verification"], "evidence-one");
-    assert_eq!(findings[2].extra["verification"], "evidence-two");
+    assert_eq!(findings[1].verification.as_deref().unwrap(), "evidence-one");
+    assert_eq!(findings[2].verification.as_deref().unwrap(), "evidence-two");
 }
 
 #[test]
@@ -337,7 +337,7 @@ fn chain_resolves_rendered_markers_and_preserves_every_copy() {
     let copies: Vec<_> = findings.iter().filter(|f| f.id == "a:F1").collect();
     assert_eq!(copies.len(), 3);
     for (finding, evidence) in copies.iter().zip(["first", "middle", "last"]) {
-        assert_eq!(finding.extra["evidence"], evidence);
+        assert_eq!(finding.evidence.as_deref().unwrap(), evidence);
         assert_eq!(finding.disposition.as_deref(), Some("accepted"));
         assert!(owner.prompts[4].contains(evidence));
     }
@@ -736,7 +736,10 @@ fn required_findings_prompt_includes_empty_example_even_when_fence_is_mentioned(
         .expect("findings example demonstrates a finding");
     for field in ["id", "severity", "file", "summary", "status"] {
         assert!(
-            finding.get(field).and_then(serde_json::Value::as_str).is_some(),
+            finding
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
             "finding example has a string {field}"
         );
     }
@@ -895,7 +898,10 @@ fn findings_required_and_review_nodes_still_fail_on_a_missing_block() {
     required.require_findings = true;
     let settled = settle_single(required, "");
     assert_eq!(settled.state, NodeState::Failed);
-    assert_eq!(settled.advance_error_code.as_deref(), Some("findings_required"));
+    assert_eq!(
+        settled.advance_error_code.as_deref(),
+        Some("findings_required")
+    );
 
     let mut lens = node("lens", route("first"));
     lens.role = Some("lens.security".into());

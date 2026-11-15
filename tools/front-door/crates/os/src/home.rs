@@ -294,3 +294,140 @@ fn read_optional(
     *remaining -= bytes.len() as u64;
     Ok(Some(bytes))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    fn recipe(root: &Path) -> Result<HomeRecipe, Box<dyn std::error::Error>> {
+        let source = root.join("source");
+        let private_parent = root.join("provider-state");
+        fs::create_dir(&source)?;
+        crate::fixture::private_state_dir(&private_parent)?;
+        Ok(HomeRecipe::new(
+            source,
+            private_parent,
+            RelativePath::parse("home")?,
+            RelativePath::parse("state")?,
+            HomeFiles {
+                copy: vec!["settings.json".into()],
+                refuse_source: vec!["login.keychain-db".into()],
+                refuse_private: vec!["auth.json".into()],
+            },
+            1024,
+        )?)
+    }
+
+    #[test]
+    fn prepare_copies_declared_files_privately_and_refuses_links()
+    -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Clone, Copy)]
+        enum Row {
+            DeclaredFiles,
+            Link,
+            TransactionalState,
+        }
+        for row in [Row::DeclaredFiles, Row::Link, Row::TransactionalState] {
+            let temp = tempfile::tempdir()?;
+            let recipe = recipe(temp.path())?;
+            let source = temp.path().join("source");
+            match row {
+                Row::DeclaredFiles => {
+                    fs::write(source.join("settings.json"), b"declared")?;
+                    fs::write(source.join("unlisted.json"), b"ignored")?;
+                }
+                Row::Link => {
+                    let target = temp.path().join("outside");
+                    fs::write(&target, b"external")?;
+                    std::os::unix::fs::symlink(target, source.join("settings.json"))?;
+                }
+                Row::TransactionalState => {
+                    fs::write(source.join("login.keychain-db"), b"transactional")?;
+                }
+            }
+
+            match row {
+                Row::DeclaredFiles => {
+                    let prepared = recipe.prepare()?;
+                    let home = prepared.path();
+                    let copied = home.join("state/settings.json");
+                    assert_eq!(fs::read(&copied)?, b"declared");
+                    assert!(!home.join("state/unlisted.json").exists());
+                    assert_eq!(fs::metadata(home)?.permissions().mode() & 0o777, 0o700);
+                    assert_eq!(
+                        fs::metadata(home.join("state"))?.permissions().mode() & 0o777,
+                        0o700
+                    );
+                    assert_eq!(fs::metadata(copied)?.permissions().mode() & 0o777, 0o600);
+                }
+                Row::Link => assert!(matches!(recipe.prepare(), Err(HomeError::UnsafeEntry))),
+                Row::TransactionalState => {
+                    assert!(matches!(recipe.prepare(), Err(HomeError::UnsupportedState)))
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn copy_back_publishes_only_declared_names_and_refuses_private_transactional_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let recipe = recipe(temp.path())?;
+        let prepared = recipe.prepare()?;
+        let private_state = prepared.path().join("state");
+        fs::write(private_state.join("settings.json"), b"private")?;
+        fs::write(private_state.join("unlisted.json"), b"ignored")?;
+        prepared.copy_back()?;
+        let source = temp.path().join("source");
+        assert_eq!(fs::read(source.join("settings.json"))?, b"private");
+        assert!(!source.join("unlisted.json").exists());
+        assert_eq!(
+            fs::metadata(source.join("settings.json"))?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        prepared.copy_back()?;
+
+        fs::write(private_state.join("settings.json"), b"changed")?;
+        assert!(matches!(
+            prepared.copy_back(),
+            Err(HomeError::Conflict { name }) if name == "settings.json"
+        ));
+        assert_eq!(fs::read(source.join("settings.json"))?, b"private");
+
+        fs::write(private_state.join("auth.json"), b"transactional")?;
+        assert!(matches!(
+            prepared.copy_back(),
+            Err(HomeError::UnsupportedState)
+        ));
+        let rows = [
+            (Publication::Durable, None),
+            (
+                Publication::VisibleDurabilityUnconfirmed {
+                    sync_error: FsError::Io {
+                        operation: "sync directory",
+                        path: PathBuf::from("/fixture/provider-state"),
+                        source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                    },
+                },
+                Some(std::io::ErrorKind::PermissionDenied),
+            ),
+        ];
+        for (publication, expected_kind) in rows {
+            let result = durable(publication);
+            match expected_kind {
+                None => assert!(result.is_ok()),
+                Some(expected_kind) => assert!(matches!(
+                    result,
+                    Err(HomeError::DurabilityUnconfirmed(FsError::Io { source, .. }))
+                        if source.kind() == expected_kind
+                )),
+            }
+        }
+        Ok(())
+    }
+}

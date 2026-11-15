@@ -63,7 +63,7 @@ pub fn record_capacity_cooldown(
     if model.is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
         return Err(QuotaError::Invalid("capacity model"));
     }
-    if current.is_some_and(|record| record.account != *account) {
+    if current.is_some_and(|record| !record.account.same_identity(account)) {
         return Err(QuotaError::Conflict);
     }
     let expires = now
@@ -75,15 +75,19 @@ pub fn record_capacity_cooldown(
     let mut record = current
         .cloned()
         .unwrap_or_else(|| AccountRecord::empty(account.clone()));
+    record.adopt_account(account);
     record.validate()?;
     record.revision = record
         .revision
         .checked_add(1)
         .ok_or(QuotaError::NumberOutOfRange)?;
-    let extra = record
+    let existing = record
         .capacity_cooldowns
         .iter()
         .find(|cooldown| cooldown.model == model)
+        .cloned();
+    let extra = existing
+        .as_ref()
         .map(|cooldown| cooldown.extra.clone())
         .unwrap_or_default();
     record
@@ -94,14 +98,17 @@ pub fn record_capacity_cooldown(
     }
     record.capacity_cooldowns.push(CapacityCooldown {
         extra,
-        account: account.clone(),
+        account: existing.as_ref().map_or_else(
+            || record.account.clone(),
+            |cooldown| cooldown.account.updated_from(account),
+        ),
         model: model.into(),
         observed_unix_seconds: now,
         expires_unix_seconds: expires,
     });
     record.validate()?;
     Ok(Some(UpdateIntent {
-        account: account.clone(),
+        account: record.account.clone(),
         expected: current.cloned(),
         replacement: Some(record),
         readiness_probe_result: None,
@@ -183,22 +190,10 @@ impl Admission<'_> {
     ) -> Result<bool, QuotaError> {
         let expires = refusal.expires_unix_seconds()?;
         let snapshot = self.fresh_snapshot(adapter, record);
-        // Older pool-less refusals predate grouped quota observations. For
-        // grouped adapters, recover their comparison scope from the model
-        // family, as Catalogue::quota_pool does for uncatalogued models.
-        let pool = refusal.pool.as_deref().or_else(|| {
-            provenant_records::AdapterSpec::get(adapter)
-                .filter(|spec| spec.grouped_quota_pools)
-                .and_then(|_| refusal.model.split('-').next())
-                .filter(|family| !family.is_empty())
-        });
+        let pool = refusal.pool.as_deref();
         let comparable_newer = record.is_some_and(|r| r.last_error.is_none())
             && snapshot.is_some_and(|s| {
                 s.observed_unix_seconds > refusal.observed_unix_seconds
-                    && matches!(
-                        s.status,
-                        QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
-                    )
                     && pool.is_some_and(|pool| {
                         let mut windows = s
                             .windows
@@ -276,16 +271,8 @@ impl Admission<'_> {
 
     /// Check provider readiness, current allowance and the account record's
     /// persisted refusals.
+    /// Partial coverage is advisory; explicit provider refusals are checked separately.
     pub fn check(&self, route: &ResolvedRoute) -> Result<(), QuotaError> {
-        self.check_with_partial_headroom(route, false)
-    }
-
-    /// Opt in only to uncalibrated partial headroom; exhaustion remains binding.
-    pub fn check_with_partial_headroom(
-        &self,
-        route: &ResolvedRoute,
-        allow_unknown: bool,
-    ) -> Result<(), QuotaError> {
         match route.readiness {
             RouteReadiness::Ready {
                 expires_unix_seconds,
@@ -311,20 +298,15 @@ impl Admission<'_> {
                     "authentication required; sign in to the selected account",
                 ));
             }
-            match partial_headroom(
+            if partial_headroom(
                 snapshot,
                 &route.adapter,
                 &route.model,
                 self.pools,
                 self.now_unix_seconds,
-            ) {
-                PartialHeadroom::Exhausted => {
-                    return Err(QuotaError::Refused("allowance exhausted"));
-                }
-                PartialHeadroom::Unknown if !allow_unknown => {
-                    return Err(QuotaError::Refused("uncalibrated partial coverage"));
-                }
-                _ => {}
+            ) == PartialHeadroom::Exhausted
+            {
+                return Err(QuotaError::AllowanceExhausted);
             }
         }
         Ok(())
@@ -339,7 +321,7 @@ pub enum PartialHeadroom {
     Exhausted,
 }
 
-/// Apply the same window and calibration rules during selection and launch.
+/// Partial coverage can inform pacing but cannot establish exhausted headroom.
 pub fn partial_headroom(
     snapshot: &QuotaSnapshot,
     adapter: &str,
@@ -363,14 +345,14 @@ pub fn partial_headroom(
         .details
         .as_ref()
         .is_some_and(|d| d.coverage.as_deref() == Some("partial"));
-    if (matches!(
-        snapshot.status,
-        QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
-    ) || (snapshot.status == QuotaStatus::Unknown && partial))
+    if !partial
+        && matches!(
+            snapshot.status,
+            QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
+        )
         && snapshot.windows.iter().filter(relevant).any(|w| {
             w.used_basis_points >= 10000
-                && (partial
-                    || w.resets_unix_seconds.is_none_or(|r| r > now)
+                && (w.resets_unix_seconds.is_none_or(|r| r > now)
                     || snapshot
                         .details
                         .as_ref()
@@ -420,21 +402,25 @@ pub fn record_refusal(
     let model = model
         .strip_prefix(&prefix)
         .ok_or(QuotaError::Invalid("provider refusal model"))?;
-    if current.is_some_and(|record| record.account != *account) {
+    if current.is_some_and(|record| !record.account.same_identity(account)) {
         return Err(QuotaError::Conflict);
     }
     let mut record = current
         .cloned()
         .unwrap_or_else(|| AccountRecord::empty(account.clone()));
+    record.adopt_account(account);
     record.validate()?;
     record.revision = record
         .revision
         .checked_add(1)
         .ok_or(QuotaError::NumberOutOfRange)?;
-    let extra = record
+    let existing = record
         .refusals
         .iter()
         .find(|refusal| refusal.model == model && refusal.pool.as_deref() == pool)
+        .cloned();
+    let extra = existing
+        .as_ref()
         .map(|refusal| refusal.extra.clone())
         .unwrap_or_default();
     record
@@ -445,7 +431,10 @@ pub fn record_refusal(
     }
     record.refusals.push(Refusal {
         extra,
-        account: account.clone(),
+        account: existing.as_ref().map_or_else(
+            || record.account.clone(),
+            |refusal| refusal.account.updated_from(account),
+        ),
         model: model.into(),
         pool: pool.map(Into::into),
         observed_unix_seconds: now_unix_seconds,
@@ -453,7 +442,7 @@ pub fn record_refusal(
     });
     record.validate()?;
     Ok(UpdateIntent {
-        account: account.clone(),
+        account: record.account.clone(),
         expected: current.cloned(),
         replacement: Some(record),
         readiness_probe_result: None,
@@ -479,50 +468,76 @@ mod tests {
     #[test]
     fn persisted_admission_evidence_preserves_unknown_fields_on_refresh() {
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "codex".into(),
             account_key: "key".into(),
             label: "label".into(),
         };
         let future = serde_json::json!({"nested": [null, true, u64::MAX]});
-        let refusal: Refusal = serde_json::from_value(serde_json::json!({
-            "account": account, "model": "model", "pool": null,
-            "observed_unix_seconds": 100, "resets_unix_seconds": 500,
-            "future": future,
-        }))
-        .unwrap();
-        let cooldown: CapacityCooldown = serde_json::from_value(serde_json::json!({
-            "account": account, "model": "model",
-            "observed_unix_seconds": 100, "expires_unix_seconds": 500,
-            "future": future,
-        }))
-        .unwrap();
         let mut record = AccountRecord::empty(account.clone());
-        record.refusals.push(refusal);
-        record.capacity_cooldowns.push(cooldown);
-        let record = record_refusal(Some(&record), &account, "codex/model", None, 200, Some(600))
+        record.refusals.push(Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: "model".into(),
+            pool: None,
+            observed_unix_seconds: 100,
+            resets_unix_seconds: Some(500),
+        });
+        record.capacity_cooldowns.push(CapacityCooldown {
+            extra: Default::default(),
+            account: account.clone(),
+            model: "model".into(),
+            observed_unix_seconds: 100,
+            expires_unix_seconds: 500,
+        });
+        let mut value = serde_json::to_value(&record).unwrap();
+        value["record_future"] = future.clone();
+        value["account"]["scope_future"] = future.clone();
+        value["refusals"][0]["refusal_future"] = future.clone();
+        value["refusals"][0]["account"]["scope_future"] = future.clone();
+        value["capacity_cooldowns"][0]["cooldown_future"] = future.clone();
+        value["capacity_cooldowns"][0]["account"]["scope_future"] = future.clone();
+        let encoded_input = serde_json::to_vec(&value).unwrap();
+        let record = AccountRecord::decode(&encoded_input).unwrap();
+        let incoming = AccountScope {
+            label: "renamed".into(),
+            ..account
+        };
+        let record = record_refusal(
+            Some(&record),
+            &incoming,
+            "codex/model",
+            None,
+            200,
+            Some(600),
+        )
+        .unwrap()
+        .replacement
+        .unwrap();
+        let record = record_capacity_cooldown(Some(&record), &incoming, "codex/model", 200, 600)
+            .unwrap()
             .unwrap()
             .replacement
             .unwrap();
-        let record = record_capacity_cooldown(Some(&record), &account, "codex/model", 200, 600)
-            .unwrap()
-            .unwrap()
-            .replacement
-            .unwrap();
-        assert_eq!(
-            serde_json::to_value(&record.refusals[0]).unwrap()["future"],
-            future
-        );
-        assert_eq!(
-            serde_json::to_value(&record.capacity_cooldowns[0]).unwrap()["future"],
-            future
-        );
-        assert_eq!(record.refusals[0].observed_unix_seconds, 200);
-        assert_eq!(record.capacity_cooldowns[0].observed_unix_seconds, 200);
+        value["revision"] = serde_json::json!(2);
+        value["account"]["label"] = serde_json::json!("renamed");
+        value["refusals"][0]["observed_unix_seconds"] = serde_json::json!(200);
+        value["refusals"][0]["resets_unix_seconds"] = serde_json::json!(600);
+        value["refusals"][0]["account"]["label"] = serde_json::json!("renamed");
+        value["capacity_cooldowns"][0]["observed_unix_seconds"] = serde_json::json!(200);
+        value["capacity_cooldowns"][0]["expires_unix_seconds"] = serde_json::json!(800);
+        value["capacity_cooldowns"][0]["account"]["label"] = serde_json::json!("renamed");
+        let encoded = provenant_records::encode(&record).unwrap();
+        let round_trip: AccountRecord =
+            provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG)
+                .unwrap();
+        assert_eq!(serde_json::to_value(&round_trip).unwrap(), value);
     }
 
     #[test]
     fn capacity_evidence_is_scoped_and_replaced_after_expiry() {
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "codex".into(),
             account_key: "key".into(),
             label: "label".into(),
@@ -567,6 +582,9 @@ mod admission_tests {
     use super::*;
     fn route() -> ResolvedRoute {
         ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
             extra: Default::default(),
             adapter: "claude".into(),
             model: "exact/model".into(),
@@ -578,6 +596,7 @@ mod admission_tests {
             exclusions: vec![],
             eligibility: provenant_records::RouteEligibility::Eligible,
             readiness: RouteReadiness::Ready {
+                availability_warning: None,
                 extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: 9999,
@@ -591,12 +610,14 @@ mod admission_tests {
     }
     fn record(status: QuotaStatus) -> AccountRecord {
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "claude".into(),
             account_key: "opaque".into(),
             label: "work".into(),
         };
         let mut record = AccountRecord::empty(account.clone());
         record.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account,
             revision: 0,
@@ -606,6 +627,7 @@ mod admission_tests {
             authority_ref: None,
             details: None,
             windows: vec![QuotaWindow {
+                extra: Default::default(),
                 window_seconds: None,
                 pool: "pool-a".into(),
                 used_basis_points: 10000,
@@ -618,9 +640,8 @@ mod admission_tests {
     fn stale_availability_warning_does_not_bypass_exhaustion() {
         let mut route = route();
         route.readiness = RouteReadiness::Ready {
-            extra: [("availability_warning".into(), serde_json::json!("stale"))]
-                .into_iter()
-                .collect(),
+            availability_warning: Some("stale".into()),
+            extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 1050,
         };
@@ -641,9 +662,8 @@ mod admission_tests {
         let stale_auth = [stale_auth];
         assert!(admission(&stale_auth).check(&route).is_ok());
         route.readiness = RouteReadiness::Ready {
-            extra: [("availability_warning".into(), serde_json::json!("stale"))]
-                .into_iter()
-                .collect(),
+            availability_warning: Some("stale".into()),
+            extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 950,
         };
@@ -663,14 +683,21 @@ mod admission_tests {
             }
             .check(&route())
         };
-        assert!(matches!(
-            check(&record, 1000),
-            Err(QuotaError::Refused(reason)) if reason.contains("re-register")
-        ));
-        assert!(matches!(
-            check(&record, 9000),
-            Err(QuotaError::Refused(reason)) if reason.contains("re-register")
-        ));
+        assert!(check(&record, 1000).is_err());
+        assert!(check(&record, 9000).is_err());
+        for now in [1000, 9000] {
+            assert_eq!(
+                Admission {
+                    policies: crate::source::TEST_POLICIES,
+                    now_unix_seconds: now,
+                    records: std::slice::from_ref(&record),
+                    pools: &[],
+                }
+                .account_block("claude", "opaque", "exact/model")
+                .unwrap(),
+                Some(AccountBlock::Mismatch)
+            );
+        }
         record.last_error = None;
         assert!(check(&record, 1000).is_ok());
     }
@@ -681,6 +708,17 @@ mod admission_tests {
         route.model = "opencode-go/mimo-v2.6-flash".into();
         route.account_key = Some("go".into());
         route.pool_selection = Some(provenant_records::RouteSelectionReceipt {
+            selection_rule: provenant_records::route_selection::SelectionRule::WeightedDraw,
+            considered_exclusions: Vec::new(),
+            exploration: provenant_records::route_selection::Exploration {
+                extra: Default::default(),
+                selected: false,
+                percent: 0,
+                enabled: false,
+                source: "fixture".into(),
+            },
+            weight_source: provenant_records::route_selection::WeightSource::Catalogue,
+            account_load: None,
             extra: Default::default(),
             pool: "senior".into(),
             candidates: vec![],
@@ -692,6 +730,7 @@ mod admission_tests {
         });
         let mut record = record(QuotaStatus::Available);
         record.account = AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             label: "go".into(),
@@ -699,6 +738,10 @@ mod admission_tests {
         let snapshot = record.snapshot.as_mut().unwrap();
         snapshot.account = record.account.clone();
         snapshot.windows.clear();
+        snapshot.details = Some(crate::QuotaDetails {
+            plan: Some("go".into()),
+            ..Default::default()
+        });
         let raw = [record];
         let check = |records: &[AccountRecord], now| {
             Admission {
@@ -723,59 +766,48 @@ mod admission_tests {
         let mut active = raw.clone();
         settings.apply_calibration(&mut active, 1000);
         assert!(check(&active, 1000).is_ok());
-        assert!(matches!(
-            check(&active, 1100),
-            Err(QuotaError::Refused("uncalibrated partial coverage"))
-        ));
-        let mut partial = raw.clone();
-        settings.apply_calibration(&mut partial, 1100);
-        partial[0]
-            .snapshot
-            .as_mut()
-            .unwrap()
-            .windows
-            .push(QuotaWindow {
+        assert!(check(&active, 1100).is_ok());
+        // Partial estimates stay advisory even at the reported limit, across
+        // status labels and expired or unknown reset times.
+        for (status, reset) in [
+            (QuotaStatus::Unknown, None),
+            (QuotaStatus::Unknown, Some(1099)),
+            (QuotaStatus::Exhausted, Some(1200)),
+        ] {
+            let mut partial = raw.clone();
+            settings.apply_calibration(&mut partial, 1100);
+            let snapshot = partial[0].snapshot.as_mut().unwrap();
+            snapshot.status = status;
+            snapshot.windows.push(QuotaWindow {
+                extra: Default::default(),
                 pool: "five_hour".into(),
                 window_seconds: None,
-                used_basis_points: 9999,
-                resets_unix_seconds: None,
+                used_basis_points: 10000,
+                resets_unix_seconds: reset,
             });
-        assert!(matches!(
-            check(&partial, 1100),
-            Err(QuotaError::Refused("uncalibrated partial coverage"))
-        ));
-        let opt_in = |records: &[AccountRecord]| {
-            Admission {
-                policies: crate::source::TEST_POLICIES,
-                now_unix_seconds: 1100,
-                records,
-                pools: &[],
-            }
-            .check_with_partial_headroom(&route, true)
-        };
-        assert!(opt_in(&partial).is_ok());
-        partial[0].snapshot.as_mut().unwrap().windows[0].used_basis_points = 10000;
-        partial[0].snapshot.as_mut().unwrap().status = QuotaStatus::Unknown;
-        assert!(matches!(
-            check(&partial, 1100),
-            Err(QuotaError::Refused("allowance exhausted"))
-        ));
-        assert!(matches!(
-            opt_in(&partial),
-            Err(QuotaError::Refused("allowance exhausted"))
-        ));
-        partial[0].snapshot.as_mut().unwrap().windows[0].resets_unix_seconds = Some(1099);
-        assert!(matches!(
-            opt_in(&partial),
-            Err(QuotaError::Refused("allowance exhausted"))
-        ));
+            assert!(check(&partial, 1100).is_ok());
+        }
         settings.calibration.get_mut("go").unwrap().five_hour = Some(100);
-        let mut exhausted = raw.clone();
-        settings.apply_calibration(&mut exhausted, 1000);
-        exhausted[0].snapshot.as_mut().unwrap().windows[0].resets_unix_seconds = Some(999);
+        let mut calibrated = raw.clone();
+        settings.apply_calibration(&mut calibrated, 1000);
+        assert!(check(&calibrated, 1000).is_ok());
+
+        // A complete measurement still enforces the selected model's window,
+        // independently of advertised free-pool membership.
+        let mut measured = raw;
+        let snapshot = measured[0].snapshot.as_mut().unwrap();
+        snapshot.status = QuotaStatus::Exhausted;
+        snapshot.details.get_or_insert_default().coverage = Some("complete".into());
+        snapshot.windows.push(QuotaWindow {
+            extra: Default::default(),
+            pool: "five_hour".into(),
+            window_seconds: None,
+            used_basis_points: 10000,
+            resets_unix_seconds: Some(1200),
+        });
         assert!(matches!(
-            check(&exhausted, 1000),
-            Err(QuotaError::Refused("allowance exhausted"))
+            check(&measured, 1100),
+            Err(QuotaError::AllowanceExhausted)
         ));
     }
 
@@ -787,6 +819,7 @@ mod admission_tests {
         let refusal = Refusal {
             extra: Default::default(),
             account: AccountScope {
+                extra: Default::default(),
                 adapter: "opencode".into(),
                 account_key: "opaque".into(),
                 label: "free".into(),
@@ -832,6 +865,7 @@ mod admission_tests {
     #[test]
     fn account_block_types_mismatch_free_and_scoped_refusals() {
         let scope = AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "opaque".into(),
             label: "free".into(),
@@ -909,7 +943,7 @@ mod admission_tests {
                 pools: &["pool-a".into()],
             }
             .check(&route()),
-            Err(QuotaError::Refused("allowance exhausted"))
+            Err(QuotaError::AllowanceExhausted)
         ));
     }
     #[test]
@@ -920,6 +954,7 @@ mod admission_tests {
         snapshot.windows[0].used_basis_points = 3000;
         snapshot.windows[0].resets_unix_seconds = Some(-2600);
         snapshot.windows.push(QuotaWindow {
+            extra: Default::default(),
             window_seconds: None,
             pool: "pool-b".into(),
             used_basis_points: 1000,
@@ -953,6 +988,7 @@ mod admission_tests {
         let account = record(QuotaStatus::Available).account;
         let mut route = route();
         route.readiness = RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 99_999,
@@ -981,28 +1017,35 @@ mod admission_tests {
     }
     #[test]
     fn account_usage_limit_holds_every_model_until_its_reset() {
-        let account = record(QuotaStatus::Available).account;
+        let account = AccountScope {
+            extra: Default::default(),
+            adapter: "codex".into(),
+            account_key: "opaque".into(),
+            label: "work".into(),
+        };
         let mut route = route();
+        route.adapter = account.adapter.clone();
+        route.model = "gpt-6.1-sol".into();
         route.readiness = RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 99_999,
         };
         // Recorded while serving another model on the same account.
-        let other = format!("{}/other-model", account.adapter);
         let intent = record_refusal(
             None,
             &account,
-            &other,
+            "codex/other-model",
             Some(ACCOUNT_ROUTE),
-            1000,
+            1_000,
             Some(30_000),
         )
         .expect("refusal");
         let mut refused = intent.replacement.expect("record");
         assert!(refused.refusals[0].account_wide());
         refused.snapshot = None;
-        for (now, allowed) in [(1000, false), (29_999, false), (30_000, true)] {
+        for (now, allowed) in [(1_000, false), (29_999, false), (30_000, true)] {
             let admission = Admission {
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: now,
@@ -1017,38 +1060,123 @@ mod admission_tests {
                 (!allowed).then_some(AccountBlock::ScopedRefusal),
             );
         }
-        // A newer reading with headroom in every window clears it early;
-        // one spent window does not.
-        let mut fresh = record(QuotaStatus::Available);
-        fresh.refusals = refused.refusals.clone();
-        let snapshot = fresh.snapshot.as_mut().expect("snapshot");
-        snapshot.observed_unix_seconds = 1500;
-        let admit = |record: &AccountRecord| {
-            Admission {
+
+        // Codex may return only model-specific windows from rateLimitsByLimitId.
+        // Those fresh observations can be Unknown overall while still proving
+        // headroom. They clear quota refusal; an unprobed route stays unknown.
+        for (status, windows, readiness_ready) in [
+            (
+                QuotaStatus::Available,
+                vec![QuotaWindow {
+                    extra: Default::default(),
+                    pool: "primary".into(),
+                    window_seconds: Some(18_000),
+                    used_basis_points: 0,
+                    resets_unix_seconds: Some(30_000),
+                }],
+                true,
+            ),
+            (
+                QuotaStatus::Unknown,
+                ["gpt-5-codex.primary", "gpt-5-codex.secondary"]
+                    .into_iter()
+                    .map(|pool| QuotaWindow {
+                        extra: Default::default(),
+                        pool: pool.into(),
+                        window_seconds: Some(18_000),
+                        used_basis_points: 0,
+                        resets_unix_seconds: Some(30_000),
+                    })
+                    .collect(),
+                false,
+            ),
+        ] {
+            let mut fresh = refused.clone();
+            let mut snapshot =
+                QuotaSnapshot::test_snapshot(account.clone(), status, 1_500, windows);
+            snapshot.revision = fresh.revision;
+            snapshot.authority_ref = Some("configured-local-quota".into());
+            fresh.snapshot = Some(snapshot);
+            let admission = Admission {
                 policies: crate::source::TEST_POLICIES,
-                now_unix_seconds: 1600,
-                records: std::slice::from_ref(record),
+                now_unix_seconds: 1_600,
+                records: std::slice::from_ref(&fresh),
                 pools: &[],
+            };
+            assert!(
+                !admission
+                    .refusal_holds("codex", Some(&fresh), &fresh.refusals[0])
+                    .unwrap()
+            );
+            assert_eq!(
+                admission
+                    .account_block("codex", "opaque", &route.model)
+                    .unwrap(),
+                None
+            );
+            if readiness_ready {
+                assert!(admission.check(&route).is_ok());
+            } else {
+                // A Codex quota tick can return useful model windows while its
+                // overall quota status remains unknown. The live tick updates
+                // this readiness file from the same account replacement.
+                let mut readiness = crate::ReadinessFile::default();
+                let prior = Admission {
+                    policies: crate::source::TEST_POLICIES,
+                    now_unix_seconds: 1_000,
+                    records: std::slice::from_ref(&refused),
+                    pools: &[],
+                };
+                readiness
+                    .sync_refusals(&refused, crate::LOCAL_HOST, &prior)
+                    .unwrap();
+                readiness
+                    .sync_refusals(&fresh, crate::LOCAL_HOST, &admission)
+                    .unwrap();
+                let scope = crate::ReadinessScope {
+                    extra: Default::default(),
+                    host: crate::LOCAL_HOST.into(),
+                    adapter: "codex".into(),
+                    account_key: "opaque".into(),
+                    route: ACCOUNT_ROUTE.into(),
+                };
+                let read = readiness.get(&scope, 1_600);
+                assert_eq!(read.state, crate::ReadinessState::Unknown);
+                assert_eq!(read.reason, Some(crate::ReadinessReason::NotProbed));
+                assert!(readiness.records.iter().all(|record| {
+                    record.reason != Some(crate::ReadinessReason::ProviderRefusal)
+                }));
             }
-            .account_block(&account.adapter, &account.account_key, &route.model)
-            .unwrap()
-        };
-        snapshot.windows[0].used_basis_points = 1_000;
-        snapshot.windows.push(QuotaWindow {
-            window_seconds: None,
-            pool: "pool-b".into(),
-            used_basis_points: 10_000,
-            resets_unix_seconds: Some(30_000),
-        });
-        assert_eq!(admit(&fresh), Some(AccountBlock::ScopedRefusal));
-        fresh.snapshot.as_mut().expect("snapshot").windows[1].used_basis_points = 2_000;
-        assert_eq!(admit(&fresh), None);
+
+            let mut failed = fresh.clone();
+            failed.last_error = Some(ProbeFailure::Network);
+            let admission = Admission {
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: 1_600,
+                records: std::slice::from_ref(&failed),
+                pools: &[],
+            };
+            assert!(
+                admission
+                    .refusal_holds("codex", Some(&failed), &failed.refusals[0])
+                    .unwrap()
+            );
+            assert_eq!(
+                admission
+                    .account_block("codex", "opaque", &route.model)
+                    .unwrap(),
+                Some(AccountBlock::ScopedRefusal)
+            );
+            assert!(admission.check(&route).is_err());
+        }
     }
+
     #[test]
     fn capacity_evidence_does_not_refuse_admission_but_quota_refusal_does() {
         let account = record(QuotaStatus::Available).account;
         let mut route = route();
         route.readiness = RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 99_999,
@@ -1076,14 +1204,20 @@ mod admission_tests {
             .unwrap();
         assert_eq!(both.capacity_cooldowns.len(), 1);
         assert_eq!(both.refusals.len(), 1);
-        assert!(matches!(
-            admit(&both, 1001),
-            Err(QuotaError::Refused(reason)) if reason.contains("scoped provider refusal")
-        ));
-        assert!(matches!(
-            admit(&both, 1600),
-            Err(QuotaError::Refused(reason)) if reason.contains("scoped provider refusal")
-        ));
+        for now in [1001, 1600] {
+            assert!(admit(&both, now).is_err());
+            assert_eq!(
+                Admission {
+                    policies: crate::source::TEST_POLICIES,
+                    now_unix_seconds: now,
+                    records: std::slice::from_ref(&both),
+                    pools: &[],
+                }
+                .account_block("claude", "opaque", "exact/model")
+                .unwrap(),
+                Some(AccountBlock::ScopedRefusal)
+            );
+        }
         assert!(admit(&both, 3000).is_ok());
     }
     #[test]
@@ -1144,16 +1278,19 @@ mod admission_tests {
             observed_unix_seconds: 950,
             resets_unix_seconds: None,
         });
-        assert!(matches!(
-            Admission {
-                policies: crate::source::TEST_POLICIES,
-                now_unix_seconds: 1300,
-                records: &[record],
-                pools: &["pool-a".into()],
-            }
-            .check(&route()),
-            Err(QuotaError::Refused(reason)) if reason.contains("scoped provider refusal")
-        ));
+        let admission = Admission {
+            policies: crate::source::TEST_POLICIES,
+            now_unix_seconds: 1300,
+            records: std::slice::from_ref(&record),
+            pools: &["pool-a".into()],
+        };
+        assert_eq!(
+            admission
+                .account_block("claude", "opaque", "exact/model")
+                .unwrap(),
+            Some(AccountBlock::ScopedRefusal)
+        );
+        assert!(admission.check(&route()).is_err());
     }
     #[test]
     fn unknown_and_stale_do_not_manufacture_exhaustion() {
@@ -1248,6 +1385,9 @@ mod refusal_scope_tests {
     #[test]
     fn refusals_expire_only_for_matching_identity_pool_observation_or_reset() {
         let route = ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
             extra: Default::default(),
             adapter: "claude".into(),
             model: "exact".into(),
@@ -1259,6 +1399,7 @@ mod refusal_scope_tests {
             exclusions: vec![],
             eligibility: provenant_records::RouteEligibility::Eligible,
             readiness: RouteReadiness::Ready {
+                availability_warning: None,
                 extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: 5000,
@@ -1270,6 +1411,7 @@ mod refusal_scope_tests {
             pool_selection: None,
         };
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "claude".into(),
             account_key: "work".into(),
             label: "work".into(),
@@ -1298,6 +1440,7 @@ mod refusal_scope_tests {
             let mut record = AccountRecord::empty(account.clone());
             record.refusals.push(refusal);
             record.snapshot = Some(QuotaSnapshot {
+                extra: Default::default(),
                 schema_version: 1,
                 account: account.clone(),
                 revision: 0,
@@ -1307,6 +1450,7 @@ mod refusal_scope_tests {
                 authority_ref: None,
                 details: None,
                 windows: vec![QuotaWindow {
+                    extra: Default::default(),
                     window_seconds: None,
                     pool: pool.into(),
                     used_basis_points: 0,
@@ -1337,6 +1481,7 @@ mod refusal_scope_tests {
         let mut record = AccountRecord::empty(account.clone());
         record.refusals.push(refusal);
         record.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account,
             revision: 0,
@@ -1347,12 +1492,14 @@ mod refusal_scope_tests {
             details: None,
             windows: vec![
                 QuotaWindow {
+                    extra: Default::default(),
                     pool: "gemini.weekly".into(),
                     window_seconds: Some(604800),
                     used_basis_points: 170,
                     resets_unix_seconds: Some(3000),
                 },
                 QuotaWindow {
+                    extra: Default::default(),
                     pool: "gemini.5h".into(),
                     window_seconds: Some(18000),
                     used_basis_points: 670,
@@ -1374,83 +1521,13 @@ mod refusal_scope_tests {
                 allowed
             );
         }
-
-        // Old Agy refusals have no stored pool. A fresh family reading with
-        // headroom clears them, while a full or older reading cannot.
-        let account = AccountScope {
-            adapter: "agy".into(),
-            account_key: "work".into(),
-            label: "work".into(),
-        };
-        let refusal = Refusal {
-            extra: Default::default(),
-            account: account.clone(),
-            model: "gemini-3.8-flash".into(),
-            pool: None,
-            observed_unix_seconds: 950,
-            resets_unix_seconds: Some(1100),
-        };
-        for (observed, used, holds) in [(960, 170, false), (960, 10000, true), (940, 170, true)] {
-            let mut record = AccountRecord::empty(account.clone());
-            record.refusals.push(refusal.clone());
-            record.snapshot = Some(QuotaSnapshot {
-                schema_version: 1,
-                account: account.clone(),
-                revision: 0,
-                status: QuotaStatus::Available,
-                observed_unix_seconds: observed,
-                source_ref: "fixture".into(),
-                authority_ref: None,
-                details: None,
-                windows: vec![
-                    QuotaWindow {
-                        window_seconds: Some(604800),
-                        pool: "gemini.weekly".into(),
-                        used_basis_points: used,
-                        resets_unix_seconds: Some(3000),
-                    },
-                    QuotaWindow {
-                        window_seconds: Some(18000),
-                        pool: "claude.5h".into(),
-                        used_basis_points: 10000,
-                        resets_unix_seconds: Some(2000),
-                    },
-                ],
-            });
-            let admission = Admission {
-                policies: crate::source::TEST_POLICIES,
-                now_unix_seconds: 1000,
-                records: std::slice::from_ref(&record),
-                pools: &[],
-            };
-            assert_eq!(
-                admission
-                    .refusal_holds("agy", Some(&record), &refusal)
-                    .unwrap(),
-                holds
-            );
-            if holds {
-                for (now, expected) in [(1099, true), (1100, false)] {
-                    let admission = Admission {
-                        policies: crate::source::TEST_POLICIES,
-                        now_unix_seconds: now,
-                        records: std::slice::from_ref(&record),
-                        pools: &[],
-                    };
-                    assert_eq!(
-                        admission
-                            .refusal_holds("agy", Some(&record), &refusal)
-                            .unwrap(),
-                        expected,
-                        "observed={observed} used={used} now={now}"
-                    );
-                }
-            }
-        }
     }
     #[test]
     fn grouped_pool_exhaustion_blocks_only_models_in_that_pool() {
         let route = |model: &str| ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
             extra: Default::default(),
             adapter: "agy".into(),
             model: model.into(),
@@ -1462,6 +1539,7 @@ mod refusal_scope_tests {
             exclusions: vec![],
             eligibility: provenant_records::RouteEligibility::Eligible,
             readiness: RouteReadiness::Ready {
+                availability_warning: None,
                 extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: 5000,
@@ -1473,11 +1551,13 @@ mod refusal_scope_tests {
             pool_selection: None,
         };
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "agy".into(),
             account_key: "work".into(),
             label: "work".into(),
         };
         let window = |pool: &str, used| QuotaWindow {
+            extra: Default::default(),
             pool: pool.into(),
             window_seconds: Some(604800),
             used_basis_points: used,
@@ -1486,6 +1566,7 @@ mod refusal_scope_tests {
         // An exhausted ungrouped window blocks every model.
         let mut record = AccountRecord::empty(account.clone());
         record.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: account.clone(),
             revision: 0,
@@ -1515,6 +1596,7 @@ mod refusal_scope_tests {
         for (gemini, claude) in [(10000, 0), (0, 10000)] {
             let mut record = AccountRecord::empty(account.clone());
             record.snapshot = Some(QuotaSnapshot {
+                extra: Default::default(),
                 schema_version: 1,
                 account: account.clone(),
                 revision: 0,

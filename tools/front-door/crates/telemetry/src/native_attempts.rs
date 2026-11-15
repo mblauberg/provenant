@@ -24,7 +24,6 @@ pub enum Settlement {
 
 /// A native attempt is separate from Fabric lanes and records metadata only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Attempt {
     pub id: String,
     pub alias: String,
@@ -37,13 +36,16 @@ pub struct Attempt {
     pub ended_at: Option<String>,
     pub settlement: Option<Settlement>,
     pub agent_id: Option<String>,
+    #[serde(default, flatten)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Store {
     schema_version: u64,
     attempts: Vec<Attempt>,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 #[derive(Debug, Error)]
@@ -113,10 +115,16 @@ fn valid(attempt: &Attempt) -> bool {
         && (attempt.agent_id.is_none() || attempt.ended_at.is_some())
 }
 
-fn load(directory: &Directory) -> Result<Vec<Attempt>, AttemptError> {
+fn load_store(directory: &Directory) -> Result<Store, AttemptError> {
     let file = match directory.open_read(OsStr::new(STORE)) {
         Ok(file) => file,
-        Err(error) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) if error.is_not_found() => {
+            return Ok(Store {
+                schema_version: 1,
+                attempts: Vec::new(),
+                extra: Default::default(),
+            });
+        }
         Err(error) => return Err(error.into()),
     };
     if file.metadata()?.size > CAP {
@@ -127,7 +135,7 @@ fn load(directory: &Directory) -> Result<Vec<Attempt>, AttemptError> {
     if bytes.len() as u64 > CAP {
         return Err(AttemptError::Store);
     }
-    let store: Store = serde_json::from_slice(&bytes).map_err(|_| AttemptError::Store)?;
+    let store: Store = crate::decode_record(&bytes, CAP).map_err(|_| AttemptError::Store)?;
     if store.schema_version != 1 || store.attempts.iter().any(|attempt| !valid(attempt)) {
         return Err(AttemptError::Store);
     }
@@ -143,7 +151,11 @@ fn load(directory: &Directory) -> Result<Vec<Attempt>, AttemptError> {
             return Err(AttemptError::Store);
         }
     }
-    Ok(store.attempts)
+    Ok(store)
+}
+
+fn load(directory: &Directory) -> Result<Vec<Attempt>, AttemptError> {
+    Ok(load_store(directory)?.attempts)
 }
 
 /// Read an atomic snapshot; an absent state root or store is empty.
@@ -169,13 +181,9 @@ fn update(
         &CancelToken::new(),
         &clock,
     )?;
-    let mut attempts = load(&directory)?;
-    f(&mut attempts)?;
-    let bytes = serde_json::to_vec(&Store {
-        schema_version: 1,
-        attempts,
-    })
-    .map_err(std::io::Error::other)?;
+    let mut store = load_store(&directory)?;
+    f(&mut store.attempts)?;
+    let bytes = provenant_records::encode(&store).map_err(std::io::Error::other)?;
     if bytes.len() as u64 > CAP {
         return Err(AttemptError::Store);
     }
@@ -355,5 +363,32 @@ pub fn report(attempts: Vec<Attempt>, rows: &[crate::ingest::Row]) -> Report {
                 buckets,
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Store;
+
+    #[test]
+    fn native_attempt_store_retains_additive_fields() {
+        let record = serde_json::json!({
+            "schema_version": 1,
+            "attempts": [{
+                "id": "tool",
+                "alias": "reviewer",
+                "model": "provider/model",
+                "effort": null,
+                "session": "session",
+                "config": "a".repeat(64),
+                "started_at": "2026-10-01T00:00:00Z",
+                "ended_at": "2026-10-01T00:01:00Z",
+                "settlement": "succeeded",
+                "agent_id": null,
+                "future_attempt": 2
+            }],
+            "future_store": 1
+        });
+        crate::assert_record_round_trip::<Store>(record);
     }
 }

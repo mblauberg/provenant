@@ -70,9 +70,13 @@ pub fn local_signin(
     }
     Some(
         if out.termination == Termination::Exit(0)
-            && (strategy == LoginReprobe::Codex
-                || output.contains("logged in")
-                || output.contains("login successful"))
+            && match strategy {
+                LoginReprobe::Codex => true,
+                LoginReprobe::Cursor => crate::cursor::status_account(&out.stdout.bytes)
+                    .or_else(|| crate::cursor::status_account(&out.stderr.bytes))
+                    .is_some(),
+                _ => false,
+            }
         {
             LocalSignin::SignedIn
         } else {
@@ -179,13 +183,10 @@ impl HostProbeDir {
         Err(fs::FsError::Io {
             operation: PROBE_DIR_OPERATION,
             path: host_root.to_owned(),
-            source: std::io::Error::other(format!(
-                "{TRIES} tries; last: {}",
-                last.map_or_else(
-                    || "no attempt recorded".to_owned(),
-                    |error| error.to_string()
-                ),
-            )),
+            source: last.map_or_else(
+                || std::io::Error::other("no retry cause recorded"),
+                std::io::Error::other,
+            ),
         })
     }
 
@@ -290,16 +291,29 @@ impl<'a> HostProbeExecutor<'a> {
     pub fn root(&self) -> &Path {
         &self.path
     }
+
+    /// Check that a private probe directory can be prepared before resolving
+    /// account identity. Registration must surface host-state failures even
+    /// for adapters whose identity comes from local files rather than a probe.
+    pub fn preflight(&self) -> Result<(), ExecError> {
+        HostProbeDir::create_in(&self.root, &self.path)
+            .map(drop)
+            .map_err(probe_directory_error)
+    }
+}
+
+fn probe_directory_error(error: fs::FsError) -> ExecError {
+    ExecError::Io {
+        operation: PROBE_DIR_OPERATION,
+        source: std::io::Error::other(error),
+    }
 }
 
 impl Executor for HostProbeExecutor<'_> {
     fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
         // mkdir is exclusive: an existing entry is an error, never a cwd.
-        let scratch = HostProbeDir::create_in(&self.root, &self.path);
-        let scratch = scratch.map_err(|error| ExecError::Io {
-            operation: PROBE_DIR_OPERATION,
-            source: std::io::Error::other(error),
-        })?;
+        let scratch =
+            HostProbeDir::create_in(&self.root, &self.path).map_err(probe_directory_error)?;
         // Reborrow filters with the shorter cwd lifetime. Struct update syntax
         // would retain ExecOptions' original, invariant filter lifetime.
         self.executor.execute(ExecOptions {
@@ -325,6 +339,7 @@ impl Executor for HostProbeExecutor<'_> {
                 .map(|filter| filter as &mut dyn CaptureFilter),
             cancel: options.cancel,
             timeout: options.timeout,
+            wait_for_completion: options.wait_for_completion,
             terminate_grace: options.terminate_grace,
             reap_timeout: options.reap_timeout,
             stop_on_output_limit: options.stop_on_output_limit,
@@ -525,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_retries_name_the_root_and_last_cause() {
+    fn exhausted_probe_retries_return_the_typed_operation_and_root() {
         let host_root = tempfile::tempdir().unwrap();
         let root = Directory::open_anchor(host_root.path()).unwrap();
         let held = std::cell::RefCell::new(Vec::new());
@@ -540,15 +555,19 @@ mod tests {
             },
             &|_| {},
         );
-        let error = result.err().unwrap().to_string();
-        let attempts = held.borrow().len();
-        assert!((2..=32).contains(&attempts));
-        assert!(
-            error.contains(host_root.path().to_str().unwrap()),
-            "{error}"
-        );
-        assert!(error.contains(&format!("{attempts} tries")), "{error}");
-        assert!(error.contains("lock acquisition timed out"), "{error}");
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("the held probe locks must exhaust retries"),
+        };
+        assert!(matches!(
+            error,
+            fs::FsError::Io { operation, ref path, ref source }
+                if operation == PROBE_DIR_OPERATION && path == host_root.path()
+                    && source.get_ref().is_some_and(|cause| matches!(
+                        cause.downcast_ref::<fs::FsError>(),
+                        Some(fs::FsError::LockTimeout { .. })
+                    ))
+        ));
     }
 
     #[test]

@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Exercise the production/test and typed/JSON boundaries of the ownership lint."""
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+loader = importlib.machinery.SourceFileLoader("extra_fields_lint", str(Path(__file__).with_name("check-extra-fields")))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+lint = importlib.util.module_from_spec(spec)
+sys.modules[loader.name] = lint
+loader.exec_module(lint)
+
+
+class ExtraFieldsOwnership(unittest.TestCase):
+    def test_host_key_allowlist_is_empty(self):
+        self.assertFalse(lint.ALLOWLIST)
+
+    def test_static_host_keys_are_rejected(self):
+        cases = [
+            'fn f(record: Record) { record.extra.insert("owned".into(), true.into()); }',
+            'fn f(record: Record) { record.extra.get(crate::host::OWNED); }',
+            'const host_key: &str = "owned"; fn f(record: Record) { record.extra.get(host_key); }',
+            'fn f(record: Record) { record.extra.get(OWNED.as_str()); }',
+            'fn f(extra: &ExtraFields) { extra.get("owned"); }',
+            'fn f() { let mut extra = Default::default(); extra.insert("owned".into(), true.into()); Record { extra } }',
+            'fn f() { let mut fields = ExtraFields::default(); fields.insert(r#"owned"#.into(), true.into()); }',
+            'fn f(record: Record) { let copied = record.extra.clone(); copied.get(OWNED); }',
+            'fn f(record: Record) { record.extra /* comment */ .get ("owned"); }',
+            'fn f(record: Record) { let preceding = ""; record.extra.get("owned"); }',
+            'fn f(record: Record) { let preceding = b""; record.extra.get("owned"); }',
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "production.rs"
+            for case in cases:
+                with self.subTest(source=case):
+                    source.write_text(case)
+                    self.assertTrue(lint.scan(source))
+
+    def test_unknown_json_and_test_keys_are_allowed(self):
+        cases = [
+            'fn f(record: Record, field: &str) { record.extra.get(field); }',
+            'fn f() { let extra: serde_json::Map<String, Value> = Map::new(); extra.get("user"); }',
+            'fn f() { let extra = serde_json::Map::new(); extra.get("user"); }',
+            '#[cfg(test)] mod tests { fn helper(record: Record) { record.extra.get("test"); } }',
+            '#[test] fn example(record: Record) { record.extra.get("test"); }',
+            'fn f() { let text = r#"record.extra.get("text")"#; /* record.extra.get("comment"); */ }',
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "production.rs"
+            for case in cases:
+                with self.subTest(source=case):
+                    source.write_text(case)
+                    self.assertFalse(lint.scan(source))
+            for filename in ["boundary_tests.rs", "boundary_invariants.rs"]:
+                source = Path(temporary) / filename
+                source.write_text('fn helper(record: Record) { record.extra.get("test"); }')
+                self.assertFalse(lint.scan(source))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -36,7 +36,7 @@ fn delivery(dir: &Path, launch: bool) -> Delivery<'static> {
     Delivery {
         dir: operation_dir(dir, &OperationId::parse("handoff-1").unwrap()),
         project: Path::new("/Users/me/Repos/project"),
-        state: Path::new("/Users/me/.local/share/provenant/v1"),
+        state: Path::new("/Users/me/.local/share/provenant/v2"),
         account_label: "work",
         account: PathBuf::from("/Users/me/.claude-work"),
         model: Some("opus"),
@@ -421,11 +421,10 @@ fn refusal_codes_pass_through_as_plain_upper_case() {
 
 #[test]
 fn the_peer_works_to_less_than_the_source_waits() {
-    assert_eq!(peer_seconds(Some(30), 30), 25);
-    assert_eq!(peer_seconds(Some(10), 30), 5);
-    assert_eq!(peer_seconds(Some(30), 12), 7);
-    assert_eq!(peer_seconds(None, 30), 25);
-    assert_eq!(peer_seconds(Some(3), 30), 1);
+    assert_eq!(peer_seconds(30, 30), 25);
+    assert_eq!(peer_seconds(10, 30), 5);
+    assert_eq!(peer_seconds(30, 12), 7);
+    assert_eq!(peer_seconds(3, 30), 1);
 }
 
 #[test]

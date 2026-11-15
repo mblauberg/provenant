@@ -1,8 +1,6 @@
 # Operating defaults, evaluated by the same selectors and schedules as overrides.
 [defaults.lane]
 stop_early_ok = false
-max_continuations = 2
-resume_continuations = false
 
 [defaults.cache]
 read_share_target = 0.90

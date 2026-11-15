@@ -1,16 +1,17 @@
-# Run the Claude Code session and worktree hooks
+# Run native session and worktree hooks
 Owner: provenant
-Anchor: [`hooks_session.rs`](../../tools/front-door/tests/hooks_session.rs)
+Anchor: [`hooks::run`](../../tools/front-door/src/hooks.rs)
 
 `provenant install --harness claude --hooks on` registers these hooks in the
-Claude settings (see [install](install.md)); rerun it after an upgrade to
-register new handlers. Every handler exits 0 on its own failure, except the
-worktree hooks and the guard's exit-2 denial, and prints only the protocol
-response on stdout.
+Claude settings (see [install](install.md)). Other harnesses use their native
+hook events declared in [`AdapterSpec`](../../tools/front-door/crates/records/src/adapters.rs). Unrecognised or unusable advisory input
+abstains with exit 0 and a diagnostic. Worktree ownership, writer isolation,
+data integrity and authority checks can refuse with exit 2. Stdout contains
+only the native protocol response.
 
 | Event | Handler | What it does |
 |---|---|---|
-| `PreToolUse` (`Bash`) | `hook claude pre-tool-use` | Enforces the guard, then optionally offers human answers |
+| `PreToolUse` (`Bash`) | `hook claude pre-tool-use` | Leaves tool policy to confinement, then optionally offers human answers |
 | `SessionStart` (`startup`, `resume`, `clear`) | `hook claude session-start` | Reports checkpoint status, then the state digest |
 | `SessionStart` (`compact`) | `hook claude compact` | The same report after compaction |
 | `PreCompact` | `hook claude pre-compact` | Writes derived state to `autosave.md` and prints the summary instruction below |
@@ -19,37 +20,16 @@ response on stdout.
 | `WorktreeRemove` | `hook claude worktree-remove` | Runs `provenant worktree remove <name>` |
 | chair prompt, start, stop | `hook claude chair-prompt`, `chair-start`, `chair-stop` | Account switching; see [configuration](configuration.md#chair-account-switching) |
 
-If every Bash call is denied with `guard policy unavailable`, policy root
-resolution failed: from a terminal outside Claude, check that `HOME` resolves
-and that `PROVENANT_STATE_DIR` or the hook's `--state-dir` names the intended
-state root. The [human inbox](human-inbox.md#delivery-service) owns how the hook
-offers answers.
+The guard leaves shell and tool permissions to the lane's confinement policy.
+Unavailable hook state is diagnostic, and does not deny the tool. The
+[human inbox](human-inbox.md#delivery-service) owns how the hook offers answers.
 
 ## SessionStart output
 
-Read-only, under 8 KiB in total (the checkpoint excerpt shrinks first), with a
-4-second budget; a section that could not be read is listed as unavailable,
-never empty. In order:
-
-- `## Standing`: the checkpoint's typed `provenant_standing` record (goal,
-  grants, open obligations, what waits on the owner). A grant with an
-  `owner:<ref>` or `rule:<ref>` source is listed active; without one, or with an
-  unreadable expiry, unverified; an expired one is counted only. It points at
-  authority and never creates any. After an account switch `chair-start` appends
-  the source session's standing section to its handoff.
-- `## Intent`: the checkpoint's intent section (3 KiB cap, shared with standing),
-  plus the host transcript path for exact words. No intent section gets an
-  `Intent:` diagnostic line.
-- The digest (3 KiB): lanes in flight, lanes settled since the last chair save
-  (24 hours with no checkpoint), and pull requests named in the checkpoint
-  (`PR #12`, `pr/12`, `pull/12`; the sixteen most recent), each from
-  `provenant pr status N`. Write delivered PRs into the checkpoint that way.
-  Lane listings read one page of 100; a trailing `+` marks a partial count and
-  the section gives the command for the next page.
-- The chair's checkpoint, then `autosave.md`.
-
-Every printed command repeats the hook's non-default `--state-dir` so it reads
-the same store; a hint that cannot round-trip is shown as a note.
+The hook reports checkpoint and lane state. An unavailable section is not an
+empty one; inspect the source before acting. The checkpoint points to authority
+but does not create it. Record delivered PRs in the checkpoint so the digest can
+find them.
 
 ## Autosave and compaction
 
@@ -65,10 +45,10 @@ the same store; a hint that cannot round-trip is shown as a note.
   outcome, reason, rejected alternatives, open disagreement and uncertain
   readings, and quote only authority grants or corrections. The hook only asks;
   without a compliant summary, intent survives only if the chair saved it (see the
-  [session skill](../../skills/session/SKILL.md)). Codex shares only the
-  SessionStart rendering and has no `PreCompact` hook.
+  [session skill](../../skills/session/SKILL.md)). Each harness's native
+  compaction events and unavailable mappings are recorded in `AdapterSpec`.
 
-## Worktree hooks
+## Claude worktree hooks
 
 Claude Code replaces its own `git worktree` handling with these hooks, so each
 prints the new worktree's absolute path and nothing else on stdout.
@@ -79,15 +59,15 @@ prints the new worktree's absolute path and nothing else on stdout.
   when it is clean, has no live writer, is on that branch at the recorded HEAD
   and both creation records agree (one in the Git admin directory, one in
   `<state>/hooks/claude-worktrees/`). The primary checkout, hand-made trees and
-  dirty trees are never reused: exit 2 with the reason.
+  dirty trees are never reused: exit 2 with the reason. Invalid event input
+  abstains without creating or removing anything.
 - `worktree-remove` removes only a linked worktree this hook created, through
   `provenant worktree remove <name>` without `--discard`. Dirty trees, live
   writers, the primary checkout and unmerged branches (`not_merged`) refuse with
   exit 2 and the worktree stays; use `provenant worktree remove` yourself once
   the cause is cleared. Declared regenerable output is reclaimed; any other
   ignored file, such as an undeclared `target/`, keeps the tree.
-- A failure means no worktree is created: fix the cause or run
-  `provenant install --hooks off` to return to Claude's own worktrees.
+- If a hook fails, inspect and resolve the reported cause.
 
 Check with `provenant hook claude --help`; the fixture tests are
 `cargo test -p provenant --test hooks_session` from `tools/front-door`.

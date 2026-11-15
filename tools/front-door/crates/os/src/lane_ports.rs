@@ -13,16 +13,13 @@
 //! lane can still bind outside its block, and another program can use a port
 //! inside it.
 use crate::fs::{Directory, FsError, LockGuard, LockMode, Result};
+use provenant_core::consumer_env::{LANE_PORT_BASE, LANE_PORT_COUNT};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
 /// Directory below the host state root that holds the block lock files.
 pub const DIRECTORY: &str = "lane-ports";
-/// Environment variable naming the first port of a lane's block.
-pub const BASE_ENV: &str = "PROVENANT_LANE_PORT_BASE";
-/// Environment variable naming how many consecutive ports the block holds.
-pub const COUNT_ENV: &str = "PROVENANT_LANE_PORT_COUNT";
 
 /// The configured port space: `blocks` consecutive blocks of `size` ports
 /// from `base`.
@@ -32,8 +29,8 @@ pub struct Plan {
     pub base: u32,
     pub size: u32,
     pub blocks: u32,
-    /// Where the effective block count was selected; absent in older plans.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Where the effective block count was selected.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub blocks_origin: Option<BlocksOrigin>,
 }
 
@@ -61,8 +58,8 @@ impl Lease {
     /// The environment that tells the lane which ports are its own.
     pub fn environment(&self) -> [(&'static str, String); 2] {
         [
-            (BASE_ENV, self.base.to_string()),
-            (COUNT_ENV, self.size.to_string()),
+            (LANE_PORT_BASE, self.base.to_string()),
+            (LANE_PORT_COUNT, self.size.to_string()),
         ]
     }
 }
@@ -169,36 +166,27 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    fn plan(state: &Path, blocks: u32) -> Plan {
+    fn plan(state: &Path, base: u32, size: u32, blocks: u32) -> Plan {
         Plan {
             state: state.to_owned(),
-            base: 30000,
-            size: 16,
+            base,
+            size,
             blocks,
             blocks_origin: None,
         }
     }
 
     #[test]
-    fn old_port_plans_without_origin_remain_readable()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let plan: Plan = serde_json::from_str(
-            r#"{"state":"/fixture/state","base":30000,"size":16,"blocks":1}"#,
-        )?;
-        assert_eq!(plan.blocks_origin, None);
-        Ok(())
-    }
-
-    #[test]
-    fn concurrent_leases_are_disjoint_and_release_on_drop() {
+    fn leases_are_disjoint_and_release_on_drop() {
         let temp = tempfile::tempdir().unwrap();
-        let plan = plan(temp.path(), 3);
+        let plan = plan(temp.path(), 18_000, 37, 3);
         let first = plan.try_acquire().unwrap().unwrap();
         let second = plan.try_acquire().unwrap().unwrap();
         let third = plan.try_acquire().unwrap().unwrap();
         let mut starts = [first.base, second.base, third.base];
         starts.sort_unstable();
-        assert_eq!(starts, [30000, 30016, 30032]);
+        let expected = std::array::from_fn(|index| plan.base + index as u32 * plan.size);
+        assert_eq!(starts, expected);
         assert!(plan.try_acquire().unwrap().is_none());
         let freed = second.base;
         drop(second);
@@ -206,7 +194,10 @@ mod tests {
         assert_eq!(again.base, freed);
         assert_eq!(
             again.environment(),
-            [(BASE_ENV, freed.to_string()), (COUNT_ENV, "16".into())]
+            [
+                (LANE_PORT_BASE, freed.to_string()),
+                (LANE_PORT_COUNT, plan.size.to_string())
+            ]
         );
         drop((first, third));
     }
@@ -214,31 +205,33 @@ mod tests {
     #[test]
     fn leases_from_different_plans_never_share_a_port() {
         let temp = tempfile::tempdir().unwrap();
-        let old = plan(temp.path(), 2);
+        let old = plan(temp.path(), 31_000, 32, 2);
         let held = old.try_acquire().unwrap().unwrap();
-        assert_eq!(held.base, 30000);
-        // Base moved down one block: its block 1 is the held 30000-30015.
+        assert_eq!(held.base, old.base);
+        // The second block in the moved plan overlaps the held first block.
         let moved = Plan {
-            base: 29984,
-            ..plan(temp.path(), 2)
+            base: old.base - old.size,
+            ..old.clone()
         };
         let next = moved.try_acquire().unwrap().unwrap();
-        assert_eq!((next.base, next.size), (29984, 16));
+        assert_eq!((next.base, next.size), (moved.base, moved.size));
         assert!(moved.try_acquire().unwrap().is_none());
-        // A half-block shift overlaps both held blocks.
+        // A half-block shift overlaps the held range.
+        let shifted_base = old.base + old.size / 2;
         let shifted = Plan {
-            base: 30008,
-            ..plan(temp.path(), 1)
+            base: shifted_base,
+            blocks: 1,
+            ..old.clone()
         };
         assert!(shifted.try_acquire().unwrap().is_none());
         drop(held);
-        assert_eq!(shifted.try_acquire().unwrap().unwrap().base, 30008);
+        assert_eq!(shifted.try_acquire().unwrap().unwrap().base, shifted_base);
     }
 
     #[test]
     fn a_plan_outside_the_port_space_is_refused() {
         let temp = tempfile::tempdir().unwrap();
-        let mut plan = plan(temp.path(), 4);
+        let mut plan = plan(temp.path(), 40_000, 100, 4);
         plan.base = 65500;
         assert!(plan.try_acquire().is_err());
         plan.base = 80;

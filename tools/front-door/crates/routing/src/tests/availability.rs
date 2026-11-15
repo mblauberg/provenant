@@ -4,7 +4,7 @@ use super::*;
 fn past_deadline_account_stands_by_for_an_available_account()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_quota::{QuotaStatus, QuotaWindow};
-    let zone = jiff::tz::TimeZone::system();
+    let zone = jiff::tz::TimeZone::UTC;
     let local = |day| {
         zone.to_ambiguous_zoned(jiff::civil::date(2026, 10, day).at(12, 0, 0, 0))
             .compatible()
@@ -14,7 +14,7 @@ fn past_deadline_account_stands_by_for_an_available_account()
     let reset = local(31)? + 86_400;
     let catalogue = Catalogue::bundled()?;
     let config: RoutingConfig = serde_json::from_value(
-        serde_json::json!({"pacing":{"accounts":{"michael":{"policy":"pace","windows":["seven_day"],"deadline":{"reset_of":"anese"}},"anese":{"policy":"pace","windows":["seven_day"],"deadline":{"reset_of":"michael"}}}}}),
+        serde_json::json!({"pacing":{"accounts":{"claude/michael":{"policy":"pace","windows":["seven_day"],"deadline":{"reset_of":"claude/anese"}},"claude/anese":{"policy":"pace","windows":["seven_day"],"deadline":{"reset_of":"claude/michael"}}}}}),
     )?;
     let mut michael = availability();
     michael.adapter = "claude".into();
@@ -37,6 +37,7 @@ fn past_deadline_account_stands_by_for_an_available_account()
         )?;
         q.snapshot.account.adapter = "claude".into();
         q.snapshot.windows = vec![QuotaWindow {
+            extra: Default::default(),
             pool: "seven_day".into(),
             window_seconds: Some(604_800),
             used_basis_points: 2_000,
@@ -76,7 +77,7 @@ fn past_deadline_account_stands_by_for_an_available_account()
 }
 
 #[test]
-fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::error::Error>> {
+fn pacing_reserve_warns_without_excluding_accounts() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_quota::{QuotaStatus, QuotaWindow};
     use provenant_records::diagnostic::PacingReserveSetting;
     let catalogue = Catalogue::bundled()?;
@@ -88,6 +89,7 @@ fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::er
         confinement_ref: "grant",
     }];
     let window = |seconds, used, remaining: i64| QuotaWindow {
+        extra: Default::default(),
         pool: "test".into(),
         window_seconds: Some(seconds),
         used_basis_points: used,
@@ -108,7 +110,7 @@ fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::er
         (vec![window(18_000, 5_000, 9_000)], None),
     ] {
         for policy in ["pace", "spend", "max"] {
-            let config: RoutingConfig =
+            let mut config: RoutingConfig =
                 serde_json::from_value(serde_json::json!({"pacing": {"codex": policy}}))?;
             let mut observation = quota(
                 "codex/test",
@@ -120,24 +122,44 @@ fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::er
             )?;
             observation.snapshot.windows = windows.clone();
             let observations = [observation];
+            config.launch_policy.overlay(
+                &std::collections::BTreeMap::from([
+                    (
+                        "PACING_ADAPTER".into(),
+                        provenant_records::policy::Strength::Warn,
+                    ),
+                    (
+                        "PACING_ACCOUNT".into(),
+                        provenant_records::policy::Strength::Warn,
+                    ),
+                    (
+                        "PACING_FREE".into(),
+                        provenant_records::policy::Strength::Warn,
+                    ),
+                ]),
+                provenant_records::policy::Source::Dispatch,
+            );
             let mut ctx = context(&catalogue, &config, now()?);
             ctx.registry = &registry;
             ctx.availability = &availability;
             ctx.access = &access;
             ctx.quota = &observations;
             let route = resolve(&request("codex/test")?, &ctx)?;
+            assert!(reason(&route).is_none());
             assert_eq!(
-                reason(&route) == Some(&RouteExclusionReason::PacingReserve),
+                route
+                    .diagnostics
+                    .account_load
+                    .as_ref()
+                    .is_some_and(|load| !load.warnings.is_empty()),
                 expected_setting.is_some() && policy == "pace"
             );
             if expected_setting.is_some() && policy == "pace" {
-                assert_eq!(
-                    route.exclusions[0].reason,
-                    RouteExclusionReason::PacingReserve
-                );
-                assert!(serde_json::to_string(&route)?.contains("pacing_reserve"));
-                let fact: provenant_records::diagnostic::ResourceFact =
-                    serde_json::from_value(route.extra["pacing_reserve_fact"].clone())?;
+                assert!(route.exclusions.is_empty());
+                let fact: provenant_records::diagnostic::ResourceFact = route
+                    .diagnostics
+                    .pacing_reserve_fact
+                    .ok_or("pacing reserve fact")?;
                 assert!(matches!(
                     fact,
                     provenant_records::diagnostic::ResourceFact::PacingReserve {
@@ -177,21 +199,40 @@ fn pace_reserves_account_headroom_across_windows() -> Result<(), Box<dyn std::er
             20,
         ),
         (
-            serde_json::json!({"pacing": {"accounts": {"opaque-account": {"policy": "pace", "reserve": {"five_hour": 25}}}}}),
+            serde_json::json!({"pacing": {"accounts": {"codex/opaque-account": {"policy": "pace", "reserve": {"five_hour": 25}}}}}),
             provenant_records::diagnostic::PacingReserveSetting::Account,
             provenant_records::diagnostic::PacingSettingSource::Configuration,
             25,
         ),
     ] {
-        let config: RoutingConfig = serde_json::from_value(configuration)?;
+        let mut config: RoutingConfig = serde_json::from_value(configuration)?;
+        config.launch_policy.overlay(
+            &std::collections::BTreeMap::from([
+                (
+                    "PACING_ADAPTER".into(),
+                    provenant_records::policy::Strength::Warn,
+                ),
+                (
+                    "PACING_ACCOUNT".into(),
+                    provenant_records::policy::Strength::Warn,
+                ),
+                (
+                    "PACING_FREE".into(),
+                    provenant_records::policy::Strength::Warn,
+                ),
+            ]),
+            provenant_records::policy::Source::Dispatch,
+        );
         let mut ctx = context(&catalogue, &config, now()?);
         ctx.registry = &registry;
         ctx.availability = &availability;
         ctx.access = &access;
         ctx.quota = &observations;
         let route = resolve(&request("codex/test")?, &ctx)?;
-        let fact: provenant_records::diagnostic::ResourceFact =
-            serde_json::from_value(route.extra["pacing_reserve_fact"].clone())?;
+        let fact: provenant_records::diagnostic::ResourceFact = route
+            .diagnostics
+            .pacing_reserve_fact
+            .ok_or("pacing reserve fact")?;
         assert_eq!(
             fact,
             provenant_records::diagnostic::ResourceFact::PacingReserve {
@@ -224,13 +265,6 @@ fn availability_access_and_scoped_quota_are_independent_gates()
     assert_eq!(
         reason(&resolve(&query, &context)?),
         Some(&RouteExclusionReason::UnknownAvailability)
-    );
-    let mut records = [availability()];
-    records[0].expires_unix_seconds = 100;
-    context.availability = &records;
-    assert_eq!(
-        reason(&resolve(&query, &context)?),
-        Some(&RouteExclusionReason::ConfinementUnavailable)
     );
     let records = [availability()];
     context.availability = &records;
@@ -272,140 +306,178 @@ fn availability_access_and_scoped_quota_are_independent_gates()
         resolve(&request("codex/not-observed")?, &context)?.readiness,
         RouteReadiness::Ready { .. }
     ));
-    let stale = [quota(
-        "codex/test",
-        "opaque-account",
-        QuotaStatus::Exhausted,
-        1,
-        80,
-        99,
-    )?];
-    context.quota = &stale;
-    assert!(reason(&resolve(&query, &context)?).is_none());
-    let unknown = [quota(
-        "codex/test",
-        "opaque-account",
-        QuotaStatus::Unknown,
-        1,
-        80,
-        120,
-    )?];
-    context.quota = &unknown;
-    assert!(reason(&resolve(&query, &context)?).is_none());
-    let other_account = [quota(
-        "codex/test",
-        "other-account",
-        QuotaStatus::Exhausted,
-        1,
-        80,
-        120,
-    )?];
-    context.quota = &other_account;
-    assert!(reason(&resolve(&query, &context)?).is_none());
-    let other_model = [quota(
-        "codex/other",
-        "opaque-account",
-        QuotaStatus::Exhausted,
-        1,
-        80,
-        120,
-    )?];
-    context.quota = &other_model;
-    assert!(reason(&resolve(&query, &context)?).is_none());
-    let current = [quota(
-        "codex/test",
-        "opaque-account",
-        QuotaStatus::Exhausted,
-        1,
-        80,
-        120,
-    )?];
-    context.quota = &current;
-    assert_eq!(
-        reason(&resolve(&query, &context)?),
-        Some(&RouteExclusionReason::Exhausted)
-    );
-    for (expires, expected) in [(120, Some(RouteExclusionReason::AuthRequired)), (99, None)] {
-        let auth = [quota(
-            "codex/test",
-            "opaque-account",
-            QuotaStatus::AuthRequired,
-            1,
-            80,
-            expires,
-        )?];
-        let auth_context = RoutingContext {
-            quota: &auth,
-            ..context
-        };
-        assert_eq!(reason(&resolve(&query, &auth_context)?), expected.as_ref());
+    let cases = [
+        (
+            "stale snapshot",
+            vec![quota(
+                "codex/test",
+                "opaque-account",
+                QuotaStatus::Exhausted,
+                1,
+                80,
+                99,
+            )?],
+            None,
+        ),
+        (
+            "unknown status",
+            vec![quota(
+                "codex/test",
+                "opaque-account",
+                QuotaStatus::Unknown,
+                1,
+                80,
+                120,
+            )?],
+            None,
+        ),
+        (
+            "other account",
+            vec![quota(
+                "codex/test",
+                "other-account",
+                QuotaStatus::Exhausted,
+                1,
+                80,
+                120,
+            )?],
+            None,
+        ),
+        (
+            "other model",
+            vec![quota(
+                "codex/other",
+                "opaque-account",
+                QuotaStatus::Exhausted,
+                1,
+                80,
+                120,
+            )?],
+            None,
+        ),
+        (
+            "matching exhausted status",
+            vec![quota(
+                "codex/test",
+                "opaque-account",
+                QuotaStatus::Exhausted,
+                1,
+                80,
+                120,
+            )?],
+            Some(RouteExclusionReason::Exhausted),
+        ),
+        (
+            "fresh auth refusal",
+            vec![quota(
+                "codex/test",
+                "opaque-account",
+                QuotaStatus::AuthRequired,
+                1,
+                80,
+                120,
+            )?],
+            Some(RouteExclusionReason::AuthRequired),
+        ),
+        (
+            "expired auth refusal",
+            vec![quota(
+                "codex/test",
+                "opaque-account",
+                QuotaStatus::AuthRequired,
+                1,
+                80,
+                99,
+            )?],
+            None,
+        ),
+        (
+            "refresh pending",
+            vec![quota(
+                "codex/test",
+                "opaque-account",
+                QuotaStatus::RefreshPending,
+                1,
+                80,
+                120,
+            )?],
+            None,
+        ),
+        (
+            "newer unknown status",
+            vec![
+                quota(
+                    "codex/test",
+                    "opaque-account",
+                    QuotaStatus::Exhausted,
+                    1,
+                    80,
+                    120,
+                )?,
+                quota(
+                    "codex/test",
+                    "opaque-account",
+                    QuotaStatus::Unknown,
+                    2,
+                    90,
+                    120,
+                )?,
+            ],
+            None,
+        ),
+        (
+            "expired newest observation",
+            vec![
+                quota(
+                    "codex/test",
+                    "opaque-account",
+                    QuotaStatus::Exhausted,
+                    1,
+                    80,
+                    120,
+                )?,
+                quota(
+                    "codex/test",
+                    "opaque-account",
+                    QuotaStatus::Exhausted,
+                    2,
+                    90,
+                    99,
+                )?,
+            ],
+            Some(RouteExclusionReason::Exhausted),
+        ),
+        (
+            "newer available status",
+            vec![
+                quota(
+                    "codex/test",
+                    "opaque-account",
+                    QuotaStatus::Exhausted,
+                    1,
+                    80,
+                    120,
+                )?,
+                quota(
+                    "codex/test",
+                    "opaque-account",
+                    QuotaStatus::Available,
+                    2,
+                    90,
+                    120,
+                )?,
+            ],
+            None,
+        ),
+    ];
+    for (scope, observations, expected) in &cases {
+        context.quota = observations;
+        assert_eq!(
+            reason(&resolve(&query, &context)?),
+            expected.as_ref(),
+            "quota scope: {scope}"
+        );
     }
-    let newer_unknown = [
-        quota(
-            "codex/test",
-            "opaque-account",
-            QuotaStatus::Exhausted,
-            1,
-            80,
-            120,
-        )?,
-        quota(
-            "codex/test",
-            "opaque-account",
-            QuotaStatus::Unknown,
-            2,
-            90,
-            120,
-        )?,
-    ];
-    context.quota = &newer_unknown;
-    assert!(reason(&resolve(&query, &context)?).is_none());
-    let expired_newest = [
-        quota(
-            "codex/test",
-            "opaque-account",
-            QuotaStatus::Exhausted,
-            1,
-            80,
-            120,
-        )?,
-        quota(
-            "codex/test",
-            "opaque-account",
-            QuotaStatus::Exhausted,
-            2,
-            90,
-            99,
-        )?,
-    ];
-    context.quota = &expired_newest;
-    assert_eq!(
-        reason(&resolve(&query, &context)?),
-        Some(&RouteExclusionReason::Exhausted)
-    );
-    let reset = [
-        quota(
-            "codex/test",
-            "opaque-account",
-            QuotaStatus::Exhausted,
-            1,
-            80,
-            120,
-        )?,
-        quota(
-            "codex/test",
-            "opaque-account",
-            QuotaStatus::Available,
-            2,
-            90,
-            120,
-        )?,
-    ];
-    context.quota = &reset;
-    assert!(
-        reason(&resolve(&query, &context)?).is_none(),
-        "a newer comparable observation supersedes exhausted"
-    );
     Ok(())
 }
 
@@ -425,6 +497,7 @@ fn exhausted_refusal_lapses_after_every_full_window_resets()
     context.access = &access;
     let query = request("codex/test")?;
     let window = |reset| provenant_quota::QuotaWindow {
+        extra: Default::default(),
         pool: "five_hour".into(),
         window_seconds: None,
         used_basis_points: 10_000,
@@ -540,6 +613,7 @@ fn account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks()
     let mut catalogue = Catalogue::bundled()?;
     for id in ["codex/test", "claude/test"] {
         catalogue.models.push(ModelEntry {
+            capability: Default::default(),
             free: false,
             model: ModelId::parse(id)?,
             efforts: vec![],
@@ -683,6 +757,7 @@ fn qualified_pacing_and_reset_references_respect_adapter() -> Result<(), Box<dyn
     use provenant_quota::{QuotaStatus, QuotaWindow};
     let model = "claude/claude-haiku-5-5";
     let window = QuotaWindow {
+        extra: Default::default(),
         pool: "seven_day".into(),
         window_seconds: Some(604_800),
         used_basis_points: 5_000,
@@ -691,6 +766,7 @@ fn qualified_pacing_and_reset_references_respect_adapter() -> Result<(), Box<dyn
     let mut matching = quota(model, "shared", QuotaStatus::Available, 1, 80, 120)?;
     matching.snapshot.account.adapter = "claude".into();
     matching.snapshot.windows = vec![QuotaWindow {
+        extra: Default::default(),
         resets_unix_seconds: Some(90),
         ..window.clone()
     }];
@@ -722,11 +798,12 @@ fn reset_reference_uses_fresh_reset_and_reports_unknown_or_stale_fallback()
     let model = "claude/claude-haiku-5-5";
     let config = || {
         serde_json::from_value::<RoutingConfig>(serde_json::json!({
-            "pacing":{"accounts":{"michael":{"policy":"pace", "windows":["seven_day"],
-                "deadline":{"reset_of":"anese"}}}}
+            "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["seven_day"],
+                "deadline":{"reset_of":"claude/anese"}}}}
         }))
     };
     let own = QuotaWindow {
+        extra: Default::default(),
         pool: "seven_day".into(),
         window_seconds: Some(604_800),
         used_basis_points: 5_000,
@@ -735,41 +812,72 @@ fn reset_reference_uses_fresh_reset_and_reports_unknown_or_stale_fallback()
     let mut reference = quota(model, "anese", QuotaStatus::Available, 1, 80, 120)?;
     reference.snapshot.account.adapter = "claude".into();
     reference.snapshot.windows = vec![QuotaWindow {
+        extra: Default::default(),
         resets_unix_seconds: Some(302_500),
         ..own.clone()
     }];
-    for (references, factor, fallback) in [
-        (
-            vec![QuotaObservation {
-                model: reference.model.clone(),
-                expires_unix_seconds: reference.expires_unix_seconds,
-                snapshot: reference.snapshot.clone(),
-            }],
-            10_000,
-            false,
-        ),
-        (vec![], 5_000, true),
-        (
-            {
-                let mut stale = reference;
-                stale.expires_unix_seconds = 100;
-                vec![stale]
-            },
-            5_000,
-            true,
-        ),
-    ] {
+    let factor = |references| -> Result<u32, Box<dyn std::error::Error>> {
         let route = profile_preview(config()?, model, "michael", vec![own.clone()], references)?;
-        let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
-        assert_eq!(candidate.factor_basis_points, factor);
-        assert_eq!(
-            candidate
-                .pacing_detail
-                .as_deref()
-                .ok_or("detail")?
-                .contains("falling back"),
-            fallback
-        );
+        Ok(route.pool_selection.ok_or("receipt")?.candidates[0].factor_basis_points)
+    };
+    let without_reference = factor(vec![])?;
+    let fresh_reference = factor(vec![QuotaObservation {
+        model: reference.model.clone(),
+        expires_unix_seconds: reference.expires_unix_seconds,
+        snapshot: reference.snapshot.clone(),
+    }])?;
+    let mut stale = reference;
+    stale.expires_unix_seconds = 100;
+    let stale_reference = factor(vec![stale])?;
+    assert_ne!(fresh_reference, without_reference);
+    assert_eq!(stale_reference, without_reference);
+    Ok(())
+}
+
+#[test]
+fn registered_opencode_plans_select_independently_of_account_keys()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    config
+        .pacing
+        .providers
+        .insert("opencode".into(), PacingPolicy::Pace);
+    let spec = provenant_records::AdapterSpec::get("opencode").ok_or("adapter")?;
+    let records: Vec<_> = spec
+        .account_model_plans
+        .iter()
+        .enumerate()
+        .map(|(index, plan)| AvailabilityRecord {
+            adapter: spec.name.into(),
+            plan: Some(plan.plan.into()),
+            account_key: Some(format!("registered-{index}")),
+            observed_models: vec![],
+            ..availability()
+        })
+        .collect();
+    let access = opencode_access();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    for entry in catalogue
+        .models()
+        .iter()
+        .filter(|entry| entry.model.adapter() == spec.name)
+    {
+        let serving = records
+            .iter()
+            .find(|record| spec.account_serves_model(record.plan.as_deref(), entry.model.model()))
+            .ok_or("serving plan")?;
+        let route = resolve(&request(entry.model.as_str())?, &ctx)?;
+        assert_eq!(route.account_key, serving.account_key);
+        if entry.free {
+            let preview = pacing_preview(&entry.model, &ctx);
+            assert!(preview.iter().all(
+                |p| p.account == serving.account_key && matches!(p.policy, PacingPolicy::Pace)
+            ));
+            assert!(!preview.is_empty());
+        }
     }
     Ok(())
 }

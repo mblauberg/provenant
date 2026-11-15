@@ -53,6 +53,10 @@ pub struct Group {
     pub totals: Totals,
 }
 
+fn some(value: &Option<String>) -> String {
+    value.clone().unwrap_or_else(|| GAP.to_owned())
+}
+
 fn unreported(row: &Row) -> bool {
     let t = &row.tokens;
     [
@@ -72,7 +76,7 @@ pub fn totals<'a>(rows: impl IntoIterator<Item = &'a Row>) -> Result<Totals, Tel
     let (mut numerator, mut any) = (0u128, false);
     for row in rows {
         totals.attempts += 1;
-        totals.unattributed_attempts += u64::from(row.account.is_none());
+        totals.unattributed_attempts += u64::from(row.identity.is_unknown());
         totals.unreported_token_attempts += u64::from(unreported(row));
         match &row.cost {
             Some(cost) => {
@@ -102,16 +106,11 @@ pub fn totals<'a>(rows: impl IntoIterator<Item = &'a Row>) -> Result<Totals, Tel
 }
 
 fn key(row: &Row, by: By) -> String {
-    let some = |value: &Option<String>| value.clone().unwrap_or_else(|| GAP.to_owned());
     match by {
-        By::Account => some(&row.account),
+        By::Account => row.identity.account_key(),
         By::Model => some(&row.model),
-        By::Graph => some(&row.graph),
-        By::Node => match (&row.graph, &row.node) {
-            (Some(graph), Some(node)) => format!("{graph}/{node}"),
-            (None, Some(node)) => node.clone(),
-            _ => GAP.to_owned(),
-        },
+        By::Graph => row.graph.clone(),
+        By::Node => format!("{}/{}", row.graph, row.node),
         By::Route => match (&row.provider, &row.model) {
             (Some(provider), Some(model)) => match &row.effort {
                 Some(effort) => format!("{provider}/{model}/{effort}"),
@@ -145,8 +144,9 @@ pub fn group<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::{Cost, FORMAT, Labels, Source, Tokens};
+    use crate::ledger::{Cost, FORMAT, Source, Tokens};
     use provenant_core::{ProjectId, WallTime};
+    use provenant_records::AccountIdentity;
 
     fn row(attempt: &str, account: Option<&str>, cost: Option<(u64, bool)>) -> Row {
         let token = Some(1);
@@ -154,14 +154,15 @@ mod tests {
             format: FORMAT.into(),
             source: Source::Settlement,
             project: ProjectId::from_bytes([1; 16]),
-            graph: None,
-            node: None,
+            graph: "graph".into(),
+            node: "node".into(),
             attempt: attempt.into(),
-            labels: Labels::default(),
             provider: Some("claude".into()),
             model: Some("m".into()),
             effort: None,
-            account: account.map(str::to_owned),
+            identity: account.map_or_else(AccountIdentity::unknown, |key| {
+                AccountIdentity::known("claude", key, "fixture-epoch")
+            }),
             outcome: "succeeded".into(),
             started: None,
             finished: WallTime::from_micros(0).expect("epoch"),
@@ -172,14 +173,17 @@ mod tests {
                 cache_write_1h: None,
                 output_excluding_reasoning: token,
                 reasoning: token,
+                extra: Default::default(),
             },
             cost: cost.map(|(picodollars, complete)| Cost {
                 picodollars,
                 complete,
                 subscription: false,
                 prices: "p".into(),
+                extra: Default::default(),
             }),
             context_band: None,
+            extra: Default::default(),
         }
     }
 
@@ -190,13 +194,24 @@ mod tests {
             row("b", Some("work"), None),
         ];
         let total = totals(&rows).expect("totals");
-        assert_eq!(total.usd.as_deref(), Some("2.000000"));
+        assert_eq!(total.microdollars, Some(2_000_000));
         assert_eq!((total.priced_attempts, total.unpriced_attempts), (1, 1));
         assert!(!total.complete);
         let none = totals(&rows[1..]).expect("totals");
         assert_eq!((none.microdollars, none.usd), (None, None));
         assert!(!none.complete);
         assert_eq!(totals(&[]).expect("totals").usd, None);
+    }
+
+    #[test]
+    fn ledger_record_retains_additive_fields_at_each_typed_level() {
+        let mut record =
+            serde_json::to_value(row("attempt", Some("work"), Some((1_000_000, true))))
+                .expect("fixture serialises");
+        record["future_row"] = serde_json::json!({"value": 1});
+        record["tokens"]["future_tokens"] = serde_json::json!(2);
+        record["cost"]["future_cost"] = serde_json::json!(3);
+        crate::assert_record_round_trip::<Row>(record);
     }
 
     #[test]
@@ -207,9 +222,9 @@ mod tests {
         ];
         let groups = group(&rows, By::Account).expect("groups");
         let keys: Vec<_> = groups.iter().map(|g| g.key.as_str()).collect();
-        assert_eq!(keys, [GAP, "work"]);
-        assert_eq!(groups[0].totals.unattributed_attempts, 1);
-        assert_eq!(groups[1].totals.unattributed_attempts, 0);
+        assert_eq!(keys, ["claude/work", GAP]);
+        assert_eq!(groups[0].totals.unattributed_attempts, 0);
+        assert_eq!(groups[1].totals.unattributed_attempts, 1);
         assert_eq!(groups[0].totals.unreported_token_attempts, 0);
     }
 }

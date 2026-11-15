@@ -1,7 +1,7 @@
 # Human inbox
 
-Owner: `crates/fabric-runtime`, `crates/cli`, `crates/fabric-mcp`
-Anchor: [`tests/inbox.rs`](../../tools/front-door/tests/inbox.rs), [`inbox/tests.rs`](../../tools/front-door/crates/fabric-runtime/src/inbox/tests.rs)
+Owner: `crates/fabric-runtime`, `crates/cli`
+Anchor: [`tests/inbox.rs`](../../tools/front-door/tests/inbox.rs), [inbox/tests.rs](../../tools/front-door/crates/fabric-runtime/src/inbox/tests.rs)
 
 How a chair asks the owner for a decision and consumes the answer. Only a chair
 or human-controlled session can post, answer, close or acknowledge; worker lanes
@@ -44,9 +44,9 @@ provenant inbox acknowledge REQUEST_ID --answer ANSWER_ID \
   `phone_remote`, `cli`, `unknown`); phone use is never inferred.
 - Use the explicit originating session ID: posting does not discover or
   authenticate a live session. Acknowledgement needs the request's original
-  actor as well as its exact host, project and session. MCP and the terminal
-  may use different agent labels; read `inbox.agent` from `fabric_context`
-  (`op: inspect`), keep it with the checkpoint, and set
+  actor as well as its exact host, project and session. Hooks and the terminal
+  may use different agent labels; read `inbox.agent` from
+  `provenant fabric identity --json`, keep it with the checkpoint, and set
   `PROVENANT_AGENT_LABEL` to it for CLI acknowledgement.
 - Preserve the operation ID, input and viewed revision when retrying after an
   uncertain reply; a changed operation conflicts. To replace a viewed item add
@@ -56,6 +56,11 @@ provenant inbox acknowledge REQUEST_ID --answer ANSWER_ID \
   refuses answers; `inbox --state all` still shows it. Expiry is a projection at
   read time and implies no approval. `inbox close` with a reason and revision
   withdraws, supersedes or expires an item without discarding its answer.
+- A graph node ask is an ordinary open request in the same list, filed by the
+  graph under the chair's session; `provenant inbox` and `console overview` show
+  it beside the others. Answer it as any other request, including
+  `--channel chat`; the graph reads the answer on its next advance, acknowledges
+  it and resumes the node. Cancelling the graph closes its unanswered requests.
 - `work` links a request to a run; only `verified` `work_coverage` may be treated
   as navigable work.
 - Peers and projects: `--all-projects` finds a request's project by ID and lists
@@ -78,26 +83,19 @@ rounds are exhausted. Answer `stop`, `extend` (one round) or `accept`, or reply
 
 ## Delivery service
 
-Every adapter receives answers through Fabric mail. Hook injection is the
-exception; `scripts/check-doc-truth` compares this table with
-`delivery_capabilities()` in `crates/cli/src/hooks.rs` and the adapter specs.
-
-| Provider | Transport | Local offer reader | Live injection |
-|---|---|---|---|
-| `claude` | Fabric mail | Library API | Unavailable |
-| `claude` | `PreToolUse` hook | Available | Tool-call boundary |
-| Every other adapter | Fabric mail | Unavailable | Unavailable |
-
-Claude's `PreToolUse` hook may offer answers on Bash calls within a 50 ms
-budget; offering never acknowledges. If the hook reports the local delivery index
-unavailable, run any `provenant inbox` command to upgrade the store (back up the
-Fabric store first; older binaries refuse the added schema).
+Every adapter receives answers through Fabric mail. Native pre-tool hook
+injection is available only where the adapter's declared response contract can
+carry context without denying the tool. Offering an answer never acknowledges
+it. `HarnessInstall.answer_delivery` owns this capability and its reason and
+source; `delivery_capabilities()` derives library and live delivery from that
+same declaration. `provenant check install` reports native integration limits
+as informational warnings.
 
 ## Steering
 
-`provenant steer ATTEMPT --text-stdin` and `provenant chair message SESSION
---text-stdin --channel CHANNEL` record up to 4 KiB of guidance as Fabric mail
-with no authority; both are refused inside a lane. `chair message` queues to
+`provenant steer TARGET --brief TEXT` or `--brief-file PATH`, and `provenant
+chair message SESSION --text-stdin --channel CHANNEL`, record up to 4 KiB of
+guidance as Fabric mail with no authority; both are refused inside a lane. `chair message` queues to
 that session's own mailbox, read with `provenant fabric mail read --session
 SESSION`. No lane adapter delivers `steer` live today: it refuses with
 `control_unsupported` and records nothing (`retry` is the continuation). Per-

@@ -110,6 +110,7 @@ fn read_failure_reason(error: &FacadeError) -> String {
 fn read_remote(
     owner: &mut BinaryRunOwner<'_>,
     target: AttemptTarget,
+    origin: &provenant_records::WorkKey,
     budget: WaitBudget,
     cancel: &CancelToken,
     max: usize,
@@ -130,8 +131,9 @@ fn read_remote(
             budget,
             cancel,
         )?;
+        let result = super::peer::checked_output_origin(result, origin)?;
         let OutputResult::Chunk {
-            extra,
+            peer,
             target: returned_target,
             part,
             offset: returned,
@@ -168,9 +170,8 @@ fn read_remote(
             return Err(FacadeError::StateCorrupt);
         }
         if bytes.len() == max {
-            let length = extra
-                .get("length")
-                .and_then(serde_json::Value::as_u64)
+            let length = peer
+                .length
                 .filter(|length| *length > next_offset)
                 .ok_or_else(|| {
                     FacadeError::io("peer did not report the full redacted result length")
@@ -270,17 +271,26 @@ pub(super) fn materialise(
                 read_result(session, &call, attempt, remaining).map_err(super::run_error)
             } else {
                 match owner_host.parse() {
-                    Ok(remote_host) => read_remote(
-                        &mut owner,
-                        AttemptTarget {
-                            extra: Default::default(),
-                            host: Some(remote_host),
-                            attempt,
-                        },
-                        budget,
-                        cancel,
-                        remaining,
-                    ),
+                    Ok(remote_host) => (|| {
+                        let origin = request
+                            .attempt_key
+                            .as_ref()
+                            .ok_or(FacadeError::StateCorrupt)?
+                            .work_key(factory.context.identity.project)
+                            .map_err(|_| FacadeError::StateCorrupt)?;
+                        read_remote(
+                            &mut owner,
+                            AttemptTarget {
+                                extra: Default::default(),
+                                host: Some(remote_host),
+                                attempt,
+                            },
+                            &origin,
+                            budget,
+                            cancel,
+                            remaining,
+                        )
+                    })(),
                     Err(_) => Err(FacadeError::InvalidInput { detail: None }),
                 }
             }

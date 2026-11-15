@@ -35,7 +35,7 @@ fn creating_a_branch_records_creation_with_repository_and_full_ref() -> Result<(
     assert_eq!(record.endpoint, RefEndpoint::Local);
     assert_eq!(record.reference, "refs/heads/lane/owned");
     assert_eq!(record.origin, RefOrigin::Created);
-    assert_eq!(record.generation, 1);
+    assert!(record.generation > 0);
     assert_eq!(record.tip, base);
     Ok(())
 }
@@ -56,7 +56,7 @@ fn reusing_an_existing_branch_records_adoption() -> Result<(), Box<dyn Error>> {
     )?;
     let record = ledger_record(&context, "human/topic")?.ok_or("no ledger record")?;
     assert_eq!(record.origin, RefOrigin::Adopted);
-    assert_eq!(record.generation, 1);
+    assert!(record.generation > 0);
     Ok(())
 }
 
@@ -72,7 +72,8 @@ fn recreating_a_ref_at_the_same_commit_is_a_new_generation() -> Result<(), Box<d
     };
     create(&context, request(), &cancel())?;
     let first = ledger_record(&context, "lane/again")?.ok_or("no first record")?;
-    remove(
+    remove_with_port(
+        &test,
         &context,
         WorktreeRemove::Name {
             name: "lane/again".into(),
@@ -84,16 +85,72 @@ fn recreating_a_ref_at_the_same_commit_is_a_new_generation() -> Result<(), Box<d
     )?;
     fixture.run(&["branch", "-D", "lane/again"]).ok();
     assert!(!branch_exists(&fixture, "lane/again"));
+    let ledger = RefLedger::for_context(&context)?;
+    let _ = ledger.forget(&first, &test.clock, &cancel())?;
+    assert!(ledger_record(&context, "lane/again")?.is_none());
     create(&context, request(), &cancel())?;
     let second = ledger_record(&context, "lane/again")?.ok_or("no second record")?;
     assert_eq!(first.tip, second.tip);
     assert_eq!(second.origin, RefOrigin::Created);
-    assert_eq!(second.generation, first.generation + 1);
+    assert!(second.generation > first.generation);
     Ok(())
 }
 
 #[test]
-fn adoption_keeps_a_created_generation_only_at_the_recorded_tip() -> Result<(), Box<dyn Error>> {
+fn missing_generation_sequence_does_not_restart_a_nonempty_ledger() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let ledger = RefLedger::for_context(&context)?;
+    let head = fixture.head()?;
+    let first = ledger.record(
+        RefObservation {
+            endpoint: RefEndpoint::Local,
+            reference: GitRefName::branch("lane/first")?,
+            origin: RefOrigin::Created,
+            tip: head,
+            recorded_at: test.clock.wall_now()?,
+            attempt_id: None,
+            operation_id: None,
+        },
+        &test.clock,
+        &cancel(),
+    )?;
+    let sequence = fixture
+        ._temp
+        .path()
+        .join("worktrees")
+        .join(test.binding.project_id().to_string())
+        .join("refs")
+        .join("last-generation");
+    std::fs::remove_file(sequence)?;
+    assert!(matches!(
+        ledger.forget(&first, &test.clock, &cancel()),
+        Err(WorktreeError::InvalidOutput)
+    ));
+    let next = ledger.record(
+        RefObservation {
+            endpoint: RefEndpoint::Local,
+            reference: GitRefName::branch("lane/next")?,
+            origin: RefOrigin::Created,
+            tip: head,
+            recorded_at: test.clock.wall_now()?,
+            attempt_id: None,
+            operation_id: None,
+        },
+        &test.clock,
+        &cancel(),
+    );
+    assert!(matches!(next, Err(WorktreeError::InvalidOutput)));
+    assert_eq!(
+        ledger_record(&context, "lane/first")?.as_ref(),
+        Some(&first)
+    );
+    Ok(())
+}
+
+#[test]
+fn fresh_adoption_advances_but_observed_ref_identity_is_idempotent() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
@@ -110,48 +167,241 @@ fn adoption_keeps_a_created_generation_only_at_the_recorded_tip() -> Result<(), 
     };
     let head = fixture.head()?;
     let created = ledger.record(observe(RefOrigin::Created, head), &test.clock, &cancel())?;
-    let same = ledger.record(observe(RefOrigin::Adopted, head), &test.clock, &cancel())?;
-    assert_eq!(same, created);
+    let adopted = ledger.record(observe(RefOrigin::Adopted, head), &test.clock, &cancel())?;
+    assert_eq!(adopted.origin, RefOrigin::Adopted);
+    assert_eq!(adopted.tip, head);
+    assert!(adopted.generation > created.generation);
+    let adopted_again = ledger.record(observe(RefOrigin::Adopted, head), &test.clock, &cancel())?;
+    assert!(adopted_again.generation > adopted.generation);
+    let observed_again = ledger.observe_local_branch(&reference, head, &test.clock, &cancel())?;
+    assert_eq!(observed_again, adopted_again);
     fixture.run(&["commit", "--allow-empty", "-m", "moved"])?;
     let moved = fixture.head()?;
-    let adopted = ledger.record(observe(RefOrigin::Adopted, moved), &test.clock, &cancel())?;
-    assert_eq!(adopted.origin, RefOrigin::Adopted);
-    assert_eq!(adopted.generation, created.generation + 1);
+    let moved_adoption = ledger.observe_local_branch(&reference, moved, &test.clock, &cancel())?;
+    assert_eq!(moved_adoption.origin, RefOrigin::Adopted);
+    assert!(moved_adoption.generation > adopted_again.generation);
+    let moved_again = ledger.observe_local_branch(&reference, moved, &test.clock, &cancel())?;
+    assert_eq!(moved_again, moved_adoption);
+    let returned = ledger.observe_local_branch(&reference, head, &test.clock, &cancel())?;
+    assert!(returned.generation > moved_adoption.generation);
+
+    let owned_reference = GitRefName::branch("lane/owned-observation")?;
+    let owner_operation = "observed-owner".parse()?;
+    let owned = ledger.record(
+        RefObservation {
+            endpoint: RefEndpoint::Local,
+            reference: owned_reference.clone(),
+            origin: RefOrigin::Created,
+            tip: head,
+            recorded_at: test.clock.wall_now()?,
+            attempt_id: Some(AttemptId::from_bytes([12; 16])),
+            operation_id: Some(owner_operation),
+        },
+        &test.clock,
+        &cancel(),
+    )?;
+    assert_eq!(
+        ledger.observe_local_branch(&owned_reference, head, &test.clock, &cancel())?,
+        owned
+    );
+    let advanced = ledger.observe_local_branch(&owned_reference, moved, &test.clock, &cancel())?;
+    assert!(advanced.generation > owned.generation);
+    assert_eq!(advanced.origin, owned.origin);
+    assert_eq!(advanced.attempt_id, owned.attempt_id);
+    assert_eq!(advanced.operation_id, owned.operation_id);
     Ok(())
 }
 
 #[test]
-fn cooperating_writers_share_one_ledger_per_repository() -> Result<(), Box<dyn Error>> {
+fn detached_private_head_uses_the_shared_generation_and_endpoint_identity()
+-> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
-    let endpoint = RefEndpoint::Remote {
-        remote: "upstream".into(),
-        push_url: "https://example.invalid/repo.git".into(),
-    };
-    let reference = GitRefName::branch("lane/pushed")?;
-    // A second writer opens the same ledger from the state root alone.
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "lane/detached".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let ledger = RefLedger::for_context(&context)?;
+    let branch = ledger_record(&context, "lane/detached")?.ok_or("no branch record")?;
+    run_in_worktree(&fixture, &created.path, &["checkout", "--detach"])?;
+    let path = canonicalize(&created.path)?;
+    let path_text = path.to_str().ok_or("non-UTF8 worktree path")?;
+    let head = GitOid::parse(
+        std::str::from_utf8(
+            &fixture
+                .run(&["-C", path_text, "rev-parse", "--verify", "HEAD"])?
+                .stdout
+                .bytes,
+        )?
+        .trim(),
+    )?;
+    let first = ledger.record_worktree_head(&path, head, &test.clock, &cancel())?;
+    assert!(matches!(
+        &first.endpoint,
+        RefEndpoint::Worktree { path } if path == path_text
+    ));
+    assert_eq!(first.reference, "HEAD");
+    assert_eq!(first.origin, RefOrigin::Adopted);
+    assert!(first.generation > branch.generation);
+    assert_eq!(ledger.load_worktree_head(&path)?.as_ref(), Some(&first));
+    assert_eq!(
+        ledger.record_worktree_head(&path, head, &test.clock, &cancel())?,
+        first
+    );
+    let identity = first.ownership().identity()?;
+    assert!(matches!(
+        identity.endpoint,
+        provenant_records::custody::RefEndpointIdentity::Worktree { .. }
+    ));
+    assert!(!serde_json::to_string(&identity)?.contains(path_text));
+
+    run_in_worktree(
+        &fixture,
+        &created.path,
+        &["commit", "--allow-empty", "-m", "move detached HEAD"],
+    )?;
+    let moved = GitOid::parse(
+        std::str::from_utf8(
+            &fixture
+                .run(&["-C", path_text, "rev-parse", "--verify", "HEAD"])?
+                .stdout
+                .bytes,
+        )?
+        .trim(),
+    )?;
+    let next = ledger.record_worktree_head(&path, moved, &test.clock, &cancel())?;
+    assert_eq!(next.reference, "HEAD");
+    assert_eq!(next.tip, moved);
+    assert!(next.generation > first.generation);
+
+    let other = create(
+        &context,
+        WorktreeCreate {
+            branch: "lane/detached-other".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    run_in_worktree(&fixture, &other.path, &["checkout", "--detach"])?;
+    let other_path = canonicalize(&other.path)?;
+    let other_path_text = other_path.to_str().ok_or("non-UTF8 worktree path")?;
+    let other_head = GitOid::parse(
+        std::str::from_utf8(
+            &fixture
+                .run(&["-C", other_path_text, "rev-parse", "--verify", "HEAD"])?
+                .stdout
+                .bytes,
+        )?
+        .trim(),
+    )?;
+    let other_record =
+        ledger.record_worktree_head(&other_path, other_head, &test.clock, &cancel())?;
+    assert!(other_record.generation > next.generation);
+    assert_ne!(
+        other_record.ownership().identity()?,
+        next.ownership().identity()?
+    );
+    Ok(())
+}
+
+#[test]
+fn attempt_and_operation_replays_share_generation_rules() -> Result<(), Box<dyn Error>> {
+    #[derive(Clone)]
+    enum Owner {
+        Attempt(AttemptId),
+        Operation(provenant_core::OperationId),
+    }
+    impl Owner {
+        fn attempt_id(&self) -> Option<AttemptId> {
+            match self {
+                Self::Attempt(id) => Some(*id),
+                Self::Operation(_) => None,
+            }
+        }
+
+        fn operation_id(&self) -> Option<provenant_core::OperationId> {
+            match self {
+                Self::Attempt(_) => None,
+                Self::Operation(id) => Some(id.clone()),
+            }
+        }
+    }
+
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let tip = fixture.head()?;
+    let cases = [
+        (
+            RefEndpoint::Remote {
+                remote: "upstream".into(),
+                push_url: "https://example.invalid/repo.git".into(),
+            },
+            GitRefName::branch("lane/pushed")?,
+            Owner::Attempt(AttemptId::from_bytes([9; 16])),
+            Owner::Attempt(AttemptId::from_bytes([10; 16])),
+            true,
+        ),
+        (
+            RefEndpoint::Local,
+            GitRefName::branch("lane/operation")?,
+            Owner::Operation(provenant_core::OperationId::parse("create-lane")?),
+            Owner::Operation(provenant_core::OperationId::parse("adopt-lane")?),
+            false,
+        ),
+    ];
     let other = RefLedger::open(fixture._temp.path(), test.binding.project_id())?;
-    let observation = RefObservation {
-        endpoint: endpoint.clone(),
-        reference: reference.clone(),
-        origin: RefOrigin::Created,
-        tip: fixture.head()?,
-        recorded_at: test.clock.wall_now()?,
-        attempt_id: Some(AttemptId::from_bytes([9; 16])),
-        operation_id: None,
-    };
-    let first = other.record(observation.clone(), &test.clock, &cancel())?;
-    // The same attempt replaying its sealed receipt is not a recreation.
-    let replay = other.record(observation, &test.clock, &cancel())?;
-    assert_eq!(replay, first);
-    let seen = RefLedger::for_context(&context)?
-        .load(&endpoint, &reference)?
-        .ok_or("record not shared")?;
-    assert_eq!(seen.endpoint, endpoint);
-    assert_eq!(seen.origin, RefOrigin::Created);
-    // The local ref of the same name is a different, unobserved ref.
-    assert!(ledger_record(&context, "lane/pushed")?.is_none());
+    for (endpoint, reference, first_owner, next_owner, remote) in cases {
+        let observation = |owner: &Owner, origin, recorded_at| RefObservation {
+            endpoint: endpoint.clone(),
+            reference: reference.clone(),
+            origin,
+            tip,
+            recorded_at,
+            attempt_id: owner.attempt_id(),
+            operation_id: owner.operation_id(),
+        };
+        let first = other.record(
+            observation(&first_owner, RefOrigin::Created, test.clock.wall_now()?),
+            &test.clock,
+            &cancel(),
+        )?;
+        let replay = other.record(
+            observation(&first_owner, RefOrigin::Adopted, test.clock.wall_now()?),
+            &test.clock,
+            &cancel(),
+        )?;
+        assert_eq!(replay, first);
+
+        let next = other.record(
+            observation(&next_owner, RefOrigin::Adopted, test.clock.wall_now()?),
+            &test.clock,
+            &cancel(),
+        )?;
+        assert!(next.generation > first.generation);
+        assert_eq!(next.origin, RefOrigin::Adopted);
+        assert_eq!(
+            other.record(
+                observation(&next_owner, RefOrigin::Adopted, test.clock.wall_now()?),
+                &test.clock,
+                &cancel(),
+            )?,
+            next
+        );
+
+        let seen = RefLedger::for_context(&context)?
+            .load(&endpoint, &reference)?
+            .ok_or("record not shared")?;
+        assert_eq!(seen, next);
+        if remote {
+            assert!(ledger_record(&context, "lane/pushed")?.is_none());
+        }
+    }
     Ok(())
 }
 
@@ -197,15 +447,15 @@ fn lane_owners_link_the_created_generation() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn owner_records_without_a_ref_link_still_load() -> Result<(), Box<dyn Error>> {
-    // No backward compatibility shim: an old record is simply unobserved.
+fn adopted_owner_without_a_ref_link_stays_unobserved() -> Result<(), Box<dyn Error>> {
+    // An adopted checkout can lack observed branch ownership.
     let owner: WorktreeOwner = serde_json::from_value(serde_json::json!({
         "attempt_id": null,
         "operation_id": null,
-        "branch": "human/old",
+        "branch": "human/adopted",
         "base": "1111111111111111111111111111111111111111",
         "host": provenant_core::HostId::from_bytes([1; 16]),
-        "created_at": SystemClock.wall_now()?,
+        "created_at": provenant_core::WallTime::from_unix_seconds(1_700_000_000)?,
         "origin": "adopted",
     }))?;
     assert!(owner.reference.is_none());
@@ -219,6 +469,7 @@ fn landed_check_uses_ancestry_and_refuses_rewritten_or_missing_commits()
     let test = TestContext::new(&fixture)?;
     let context = test.context();
     let graph = RepoGraph {
+        repo: context.repo,
         context: &context,
         cancel: &cancel(),
     };

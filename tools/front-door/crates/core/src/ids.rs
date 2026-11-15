@@ -59,8 +59,6 @@ ids!(
     WorkspaceId,
     RepoId,
     ActorId,
-    RunId,
-    TaskId,
     ClaimId,
     MessageId,
     AttemptId,
@@ -244,7 +242,7 @@ mod tests {
             assert!(ProjectId::parse(bad).is_err());
             assert!(serde_json::from_value::<ProjectId>(serde_json::json!(bad)).is_err());
         }
-        assert!(serde_json::from_str::<RunId>("12").is_err());
-        assert_eq!(RunId::from_bytes([255; 16]).to_string(), "f".repeat(32));
+        assert!(serde_json::from_str::<AttemptId>("12").is_err());
+        assert_eq!(AttemptId::from_bytes([255; 16]).to_string(), "f".repeat(32));
     }
 }

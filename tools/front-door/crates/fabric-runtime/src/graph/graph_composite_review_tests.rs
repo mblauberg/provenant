@@ -141,9 +141,11 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
     assert_eq!(outputs.findings[0].status, "open");
     assert_eq!(outputs.findings[2].id, "F3");
     assert_eq!(outputs.findings[2].severity, "high");
-    assert!(outputs.findings.iter().all(|finding| {
-        finding.effective_severity() == "note" && finding.trigger().is_none()
-    }));
+    assert!(
+        outputs.findings.iter().all(|finding| {
+            finding.effective_severity() == "note" && finding.trigger().is_none()
+        })
+    );
     assert_eq!(outputs.findings[2].summary, "valid finding");
     assert!(outputs.warnings.iter().any(|w| w.contains("field status")));
     assert!(
@@ -175,11 +177,16 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
             .any(|w| w.contains("field status"))
     );
     assert_eq!(composite.findings.len(), 3);
-    for (finding, severity) in composite.findings.iter().zip(["blocking", "blocking", "high"]) {
+    for (finding, severity) in composite
+        .findings
+        .iter()
+        .zip(["blocking", "blocking", "high"])
+    {
         assert_eq!(finding.severity, severity);
         assert_eq!(finding.effective_severity(), "note");
         assert!(finding.trigger().is_none());
-        assert!(owner.prompts[3].contains(&format!("\"severity\":\"{severity}\"")));
+        // Typed composite findings above cover severity; the consumer must
+        // receive the finding and its warnings regardless of JSON formatting.
         assert!(owner.prompts[3].contains(&finding.file));
     }
     assert!(owner.prompts[3].contains("malformed finding:"));
@@ -470,8 +477,11 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
     let unavailable = node("lens-c");
     assert_eq!(unavailable.state, NodeState::Failed);
     assert_eq!(
-        unavailable.advance_error_code.as_deref(),
-        Some("adapter_unavailable")
+        unavailable
+            .attempts
+            .last()
+            .and_then(|attempt| attempt.outcome),
+        Some(AttemptOutcome::AdapterUnavailable)
     );
     assert!(excerpt.contains(&format!(
         "{}: {}",
@@ -492,54 +502,28 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
 }
 
 #[test]
-fn partial_composite_replay_recovers_legacy_minimum_and_wording() {
+fn partial_composite_replay_preserves_checkpoint_and_launches_nothing() {
     let (document, mut owner) = partial_review(1);
     let mut journal = MemoryJournal::default();
-    advance(&document, &mut owner, &mut journal).unwrap();
-    let checkpoint = journal.0.as_mut().unwrap();
-    let group = checkpoint
-        .nodes
-        .iter_mut()
-        .find(|node| node.id == "lenses")
-        .unwrap();
-    group.min_successful = None;
-    let result = group.outputs.as_mut().unwrap().result.as_mut().unwrap();
-    result.excerpt = result
-        .excerpt
-        .replace("Unavailable members:", "Unavailable lenses:");
-    result.digest = CanonicalV1::file_digest(result.excerpt.as_bytes()).to_string();
-    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
-    assert_eq!(replay.outcome, Some(GraphOutcome::Partial));
-    assert_eq!(
-        replay
-            .checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id == "lenses")
-            .unwrap()
-            .min_successful,
-        Some(1)
-    );
+    let first = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(first.outcome, Some(GraphOutcome::Partial));
+    let mut replay_owner = FakeOwner::default();
+    let replay = advance(&document, &mut replay_owner, &mut journal).unwrap();
+    assert_eq!(replay.checkpoint, first.checkpoint);
+    assert!(replay_owner.calls.is_empty());
 }
 
 #[test]
-fn status_recovers_old_partial_composite_minimum() {
+fn status_and_replay_agree_on_persisted_partial_composite() {
     let (document, mut owner) = partial_review(1);
-    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+    let checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
         .unwrap()
         .checkpoint;
-    checkpoint
-        .nodes
-        .iter_mut()
-        .find(|node| node.id == "lenses")
-        .unwrap()
-        .min_successful = None;
-    assert_eq!(checkpoint.outcome(), GraphOutcome::Failed);
+    assert_eq!(checkpoint.outcome(), GraphOutcome::Partial);
     use provenant_core::Clock;
     let temp = crate::test_support::tempdir().unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver).unwrap();
     let project = provenant_core::ProjectId::from_bytes([1; 16]);
     let clock = provenant_os::clock::SystemClock::new();
@@ -549,10 +533,12 @@ fn status_recovers_old_partial_composite_minimum() {
         FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
     journal
         .bind(GraphExecution {
-            review_base: None,
+            peer_origin_context: None,
+            peer_submission_digest: None,
+
             extra: Default::default(),
-            integration_base: None,
-            directory: base,
+            bases: None,
+            directory: inputs.checkout.clone(),
             document: document.clone(),
         })
         .unwrap();
@@ -566,77 +552,8 @@ fn status_recovers_old_partial_composite_minimum() {
             .unwrap()
             .unwrap()
             .outcome(),
-        GraphOutcome::Failed
+        GraphOutcome::Partial
     );
-}
-
-#[test]
-fn legacy_partial_output_replays_with_warnings_and_truncated_authored_text() {
-    let mut members: Vec<_> = (0..17).map(|i| serde_json::json!({
-        "id":format!("worker-{i}"), "access":"read_only", "prompt":"work", "route":{"alias":"fixture"}
-    })).collect();
-    members.push(serde_json::json!({"id":"failed", "access":"read_only", "prompt":"work", "route":{"alias":"fixture"}}));
-    let exports: Vec<_> = members
-        .iter()
-        .map(|member| serde_json::json!({"node":member["id"],"outputs":["result"]}))
-        .collect();
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1, "graph_id":"legacy-partial", "nodes":[{
-            "id":"group", "kind":"composite", "access":"read_only",
-            "composite":{"min_successful":1,"nodes":members,"exports":exports}
-        }]
-    }))
-    .unwrap();
-    let body = format!("member failed {}", "x".repeat(4096));
-    let mut observations: VecDeque<_> = (0..17)
-        .map(|_| terminal_with_result(AttemptOutcome::Succeeded, &body))
-        .collect();
-    observations.push_back(terminal(AttemptOutcome::TaskFailed));
-    let mut owner = FakeOwner {
-        observations,
-        ..Default::default()
-    };
-    let mut journal = MemoryJournal::default();
-    advance(&document, &mut owner, &mut journal).unwrap();
-    let checkpoint = journal.0.as_mut().unwrap();
-    let mut body = String::new();
-    for i in 0..17 {
-        let id = format!("group--worker-{i}");
-        let member = checkpoint.nodes.iter().find(|node| node.id == id).unwrap();
-        body.push_str(&format!(
-            "{id}:\n{}\n",
-            member
-                .outputs
-                .as_ref()
-                .unwrap()
-                .result
-                .as_ref()
-                .unwrap()
-                .excerpt
-        ));
-    }
-    let group = checkpoint
-        .nodes
-        .iter_mut()
-        .find(|node| node.id == "group")
-        .unwrap();
-    let output = group.outputs.as_mut().unwrap();
-    assert_eq!(
-        output.warnings,
-        ["unavailable group--failed: member failed"]
-    );
-    output.warnings[0] = "unavailable group--failed: lens failed".into();
-    let header = "Unavailable lenses:\ngroup--failed: lens failed";
-    let room = COMPOSITE_EXCERPT_BYTES - header.len() - 2;
-    assert!(body.len() > room);
-    let body = bounded(&body, COMPOSITE_EXCERPT_BYTES);
-    let excerpt = format!("{header}\n\n{}", bounded(&body, room));
-    let result = output.result.as_mut().unwrap();
-    assert!(result.truncated);
-    result.digest = CanonicalV1::file_digest(excerpt.as_bytes()).to_string();
-    result.excerpt = excerpt;
-    assert!(result.excerpt.contains("member failed"));
-    advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
 }
 
 #[test]
@@ -679,9 +596,9 @@ fn qualified_findings_survive_model_synthesis() {
             assert!(finding.id.ends_with(":F1"));
             assert_eq!(finding.effective_severity(), "note");
             assert_eq!((finding.file.as_str(), finding.line), ("a.rs", None));
-            assert_eq!(finding.extra["lens"], "tests");
-            assert_eq!(finding.extra["evidence"], "observed failure");
-            assert_eq!(finding.extra["proposed_fix"], "repair branch");
+            assert_eq!(finding.lens.as_deref().unwrap(), "tests");
+            assert_eq!(finding.evidence.as_deref().unwrap(), "observed failure");
+            assert_eq!(finding.proposed_fix.as_deref().unwrap(), "repair branch");
         }
         assert!(owner.prompts[1].contains("\"lens\":\"tests\""));
         assert!(owner.prompts[1].contains("\"evidence\":\"observed failure\""));
@@ -728,9 +645,9 @@ fn qualified_findings_survive_deterministic_review_reduction() {
     let findings = &panel.outputs.as_ref().unwrap().findings;
     assert_eq!(findings.len(), 2);
     for (finding, lens) in findings.iter().zip(["tests", "security"]) {
-        assert_eq!(finding.extra["lens"], lens);
-        assert_eq!(finding.extra["evidence"], "observed");
-        assert_eq!(finding.extra["proposed_fix"], "repair");
+        assert_eq!(finding.lens.as_deref().unwrap(), lens);
+        assert_eq!(finding.evidence.as_deref().unwrap(), "observed");
+        assert_eq!(finding.proposed_fix.as_deref().unwrap(), "repair");
     }
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)

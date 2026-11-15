@@ -89,7 +89,7 @@ pub struct ConfiguredPrices {
     pub id: String,
     pub reviewed_at: String,
     pub units: String,
-    /// Surface the sheet in `telemetry stats` once `reviewed_at` is older than this.
+    /// Surface the sheet in `telemetry cost` once `reviewed_at` is older than this.
     #[serde(default)]
     pub max_review_age_days: Option<u32>,
     /// Refresh reports sources differing by more than this many basis points.

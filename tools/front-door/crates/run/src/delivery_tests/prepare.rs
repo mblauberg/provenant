@@ -1,28 +1,49 @@
 use super::*;
 
 #[test]
-fn non_fact_host_commands_keep_their_limits() {
-    let listing = provenant_os::exec::DEFAULT_CAPTURE_LIMIT;
-    for args in [
-        &["for-each-ref", "--format=%(refname)"][..],
-        &[
-            "--git-dir",
-            "repo.git",
-            "--work-tree",
-            "tree",
-            "for-each-ref",
-        ],
-        &[
-            "-c",
-            "remote.origin.uploadpack=git-upload-pack",
-            "ls-remote",
-            "origin",
-        ],
+fn host_command_output_classes_follow_the_declared_limits() {
+    for (class, commit_log, args) in [
+        (
+            HostOutputClass::RefListing,
+            false,
+            &["for-each-ref", "--format=%(refname)"][..],
+        ),
+        (
+            HostOutputClass::RefListing,
+            false,
+            &[
+                "--git-dir",
+                "repo.git",
+                "--work-tree",
+                "tree",
+                "for-each-ref",
+            ],
+        ),
+        (
+            HostOutputClass::RefListing,
+            false,
+            &[
+                "-c",
+                "remote.origin.uploadpack=git-upload-pack",
+                "ls-remote",
+                "origin",
+            ],
+        ),
+        (HostOutputClass::Ordinary, false, &["remote"]),
+        (HostOutputClass::CommitLog, true, &["log"]),
+        (
+            HostOutputClass::OriginConfiguration,
+            false,
+            &["config", "--show-origin", "--list"],
+        ),
     ] {
-        assert_eq!(stdout_limit(false, args), listing, "{args:?}");
+        assert_eq!(host_output_class(commit_log, args), class);
+        assert_eq!(
+            stdout_limit(commit_log, args),
+            host_output_limit(class),
+            "{class:?}"
+        );
     }
-    assert_eq!(stdout_limit(false, &["remote"]), 16 * 1024);
-    assert_eq!(stdout_limit(true, &["log"]), 56_000);
 }
 
 #[test]
@@ -66,13 +87,13 @@ fn prepare_refuses_unavailable_and_unsafe_credential_helpers()
     std::os::unix::fs::symlink(&lane_helper, &link)?;
     let opaque = fixture.root.join("gh;echo");
     fixture.executable(&opaque, "#!/bin/sh\nexit 0\n")?;
-    for (helper, detail) in [
-        (&unavailable, "gh: not found"),
-        (&not_executable, "not-executable"),
-        (&fixture.root, "unavailable"),
-        (&lane_helper, "inside the writer worktree"),
-        (&link, "inside the writer worktree"),
-        (&opaque, "opaque shell credential helper"),
+    for (helper, safety) in [
+        (&unavailable, HelperSafety::Unavailable),
+        (&not_executable, HelperSafety::Unavailable),
+        (&fixture.root, HelperSafety::Unavailable),
+        (&lane_helper, HelperSafety::LaneLocalPath),
+        (&link, HelperSafety::LaneLocalPath),
+        (&opaque, HelperSafety::OpaqueShellCommand),
     ] {
         fixture.git(&[
             "config",
@@ -80,20 +101,39 @@ fn prepare_refuses_unavailable_and_unsafe_credential_helpers()
             &format!("!{} auth git-credential", helper.display()),
         ])?;
         let error = fixture.prepare().expect_err("unsafe helper");
-        assert!(
-            matches!(
-                error,
-                RunError::DeliveryPrepare {
-                    step: "credential helper",
-                    ..
-                }
-            ),
-            "{error}"
-        );
-        let reason = error.to_string();
-        assert!(reason.contains(detail), "{reason}");
-        assert!(!reason.contains("receipt"), "{reason}");
+        assert!(matches!(
+            error,
+            RunError::DeliveryPrepare {
+                step: DeliveryPrepareStep::CredentialHelper,
+                refusal: Some(DeliveryPrepareRefusal::CredentialHelper(actual)),
+                ..
+            } if actual == safety
+        ));
     }
+    fixture.git(&["config", "credential.helper", "helper;echo"])?;
+    assert!(matches!(
+        fixture.prepare(),
+        Err(RunError::DeliveryPrepare {
+            step: DeliveryPrepareStep::CredentialHelper,
+            refusal: Some(DeliveryPrepareRefusal::CredentialHelper(
+                HelperSafety::NonPlainExecutable
+            )),
+            ..
+        })
+    ));
+
+    let ssh_fixture = PrepareFixture::new()?;
+    ssh_fixture.git(&["config", "core.sshCommand", "ssh -v"])?;
+    assert!(matches!(
+        ssh_fixture.prepare(),
+        Err(RunError::DeliveryPrepare {
+            step: DeliveryPrepareStep::CredentialHelper,
+            refusal: Some(DeliveryPrepareRefusal::CredentialHelper(
+                HelperSafety::UnsupportedSshCommand
+            )),
+            ..
+        })
+    ));
     Ok(())
 }
 
@@ -181,8 +221,16 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
             lane.to_str().ok_or("lane")?,
         ],
     )?;
+    let store_root = root.join("store");
+    let custody_project = registered_writer_project_id(
+        &project,
+        &store_root.join("home"),
+        &store_root.join("checkout"),
+        &store_root.join("state"),
+    )?;
     let writer = WriterRequest {
         extra: Default::default(),
+        custody_project: Some(custody_project),
         project,
         worktree: lane.clone(),
     };
@@ -221,17 +269,17 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700))?;
     let head = GitOid::parse(&git(&lane, &["rev-parse", "HEAD"])?)?;
     let head_text = head.to_string();
-    let fixture = root.join("store");
-    std::fs::create_dir(&fixture)?;
+    let fixture = store_root;
+    std::fs::create_dir_all(&fixture)?;
     let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&tests::context(&fixture)?, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(writer.clone());
-    input.request.tasks[0].deliver = Some(request.clone());
+    input.request.task.writer = Some(writer.clone());
+    input.request.task.deliver = Some(request.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let id = input.attempt_id;
+    let attempt = store.attempt_dir(id, false)?;
     // A lane that rewrites the stored destination after launch cannot steer
     // the host's push: the destination bound at prepare wins.
     let rewritten = WriterDeliveryRequest {
@@ -295,7 +343,8 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         ],
     )?;
     let idle_writer = WriterRequest {
-        extra: Default::default(),
+        extra: writer.extra.clone(),
+        custody_project: writer.custody_project,
         project: writer.project.clone(),
         worktree: idle_lane.clone(),
     };
@@ -306,13 +355,14 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     let idle_host =
         HostDeliveryContext::new(environment.clone()).prepare(&idle_writer, &idle_request)?;
     let mut idle = tests::input();
-    idle.run_id = provenant_core::RunId::from_bytes([17; 16]);
+    idle.attempt_id = provenant_core::AttemptId::from_bytes([17; 16]);
     idle.operation_id = provenant_core::OperationId::parse("idle-delivery")?;
-    idle.attempts[0].attempt_id = provenant_core::AttemptId::from_bytes([18; 16]);
-    idle.request.tasks[0].writer = Some(idle_writer.clone());
-    idle.request.tasks[0].deliver = Some(idle_request.clone());
+    idle.attempt_id = provenant_core::AttemptId::from_bytes([18; 16]);
+    crate::tests::rekey(&mut idle);
+    idle.request.task.writer = Some(idle_writer.clone());
+    idle.request.task.deliver = Some(idle_request.clone());
     store.create(&idle, &call)?;
-    let idle_attempt = store.attempt_dir(idle.run_id, idle.attempts[0].attempt_id, false)?;
+    let idle_attempt = store.attempt_dir(idle.attempt_id, false)?;
     let idle_receipt = deliver_once(
         &idle_host,
         &idle_writer,
@@ -330,20 +380,22 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     assert!(git(&lane, &["ls-remote", "origin", "refs/heads/published/idle"])?.is_empty());
     // An interrupted delivery is recorded during terminal recovery, with no push.
     let mut interrupted = tests::input();
-    interrupted.run_id = provenant_core::RunId::from_bytes([14; 16]);
+    interrupted.attempt_id = provenant_core::AttemptId::from_bytes([14; 16]);
     interrupted.operation_id = provenant_core::OperationId::parse("interrupted-delivery")?;
-    interrupted.attempts[0].attempt_id = provenant_core::AttemptId::from_bytes([16; 16]);
-    interrupted.request.tasks[0].writer = Some(writer);
-    interrupted.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+    interrupted.attempt_id = provenant_core::AttemptId::from_bytes([16; 16]);
+    crate::tests::rekey(&mut interrupted);
+    interrupted.request.task.writer = Some(writer);
+    interrupted.request.task.deliver = Some(WriterDeliveryRequest {
         branch: "interrupted".into(),
         ..request
     });
     store.create(&interrupted, &call)?;
-    let id = interrupted.attempts[0].attempt_id;
-    let attempt = store.attempt_dir(interrupted.run_id, id, false)?;
+    let id = interrupted.attempt_id;
+    let attempt = store.attempt_dir(id, false)?;
     let pending = WriterDeliveryReceipt {
         branch: "interrupted".into(),
         state: WriterDeliveryState::Failed {
+            reason: None,
             extra: Default::default(),
             stage: WriterDeliveryStage::Interrupted,
         },
@@ -356,7 +408,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         RECORD_LIMIT,
     )?;
     let mut exit = tests::exit();
-    exit.scope.run = interrupted.run_id;
+    exit.scope.attempt = interrupted.attempt_id;
     exit.scope.attempt = id;
     dispatch_tests::seal_exit(&store, &exit)?;
     artifacts::seal(
@@ -378,15 +430,10 @@ fn land_settlement_clears_terminal_writer_reservation()
 }
 
 #[test]
-fn land_settlement_refuses_nonterminal_writer()
--> std::result::Result<(), Box<dyn std::error::Error>> {
-    landed_writer_fence_fixture(LandedWriterFenceCase::Nonterminal)
-}
-
-#[test]
-fn land_settlement_refuses_mismatched_or_incomplete_writer_evidence()
+fn land_settlement_refuses_each_invalid_writer_evidence_state()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     for case in [
+        LandedWriterFenceCase::Nonterminal,
         LandedWriterFenceCase::WrongScope,
         LandedWriterFenceCase::WrongWriter,
         LandedWriterFenceCase::WrongAttempt,
@@ -626,9 +673,9 @@ fn publication_cleanup_never_removes_another_import_pin()
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&execution, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.task.writer = Some(fixture.writer.clone());
     store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
+    let id = input.attempt_id;
     dispatch_tests::seal_exit(&store, &tests::exit())?;
     let record = store.publish_terminal(id, 1, &tests::publication(), &tests::exit(), &call)?;
     let head = fixture.prepare()?.head(&fixture.writer)?;
@@ -638,11 +685,10 @@ fn publication_cleanup_never_removes_another_import_pin()
         execution.project_id,
     )?;
     let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
-    let scope = provenant_supervisor::custody::Scope {
+    let scope = provenant_records::custody::Scope {
         attempt: provenant_core::AttemptId::from_bytes([99; 16]),
         // A live lease never has generation 0; the record's own scope does.
         generation: 1,
-        ..RunStore::scope(&record)
     };
     let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
         directory,
@@ -654,7 +700,7 @@ fn publication_cleanup_never_removes_another_import_pin()
     )?;
     let reference = format!("refs/provenant/import/{head}");
     fixture.git(&["update-ref", &reference, &head.to_string()])?;
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let attempt = store.attempt_dir(id, false)?;
     let mut driver = crate::settlement::Guard::claim(&attempt, RunStore::scope(&record), &clock)?
         .ok_or("old driver")?;
     driver.set_head(head)?;
@@ -737,8 +783,16 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
             "HEAD~1",
         ],
     )?;
+    let store_root = root.join("store");
+    let custody_project = registered_writer_project_id(
+        &project,
+        &store_root.join("home"),
+        &store_root.join("checkout"),
+        &store_root.join("state"),
+    )?;
     let writer = WriterRequest {
         extra: Default::default(),
+        custody_project: Some(custody_project),
         project,
         worktree: lane.clone(),
     };
@@ -754,16 +808,16 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
     std::fs::write(lane.join("change"), "a repair on a stale base")?;
     git(&lane, &["add", "change"])?;
     git(&lane, &["commit", "-qm", "Repair"])?;
-    let fixture = root.join("store");
-    std::fs::create_dir(&fixture)?;
+    let fixture = store_root;
+    std::fs::create_dir_all(&fixture)?;
     let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
     let call = tests::call(&clock, &cancel);
     let store = RunStore::open(&tests::context(&fixture)?, &call)?;
     let mut input = tests::input();
-    input.request.tasks[0].writer = Some(writer.clone());
-    input.request.tasks[0].deliver = Some(request.clone());
+    input.request.task.writer = Some(writer.clone());
+    input.request.task.deliver = Some(request.clone());
     store.create(&input, &call)?;
-    let attempt = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, false)?;
+    let attempt = store.attempt_dir(input.attempt_id, false)?;
     assert!(matches!(
         deliver_once(&host, &writer, &request, &attempt, "fixture receipt"),
         Err(RunError::Delivery(WriterDeliveryStage::Push))

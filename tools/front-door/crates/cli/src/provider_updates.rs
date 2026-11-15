@@ -11,8 +11,7 @@ pub fn schedule(roots: &Roots, cwd: &Path) -> Result<(), String> {
     if crate::fabric::in_lane() {
         return Ok(());
     }
-    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|e| e.to_string())?;
+    let config = crate::config_reads::read_for(roots, "knobs").map_err(|e| e.to_string())?;
     let now = SystemClock::new()
         .wall_now()
         .map_err(|e| e.to_string())?
@@ -104,8 +103,7 @@ pub fn housekeep(roots: &Roots, home: &Path, cwd: &Path) -> Result<(), String> {
 }
 
 fn update_providers(roots: &Roots, home: &Path, cwd: &Path) -> Result<(), String> {
-    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|e| e.to_string())?;
+    let config = crate::config_reads::read_for(roots, "knobs").map_err(|e| e.to_string())?;
     let clock = SystemClock::new();
     let now = clock
         .wall_now()
@@ -172,6 +170,7 @@ fn note_update(
         &ctx.roots.state,
         ctx.identity.project,
         ctx.identity.inbox.actor,
+        ctx.local_observation.clone(),
         clock,
         &ThreadPause,
         &cancel,

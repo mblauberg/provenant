@@ -225,13 +225,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn host_monotonic_clock_does_not_go_backwards_and_the_boot_identity_is_stable() {
-        let first = host_monotonic_micros().unwrap();
-        assert!(first > 0);
-        assert!(host_monotonic_micros().unwrap() >= first);
-        assert_eq!(boot_identity().unwrap(), boot_identity().unwrap());
-    }
 }

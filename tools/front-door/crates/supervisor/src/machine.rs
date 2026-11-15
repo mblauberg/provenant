@@ -148,12 +148,6 @@ pub struct State {
     last_progress_ms: Option<u64>,
 }
 impl State {
-    /// Push the wall deadline out by time the lane spent queued for a build
-    /// slot, which is not its own runtime.
-    pub fn extend_wall_deadline(&mut self, ms: u64) {
-        self.budgets.wall_deadline_ms = self.budgets.wall_deadline_ms.saturating_add(ms);
-    }
-
     pub fn prepared(budgets: Budgets) -> Self {
         Self {
             phase: Phase::Prepared,
@@ -565,36 +559,47 @@ mod tests {
     }
 
     #[test]
-    fn a_host_sleep_cannot_extend_the_wall_deadline() {
-        // The monotonic clock stood still while the host slept; the wall clock
-        // moved on past the deadline.
-        let mut tick = Tick::at(40);
-        tick.wall_ms = 100;
-        let (state, effects) = step(running(), Event::Silence, tick);
-        assert_eq!(state.phase(), Phase::Stopping);
-        assert_eq!(effects, vec![Effect::DeliverStop(StopReason::WallDeadline)]);
-        // Neither clock at the deadline leaves the lane running.
-        let mut tick = Tick::at(40);
-        tick.wall_ms = 99;
-        let (state, effects) = step(running(), Event::Silence, tick);
-        assert_eq!(state.phase(), Phase::Running);
-        assert!(effects.is_empty());
-    }
-
-    #[test]
     fn wall_deadline_is_the_only_execution_deadline() {
-        let (prepared, effects) = step(
-            State::prepared(Budgets::with_cleanup(100, 10, 5)),
-            Event::Silence,
-            Tick::at(99),
-        );
-        assert_eq!(prepared.phase(), Phase::Prepared);
-        assert!(effects.is_empty());
-
-        let (state, effects) = step(running(), Event::Silence, Tick::at(100));
-        assert_eq!(state.phase(), Phase::Stopping);
-        assert_eq!(effects, vec![Effect::DeliverStop(StopReason::WallDeadline)]);
-        assert!(!state.timed_out());
+        let cases = [
+            // Host sleep advances wall time even if the monotonic sample is stale.
+            (
+                running(),
+                40,
+                100,
+                Phase::Stopping,
+                Some(StopReason::WallDeadline),
+            ),
+            (running(), 40, 99, Phase::Running, None),
+            (
+                running(),
+                100,
+                40,
+                Phase::Stopping,
+                Some(StopReason::WallDeadline),
+            ),
+            (
+                State::prepared(Budgets::with_cleanup(100, 10, 5)),
+                99,
+                99,
+                Phase::Prepared,
+                None,
+            ),
+        ];
+        for (state, now, wall, phase, reason) in cases {
+            let mut tick = Tick::at(now);
+            tick.wall_ms = wall;
+            let (state, effects) = step(state, Event::Silence, tick);
+            assert_eq!(state.phase(), phase);
+            assert_eq!(
+                state.stop_attempts().first().map(|attempt| attempt.reason),
+                reason
+            );
+            assert_eq!(
+                effects,
+                reason.map_or_else(Vec::new, |reason| vec![Effect::DeliverStop(reason)])
+            );
+            assert!(!state.timed_out());
+        }
     }
 
     #[test]

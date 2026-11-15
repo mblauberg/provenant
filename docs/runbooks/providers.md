@@ -9,13 +9,8 @@ launch behaviour are in the [supervisor spec](../specs/supervisor.md).
 
 ## Claude lane tokens
 
-By default a Claude lane gets a copy of its account's login access token. When
-the host renews that login (a launch within 15 minutes of expiry, a quota probe,
-or any `claude` run on the account's config directory), the server can revoke
-every copy and live lanes fail with `authentication_failed`. The lane settles
-with cause `lane_token_lost`; a writer continues from its handoff on a fresh
-token, bounded by `lane.max_continuations`. If the registered lane token itself
-is rejected, the lane settles without continuation and names the account.
+A renewed Claude login can revoke a token copied into a running lane. To avoid
+interrupting work, register a separate lane token for each account.
 
 To remove the cause, register a long-lived lane token per account. It comes
 from its own grant, so renewing the login never revokes it:
@@ -38,9 +33,17 @@ Provenant cannot check that the token belongs to the registered account. It
 lasts about a year; revoke it in the account settings on claude.ai, or revert by
 deleting the file. Never copy it between account directories.
 
-A separately registered directory can hold a copied single-use refresh token;
-quota never rotates it, so sign in interactively there when `provenant quota`
-reports `login_expired`.
+Register each account with its own CLI login; do not copy refresh tokens.
+Use `provenant quota` to inspect account health and follow its recovery command.
+
+## Check provider routes
+
+Before and after a release, run `provenant check providers --json` against the
+candidate's isolated state and then the installed state. Inspect the readiness
+report. With authority to spend quota, run `provenant check providers --live`
+to exercise routes; use `provenant check providers --help` to select routes.
+Retain the JSON and attempt IDs as release evidence. Investigate failed routes
+and rerun the check after repair.
 
 ## Agy accounts
 
@@ -53,12 +56,8 @@ directory itself:
 provenant accounts register --adapter agy --directory ~ LABEL
 ```
 
-An isolated account fails closed: if its `Library/Keychains/login.keychain-db`
-is missing, a symlink, hard-linked or the same inode as your own, registration,
-launch and quota fail naming the path (`KEYCHAIN_UNAVAILABLE` in `provenant quota`
-and `provenant hosts doctor`). A launch also skips the route on a changed Google
-identity (`re-register it`). Re-registering or `provenant quota tick` re-probes
-a repaired account at once.
+If the isolated keychain or identity is unavailable, repair the account and
+re-register it, then check `provenant quota` and `provenant hosts doctor`.
 
 Add a second account on macOS (the empty keychain password and no lock timeout
 are deliberate, so a headless lane never prompts):
@@ -88,46 +87,8 @@ profile applies to Go lanes only.
 
 ## Command and host-native routes
 
-Name argv for the model-less `command` adapter in host configuration, then
-select it by name from a graph task:
-
-```toml
-[domains.fabric.commands.fmt-check]
-argv = ["cargo", "fmt", "--check"]
-runtimes = ["/opt/check/bin/python3"]   # optional: interpreters to allow executing
-```
-
-```json
-{"id":"format","kind":"task","access":"read_only","prompt":"Run the configured format check.","route":{"adapter":"command","name":"fmt-check"}}
-```
-
-Prompt text never supplies argv. The result ends `VERDICT: PASS` for exit zero
-and `VERDICT: FAIL` otherwise.
-
-`host-native` selects a named host feature; the one kind, `claude-agent`, runs a
-Claude Code agent with a definition from
-`[domains.fabric.host_native.NAME]` (`kind`, `model`, `effort`, `description`,
-`prompt`). A graph must list a later non-native route as fallback, for
-example `"routes":[{"adapter":"host-native","name":"ci-fixer"},{"alias":"senior"}]`.
-A launched writer that fails stops for recovery rather than starting another.
-
-## Lane user skills and project paths
-
-`domains.lanes.user_skills` is `"discover"` (default) or `"off"`; override per
-project under `[domains.lanes.projects."PROJECT-ID"]` (ID from
-`provenant fabric identity`) or per route with
-`domains.routing.model_policy.rules`. A route policy beats the project, which
-beats the host default. Host skills are copied read-only to an attempt-owned
-tree, limited by `domains.lanes.skill_stage_max_bytes`.
-
-Writers get extra read-write paths from `shared_paths` and execute-only
-directories from `exec_roots` in the same project table (ignored entries warn);
-neither changes PATH. For host-wide write grants use `[domains.run]
-writer_writes` with real paths (`/private/tmp`, not `/tmp`).
+See [routing and templates](routing-and-templates.md#templates) for route setup.
 
 ## Cloud sessions
 
-Provenant does not place lanes or graph nodes in a provider's cloud. To hand a
-brief to a cloud session and later take its branch back, use
-`provenant cloud launch` and `provenant cloud collect`; per-repository setup is
-in [Cloud launch](cloud-launch.md).
+See [Cloud launch](cloud-launch.md) to launch and collect a provider session.

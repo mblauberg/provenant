@@ -13,22 +13,7 @@ pub enum ExclusionSelector {
     /// One exact `adapter/id` model.
     Model(ModelId),
 }
-/// Where an exclusion came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExclusionSource {
-    Flag,
-    Graph,
-    Config,
-}
-impl ExclusionSource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Flag => "flag",
-            Self::Graph => "graph",
-            Self::Config => "config",
-        }
-    }
-}
+pub use provenant_records::route_selection::ExclusionSource;
 /// One selector and its source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExclusionRule {
