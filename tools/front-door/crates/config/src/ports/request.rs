@@ -34,7 +34,11 @@ impl Request {
     /// cancellation stays shared with the original.
     #[allow(clippy::disallowed_methods, reason = "forge request deadline boundary")]
     pub fn capped(&self, cap: Duration) -> Self {
-        let capped = Instant::now().checked_add(cap).unwrap_or_else(far_future);
+        self.capped_at(Instant::now(), cap)
+    }
+
+    fn capped_at(&self, now: Instant, cap: Duration) -> Self {
+        let capped = now.checked_add(cap).unwrap_or_else(far_future);
         Self::new(self.deadline.min(capped), self.cancel.clone())
     }
 
@@ -70,11 +74,14 @@ mod tests {
 
     #[test]
     fn a_capped_request_shares_cancellation_and_never_extends_the_deadline() {
-        let outer = Request::within(Duration::from_secs(5));
-        let inner = outer.capped(Duration::from_secs(60));
-        assert!(inner.remaining() <= outer.remaining() + Duration::from_millis(50));
-        let short = outer.capped(Duration::from_millis(10));
-        assert!(short.remaining() <= Duration::from_millis(10));
+        // Only the coordinate is opaque. Every cap uses this same injected
+        // sample, so scheduling cannot change the expected deadlines.
+        let now = Request::within(Duration::ZERO).deadline;
+        let outer = Request::new(now + Duration::from_secs(5), CancelToken::new());
+        let inner = outer.capped_at(now, Duration::from_secs(60));
+        assert_eq!(inner.deadline, outer.deadline);
+        let short = outer.capped_at(now, Duration::from_millis(10));
+        assert_eq!(short.deadline, now + Duration::from_millis(10));
         outer.cancel().cancel();
         for request in [&outer, &inner, &short] {
             assert!(request.is_cancelled());
