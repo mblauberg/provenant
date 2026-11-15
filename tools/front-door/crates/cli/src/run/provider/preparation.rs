@@ -2821,6 +2821,35 @@ pub(super) fn prepare_candidates(
                     };
                     let recorded =
                         crate::quota::read_readiness(roots.state.as_path(), &scope, timestamp);
+                    // Staleness removes an old auth failure from admission,
+                    // but the executable-only OpenCode probe still cannot
+                    // establish login health. Keep that distinction visible
+                    // as a launch warning instead of silently losing the
+                    // reason when `read_readiness` projects it to `Stale`.
+                    let persisted_auth_failure = crate::quota::recorded_readiness_file(
+                        roots.state.as_path(),
+                        &entry.adapter,
+                        &entry.key,
+                    )
+                    .ok()
+                    .flatten()
+                    .is_some_and(|file| {
+                        file.records.iter().any(|record| {
+                            record.scope.host == provenant_quota::LOCAL_HOST
+                                && record.scope.route == provenant_quota::ACCOUNT_ROUTE
+                                && recorded.reason == Some(provenant_quota::ReadinessReason::Stale)
+                                && recorded.observed_scope.as_ref() == Some(&record.scope)
+                                && recorded.observed_unix_seconds
+                                    == Some(record.observed_unix_seconds)
+                                && matches!(
+                                    record.reason,
+                                    Some(
+                                        provenant_quota::ReadinessReason::SignedOut
+                                            | provenant_quota::ReadinessReason::LoginExpired
+                                    )
+                                )
+                        })
+                    });
                     let mismatch = recorded.reason
                         == Some(provenant_quota::ReadinessReason::AccountMismatch)
                         || diagnostic_records.iter().any(|r| {
@@ -2847,7 +2876,8 @@ pub(super) fn prepare_candidates(
                                 provenant_quota::ReadinessReason::SignedOut
                                     | provenant_quota::ReadinessReason::LoginExpired
                             )
-                        );
+                        )
+                        || persisted_auth_failure;
                     if auth_failure && login_check_can_clear(&entry.adapter, mismatch) {
                         let executable = Path::new(&record.executable);
                         if strategy == provenant_records::LoginReprobe::ExecutableOnly {
