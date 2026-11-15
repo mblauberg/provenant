@@ -406,7 +406,7 @@ pub enum FacadeError {
     #[error("recorded refusal: {}", diagnostic.detail.as_deref().unwrap_or(&diagnostic.code))]
     RecordedRefusal {
         refusal_code: String,
-        diagnostic: provenant_records::diagnostic::Diagnostic,
+        diagnostic: Box<provenant_records::diagnostic::Diagnostic>,
     },
     #[error("{operation} failed (Git reported lock failure: {lock_failure})")]
     GitMutationFailed {
@@ -769,7 +769,7 @@ impl FacadeError {
         use provenant_records::diagnostic::Diagnostic;
         let mut projected = Diagnostic::new(self.code());
         match self {
-            Self::RecordedRefusal { diagnostic, .. } => return diagnostic.clone(),
+            Self::RecordedRefusal { diagnostic, .. } => return (**diagnostic).clone(),
             Self::GitMutationFailed { operation, lock_failure } => {
                 projected = projected.detail(format!("{operation} failed (Git reported lock failure: {lock_failure})"))
                     .next("inspect repository Git mutation state before retrying");

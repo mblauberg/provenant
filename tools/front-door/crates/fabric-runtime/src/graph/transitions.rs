@@ -334,7 +334,7 @@ pub(super) fn apply_attempt_observation(
                         .role
                         .as_deref()
                         .and_then(|role| role.strip_prefix("lens."))
-                        .or_else(|| node.review_lens.as_deref())
+                        .or(node.review_lens.as_deref())
                 {
                     for finding in &mut outputs.findings {
                         if !upstream_findings
@@ -631,7 +631,7 @@ pub(super) fn apply_attempt_observation(
                                         .review_base
                                         .as_deref()
                                         .or(graph_review_base.as_deref())
-                                        .or_else(|| node.review_base.as_deref())
+                                        .or(node.review_base.as_deref())
                                         .and_then(|b| GitOid::parse(b).ok())
                                 });
                                 let findings = progress

@@ -603,12 +603,11 @@ fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts(
     store.complete_refusal_notice(&record, &call)?;
     store.complete_refusal_notice(&record, &call)?;
     assert!(store.pending_refusal_notices(10, &call)?.is_empty());
-    assert_eq!(
+    assert!(
         store
             .operation(&input.operation_id, &call)?
             .ok_or("missing")?
-            .refusal_notice_done,
-        true
+            .refusal_notice_done
     );
     for n in 10_u8..91 {
         input.operation_id = OperationId::parse(&format!("notice-{n}"))?;

@@ -70,7 +70,7 @@ fn planner_fragment_writers_use_the_declared_worktree_template() {
         flattened[0].worktree.as_deref(),
         Some("trees/planned-writer")
     );
-    assert_eq!(flattened[0].provision_worktree, true);
+    assert!(flattened[0].provision_worktree);
 }
 
 #[test]

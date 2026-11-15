@@ -120,7 +120,7 @@ impl Facts {
 pub enum Effect {
     Proceed,
     Warn(String),
-    Refuse(crate::diagnostic::Diagnostic),
+    Refuse(Box<crate::diagnostic::Diagnostic>),
 }
 impl Effect {
     pub fn blocks(&self) -> bool {
@@ -233,9 +233,9 @@ impl Policy {
         match rule.strength {
             Strength::Off => Effect::Proceed,
             Strength::Warn => Effect::Warn(message),
-            Strength::Refuse => {
-                Effect::Refuse(crate::diagnostic::Diagnostic::new(code).detail(message))
-            }
+            Strength::Refuse => Effect::Refuse(Box::new(
+                crate::diagnostic::Diagnostic::new(code).detail(message),
+            )),
         }
     }
     /// Keep an existing domain error while routing its immutable safety

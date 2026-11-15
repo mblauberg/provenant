@@ -97,7 +97,7 @@ fn confidentiality() -> Value {
     json!({"evidence_ref":"policy"})
 }
 fn candidate() -> Value {
-    json!({"ranking":serde_json::to_value(provenant_records::route_selection::CandidateRanking::default()).unwrap(),"model":"codex/model","weight":1,"factor_basis_points":10000,
+    json!({"ranking":json!(provenant_records::route_selection::CandidateRanking::default()),"model":"codex/model","weight":1,"factor_basis_points":10000,
         "effort":null,"readiness":readiness(),"exclusion":null})
 }
 fn redraw() -> Value {
@@ -108,7 +108,7 @@ fn selection() -> Value {
         "pick":"codex/model","redraws":[redraw()]})
 }
 fn alternative() -> Value {
-    json!({"diagnostics":serde_json::to_value(provenant_records::route_selection::RouteDiagnostics::default()).unwrap(),"adapter":"codex","model":"model","effort":null,"account_key":null,
+    json!({"diagnostics":json!(provenant_records::route_selection::RouteDiagnostics::default()),"adapter":"codex","model":"model","effort":null,"account_key":null,
         "host":"local","eligibility":"eligible","readiness":readiness(),"confidentiality":confidentiality()})
 }
 fn exclusion() -> Value {

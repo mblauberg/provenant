@@ -65,7 +65,7 @@ fn registrations_for(harnesses: &[Harness], lane: bool) -> Vec<HookRegistration>
                             harness: *harness,
                             action: *action,
                             protocol,
-                            event: *event,
+                            event,
                             matcher: *matcher,
                             timeout_seconds: *timeout_seconds,
                         })

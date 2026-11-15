@@ -1258,10 +1258,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
         .unwrap();
     assert_eq!(wait.code, "invalid_input");
     assert_eq!(wait.cause.as_deref(), Some("invalid_input"));
-    assert_eq!(
-        checkpoint.nodes[work_index].attempts[0].host_refused_before_acceptance,
-        true
-    );
+    assert!(checkpoint.nodes[work_index].attempts[0].host_refused_before_acceptance);
     // Accepted operations may still have stale Starting/false/None graph rows.
     // Neither a blocked replay nor corrupt accepted state proves non-acceptance.
     for error in [

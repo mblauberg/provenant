@@ -61,7 +61,7 @@ fn submitted_implementation_preserves_its_compiled_topology_across_replays() {
 
                     worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
                 };
-                document = patch::submit(&document.graph_id, &submitted, &context, None).unwrap();
+                document = patch::submit(&document.graph_id, submitted, &context, None).unwrap();
                 assert_eq!(
                     document.nodes, expected,
                     "{template}, depth {depth}, replay {replay}"

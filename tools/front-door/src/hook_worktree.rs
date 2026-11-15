@@ -234,7 +234,7 @@ pub fn create(globals: &Globals) -> u8 {
         Err(error) => return abstain("worktree-create", &error),
     };
     if input.hook_event_name != "WorktreeCreate" || !input.cwd.is_absolute() {
-        return abstain("worktree-create", "unrecognised hook input");
+        return abstain("worktree-create", &"unrecognised hook input");
     }
     let branch = match branch_for(&input.name) {
         Ok(branch) => branch,
@@ -300,7 +300,7 @@ pub fn remove(globals: &Globals) -> u8 {
         Err(error) => return abstain("worktree-remove", &error),
     };
     if input.hook_event_name != "WorktreeRemove" || !input.worktree_path.is_absolute() {
-        return abstain("worktree-remove", "unrecognised hook input");
+        return abstain("worktree-remove", &"unrecognised hook input");
     }
     let result = (|| -> Result<(), Error> {
         let target = match std::fs::canonicalize(&input.worktree_path) {

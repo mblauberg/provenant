@@ -1959,7 +1959,6 @@ fn sandbox_floors_children(sandbox: Option<&serde_json::Value>) -> bool {
 }
 /// The applied-route field that records an attempt's sandbox mode.
 pub const SANDBOX_ROUTE_FIELD: &str = "sandbox";
-/// The task field the host sets when the submitting lane was sandboxed.
 
 /// Sealed launch classification, shared by local, peer and recovered attempts.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

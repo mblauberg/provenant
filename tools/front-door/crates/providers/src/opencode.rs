@@ -2070,16 +2070,8 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
 
     #[test]
     fn git_discovery_exec_is_exact_in_both_access_modes() {
-        let plan = crate::tests::read_only_plan("/fixture", Some("login"));
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
-        let input = crate::tests::fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            std::path::Path::new("/fixture/repo"),
-            None,
-        );
         for access in [Access::ReadOnly, Access::WorktreeWrite] {
             let plan = crate::tests::fixture_access_plan(access, Some("login"), false);
             let input = crate::tests::fixture_input(

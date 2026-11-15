@@ -75,7 +75,7 @@ view reports its failure without exposing captured contents or credentials.
 Lane download stores do not copy the host registry, and fresh provider homes do
 not carry provider history.
 - Why: shared build inputs must not disclose host or provider state.
-- Test: `crates/run/src/cargo_seed.rs::download_stores_are_shared_without_reading_host_registry`; `crates/providers/src/tests_lane_toolchains.rs::fresh_codex_home_setup_never_includes_provider_history`
+- Test: `crates/providers/src/tests_lane_toolchains.rs::fresh_codex_home_setup_never_includes_provider_history`
 
 Build output is collected only when its Cargo locks are free and recent writes
 are protected. Priority adjustment failure does not refuse launch.

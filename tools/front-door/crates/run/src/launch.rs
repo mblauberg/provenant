@@ -2613,7 +2613,7 @@ mod policy_reporting_tests {
                 prior: Option<&AttemptRecord>,
             ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
                 assert_eq!(prior.map(|record| record.attempt_id), self.prior);
-                assert_eq!(task.profile.parent_sandboxed, true);
+                assert!(task.profile.parent_sandboxed);
                 let strength = task
                     .profile
                     .knobs

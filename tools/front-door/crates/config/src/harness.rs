@@ -585,30 +585,29 @@ pub(crate) fn capture(
                 let array = array
                     .as_array()
                     .ok_or(InstallError::InvalidConfig("instructions must be an array"))?;
-                for asset in [PathBuf::from(managed::INSTRUCTION_ASSET)] {
-                    let path_value = root.join(&asset);
-                    let text = path_value.to_str().ok_or(InstallError::InvalidConfig(
-                        "instruction path requires UTF-8",
-                    ))?;
-                    let count = array.iter().filter(|v| v.as_str() == Some(text)).count();
-                    if count > 1 {
-                        return Err(InstallError::InvalidConfig("duplicate owned instruction"));
+                let asset = PathBuf::from(managed::INSTRUCTION_ASSET);
+                let path_value = root.join(&asset);
+                let text = path_value.to_str().ok_or(InstallError::InvalidConfig(
+                    "instruction path requires UTF-8",
+                ))?;
+                let count = array.iter().filter(|v| v.as_str() == Some(text)).count();
+                if count > 1 {
+                    return Err(InstallError::InvalidConfig("duplicate owned instruction"));
+                }
+                if count == 1 {
+                    if !release.files.contains_key(&asset) {
+                        return Err(InstallError::Manifest("missing instruction asset"));
                     }
-                    if count == 1 {
-                        if !release.files.contains_key(&asset) {
-                            return Err(InstallError::Manifest("missing instruction asset"));
-                        }
-                        plan.owned.push(OwnedEntry {
+                    plan.owned.push(OwnedEntry {
+                        extra: Default::default(),
+                        path: AbsolutePath::new(path)?,
+                        harness: Some(target.harness),
+                        selector: format!("array:{text}"),
+                        expected: OwnedValue::Selector {
                             extra: Default::default(),
-                            path: AbsolutePath::new(path)?,
-                            harness: Some(target.harness),
-                            selector: format!("array:{text}"),
-                            expected: OwnedValue::Selector {
-                                extra: Default::default(),
-                                value: json!(text),
-                            },
-                        });
-                    }
+                            value: json!(text),
+                        },
+                    });
                 }
             }
             if snap.is_none() && bytes == initial {
@@ -742,10 +741,10 @@ fn rewrite_instruction_array(
                 .filter(|relative| relative.parent() == Some(Path::new("instructions")))
                 .map(Path::to_path_buf)
         });
-        if name_owned.is_some() || receipt_owned.is_some() {
-            if array.iter().filter(|candidate| *candidate == value).count() > 1 {
-                return Err(InstallError::InvalidConfig("duplicate owned instruction"));
-            }
+        if (name_owned.is_some() || receipt_owned.is_some())
+            && array.iter().filter(|candidate| *candidate == value).count() > 1
+        {
+            return Err(InstallError::InvalidConfig("duplicate owned instruction"));
         }
         if let Some(asset) = name_owned.or(receipt_owned) {
             let retired = !release.files.contains_key(&asset);

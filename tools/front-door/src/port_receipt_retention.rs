@@ -1,7 +1,7 @@
 //! GC policy for content-free port command receipts.
 use provenant_config::{
-    ByteObservation, PortCommandReceiptCollectionLock, PortCommandReceiptEntry,
-    PortReceiptIssue, PortReceiptLifetime,
+    ByteObservation, PortCommandReceiptCollectionLock, PortCommandReceiptEntry, PortReceiptIssue,
+    PortReceiptLifetime,
 };
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, Roots};
 use provenant_os::clock::SystemClock;
@@ -41,7 +41,6 @@ struct AttemptScope {
     actor: ActorId,
     lease_epoch: u64,
 }
-
 
 pub(crate) fn collect(roots: &Roots, dry_run: bool) -> Report {
     let mut report = Report::default();

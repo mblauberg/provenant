@@ -2909,15 +2909,13 @@ mod tests {
         };
         let policy = crate::tests::fixture_policy();
 
-        for code in ["LANE_LANERUNTIME_ENVIRONMENT_AUTHORITY"] {
-            let rule = &policy.rule(code).rule;
-            assert_eq!(
-                rule.boundary,
-                provenant_records::policy::Boundary::Authority
-            );
-            assert_eq!(rule.strength, provenant_records::policy::Strength::Refuse);
-            assert!(rule.knob.is_none());
-        }
+        let rule = &policy.rule("LANE_LANERUNTIME_ENVIRONMENT_AUTHORITY").rule;
+        assert_eq!(
+            rule.boundary,
+            provenant_records::policy::Boundary::Authority
+        );
+        assert_eq!(rule.strength, provenant_records::policy::Strength::Refuse);
+        assert!(rule.knob.is_none());
 
         let mut env = Vec::new();
         let mut setup = Vec::new();

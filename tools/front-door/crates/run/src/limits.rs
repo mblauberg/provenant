@@ -7,8 +7,6 @@ use provenant_records::{
 };
 use std::path::Path;
 
-/// The task setting that carries `retry --extend` raises to the next launch.
-
 /// Host settings that bound one lane.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HostCaps {

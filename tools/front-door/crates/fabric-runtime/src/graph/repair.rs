@@ -464,11 +464,11 @@ pub(super) fn growth_in_round(
                 || output
                     .risk_tier
                     .as_ref()
-                    .and_then(|tier| match tier {
-                        provenant_records::workflow::RiskTier::Routine => Some(0),
-                        provenant_records::workflow::RiskTier::Substantial => Some(1),
-                        provenant_records::workflow::RiskTier::Crucial => Some(2),
-                        provenant_records::workflow::RiskTier::Terminal => Some(3),
+                    .map(|tier| match tier {
+                        provenant_records::workflow::RiskTier::Routine => 0,
+                        provenant_records::workflow::RiskTier::Substantial => 1,
+                        provenant_records::workflow::RiskTier::Crucial => 2,
+                        provenant_records::workflow::RiskTier::Terminal => 3,
                     })
                     .is_some_and(|current| baseline.is_none_or(|baseline| current > baseline))
         })

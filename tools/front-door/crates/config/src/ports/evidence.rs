@@ -143,6 +143,10 @@ pub fn record_port_command(
     validate_phase(phase)?;
     validate_lifetime(owner, &lifetime)?;
     let key_digest = CanonicalV1::file_digest(key.as_bytes());
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "port receipt publication is the wall-clock boundary"
+    )]
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| PortEvidenceError::Clock)?

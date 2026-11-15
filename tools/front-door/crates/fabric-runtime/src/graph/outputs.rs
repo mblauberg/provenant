@@ -862,7 +862,7 @@ pub(super) fn materialised_findings(
             .role
             .as_deref()
             .and_then(|role| role.strip_prefix("lens."))
-            .or_else(|| node.review_lens.as_deref())
+            .or(node.review_lens.as_deref())
         {
             for finding in &mut findings {
                 if !upstream.iter().any(|source| source.id == finding.id) {

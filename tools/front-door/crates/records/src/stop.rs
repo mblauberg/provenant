@@ -577,7 +577,8 @@ impl std::fmt::Display for StopCause {
 #[serde(try_from = "StopWire")]
 pub struct Stop {
     cause: StopCause,
-    handoff: HandoffResult,
+    // Boxed: a handoff is large, and a stop rides inside every terminal state.
+    handoff: Box<HandoffResult>,
     #[serde(flatten)]
     extra: crate::ExtraFields,
 }
@@ -630,7 +631,7 @@ impl Stop {
         }
         Ok(Self {
             cause,
-            handoff,
+            handoff: Box::new(handoff),
             extra,
         })
     }
@@ -686,7 +687,7 @@ impl Stop {
     }
 
     pub fn handoff(&self) -> Option<&Handoff> {
-        self.handoff.as_ref().ok().and_then(Option::as_ref)
+        (*self.handoff).as_ref().ok().and_then(Option::as_ref)
     }
 
     pub fn handoff_result(&self) -> &HandoffResult {
@@ -696,7 +697,7 @@ impl Stop {
     /// The writer's own one-line account, such as what blocks a `blocked`
     /// stop, for `status` and `output`.
     pub fn note(&self) -> Option<&str> {
-        match &self.handoff {
+        match &*self.handoff {
             Ok(handoff) => handoff.as_ref().map(|handoff| handoff.note.as_str()),
             Err(error) => error
                 .retained

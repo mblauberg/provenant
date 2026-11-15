@@ -358,7 +358,7 @@ fn graph_document_host_metadata_round_trips_and_rejects_malformed_values() {
 
     let document: GraphDocument = decode_typed_record(&raw).unwrap();
     assert_eq!(document.replay_digest(), Some(digest.as_str()));
-    assert!(document.extra.get("replay_digest").is_none());
+    assert!(!document.extra.contains_key("replay_digest"));
     assert_eq!(document.exclude, ["codex"]);
     assert_eq!(document.network, Some(GraphNetwork::Off));
     assert_eq!(document.capability, ["network"]);
@@ -552,8 +552,7 @@ fn writer_binding_identity_round_trips_and_rejects_malformed_values() {
     let wire = serde_json::json!({"worktree":"checkout","head":"1".repeat(40),"source_directory_identity":{"device":7,"inode":9}});
     let bytes = serde_json::to_vec(&wire).unwrap();
     let binding: WriterWorktreeBinding =
-        provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())
-            .unwrap();
+        provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default()).unwrap();
     assert_eq!(serde_json::to_value(binding).unwrap(), wire);
     let mut malformed = wire;
     malformed["source_directory_identity"]["device"] = serde_json::json!(false);

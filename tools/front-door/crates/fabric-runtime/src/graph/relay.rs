@@ -735,11 +735,7 @@ pub fn set_waiting(checkpoint: &mut GraphCheckpoint, parent: &str, waiting: bool
     let Some(progress) = checkpoint.nodes.iter_mut().find(|node| node.id == parent) else {
         return false;
     };
-    if waiting && progress.state == NodeState::Running {
-        progress.yielded_slot = true;
-    } else {
-        progress.yielded_slot = false;
-    }
+    progress.yielded_slot = waiting && progress.state == NodeState::Running;
     true
 }
 

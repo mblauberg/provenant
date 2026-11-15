@@ -201,7 +201,7 @@ fn stored_graph_refusal(
     Ok(match &record.refusal_code {
         Some(refusal_code) => FacadeError::RecordedRefusal {
             refusal_code: refusal_code.clone(),
-            diagnostic,
+            diagnostic: Box::new(diagnostic),
         },
         None => run_error(provenant_run::RunError::RecordedRefusal(Box::new(
             diagnostic,

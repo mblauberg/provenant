@@ -271,10 +271,10 @@ impl LaneRow {
                 terminal_reason = Some(detail.to_owned());
             }
         }
-        if let Some(stop) = lane.state.stop() {
-            if let Err(error) = stop.handoff_result() {
-                terminal_reason = Some(crate::diagnostic::safe_text(&error.to_string()));
-            }
+        if let Some(stop) = lane.state.stop()
+            && let Err(error) = stop.handoff_result()
+        {
+            terminal_reason = Some(crate::diagnostic::safe_text(&error.to_string()));
         }
         if matches!(
             lane.state,

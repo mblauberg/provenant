@@ -95,7 +95,7 @@ mod relay_provisioning {
                     && node.worktree.as_deref() == Some(path)
             })
             .expect("the flattened writer spec owns the provisioned path");
-        assert_eq!(writer_spec.provision_worktree, true);
+        assert!(writer_spec.provision_worktree);
         assert_eq!(
             relay::pending_provisioning(&checkpoint),
             vec![(receipt.node, path.to_owned(), source),]

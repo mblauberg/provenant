@@ -463,10 +463,9 @@ impl HandoffCapture {
         if let Some(mut error) = self.error {
             if error.retained.is_empty()
                 && let Some(handoff) = self.declaration
+                && let Ok(fields) = serde_json::from_value(serde_json::json!(handoff))
             {
-                if let Ok(fields) = serde_json::from_value(serde_json::json!(handoff)) {
-                    error.retained = fields;
-                }
+                error.retained = fields;
             }
             Err(error)
         } else if self.json.is_some() {

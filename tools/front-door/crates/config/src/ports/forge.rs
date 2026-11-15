@@ -978,7 +978,8 @@ fn http_response(
     ))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
@@ -1067,15 +1068,15 @@ esac
         }
     }
 
-    fn run_fake_gh(
-        fake: PathBuf,
-    ) -> impl FnOnce(
+    type FakeRun = dyn FnOnce(
         &[OsString],
         Option<&[u8]>,
         &[(OsString, OsString)],
         Duration,
-    ) -> io::Result<ExecOutcome> {
-        move |argv, input, environment, budget| {
+    ) -> io::Result<ExecOutcome>;
+
+    fn run_fake_gh(fake: PathBuf) -> Box<FakeRun> {
+        Box::new(move |argv, input, environment, budget| {
             let mut actual = argv.to_vec();
             actual[0] = fake.clone().into_os_string();
             let mut options = ExecOptions::new(&actual, fake.parent().unwrap(), budget);
@@ -1089,7 +1090,7 @@ esac
                 .map_err(io::Error::other)?
                 .execute(options)
                 .map_err(io::Error::other)
-        }
+        })
     }
 
     fn command_backend(fake: &Path) -> PortBackend {
