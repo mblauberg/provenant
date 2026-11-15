@@ -606,7 +606,7 @@ impl Context {
             &cwd,
             &config,
             std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
-            None,
+            active_harness_client(),
             key,
         )?;
         Ok(Self {
@@ -1041,6 +1041,78 @@ pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "An isolated child process supplies the harness markers to project context."
+    )]
+    // Spec: docs/specs/fabric.md#identity-and-store
+    fn project_context_uses_the_active_harness_actor() -> Result<(), Box<dyn std::error::Error>> {
+        use std::path::PathBuf;
+
+        const FIXTURE: &str = "PROVENANT_TEST_PROJECT_CONTEXT_IDENTITY";
+        if let Some(root) = std::env::var_os(FIXTURE) {
+            use provenant_core::RootInputs;
+            use std::fs;
+
+            let root = PathBuf::from(root);
+            let home = root.join("home");
+            let project = root.join("project");
+            let state = root.join("state");
+            let config = root.join("config");
+            for directory in [&home, &project, &state, &config] {
+                fs::create_dir_all(directory)?;
+            }
+            fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+            fs::write(
+                state.join("config.toml"),
+                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nclient_label='terminal'\n",
+            )?;
+            let mut inputs = RootInputs::new(home.clone(), project.clone());
+            inputs.state_dir = Some(state);
+            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+            let location = provenant_config::ProjectLocation::new(fs::canonicalize(&project)?)?;
+            let binding = provenant_config::bind_project(&roots, location)?;
+            provenant_config::bind_host(&roots)?;
+
+            let context = super::Context::open_for_project(roots, &home, &binding)?;
+            let expected = context.inbox_address(None)?;
+            assert_eq!(context.identity.inbox.actor, expected.actor);
+            assert_eq!(context.identity.inbox.agent, "codex");
+            assert_eq!(context.identity.client, "codex");
+            return Ok(());
+        }
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "fabric::context::tests::project_context_uses_the_active_harness_actor",
+                "--nocapture",
+            ])
+            .env(FIXTURE, &root)
+            .env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env("PROVENANT_ROOT", root.join("project"))
+            .env("PROVENANT_STATE_DIR", root.join("state"))
+            .env_remove("PROVENANT_AGENT_LABEL")
+            .env_remove("PROVENANT_SESSION_ID")
+            .env_remove("CLAUDECODE")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CLAUDE_SESSION_ID")
+            .env("CODEX_THREAD_ID", "project-context-fixture")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
+
     #[test]
     #[allow(clippy::disallowed_methods)] // Dedicated fixture subprocess isolates lane-only environment variables.
     fn lane_publication_uses_private_scratch() -> Result<(), Box<dyn std::error::Error>> {
