@@ -1654,6 +1654,30 @@ impl RunStore {
         self.retry_terminal_effects(record, &attempt, &Completion::Recovered(None), call)
     }
 
+    /// Exercise the same typed held-custody completion as the guardian path
+    /// from Run's integration fixtures, without bypassing identity validation.
+    #[cfg(test)]
+    pub(crate) fn finish_with_recovery_for_fixture(
+        &self,
+        id: AttemptId,
+        attempt: &Directory,
+        exit: &ExitObservation,
+        recovery: &custody::Recovery,
+        providers: &dyn Providers,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        Ok(self
+            .finish_in_custody(
+                id,
+                attempt,
+                exit,
+                Completion::Recovered(Some(recovery)),
+                providers,
+                call,
+            )?
+            .record)
+    }
+
     fn finish_in_custody(
         &self,
         id: AttemptId,

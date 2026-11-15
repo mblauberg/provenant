@@ -943,9 +943,18 @@ mod reboot_tests {
             0,
             "an uncancelled start waits"
         );
-        let scope = RunStore::scope(&store.record(id, &call)?);
-        let request = serde_json::to_vec(&serde_json::json!({"scope": scope}))?;
-        crate::artifacts::seal(&attempt, "cancel.json", &request, RECORD_LIMIT)?;
+        let record = store.record(id, &call)?;
+        let scope = RunStore::scope(&record);
+        let owner = record.verified_owner.unwrap_or(context.actor_id);
+        assert_eq!(
+            custody::request_stop(
+                attempt.try_clone()?,
+                scope,
+                owner,
+                StopReason::ExplicitCancellation,
+            )?,
+            StopReceipt::Requested
+        );
         assert_eq!(
             store.reap_with(&call, spawn)?,
             1,
@@ -5557,7 +5566,7 @@ mod tests {
         use provenant_supervisor::census::ProcessObservation;
 
         let temp = tempfile::tempdir()?;
-        let clock = crate::tests::clock();
+        let mut clock = crate::tests::clock();
         let cancel = provenant_core::CancelToken::new();
         let call = crate::tests::call(&clock, &cancel);
         let context = crate::tests::context(temp.path())?;
@@ -5647,6 +5656,12 @@ mod tests {
                 ..
             }
         ));
+
+        // The successor is timestamped from the terminal predecessor. Move
+        // the fixture clock to that settlement time before admitting it.
+        drop(call);
+        clock.advance(provenant_core::DurationMicros::from_micros(100))?;
+        let call = crate::tests::call(&clock, &cancel);
 
         let child = store
             .prepare_steer_continuation(id, &call)?
@@ -5879,7 +5894,7 @@ mod tests {
             Case::AccountMismatch,
         ] {
             let temp = tempfile::tempdir()?;
-            let clock = crate::tests::clock();
+            let mut clock = crate::tests::clock();
             let cancel = provenant_core::CancelToken::new();
             let call = crate::tests::call(&clock, &cancel);
             let context = crate::tests::context(temp.path())?;
@@ -5921,6 +5936,9 @@ mod tests {
                 &parent_exit,
                 &call,
             )?;
+            drop(call);
+            clock.advance(provenant_core::DurationMicros::from_micros(100))?;
+            let call = crate::tests::call(&clock, &cancel);
             let child = store
                 .prepare_steer_continuation(parent, &call)?
                 .ok_or("steer successor missing")?;
@@ -6237,47 +6255,6 @@ mod tests {
         Ok(())
     }
 
-    fn seal_provider_identity_for_exit(
-        attempt: &provenant_os::fs::Directory,
-        scope: Scope,
-        source: &provenant_os::capture::CaptureSourceIdentity,
-    ) -> TestResult {
-        let metadata = attempt.metadata()?;
-        let identity = serde_json::json!({
-            "boot": source.boot.clone(),
-            "pid": source.pid,
-            "native_start": source.native_start,
-            "group_id": source.pid,
-            "session_id": source.pid,
-        });
-        let reservation = serde_json::json!({
-            "schema_version": 1,
-            "scope": scope,
-            "launch_state": "spawned",
-            "attempt_device": metadata.device,
-            "attempt_inode": metadata.inode,
-            "reservation_device": metadata.device,
-            "reservation_inode": metadata.inode,
-            "binding": { "kind": "read_only" },
-            "boot": source.boot.clone(),
-            "guardian": identity.clone(),
-            "provider": identity,
-            "unresolved_cleanup": false,
-            "descendants": [],
-            "census_incomplete": false,
-            "omitted_descendants": 0,
-        });
-        attempt
-            .atomic_write(
-                std::ffi::OsStr::new("reservation.json"),
-                ".provider-identity-",
-                &serde_json::to_vec(&reservation)?,
-                provenant_os::fs::PublishMode::NoReplace,
-            )?
-            .require_durable()?;
-        Ok(())
-    }
-
     // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
     fn eof_fragment_only_continues_after_a_confirmed_intentional_stop() -> TestResult {
@@ -6398,7 +6375,28 @@ mod tests {
             }
 
             let attempt = store.attempt_dir(id, false)?;
-            seal_provider_identity_for_exit(&attempt, RunStore::scope(&running), &source)?;
+            let scope = RunStore::scope(&running);
+            let mut lease = custody::acquire_reader(
+                attempt.try_clone()?,
+                scope,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )?;
+            let provider = provenant_supervisor::census::ProcessIdentity {
+                boot: source.boot.clone(),
+                pid: source.pid,
+                native_start: source.native_start,
+                group_id: source.pid,
+                session_id: source.pid,
+            };
+            provenant_supervisor::fixture::record_spawned_provider(
+                &mut lease,
+                &attempt,
+                provider.clone(),
+                provider,
+            )?;
+            let recovery = lease.into_recovery()?;
             crate::artifacts::seal(
                 &attempt,
                 "stdout.log",
@@ -6418,7 +6416,8 @@ mod tests {
             let mut fake =
                 crate::dispatch_tests::Fake::with_observed(Some(route), Some(Outcome::Succeeded));
             fake.session = Some("live-session".into());
-            let finished = store.finish(id, &attempt, &exit, &fake, &call)?;
+            let finished = store
+                .finish_with_recovery_for_fixture(id, &attempt, &exit, &recovery, &fake, &call)?;
             assert!(matches!(
                 finished.state,
                 AttemptState::Terminal {
