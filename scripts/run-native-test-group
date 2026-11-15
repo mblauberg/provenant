@@ -19,8 +19,11 @@ controls = ('PROVENANT_CONFINEMENT_REQUIRED', 'PROVENANT_POSTGRES_REQUIRED', 'PR
 command = sys.argv[2:]
 quarantine = os.environ.get('QUARANTINE_FILTER', '')
 if quarantine:
-    index = command.index('-E') + 1
-    command[index] = f'({command[index]}) & not ({quarantine})'
+    if '-E' in command:
+        index = command.index('-E') + 1
+        command[index] = f'({command[index]}) & not ({quarantine})'
+    else:
+        command += ['-E', f'not ({quarantine})']
     command.append('--no-tests=pass')
 status = subprocess.run(command).returncode
 if report.is_file():
