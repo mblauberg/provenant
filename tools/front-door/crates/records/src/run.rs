@@ -2330,6 +2330,8 @@ pub struct AttemptRecord {
 }
 
 /// Outcome visible for an accepted steering turn, without exposing its text.
+/// A live session acknowledgement reports `Resumed` promptly; terminal proof
+/// can still revise that state to `NotContinued`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SteeringState {
@@ -2345,6 +2347,7 @@ pub enum SteeringState {
 pub enum SteeringCause {
     SessionUnavailable,
     SessionMismatch,
+    SessionProofIncomplete,
     TerminalStop,
     ContinuationRefused,
 }
@@ -2355,6 +2358,7 @@ impl SteeringCause {
         match self {
             Self::SessionUnavailable => "session_unavailable",
             Self::SessionMismatch => "session_mismatch",
+            Self::SessionProofIncomplete => "session_proof_incomplete",
             Self::TerminalStop => "terminal_stop",
             Self::ContinuationRefused => "continuation_refused",
         }
@@ -2365,6 +2369,7 @@ impl SteeringCause {
         match value {
             "session_unavailable" => Some(Self::SessionUnavailable),
             "session_mismatch" => Some(Self::SessionMismatch),
+            "session_proof_incomplete" => Some(Self::SessionProofIncomplete),
             "terminal_stop" => Some(Self::TerminalStop),
             "continuation_refused" => Some(Self::ContinuationRefused),
             _ => None,

@@ -1733,14 +1733,16 @@ impl RunStore {
                     .ok()
                     .flatten()
                     .unwrap_or_default();
+                let continuation = self.continuation_expectation(record.attempt_id, call)?;
                 providers
-                    .decode_captures(
+                    .decode_captures_with_continuation(
                         route,
                         &stdout,
                         &stderr,
                         exit,
                         &provider_state,
                         completion.holder_context(),
+                        continuation.as_ref(),
                     )
                     .map_err(RunError::ProviderEvidence)?
             }

@@ -186,21 +186,28 @@ fences continuation, including when that record has no trailing newline.
 
 The receipt says `queued` only after the text is durable. It does not claim a
 provider interrupt or resumed continuation; graph/run status owns those later
-outcomes. Status exposes `queued`, `resumed` or `not_continued`, the stable
-operation and message IDs, and the successor when known. `resumed` requires the
-launcher’s typed `launched` receipt for that exact successor. Busy, skipped,
-empty and uncertain launch results stay `queued`; a terminal refusal becomes
-`not_continued` with a closed safe cause. The original text remains in the
-private durable ledger in either terminal outcome. Status never echoes the
-steering text into generic receipts or status. Replaying an operation with the
-same text returns the same intent, while reusing its ID with different text
-conflicts. The host verifies launch evidence and ownership before reading
-steering input. If natural completion races with readiness or the interrupt
-request, settlement adopts the durable intent when terminal session evidence
-is valid. A different typed stop wins and leaves the saved input without an
-automatic continuation. If the live session or process identity changes, or
-the terminal session disagrees with the first validated identity, status names
-the safe mismatch cause instead of starting a fresh session.
+outcomes. Status exposes `queued`, `resumed` or `not_continued`,
+the stable operation and message IDs, and the successor when known. A
+launcher’s typed `launched` receipt records admission but leaves the status
+`queued`. `resumed` requires validated child evidence that the provider
+acknowledged the exact predecessor session on the same provider, model and
+account route. A later terminal mismatch or incomplete proof changes that
+interim status to `not_continued`; Run retains the earlier live acknowledgement
+fact with the terminal disposition. Terminal matching evidence finalises
+`resumed`. The disposition is durable in Run even if child evidence is later
+retained or collected. Busy, skipped, empty and uncertain launch results stay
+`queued`; a terminal refusal, verified session mismatch or incomplete terminal
+proof becomes `not_continued` with a closed safe cause. The original text
+remains in the private durable ledger in every outcome. Status never
+echoes the steering text into generic receipts or status. Replaying an
+operation with the same text returns the same intent, while reusing its ID
+with different text conflicts. The host verifies launch evidence and
+ownership before reading steering input. If natural completion races with
+readiness or the interrupt request, settlement adopts the durable intent when
+terminal session evidence is valid. A different typed stop wins and leaves the
+saved input without an automatic continuation. If the live session or process
+identity changes, or the terminal session disagrees with the bound expectation,
+status records the safe mismatch cause instead of starting a fresh session.
 
 This is continuation transport for #3318, not live input injection. Adapters
 advertise support as `continuation` only when their run path can retain and
