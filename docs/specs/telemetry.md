@@ -63,6 +63,8 @@ proposes a diff and never applies it.
 
 Usage rows retain per-session account identity, epoch and evidence source from the provider identity port; unavailable identity is typed unknown, never inferred from a config-directory path.
 Ingest preserves that attribution; unknown usage remains `unattributed`, never dropped.
+Lane and chair quota totals share that verified identity; route labels cannot
+turn unknown usage into an attributed account.
 Conflicting known identities persist as a per-session override that masks dated rows
 before account filtering. Ingest stores token counts
 without prompt, reply, tool or path text, and rerunning it adds nothing. The
@@ -71,6 +73,7 @@ that day visibly, and no reader loads the whole store.
 Historical context is never filled from the current release or instructions.
 - Why: chair sessions are most of the spend, and a guessed row hides who spent it.
 - Test: `tests/chair.rs::chair_on_an_unregistered_config_directory_is_recorded_as_unattributed`;
+  `crates/telemetry/src/tests.rs::quota_usage_separates_accounts_projects_and_chairs_from_lane_tokens`;
   `crates/telemetry/src/ingest/tests.rs::session_identities_split_usage_when_a_config_directory_rotates`;
   `::enrichment_preserves_existing_token_buckets_and_excludes_text`;
   `crates/telemetry/src/tests.rs::lane_context_fixture_joins_existing_chair_and_graph`

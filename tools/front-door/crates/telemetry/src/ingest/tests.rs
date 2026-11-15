@@ -545,7 +545,10 @@ fn lines_this_build_cannot_read_survive_a_rewrite() -> Result {
     let day = f.base.join("state/ingest/2026-10-01.jsonl");
     // A row another schema version wrote, then a torn line from a crash.
     let current = std::fs::read_to_string(&day)?;
-    let foreign = current.replacen("{\"schema_version\":2,", "{\"schema_version\":3,", 1);
+    let mut foreign: serde_json::Value =
+        serde_json::from_str(current.lines().next().ok_or("ingest row")?)?;
+    foreign["schema_version"] = (ROW_SCHEMA_VERSION + 1).into();
+    let foreign = format!("{foreign}\n");
     let torn = "{\"schema_version\":2,\"account\":\"half";
     std::fs::write(&day, format!("{foreign}{torn}\n"))?;
     f.write(

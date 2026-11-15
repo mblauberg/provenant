@@ -54,7 +54,7 @@ fn write_session(config: &Path, session: &str, id: &str, output: u64) -> Result 
 }
 
 #[test]
-fn ingest_is_idempotent_and_attributes_by_directory() -> Result {
+fn ingest_is_idempotent_without_inferring_identity_from_directories() -> Result {
     let rig = TestRig::new()?;
     let anese = rig.home.join(".claude-anese");
     let pro = rig.home.join(".claude-pro");
@@ -75,9 +75,8 @@ fn ingest_is_idempotent_and_attributes_by_directory() -> Result {
     let first: Value = serde_json::from_slice(&first.stdout.bytes)?;
     assert_eq!(first["data"]["added"], 3);
     let accounts = first["data"]["accounts"].as_object().ok_or("accounts")?;
-    assert_eq!(accounts["anese"]["added"], 1);
-    assert_eq!(accounts["pro"]["added"], 1);
-    assert_eq!(accounts["unattributed"]["added"], 1);
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts["unattributed"]["added"], 3);
 
     let second = rig.command(&["telemetry", "ingest", "--json"])?;
     assert_eq!(code(&second), 0);

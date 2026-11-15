@@ -194,8 +194,9 @@ fn pipeline_refuses_malformed_ci_and_invalid_configuration() -> Result {
 }
 
 #[test]
-fn stats_reports_route_access_effort_outcomes_and_nonrandom_comparison() -> Result {
+fn queued_refusal_is_excluded_from_route_quality_outcomes() -> Result {
     let rig = rig()?;
+    // This attempt is refused before launch, so it supplies no provider-quality evidence.
     terminal_run::seed(&rig, "route-outcomes-fixture", &[Value::Null])?;
     let output = rig.command(&["telemetry", "stats", "--json"])?;
     assert_eq!(code(&output), 0, "{output:?}");
@@ -203,21 +204,6 @@ fn stats_reports_route_access_effort_outcomes_and_nonrandom_comparison() -> Resu
     let rows = report["data"]["route_outcomes"]
         .as_array()
         .ok_or("outcome rows")?;
-    assert_eq!(rows.len(), 1);
-    let row = &rows[0];
-    assert_eq!(row["access"], "read-only");
-    assert_eq!(row["effort"], "unknown");
-    assert_eq!(row["samples"], 1);
-    assert_eq!(row["successes"], 0);
-    assert_eq!(row["success_rate"], 0.0);
-    assert!(row.get("cost_per_success_microdollars").is_none());
-    assert!(row["time_per_success_ms"].is_null());
-    assert_eq!(row["comparison"], "observational_not_hash_assigned");
-    let output = rig.command(&["telemetry", "stats"])?;
-    assert_eq!(code(&output), 0, "{output:?}");
-    let human = String::from_utf8(output.stdout.bytes)?;
-    assert!(human.contains("access=read-only effort=unknown n=1"));
-    assert!(!human.contains("cost"));
-    assert!(human.contains("time/success_ms=unknown"));
+    assert!(rows.is_empty());
     Ok(())
 }

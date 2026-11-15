@@ -81,9 +81,9 @@ struct QuotaRow {
     unread: u64,
 }
 
-/// Recorded lane and chair tokens, grouped by account label and project. Chair
-/// tokens come from the sessions' transcripts (`attach_chair_usage`); a chair
-/// session with none is counted as unread rather than as zero.
+/// Recorded lane and chair tokens, grouped by verified provider account identity and project.
+/// Unknown identity never borrows a route label; chair tokens come from the
+/// sessions' transcripts (`attach_chair_usage`), and unread sessions remain explicit.
 pub fn quota_usage(
     facts: impl IntoIterator<Item = AttemptFact>,
     chairs: impl IntoIterator<Item = crate::usage::ChairSession>,
@@ -111,7 +111,14 @@ pub fn quota_usage(
             account_label: None,
             account_key: None,
         });
-        let key = (route.provider, route.account_label, Some(fact.project_id));
+        let (adapter, account) = match &fact.account_identity.identity {
+            provenant_records::Identity::Known {
+                provider,
+                account_key,
+            } => (Some(provider.clone()), Some(account_key.clone())),
+            provenant_records::Identity::Unknown { .. } => (route.provider, None),
+        };
+        let key = (adapter, account, Some(fact.project_id));
         rows.entry(key).or_default().lane.record_usage(
             &fact.usage,
             Some(fact.terminal_state),
@@ -128,11 +135,14 @@ pub fn quota_usage(
         if window.project.is_some_and(|p| Some(p) != chair.project) {
             continue;
         }
-        let key = (
-            Some(chair.adapter),
-            Some(chair.account_identity.account_key()),
-            chair.project,
-        );
+        let (adapter, account) = match &chair.account_identity.identity {
+            provenant_records::Identity::Known {
+                provider,
+                account_key,
+            } => (Some(provider.clone()), Some(account_key.clone())),
+            provenant_records::Identity::Unknown { .. } => (Some(chair.adapter), None),
+        };
+        let key = (adapter, account, chair.project);
         if sessions.insert((key.clone(), chair.session)) {
             let row = rows.entry(key).or_default();
             add(&mut row.sessions, 1)?;

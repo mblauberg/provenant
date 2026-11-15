@@ -39,7 +39,11 @@ fn cli_usage_records_exclude_arguments_prompts_and_results() -> Result {
     for event in &events {
         let object = event.as_object().ok_or("event")?;
         assert!(!object.contains_key("trace"));
-        assert_eq!(object.len(), 5);
+        assert!(object.contains_key("account_identity"));
+        assert_eq!(
+            event["account_identity"]["identity"]["reason"],
+            "no_provider_account"
+        );
         assert!(event["duration_ms"].is_u64());
         assert!(event["timestamp"].is_string());
         assert!(object.keys().all(|key| {
@@ -50,6 +54,7 @@ fn cli_usage_records_exclude_arguments_prompts_and_results() -> Result {
                 "outcome",
                 "duration_ms",
                 "timestamp",
+                "account_identity",
             ]
             .contains(&key.as_str())
         }));

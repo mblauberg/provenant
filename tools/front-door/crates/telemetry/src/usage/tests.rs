@@ -22,6 +22,30 @@ fn inventory() -> Vec<(String, String)> {
     vec![(EVENT_KINDS[0].into(), "root".into())]
 }
 
+fn event_line(
+    unit: &str,
+    exit_code: u8,
+    timestamp: &str,
+    session: Option<&str>,
+    project: Option<ProjectId>,
+    wait: Option<bool>,
+) -> Result<String> {
+    let event = Event {
+        kind: EVENT_KINDS[0].into(),
+        unit: unit.into(),
+        exit_code: Some(exit_code),
+        outcome: None,
+        duration_ms: 1,
+        timestamp: timestamp.into(),
+        trace: project_trace(project),
+        account_identity: AccountIdentity::no_provider_account(),
+        session: session.map(str::to_owned),
+        config: None,
+        wait,
+    };
+    Ok(format!("{}\n", serde_json::to_string(&event)?))
+}
+
 #[test]
 fn usage_log_read_errors_include_the_os_cause() {
     let error = UsageError::Io(std::io::Error::from_raw_os_error(13));
@@ -244,7 +268,10 @@ fn oversized_log_reads_recent_complete_events() -> Result {
     let roots = roots(&base)?;
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     let mut bytes = vec![b'x'; CAP as usize];
-    bytes.extend_from_slice(b"\n{\"kind\":\"cli.verb\",\"unit\":\"root\",\"duration_ms\":0,\"timestamp\":\"2026-10-26T00:00:00.000000Z\"}\n");
+    bytes.push(b'\n');
+    bytes.extend_from_slice(
+        event_line("root", 0, "2026-10-26T00:00:00.000000Z", None, None, None)?.as_bytes(),
+    );
     std::fs::write(roots.state.as_path().join(LOG), bytes)?;
     let report = report(&roots, inventory(), None, None)?;
     assert_eq!(
@@ -264,10 +291,11 @@ fn window_starting_on_a_record_start_keeps_that_record() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
-    let event = b"{\"kind\":\"cli.verb\",\"unit\":\"root\",\"duration_ms\":0,\"timestamp\":\"2026-10-26T00:00:00.000000Z\"}\n";
     // The newline before the event puts the window's start exactly on the event.
     let mut bytes = b"x\n".to_vec();
-    bytes.extend_from_slice(event);
+    bytes.extend_from_slice(
+        event_line("root", 0, "2026-10-26T00:00:00.000000Z", None, None, None)?.as_bytes(),
+    );
     bytes.resize(2 + CAP as usize, b'x');
     std::fs::write(roots.state.as_path().join(LOG), bytes)?;
     let report = report(&roots, inventory(), None, None)?;
@@ -288,18 +316,72 @@ fn failed_verb_retry_help_and_wait_poll_are_counted() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
-    // Native usage.jsonl format, with invented identities and values.
-    let log = concat!(
-        "{\"kind\":\"cli.verb\",\"unit\":\"run\",\"exit_code\":2,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:00Z\",\"session\":\"fixture-session\"}\n",
-        "{\"kind\":\"cli.verb\",\"unit\":\"help\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:01Z\",\"session\":\"fixture-session\"}\n",
-        "{\"kind\":\"cli.verb\",\"unit\":\"run\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:02Z\",\"session\":\"fixture-session\"}\n",
-        "{\"kind\":\"cli.verb\",\"unit\":\"status\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:03Z\",\"session\":\"fixture-session\",\"wait\":true}\n",
-        "{\"kind\":\"cli.verb\",\"unit\":\"status\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:04Z\",\"session\":\"fixture-session\",\"wait\":false}\n",
-        "{\"kind\":\"cli.verb\",\"unit\":\"status\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:05Z\"}\n"
-    );
-    let log = log.replace("\"session\":\"fixture-session\"", "\"session\":\"fixture-session\",\"trace\":{\"project\":\"01010101010101010101010101010101\"}")
-        + "{\"kind\":\"cli.verb\",\"unit\":\"run\",\"exit_code\":2,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:06Z\",\"session\":\"fixture-unscoped\"}\n"
-        + "{\"kind\":\"cli.verb\",\"unit\":\"run\",\"exit_code\":0,\"duration_ms\":1,\"timestamp\":\"2026-10-01T00:00:07Z\",\"session\":\"fixture-unscoped\"}\n";
+    // Native usage.jsonl records are built from the current typed event shape.
+    let project = ProjectId::from_bytes([1; 16]);
+    let mut log = String::new();
+    for (unit, exit_code, timestamp, session, project, wait) in [
+        (
+            "run",
+            2,
+            "2026-10-01T00:00:00Z",
+            Some("fixture-session"),
+            Some(project),
+            None,
+        ),
+        (
+            "help",
+            0,
+            "2026-10-01T00:00:01Z",
+            Some("fixture-session"),
+            Some(project),
+            None,
+        ),
+        (
+            "run",
+            0,
+            "2026-10-01T00:00:02Z",
+            Some("fixture-session"),
+            Some(project),
+            None,
+        ),
+        (
+            "status",
+            0,
+            "2026-10-01T00:00:03Z",
+            Some("fixture-session"),
+            Some(project),
+            Some(true),
+        ),
+        (
+            "status",
+            0,
+            "2026-10-01T00:00:04Z",
+            Some("fixture-session"),
+            Some(project),
+            Some(false),
+        ),
+        ("status", 0, "2026-10-01T00:00:05Z", None, None, None),
+        (
+            "run",
+            2,
+            "2026-10-01T00:00:06Z",
+            Some("fixture-unscoped"),
+            None,
+            None,
+        ),
+        (
+            "run",
+            0,
+            "2026-10-01T00:00:07Z",
+            Some("fixture-unscoped"),
+            None,
+            None,
+        ),
+    ] {
+        log.push_str(&event_line(
+            unit, exit_code, timestamp, session, project, wait,
+        )?);
+    }
     std::fs::write(roots.state.as_path().join(LOG), log)?;
     let report = ergonomics(&roots, None, None, None)?;
     assert_eq!(report.help_calls, 1);

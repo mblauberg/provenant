@@ -106,6 +106,7 @@ fn detail() -> Window {
 fn quota_usage_separates_accounts_projects_and_chairs_from_lane_tokens() {
     use crate::usage::{AccountIdentity, ChairSession};
     let mut first = fact(1, Some(100));
+    first.account_identity = AccountIdentity::known("p", "account", "fixture-epoch");
     first.usage.cache_read = Some(900);
     first.usage.cache_write = None;
     let project = first.project_id;
@@ -151,15 +152,12 @@ fn quota_usage_separates_accounts_projects_and_chairs_from_lane_tokens() {
     assert_eq!(row.lane_usage.cache_read.known, 900);
     assert_eq!(row.lane_usage.cache_write.missing, 1);
     assert_eq!(row.lane_usage.cache_write.known, 0);
-    assert_eq!(
-        rows.iter()
-            .find(|r| r.account.is_none())
-            .unwrap()
-            .lane_usage
-            .uncached_input
-            .missing,
-        1
-    );
+    let unattributed = rows
+        .iter()
+        .find(|r| r.adapter.is_none() && r.account.is_none())
+        .unwrap();
+    assert_eq!(unattributed.lane_usage.uncached_input.missing, 1);
+    assert!(!rows.iter().any(|r| r.account.as_deref() == Some("other")));
     assert_eq!(
         rows.iter()
             .map(|r| r.lane_usage.uncached_input.known)
