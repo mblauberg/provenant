@@ -85,6 +85,20 @@ and rereads at `domains.wait.local_interval_ms`. Peer or relayed rows also use
 paced rereads at that setting because the relay socket has no remote event
 subscription; the result identifies that source. Pull requests use forge
 observation. Settlement events are emitted as they are observed. Expiry ends blocking observation. Local stores take one final snapshot; remote reads use only the original wait budget. Results identify unsatisfied waits as timed out.
+Every blocking forge operation inside a wait (repository discovery, pull
+request metadata, each check page and the checks read) shares one request
+context: the wait's absolute deadline, capped per read by
+`domains.wait.pr_read_timeout_seconds`, and the waiter's cancellation. Each
+operation derives its bound from the time that context has left, and a wait
+that settles cancels the forge transport of its other targets.
+Wait settings resolve in one place for every waiter (`wait`, owner-side run
+waits, relay child waits and CI cadence). A configuration file that cannot be
+read leaves the compiled defaults in force with a warning, and every reported
+source names the reason; a file that is present but malformed is a typed
+error. Reports name each setting with its source.
+- Why: a wait must not outlive its budget in a transport it can no longer
+  interrupt, and one setting must not fail three different ways.
+- Test: `src/status_wait.rs::a_target_settling_after_the_last_sample_is_reported_settled_at_expiry`; `crates/cli/src/wait.rs::wait_settings_resolve_through_one_failure_policy`; `src/pr/request.rs::a_capped_request_shares_cancellation_and_never_extends_the_deadline`
 Wait budgets clamp to `domains.wait.max_timeout_seconds` (shipped default four
 hours), warning once with the effective limit and source when exceeded. A larger
 request remains a blocking wait. Parsing retains the request so configured
