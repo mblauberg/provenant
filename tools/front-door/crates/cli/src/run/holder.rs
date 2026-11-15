@@ -82,6 +82,9 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
             Some(decoder) => decoder.decode(frame)?,
             None => FrameEvent::Progress,
         };
+        let eof_fragment = self
+            .eof_fragment_in_progress
+            .load(std::sync::atomic::Ordering::Acquire);
         let source = self.source.lock().ok().and_then(|source| source.clone());
         let mut guard = self.evidence.lock().map_err(|_| DecodeFailure)?;
         if let Some(capture) = guard.as_mut() {
@@ -93,19 +96,22 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
             } else if self.stderr {
                 Vec::new()
             } else {
-                let mut line = frame.to_vec();
-                line.push(b'\n');
-                match capture.adapter.observe(&mut capture.stream, &line) {
+                let observed = if eof_fragment {
+                    capture
+                        .adapter
+                        .observe_eof_fragment(&mut capture.stream, frame)
+                } else {
+                    let mut line = frame.to_vec();
+                    line.push(b'\n');
+                    capture.adapter.observe(&mut capture.stream, &line)
+                };
+                match observed {
                     Ok(events) => events,
                     Err(provenant_providers::ProviderError::IdentityMismatch) => {
                         stream_identity_conflict = true;
                         Vec::new()
                     }
-                    Err(provenant_providers::ProviderError::IncompleteFrame)
-                        if self
-                            .eof_fragment_in_progress
-                            .load(std::sync::atomic::Ordering::Acquire) =>
-                    {
+                    Err(provenant_providers::ProviderError::IncompleteFrame) if eof_fragment => {
                         self.identity_eof_fragment_observed
                             .store(true, std::sync::atomic::Ordering::Release);
                         Vec::new()
@@ -909,13 +915,42 @@ mod tests {
         };
 
         let partial = br#"{"event":"init","conversation_id":"s1","init":{"model":"expected-model""#;
+        let init = br#"{"event":"init","conversation_id":"s1","init":{"model":"expected-model"}}"#;
         let eof = make_frames()?;
+        assert_eq!(
+            eof.decode(init),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
         assert_eq!(
             eof.decode_eof_fragment(partial),
             Ok(provenant_os::capture::FrameEvent::Progress)
         );
         assert!(eof.identity_eof_fragment_observed());
         assert!(!eof.identity_evidence_incomplete());
+        let mut stop = super::super::tests::clean_exit();
+        stop.stop_reason = Some(provenant_supervisor::machine::StopReason::Steered);
+        stop.cancel_delivered_before_exit = Some(true);
+        stop.provider_identity_eof_fragment = eof.identity_eof_fragment_observed();
+        let mut stdout = init.to_vec();
+        stdout.push(b'\n');
+        stdout.extend_from_slice(partial);
+        let decoded = Registry::default().decode_inner(
+            &route,
+            &stdout,
+            &[],
+            &stop,
+            Path::new("/nonexistent"),
+            false,
+        )?;
+        assert_eq!(decoded.session.as_deref(), Some("s1"));
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("provider output is partial")
+        );
+        assert_ne!(
+            decoded.terminal_cause,
+            Some(run::TerminalCause::IdentityMismatch)
+        );
 
         let complete = make_frames()?;
         assert_eq!(
@@ -924,6 +959,35 @@ mod tests {
         );
         assert!(!complete.identity_eof_fragment_observed());
         assert!(complete.identity_evidence_incomplete());
+        let mut malformed_stop = super::super::tests::clean_exit();
+        malformed_stop.stop_reason = Some(provenant_supervisor::machine::StopReason::Steered);
+        malformed_stop.cancel_delivered_before_exit = Some(true);
+        malformed_stop.provider_identity_evidence_incomplete =
+            complete.identity_evidence_incomplete();
+        let mut malformed_stdout = init.to_vec();
+        malformed_stdout.push(b'\n');
+        malformed_stdout.extend_from_slice(partial);
+        malformed_stdout.push(b'\n');
+        let decoded = Registry::default().decode_inner(
+            &route,
+            &malformed_stdout,
+            &[],
+            &malformed_stop,
+            Path::new("/nonexistent"),
+            false,
+        )?;
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("provider protocol is malformed")
+        );
+
+        let valid_tail = make_frames()?;
+        assert_eq!(
+            valid_tail.decode_eof_fragment(init),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
+        assert!(!valid_tail.identity_eof_fragment_observed());
+        assert!(!valid_tail.identity_evidence_incomplete());
 
         let valid_mismatch = make_frames()?;
         let wrong_model =

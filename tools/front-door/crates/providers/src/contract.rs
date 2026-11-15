@@ -516,6 +516,16 @@ pub trait Adapter: Sync {
         state: &mut StreamState,
         bytes: &[u8],
     ) -> Result<Vec<ProviderEvent>, ProviderError>;
+    /// Observe capture bytes at actual stream EOF, validating the final
+    /// unterminated record through the same bound stream decoder.
+    fn observe_eof_fragment(
+        &self,
+        state: &mut StreamState,
+        bytes: &[u8],
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        state.check_adapter(self.id())?;
+        state.observe_eof_fragment(bytes)
+    }
     fn finish(
         &self,
         state: StreamState,

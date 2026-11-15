@@ -313,6 +313,27 @@ impl StreamState {
         }
         Ok(events)
     }
+    pub(crate) fn observe_eof_fragment(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        let mut events = self.observe(bytes)?;
+        if self.adapter == "command" || self.pending.is_empty() {
+            return Ok(events);
+        }
+        let line = std::mem::take(&mut self.pending);
+        match self.line(&line) {
+            Ok(mut final_events) => {
+                events.append(&mut final_events);
+                Ok(events)
+            }
+            Err(error) => {
+                self.malformed = true;
+                self.retained_events = events;
+                Err(error)
+            }
+        }
+    }
     fn line(&mut self, bytes: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError> {
         let mut events = (self.decoder)(bytes)?;
         let mut answer_model = None;
