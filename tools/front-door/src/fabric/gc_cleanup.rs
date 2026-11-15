@@ -541,7 +541,7 @@ fn collect_owned_worktree_with(
     if authority.identity.project != settled.project_id {
         return Err("worktree retirement project identity changed".into());
     }
-    let chair = provenant_cli::fabric::current_chair(&authority);
+    let chair = provenant_cli::fabric::current_chair(&authority)?;
     let retirement = crate::custody::RetirementWriter::open(
         roots,
         settled.project_id,

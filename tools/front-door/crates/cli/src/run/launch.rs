@@ -536,7 +536,7 @@ pub(super) fn launch_on_host_with_wait(
                 session.context.project_id,
                 &subject,
                 &provenant_records::custody::Holder::Chair {
-                    chair: crate::fabric::current_chair(&context),
+                    chair: crate::fabric::current_chair(&context)?,
                 },
                 provenant_records::custody::Origin::Provenant,
                 &index_call,

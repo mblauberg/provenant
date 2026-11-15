@@ -222,6 +222,8 @@ impl worktrees::RetirementFeeds for Owner<'_> {
     #[allow(clippy::disallowed_methods)] // Native read-only store open deadline.
     fn custody(&self, lane: &WorktreeInfo) -> Result<(), String> {
         let context = self.context()?;
+        let chair = provenant_cli::fabric::current_chair(&context)
+            .map_err(|error| WorktreeError::Retirement(Box::new(error)))?;
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let call = Request {
@@ -251,18 +253,11 @@ impl worktrees::RetirementFeeds for Owner<'_> {
                     .any(|s| *s == record.subject || record.links.contains(s))
                 {
                     if matches!(record.holder, Holder::Chair { .. })
-                        && record
-                            .holder
-                            .belongs_to(&provenant_cli::fabric::current_chair(&context))
+                        && record.holder.belongs_to(&chair)
                     {
                         continue;
                     }
-                    match crate::custody::presence(
-                        record,
-                        self.roots,
-                        context.identity.inbox.host,
-                        context.identity.inbox.actor,
-                    ) {
+                    match crate::custody::presence(record, self.roots, chair.host, chair.actor) {
                         HolderPresence::Unattended => {}
                         HolderPresence::Live => {
                             return Err("live custody holder retains this item".into());

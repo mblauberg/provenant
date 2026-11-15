@@ -467,7 +467,7 @@ pub fn acquire(resolved: &roots::Resolved, subjects: &[Subject]) -> Result<(), E
     provenant_cli::fabric::acquire_custody(
         &context,
         &Holder::Chair {
-            chair: provenant_cli::fabric::current_chair(&context),
+            chair: provenant_cli::fabric::current_chair(&context)?,
         },
         subjects,
     );
@@ -489,7 +489,7 @@ pub fn collect_cloud(
     let ledger = HostStore::open(&resolved.roots.state, &call)?;
     let key = Subject::new(SubjectKind::CloudKey, key);
     let holder = Holder::Chair {
-        chair: provenant_cli::fabric::current_chair(&context),
+        chair: provenant_cli::fabric::current_chair(&context)?,
     };
     let subjects = [
         key.clone(),
@@ -526,7 +526,7 @@ pub fn command(globals: &Globals, subject: Subject, release: bool) -> u8 {
             roots::Product::Required,
         )?;
         let context = context(&resolved, false)?;
-        let chair = provenant_cli::fabric::current_chair(&context);
+        let chair = provenant_cli::fabric::current_chair(&context)?;
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let call = Request {
@@ -582,7 +582,7 @@ pub fn status(args: &Status, globals: &Globals) -> u8 {
             roots::Product::Required,
         )?;
         let context = context(&resolved, true)?;
-        let mut chair = provenant_cli::fabric::current_chair(&context);
+        let mut chair = provenant_cli::fabric::current_chair(&context)?;
         if let Some(session) = &args.custody_session {
             chair.session = Some(session.clone());
         }
@@ -613,12 +613,7 @@ pub fn status(args: &Status, globals: &Globals) -> u8 {
         let mut items = Vec::new();
         let mut lines = Vec::new();
         for record in page.items {
-            let presence = presence(
-                &record,
-                &resolved.roots,
-                context.identity.inbox.host,
-                context.identity.inbox.actor,
-            );
+            let presence = presence(&record, &resolved.roots, chair.host, chair.actor);
             let mine = record.holder.belongs_to(&chair);
             if !mine && presence != HolderPresence::Unattended {
                 continue;
@@ -822,7 +817,7 @@ pub fn settle_landing(
     };
     let ledger = HostStore::open(&resolved.roots.state, &call)?;
     let holder = Holder::Chair {
-        chair: provenant_cli::fabric::current_chair(&context),
+        chair: provenant_cli::fabric::current_chair(&context)?,
     };
     for member in &record.request.members {
         let subject = Subject::new(SubjectKind::Pr, member.pr.to_string());
