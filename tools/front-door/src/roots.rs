@@ -5,6 +5,7 @@ use std::{
     ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
+    time::Duration,
 };
 use thiserror::Error;
 #[derive(Debug, Error)]
@@ -254,6 +255,33 @@ pub fn resolve(
     })
 }
 
+/// Resolve the verified layout owner for a selected checkout. Git commands
+/// still run from that selected checkout; only primary-project configuration
+/// and managed-path allocation use the returned layout.
+pub fn project_layout(
+    roots: &Roots,
+    selected: &Path,
+) -> Result<provenant_confinement::worktrees::ProjectLayout, Box<dyn std::error::Error>> {
+    let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
+    let utility = provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())?;
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+    let discovered = utility.project_location(&executor, selected, budget, &cancel)?;
+    let binding = provenant_config::bind_project(roots, discovered.location)?;
+    let environment = provenant_confinement::worktrees::project_layout_git_environment();
+    Ok(
+        provenant_confinement::worktrees::project_layout_for_binding(
+            &executor,
+            &binding,
+            utility.git_program_path(),
+            &environment,
+            Duration::from_secs(5),
+            &cancel,
+        )?,
+    )
+}
+
 /// Resolve a new state candidate with every captured root input intact.
 pub fn state_candidate(context: &Roots, candidate: PathBuf) -> Result<Roots, RootError> {
     let roots = context.with_state_dir(candidate, &provenant_os::fs::SystemPathResolver)?;
@@ -293,6 +321,59 @@ pub(crate) fn home() -> Result<PathBuf, RootError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn project_layout_restores_a_verified_primary_with_an_external_git_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let home = root.join("home");
+        let state = root.join("state");
+        let checkout = root.join("checkout");
+        let git_dir = root.join("git-metadata");
+        let linked = root.join("linked");
+        for path in [&home, &state, &checkout] {
+            fs::create_dir_all(path)?;
+        }
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
+
+        let mut inputs = RootInputs::new(home, checkout.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        provenant_os::fixture::run_git(
+            &checkout,
+            &[
+                "init",
+                "-q",
+                "--separate-git-dir",
+                git_dir.to_str().ok_or("non-UTF-8 fixture path")?,
+            ],
+        )?;
+        fs::write(checkout.join("tracked.txt"), "base\n")?;
+        provenant_os::fixture::run_git(&checkout, &["add", "tracked.txt"])?;
+        provenant_os::fixture::run_git(&checkout, &["commit", "-qm", "base"])?;
+
+        let primary = project_layout(&roots, &checkout)?;
+        assert_eq!(primary.project(), Some(checkout.as_path()));
+        assert_eq!(primary.root(), checkout);
+        provenant_os::fixture::run_git(
+            &checkout,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().ok_or("non-UTF-8 fixture path")?,
+            ],
+        )?;
+
+        let from_linked = project_layout(&roots, &linked)?;
+        assert_eq!(from_linked.project(), Some(checkout.as_path()));
+        assert_eq!(from_linked.root(), checkout);
+        Ok(())
+    }
+
     #[test]
     fn git_boundaries_use_existing_metadata_and_preserve_installed_release_roots()
     -> Result<(), Box<dyn std::error::Error>> {

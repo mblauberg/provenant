@@ -57,7 +57,9 @@ pub fn run(command: Cloud, globals: &Globals) -> u8 {
                     roots::Workspace::Checkout,
                     roots::Product::Required,
                 )?;
-                let result = collect_result(&project, resolved.roots.state.as_path(), &collect)?;
+                let layout = roots::project_layout(&resolved.roots, &project)?;
+                let result =
+                    collect_result(&project, &layout, resolved.roots.state.as_path(), &collect)?;
                 let capture = || -> Result<(), Error> {
                     let resolved = roots::resolve(
                         globals,
@@ -230,6 +232,7 @@ fn launch_session(project: &Path, launch: &cloud::Launch) -> Result<(Value, Stri
 
 fn collect_result(
     project: &Path,
+    layout: &provenant_confinement::worktrees::ProjectLayout,
     host_state: &Path,
     collect: &cloud::Collect,
 ) -> Result<(Value, String), Error> {
@@ -246,14 +249,13 @@ fn collect_result(
         .branch
         .clone()
         .unwrap_or_else(|| record.branch.clone());
-    let common = PathBuf::from(git(
-        project,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        None,
-    )?);
-    let main = common.parent().map(Path::to_path_buf).unwrap_or(common);
-    let worktree =
-        cloud::collect_path(project, host_state, &main, collect.path.as_deref(), &branch)?;
+    let worktree = cloud::collect_path(
+        layout.project(),
+        host_state,
+        layout.root(),
+        collect.path.as_deref(),
+        &branch,
+    )?;
     let target = worktree.display().to_string();
     match record.provider {
         Provider::Claude => {
