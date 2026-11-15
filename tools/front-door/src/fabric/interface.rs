@@ -2295,27 +2295,28 @@ impl Factory {
         }
         let id = target.graph.clone();
         let brief_given = input.get("brief").is_some_and(|value| !value.is_null());
-        if target.node.is_some() || brief_given {
-            let mut journal = FileJournal::open(
-                &self.context.roots.state,
-                self.context.identity.project,
-                &id,
-                budget,
-                cancel,
-                &self.clock,
-            )
-            .map_err(graph_journal_error)?;
-            let execution = FileJournal::execution(
-                &self.context.roots.state,
-                self.context.identity.project,
-                &id,
-            )
+        let requester_path = self.requester_lane_path();
+        let mut journal = FileJournal::open(
+            &self.context.roots.state,
+            self.context.identity.project,
+            &id,
+            budget,
+            cancel,
+            &self.clock,
+        )
+        .map_err(graph_journal_error)?;
+        let execution = FileJournal::execution(
+            &self.context.roots.state,
+            self.context.identity.project,
+            &id,
+        )
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::NotFound)?;
+        let mut checkpoint = journal
+            .load(&id)
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
-            let mut checkpoint = journal
-                .load(&id)
-                .map_err(graph_journal_error)?
-                .ok_or(FacadeError::NotFound)?;
+        if target.node.is_some() || brief_given {
             // A brief belongs to one node. A graph of one node names it;
             // otherwise the chair must say which.
             let node = match target.node.clone() {
@@ -2348,15 +2349,16 @@ impl Factory {
                 },
             )
             .map_err(retry_patch_error)?;
-            // Publish the retry state and the requester's PATH under the same
-            // journal lock, so a concurrent graph advance cannot launch the
-            // pending node with the previous requester's environment.
-            journal
-                .set_requester_path(self.requester_lane_path())
-                .map_err(graph_journal_error)?;
-            journal.save(&checkpoint).map_err(graph_journal_error)?;
             target.node = Some(node);
         }
+        // Publish the requester's PATH with any retry patch under the same
+        // journal lock, including graph-wide retries with no node patch. A
+        // concurrent tick cannot launch pending work with stale PATH.
+        journal
+            .set_requester_path(requester_path)
+            .map_err(graph_journal_error)?;
+        journal.save(&checkpoint).map_err(graph_journal_error)?;
+        drop(journal);
         let run = self.graph(
             GraphInput::Resume {
                 extra: Default::default(),
@@ -3305,9 +3307,24 @@ mod tests {
         let mut factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
-        let fixture: Value = serde_json::from_str(include_str!(
+        let mut fixture: Value = serde_json::from_str(include_str!(
             "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
         ))?;
+        let mut pending = fixture["checkpoint"]["nodes"][0].clone();
+        pending["id"] = json!("review");
+        pending["state"] = json!("pending");
+        pending["attempts"] = json!([]);
+        fixture["checkpoint"]["nodes"]
+            .as_array_mut()
+            .ok_or("checkpoint nodes")?
+            .push(pending);
+        let mut pending = fixture["execution"]["document"]["nodes"][0].clone();
+        pending["id"] = json!("review");
+        pending["prompt"] = json!("work for review");
+        fixture["execution"]["document"]["nodes"]
+            .as_array_mut()
+            .ok_or("document nodes")?
+            .push(pending);
         let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(fixture["checkpoint"].clone())?;
         let document: GraphDocument =
@@ -3317,7 +3334,8 @@ mod tests {
         std::fs::create_dir_all(&p)?;
         std::fs::create_dir_all(&q)?;
         let p = std::fs::canonicalize(p)?.as_os_str().as_bytes().to_vec();
-        let q = std::fs::canonicalize(q)?.as_os_str().as_bytes().to_vec();
+        let q_directory = std::fs::canonicalize(q)?;
+        let q = q_directory.as_os_str().as_bytes().to_vec();
         let mut journal = FileJournal::open(
             &factory.context.roots.state,
             factory.context.identity.project,
@@ -3337,6 +3355,11 @@ mod tests {
         })?;
         journal.save(&checkpoint)?;
         drop(journal);
+        assert!(
+            factory
+                .graph_target(&document.graph_id)?
+                .is_some_and(|target| target.node.is_none())
+        );
         let mut supervisor = super::super::settlement::recovery_launch(
             factory.context.roots.state.as_path(),
             &factory.cwd,
@@ -3350,7 +3373,8 @@ mod tests {
         assert_eq!(supervisor.lane_path.as_deref(), Some(p.as_slice()));
 
         let mut requester = supervisor.clone();
-        requester.lane_path = Some(q.clone());
+        requester.lane_path = None;
+        requester.executable_search_path = vec![q_directory];
         factory.host_launch = Some(requester);
         // The subsequent resume may refuse for unrelated fixture reasons; the
         // retry request must have persisted its PATH before that advance.

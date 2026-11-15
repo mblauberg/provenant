@@ -148,11 +148,10 @@ pub struct HostLaunchContext {
     /// Host-owned graph origin, independent of the provider's selected checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_directory: Option<PathBuf>,
-    pub executables: std::collections::BTreeMap<String, PathBuf>,
-    /// Original host search directories for providers unavailable during handoff.
+    /// Host search directories used when the handoff has no retained requester PATH.
     #[serde(default)]
     pub executable_search_path: Vec<PathBuf>,
-    /// Requester PATH bytes for native lanes, retained across host handoff.
+    /// Requester PATH bytes retained for run preparation and graph advancement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane_path: Option<Vec<u8>>,
     pub git: PathBuf,
@@ -212,7 +211,7 @@ impl HostLaunchContext {
     }
     /// The inputs a host derives for itself when no guardian handed it any:
     /// the caller's trusted roots and git, with search path and tool homes
-    /// from this process's environment and no pinned executables.
+    /// from this process's environment.
     pub fn from_environment(
         configuration_root: &std::path::Path,
         cwd: &std::path::Path,
@@ -222,7 +221,6 @@ impl HostLaunchContext {
             configuration_root: configuration_root.into(),
             cwd: cwd.into(),
             graph_directory: None,
-            executables: Default::default(),
             executable_search_path: std::env::var_os("PATH")
                 .map(|path| {
                     std::env::split_paths(&path)
@@ -3123,7 +3121,6 @@ mod host_clock_tests {
         let context: HostLaunchContext = serde_json::from_value(serde_json::json!({
             "configuration_root": "/fixture/state",
             "cwd": "/fixture/source",
-            "executables": {},
             "git": "/fixture/git",
             "credential_roots": [],
             "github_roots": [],
@@ -3325,7 +3322,6 @@ mod disk_admission_tests {
                 graph_directory: None,
                 configuration_root: temp.path().into(),
                 cwd: temp.path().into(),
-                executables: Default::default(),
                 executable_search_path: Vec::new(),
                 lane_path: None,
                 git: "/usr/bin/git".into(),

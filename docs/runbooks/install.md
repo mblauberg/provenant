@@ -67,6 +67,12 @@ atomic.
 
 ### Test a candidate binary
 
+CI's macOS release smoke retains a checked package in the
+`candidate-release-<workflow SHA>` artifact for seven days. Verify its checksum,
+commit, tree and platform metadata against the intended candidate before
+extracting it. This smoke build disables LTO; the published release remains the
+installation target.
+
 Run an uninstalled candidate only with its own `--state-dir`, with
 `PROVENANT_ROOT` set to its checkout. A candidate can change persisted state;
 never point it at the state of an installed binary. `install --source DIR --upgrade-preflight`

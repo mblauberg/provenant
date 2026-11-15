@@ -77,7 +77,6 @@ fn capacity_guardian_context_records_and_reports_config_failure()
         graph_directory: None,
         configuration_root: state.clone(),
         cwd: temp.path().join("checkout"),
-        executables: Default::default(),
         executable_search_path: Vec::new(),
         lane_path: None,
         git: PathBuf::from("/usr/bin/git"),

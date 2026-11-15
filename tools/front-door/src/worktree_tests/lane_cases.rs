@@ -545,8 +545,12 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 graph_directory: None,
                 configuration_root: rig.state.clone(),
                 cwd: launch.cwd.clone(),
-                executables: [("codex".into(), executable.clone())].into(),
-                executable_search_path: Vec::new(),
+                executable_search_path: vec![
+                    executable
+                        .parent()
+                        .ok_or("provider executable has no parent")?
+                        .to_path_buf(),
+                ],
                 lane_path: None,
                 git: selected_git.clone(),
                 default_account_directories: Default::default(),

@@ -173,23 +173,23 @@ compare-and-swap.
 
 ### Native environment and sandbox tool stores
 
-Unsandboxed lanes inherit the host environment. Their PATH comes from the
-requester of the run or retry, retained with the host graph execution for later
-advancement. Before lane preparation it is
-filtered to existing absolute directories outside the project and worktree,
-using the host delivery PATH rules. Named commands use the same filtered
-requester PATH for executable lookup and launch environment. A graph retry
-publishes its checkpoint and requester's PATH in one journal save, so a tick
-cannot advance it with the previous requester's tools. A remote peer records
-its own local agent PATH at ingress, since origin host directories need not
-exist on the peer.
+Unsandboxed lanes inherit the host environment. `FilteredLanePath` selects
+retained requester PATH, otherwise captured host search path, or process PATH
+only without a host handoff. It filters canonical directories and executable
+symlink targets under the project and worktree. Model/account discovery, bare
+commands and provider launch environments share its lookup and PATH. Host
+delivery filters its captured host PATH through the same owner for tool
+lookup. Explicit program paths stay explicit. Graph retry saves PATH with its
+checkpoint under one journal lock. Remote peers record their own PATH at
+ingress because origin directories may not exist there.
+
 Provider preparation may select an account-specific home or redirect state and
-cache paths in either confinement mode; account selectors choose the registered account
-and its required credentials. Credential values stay in the live launch,
-never in prompts or receipts. Native launches skip skill copies, tool
-dependency discovery, credential symlink inventory and the build-slot shim.
-Every lane still binds the host Cargo home and private target/build
-directories before seed validation.
+cache paths in either confinement mode; account selectors choose the registered
+account and its required credentials. Credential values stay in the live launch,
+never in prompts or receipts. Native launches skip skill copies, tool dependency
+discovery, credential symlink inventory and the build-slot shim. Every lane still
+binds the host Cargo home and private target/build directories before seed
+validation.
 
 Sandboxed lanes use the minimal environment and staged skills, discover tool
 dependencies and credential aliases, and report inventory omissions in one
