@@ -4852,6 +4852,216 @@ mod tests {
         Ok(())
     }
 
+    fn seal_provider_identity_for_exit(
+        attempt: &provenant_os::fs::Directory,
+        scope: Scope,
+        source: &provenant_os::capture::CaptureSourceIdentity,
+    ) -> TestResult {
+        let metadata = attempt.metadata()?;
+        let identity = serde_json::json!({
+            "boot": source.boot.clone(),
+            "pid": source.pid,
+            "native_start": source.native_start,
+            "group_id": source.pid,
+            "session_id": source.pid,
+        });
+        let reservation = serde_json::json!({
+            "schema_version": 1,
+            "scope": scope,
+            "launch_state": "spawned",
+            "attempt_device": metadata.device,
+            "attempt_inode": metadata.inode,
+            "reservation_device": metadata.device,
+            "reservation_inode": metadata.inode,
+            "binding": { "kind": "read_only" },
+            "boot": source.boot.clone(),
+            "guardian": identity.clone(),
+            "provider": identity,
+            "unresolved_cleanup": false,
+            "descendants": [],
+            "census_incomplete": false,
+            "omitted_descendants": 0,
+        });
+        attempt
+            .atomic_write(
+                std::ffi::OsStr::new("reservation.json"),
+                ".provider-identity-",
+                &serde_json::to_vec(&reservation)?,
+                provenant_os::fs::PublishMode::NoReplace,
+            )?
+            .require_durable()?;
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn eof_fragment_only_continues_after_a_confirmed_intentional_stop() -> TestResult {
+        use provenant_supervisor::census::ProcessObservation;
+
+        let cases = [
+            (
+                Some(StopReason::Steered),
+                Some(true),
+                false,
+                false,
+                Outcome::Cancelled,
+                Some(TerminalCause::Steered),
+                true,
+            ),
+            (
+                Some(StopReason::ExplicitCancellation),
+                Some(true),
+                false,
+                false,
+                Outcome::Cancelled,
+                None,
+                false,
+            ),
+            (
+                None,
+                Some(false),
+                false,
+                false,
+                Outcome::Unsettled,
+                None,
+                false,
+            ),
+            (
+                Some(StopReason::Steered),
+                Some(false),
+                false,
+                false,
+                Outcome::Unsettled,
+                None,
+                false,
+            ),
+            (
+                Some(StopReason::Steered),
+                Some(true),
+                false,
+                true,
+                Outcome::Unsettled,
+                None,
+                false,
+            ),
+            (
+                Some(StopReason::Steered),
+                Some(true),
+                true,
+                false,
+                Outcome::Failed,
+                Some(TerminalCause::IdentityMismatch),
+                false,
+            ),
+        ];
+        for (index, (reason, delivered, conflict, incomplete, outcome, cause, resumes)) in
+            cases.into_iter().enumerate()
+        {
+            let temp = tempfile::tempdir()?;
+            let clock = crate::tests::clock();
+            let cancel = provenant_core::CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let context = crate::tests::context(temp.path())?;
+            let store = RunStore::open(&context, &call)?;
+            let run = crate::tests::input();
+            let id = run.attempt_id;
+            store.create(&run, &call)?;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &crate::tests::route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let operation = OperationId::parse(&format!("steer-eof-{index}"))?;
+            assert!(matches!(
+                store.steer(id, operation, "Continue from the validated session.", &call)?,
+                SteerReceipt::Queued { .. }
+            ));
+            let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+                ProcessObservation::Present(fact) if !fact.zombie => {
+                    provenant_os::capture::CaptureSourceIdentity {
+                        attempt: id.to_string(),
+                        generation: RunStore::scope(&running).generation,
+                        boot: fact.identity.boot,
+                        pid: fact.identity.pid,
+                        native_start: fact.identity.native_start,
+                    }
+                }
+                observation => {
+                    return Err(
+                        format!("test process identity unavailable: {observation:?}").into(),
+                    );
+                }
+            };
+            let route = running
+                .applied_route
+                .as_ref()
+                .ok_or("applied route")?
+                .clone();
+            assert!(store.record_provider_session_ready(
+                id,
+                &route,
+                "live-session",
+                &source,
+                &call,
+            )?);
+            if conflict {
+                assert!(store.record_provider_identity_conflict(id, &route, &source, &call)?);
+            }
+
+            let attempt = store.attempt_dir(id, false)?;
+            seal_provider_identity_for_exit(&attempt, RunStore::scope(&running), &source)?;
+            crate::artifacts::seal(
+                &attempt,
+                "stdout.log",
+                b"{\"event\":\"init\",\"conversation_id\":\"live-session\",\"init\":{\"model\":\"expected-model\"}}\n{\"event\":",
+                CAPTURE_LIMIT,
+            )?;
+            let mut exit = crate::tests::exit();
+            exit.scope = RunStore::scope(&running);
+            exit.stop_reason = reason;
+            exit.cancel_delivered_before_exit = delivered;
+            exit.provider_identity_conflict = conflict;
+            exit.provider_identity_evidence_incomplete = incomplete;
+            exit.provider_identity_eof_fragment = true;
+            exit.terminal_observed = true;
+            exit.settlement_evidence = custody::SettlementEvidence::DarwinCensusAndCustodyLease;
+            crate::dispatch_tests::seal_exit(&store, &exit)?;
+            let fake = crate::dispatch_tests::Fake {
+                session: Some("live-session".into()),
+                ..crate::dispatch_tests::Fake::with_observed(Some(route), Some(Outcome::Succeeded))
+            };
+            let finished = store.finish(id, &attempt, &exit, &fake, &call)?;
+            assert!(matches!(
+                finished.state,
+                AttemptState::Terminal {
+                    outcome: actual_outcome,
+                    terminal_cause: actual_cause,
+                    ..
+                } if actual_outcome == outcome && actual_cause == cause
+            ));
+
+            let child = store.prepare_steer_continuation(id, &call)?;
+            assert_eq!(child.is_some(), resumes);
+            if let Some(child) = child {
+                assert_eq!(store.record(id, &call)?.superseded_by, Some(child));
+                assert_eq!(
+                    store
+                        .steering_status(id, &call)?
+                        .ok_or("steering status")?
+                        .state,
+                    provenant_records::run::SteeringState::Resumed
+                );
+            } else {
+                assert_eq!(store.record(id, &call)?.superseded_by, None);
+            }
+        }
+        Ok(())
+    }
+
     // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
     fn steer_session_readiness_binds_scope_process_and_immutable_route_identity() -> TestResult {

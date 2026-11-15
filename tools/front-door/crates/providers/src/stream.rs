@@ -517,5 +517,11 @@ pub(crate) fn wire<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Pr
     // (`MAX_LINE_BYTES`, enforced in `observe` before a line reaches here);
     // `serde_json` adds its own recursion limit. Typed fields still refuse values
     // they cannot hold.
-    serde_json::from_slice(bytes).map_err(|_| ProviderError::Malformed)
+    serde_json::from_slice(bytes).map_err(|error| {
+        if error.classify() == serde_json::error::Category::Eof {
+            ProviderError::IncompleteFrame
+        } else {
+            ProviderError::Malformed
+        }
+    })
 }

@@ -54,6 +54,12 @@ pub struct DecodeFailure;
 pub trait FrameDecoder: Send + Sync {
     fn decode(&self, frame: &[u8]) -> Result<FrameEvent, DecodeFailure>;
 
+    /// Decode the final unterminated frame at an actual stream EOF. This is
+    /// distinct from a partial frame delivered early as a terminal signal.
+    fn decode_eof_fragment(&self, frame: &[u8]) -> Result<FrameEvent, DecodeFailure> {
+        self.decode(frame)
+    }
+
     /// Whether any live frame contradicted this decoder's bound identity.
     /// This monotonic summary also covers source changes that arrive between
     /// frames and therefore cannot emit an event from `decode` itself.
@@ -62,8 +68,14 @@ pub trait FrameDecoder: Send + Sync {
     }
 
     /// Whether live stream parsing lost enough information that identity
-    /// continuity cannot be established from every decoded frame.
+    /// continuity cannot be established from every delimiter-complete frame.
     fn identity_evidence_incomplete(&self) -> bool {
+        false
+    }
+
+    /// Whether the final unterminated frame was an incomplete provider record.
+    /// This fact does not excuse loss from any delimiter-complete frame.
+    fn identity_eof_fragment_observed(&self) -> bool {
         false
     }
 
@@ -280,7 +292,7 @@ impl Frames {
         if !self.bytes.is_empty()
             && !self.oversized
             && !self.partial_terminal_sent
-            && sink.is_some_and(|sink| self.deliver(&sink).is_err())
+            && sink.is_some_and(|sink| self.deliver_eof(&sink).is_err())
         {
             out.decoder_lost_frames = out.decoder_lost_frames.saturating_add(1);
         }
@@ -288,9 +300,25 @@ impl Frames {
     }
 
     fn deliver(&self, sink: &FrameDelivery<'_>) -> Result<(), QueueLoss> {
+        self.deliver_with_boundary(sink, false)
+    }
+
+    fn deliver_eof(&self, sink: &FrameDelivery<'_>) -> Result<(), QueueLoss> {
+        self.deliver_with_boundary(sink, true)
+    }
+
+    fn deliver_with_boundary(
+        &self,
+        sink: &FrameDelivery<'_>,
+        eof_fragment: bool,
+    ) -> Result<(), QueueLoss> {
         match sink {
             FrameDelivery::Raw(sink) => sink.try_frame(&self.bytes),
-            FrameDelivery::Provider { decoder, events } => match decoder.decode(&self.bytes) {
+            FrameDelivery::Provider { decoder, events } => match if eof_fragment {
+                decoder.decode_eof_fragment(&self.bytes)
+            } else {
+                decoder.decode(&self.bytes)
+            } {
                 Ok(event) => {
                     let event_result = events.try_send(event);
                     let conflict_result = if decoder.identity_conflict_observed() {
@@ -480,6 +508,25 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct BoundaryDecoder {
+        complete_frames: std::sync::atomic::AtomicUsize,
+        eof_fragments: std::sync::atomic::AtomicUsize,
+    }
+    impl FrameDecoder for BoundaryDecoder {
+        fn decode(&self, _frame: &[u8]) -> Result<FrameEvent, DecodeFailure> {
+            self.complete_frames
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(FrameEvent::Progress)
+        }
+
+        fn decode_eof_fragment(&self, _frame: &[u8]) -> Result<FrameEvent, DecodeFailure> {
+            self.eof_fragments
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(FrameEvent::Progress)
+        }
+    }
+
+    #[derive(Default)]
     struct EventSink {
         events: Mutex<Vec<FrameEvent>>,
         fail: Option<QueueLoss>,
@@ -609,6 +656,34 @@ mod tests {
             assert_eq!(events.collected(), expected);
             assert!(capture.outcome().bytes.is_empty());
         }
+    }
+
+    #[test]
+    fn actual_eof_residual_uses_its_own_decoder_boundary() {
+        let decoder = BoundaryDecoder::default();
+        let events = EventSink::default();
+        let mut capture = StreamCapture::new(
+            StreamPolicy::Discard,
+            Some(provider(&decoder, &events)),
+            None,
+        )
+        .unwrap();
+        capture.push(b"complete\nresidual").unwrap();
+        capture.finish();
+
+        assert_eq!(
+            decoder
+                .complete_frames
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            decoder
+                .eof_fragments
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(events.collected(), vec![FrameEvent::Progress; 2]);
     }
 
     #[test]

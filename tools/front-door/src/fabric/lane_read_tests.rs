@@ -184,6 +184,7 @@ fn settled_attempt(
         cancel_delivered_before_exit: None,
         provider_identity_conflict: false,
         provider_identity_evidence_incomplete: false,
+        provider_identity_eof_fragment: false,
         omitted_spared: 0,
         warnings: Vec::new(),
         omitted_warnings: 0,

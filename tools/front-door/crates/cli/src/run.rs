@@ -712,6 +712,14 @@ impl run::Providers for Registry<'_> {
         self.decode_inner(route, stdout, &[], exit, provider_state, false)
     }
 }
+
+fn strip_final_eof_fragment(stdout: &[u8]) -> &[u8] {
+    stdout
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(&[], |newline| &stdout[..=newline])
+}
+
 impl Registry<'_> {
     fn decode_inner(
         &self,
@@ -722,6 +730,24 @@ impl Registry<'_> {
         provider_state: &Path,
         host_settlement: bool,
     ) -> Result<run::Decoded, String> {
+        let captured_stdout_len = stdout.len();
+        let confirmed_intentional_stop = exit.cancel_delivered_before_exit == Some(true)
+            && matches!(
+                exit.stop_reason,
+                Some(
+                    provenant_supervisor::machine::StopReason::ExplicitCancellation
+                        | provenant_supervisor::machine::StopReason::Steered
+                )
+            );
+        let stdout = if exit.provider_identity_eof_fragment
+            && !exit.provider_identity_conflict
+            && !exit.provider_identity_evidence_incomplete
+            && confirmed_intentional_stop
+        {
+            strip_final_eof_fragment(stdout)
+        } else {
+            stdout
+        };
         let result_event_usage = route
             .provider
             .as_deref()
@@ -998,7 +1024,7 @@ impl Registry<'_> {
                 account_key: account_key.clone(),
                 ..route.clone()
             });
-            if exit.stdout.bytes > stdout.len() as u64 {
+            if exit.stdout.bytes > captured_stdout_len as u64 {
                 decoded
                     .result
                     .insert_str(0, "[output truncated; retained tail]\n");

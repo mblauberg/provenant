@@ -383,6 +383,7 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
         cancel_delivered_before_exit: None,
         provider_identity_conflict: true,
         provider_identity_evidence_incomplete: false,
+        provider_identity_eof_fragment: false,
         priority: None,
         schema_version: 1,
         scope: scope(),
@@ -423,6 +424,7 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
     let stored: serde_json::Value = serde_json::from_slice(&bytes)?;
     assert_eq!(stored["provider_identity_conflict"], true);
     assert_eq!(stored["provider_identity_evidence_incomplete"], false);
+    assert_eq!(stored["provider_identity_eof_fragment"], false);
     for (list, omitted, expected) in [
         ("reaped", "omitted_reaped", 18),
         ("spared", "omitted_spared", 19),

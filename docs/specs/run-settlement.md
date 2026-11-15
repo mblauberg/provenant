@@ -94,6 +94,17 @@ receive the handoff. A dirty budget boundary takes precedence, and handoff is
 deferred during budget wrap-up.
 - Why: a continuation needs the prior work and a reliable reason for stopping.
 
+Provider identity conflicts and incomplete evidence from delimiter-complete
+frames, capture loss, oversize, read failure or drain timeout always fence a
+same-session steer continuation. The guardian records an incomplete JSON
+record at actual EOF separately; settlement may ignore only that final
+fragment after a confirmed delivered explicit cancellation or steering
+interrupt. Natural completion and uncertain delivery leave the attempt
+unsettled, and a parseable final record remains subject to the ordinary session
+and model identity checks.
+- Why: an expected interrupted tail may end mid-record without excusing loss of
+  evidence about the provider's session.
+
 ## Retention and disclosure
 
 Known credential shapes are filtered from retained output. A result redaction failure

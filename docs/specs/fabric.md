@@ -173,9 +173,16 @@ before exit. A stream identity error also leaves a route- and process-bound
 conflict fence when the rejected first frame yields no usable session event;
 that fence is not session-readiness evidence. The guardian seals this live
 conflict separately from the bounded stdout tail, so a failed ledger write or a
-discarded head frame cannot erase it. Oversized, undecodable, unreadable, or
-drain-truncated live output also seals incomplete identity evidence; settlement
-leaves that result unsettled instead of admitting a same-session continuation.
+discarded head frame cannot erase it. Oversized frames, undecodable
+delimiter-complete frames, unreadable output, or drain-truncated live output
+also seal incomplete identity evidence; settlement leaves that result
+unsettled instead of admitting a same-session continuation. The guardian
+separately records an incomplete JSON record in the final bytes only when the
+stream reaches actual EOF. That final fragment is tolerated only after a
+delivered `ExplicitCancellation` or `Steered` stop; natural completion and
+uncertain signal delivery remain unsettled. A parseable final record still
+passes through the shared adapter checks, so a session or model mismatch always
+fences continuation, including when that record has no trailing newline.
 
 The receipt says `queued` only after the text is durable. It does not claim a
 provider interrupt or resumed continuation; graph/run status owns those later

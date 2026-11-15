@@ -205,6 +205,7 @@ pub(super) fn clean_exit() -> ExitObservation {
         cancel_delivered_before_exit: None,
         provider_identity_conflict: false,
         provider_identity_evidence_incomplete: false,
+        provider_identity_eof_fragment: false,
         omitted_spared: 0,
         warnings: vec![],
         omitted_warnings: 0,
@@ -215,6 +216,55 @@ pub(super) fn clean_exit() -> ExitObservation {
         stdout: CaptureTotals::default(),
         stderr: CaptureTotals::default(),
     }
+}
+
+#[test]
+fn confirmed_intentional_stop_trims_only_the_final_incomplete_record()
+-> Result<(), Box<dyn std::error::Error>> {
+    let route = run::RouteRecord {
+        provider: Some("agy".into()),
+        model: Some("agy/expected-model".into()),
+        ..Default::default()
+    };
+    let stdout = concat!(
+        "{\"event\":\"init\",\"conversation_id\":\"s1\",\"init\":{\"model\":\"expected-model\"}}\n",
+        "{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"s1\",\"step_type\":\"agent_response\",\"text_delta\":\"partial"
+    );
+    let mut exit = clean_exit();
+    exit.stop_reason = Some(provenant_supervisor::machine::StopReason::Steered);
+    exit.cancel_delivered_before_exit = Some(true);
+    exit.provider_identity_eof_fragment = true;
+    let decoded = Registry::default().decode_inner(
+        &route,
+        stdout.as_bytes(),
+        &[],
+        &exit,
+        Path::new("/nonexistent"),
+        false,
+    )?;
+    assert_eq!(decoded.session.as_deref(), Some("s1"));
+    assert_ne!(
+        decoded.terminal_cause,
+        Some(run::TerminalCause::IdentityMismatch)
+    );
+
+    let wrong_model = br#"{"event":"init","conversation_id":"s1","init":{"model":"other-model"}}"#;
+    let mut conflict_exit = exit;
+    conflict_exit.provider_identity_conflict = true;
+    conflict_exit.provider_identity_eof_fragment = false;
+    let mismatch = Registry::default().decode_inner(
+        &route,
+        wrong_model,
+        &[],
+        &conflict_exit,
+        Path::new("/nonexistent"),
+        false,
+    )?;
+    assert_eq!(
+        mismatch.terminal_cause,
+        Some(run::TerminalCause::IdentityMismatch)
+    );
+    Ok(())
 }
 
 /// Population of OpenCode's own session record: the synthetic v2

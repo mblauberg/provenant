@@ -12,6 +12,10 @@ struct QuotaFrames {
     source: Mutex<Option<provenant_os::capture::CaptureSourceIdentity>>,
     identity_conflict_observed: std::sync::atomic::AtomicBool,
     identity_evidence_incomplete: std::sync::atomic::AtomicBool,
+    identity_eof_fragment_observed: std::sync::atomic::AtomicBool,
+    // Capture invokes one stream decoder serially; scope the existing parser's
+    // typed EOF error without adding another provider parser.
+    eof_fragment_in_progress: std::sync::atomic::AtomicBool,
     stderr: bool,
 }
 struct QuotaCapture {
@@ -52,6 +56,23 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
         }
     }
 
+    fn decode_eof_fragment(
+        &self,
+        frame: &[u8],
+    ) -> Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure> {
+        self.eof_fragment_in_progress
+            .store(true, std::sync::atomic::Ordering::Release);
+        let result = self.decode(frame);
+        self.eof_fragment_in_progress
+            .store(false, std::sync::atomic::Ordering::Release);
+        result
+    }
+
+    fn identity_eof_fragment_observed(&self) -> bool {
+        self.identity_eof_fragment_observed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     fn decode(
         &self,
         frame: &[u8],
@@ -78,6 +99,15 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
                     Ok(events) => events,
                     Err(provenant_providers::ProviderError::IdentityMismatch) => {
                         stream_identity_conflict = true;
+                        Vec::new()
+                    }
+                    Err(provenant_providers::ProviderError::IncompleteFrame)
+                        if self
+                            .eof_fragment_in_progress
+                            .load(std::sync::atomic::Ordering::Acquire) =>
+                    {
+                        self.identity_eof_fragment_observed
+                            .store(true, std::sync::atomic::Ordering::Release);
                         Vec::new()
                     }
                     Err(_) => {
@@ -221,6 +251,7 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
         }
         Ok(result)
     }
+
     fn identity_conflict_observed(&self) -> bool {
         self.identity_conflict_observed
             .load(std::sync::atomic::Ordering::Acquire)
@@ -663,6 +694,8 @@ mod tests {
             source: Mutex::new(Some(source.clone())),
             identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
             identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+            identity_eof_fragment_observed: std::sync::atomic::AtomicBool::new(false),
+            eof_fragment_in_progress: std::sync::atomic::AtomicBool::new(false),
             stderr: false,
         };
         let wrong_first_model =
@@ -712,6 +745,8 @@ mod tests {
                 source: Mutex::new(Some(source.clone())),
                 identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
                 identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+                identity_eof_fragment_observed: std::sync::atomic::AtomicBool::new(false),
+                eof_fragment_in_progress: std::sync::atomic::AtomicBool::new(false),
                 stderr: false,
             };
             assert_eq!(
@@ -746,6 +781,8 @@ mod tests {
             source: Mutex::new(Some(source)),
             identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
             identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+            identity_eof_fragment_observed: std::sync::atomic::AtomicBool::new(false),
+            eof_fragment_in_progress: std::sync::atomic::AtomicBool::new(false),
             stderr: false,
         };
         assert_eq!(
@@ -754,6 +791,87 @@ mod tests {
         );
         assert!(!malformed.identity_conflict_observed());
         assert!(malformed.identity_evidence_incomplete());
+        Ok(())
+    }
+
+    #[test]
+    fn only_an_actual_eof_incomplete_record_is_a_final_fragment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::capture::FrameDecoder;
+
+        let temp = tempfile::tempdir()?;
+        let attempt_path = temp.path().join("attempt");
+        std::fs::create_dir(&attempt_path)?;
+        let registration = &provenant_providers::agy::REGISTRATION;
+        let source = provenant_os::capture::CaptureSourceIdentity {
+            attempt: "fixture-attempt".into(),
+            generation: 1,
+            boot: "fixture-boot".into(),
+            pid: 123,
+            native_start: 456,
+        };
+        let route = run::RouteRecord {
+            provider: Some("agy".into()),
+            model: Some("agy/expected-model".into()),
+            ..Default::default()
+        };
+        let make_frames = || -> Result<QuotaFrames, Box<dyn std::error::Error>> {
+            let mut stream = registration.adapter.stream(None)?;
+            stream.expect_model("expected-model");
+            Ok(QuotaFrames {
+                decoder: Mutex::new(None),
+                evidence: Arc::new(Mutex::new(Some(QuotaCapture {
+                    adapter: registration.adapter,
+                    stream,
+                    attempt: Directory::open_anchor(&attempt_path)?,
+                    state_root: temp.path().into(),
+                    route: route.clone(),
+                    holder_context: Vec::new(),
+                    shared: true,
+                    recorded: false,
+                    pending_session: None,
+                    session_ready: None,
+                    pending_conflict_session: None,
+                    ready_source: None,
+                    pending_source_conflict: false,
+                    pending_identity_conflict: false,
+                    identity_conflict: false,
+                }))),
+                source: Mutex::new(Some(source.clone())),
+                identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
+                identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+                identity_eof_fragment_observed: std::sync::atomic::AtomicBool::new(false),
+                eof_fragment_in_progress: std::sync::atomic::AtomicBool::new(false),
+                stderr: false,
+            })
+        };
+
+        let partial = br#"{"event":"init","conversation_id":"s1","init":{"model":"expected-model""#;
+        let eof = make_frames()?;
+        assert_eq!(
+            eof.decode_eof_fragment(partial),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
+        assert!(eof.identity_eof_fragment_observed());
+        assert!(!eof.identity_evidence_incomplete());
+
+        let complete = make_frames()?;
+        assert_eq!(
+            complete.decode(partial),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
+        assert!(!complete.identity_eof_fragment_observed());
+        assert!(complete.identity_evidence_incomplete());
+
+        let valid_mismatch = make_frames()?;
+        let wrong_model =
+            br#"{"event":"init","conversation_id":"s1","init":{"model":"other-model"}}"#;
+        assert_eq!(
+            valid_mismatch.decode_eof_fragment(wrong_model),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
+        assert!(!valid_mismatch.identity_eof_fragment_observed());
+        assert!(valid_mismatch.identity_conflict_observed());
         Ok(())
     }
 
@@ -836,6 +954,8 @@ mod tests {
             source: Mutex::new(None),
             identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
             identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+            identity_eof_fragment_observed: std::sync::atomic::AtomicBool::new(false),
+            eof_fragment_in_progress: std::sync::atomic::AtomicBool::new(false),
             stderr: false,
         };
         frames.decode(br#"{"type":"provider.quota","response":{"body":{"error":{"type":"FreeUsageLimitError","message":"fixture"}}}}"#)?;
@@ -994,6 +1114,8 @@ mod tests {
             source: Mutex::new(None),
             identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
             identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+            identity_eof_fragment_observed: std::sync::atomic::AtomicBool::new(false),
+            eof_fragment_in_progress: std::sync::atomic::AtomicBool::new(false),
             stderr: false,
         };
         let frame = br#"{"type":"provider.quota","response":{"body":{"error":{"type":"FreeUsageLimitError","message":"fixture"}}}}"#;

@@ -1891,6 +1891,9 @@ impl Driver<'_> {
             || hooks
                 .stdout_decoder
                 .is_some_and(|decoder| decoder.identity_conflict_observed());
+        let provider_identity_eof_fragment = hooks
+            .stdout_decoder
+            .is_some_and(|decoder| decoder.identity_eof_fragment_observed());
         let provider_identity_evidence_incomplete = hooks.stdout_decoder.is_some()
             && (capture_drain_truncated
                 || stdout.oversized_frames > 0
@@ -1910,6 +1913,7 @@ impl Driver<'_> {
             cancel_delivered_before_exit: Some(cancel_delivered_before_exit),
             provider_identity_conflict,
             provider_identity_evidence_incomplete,
+            provider_identity_eof_fragment,
             delivered_signals: self.delivered_signals.clone(),
             reaped: self.reaped.clone(),
             omitted_reaped: self.omitted_reaped,

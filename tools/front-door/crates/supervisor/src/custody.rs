@@ -1404,10 +1404,15 @@ pub struct ProcessExit {
     /// the guardian independently of the bounded retained stdout tail.
     #[serde(default)]
     pub provider_identity_conflict: bool,
-    /// Live provider identity evidence was incomplete because frames were
-    /// dropped, oversized, undecodable, unreadable, or drain-truncated.
+    /// Live provider identity evidence was incomplete because a
+    /// delimiter-complete frame was dropped or undecodable, output was
+    /// oversized or unreadable, or capture drain timed out.
     #[serde(default)]
     pub provider_identity_evidence_incomplete: bool,
+    /// The live decoder saw an incomplete provider record in the residual
+    /// bytes delivered at actual EOF. This is separate from other loss.
+    #[serde(default)]
+    pub provider_identity_eof_fragment: bool,
     pub delivered_signals: Vec<i64>,
     pub reaped: Vec<ProcessIdentity>,
     pub omitted_reaped: u64,
@@ -1458,6 +1463,7 @@ impl ProcessExit {
             cancel_delivered_before_exit: Some(false),
             provider_identity_conflict: false,
             provider_identity_evidence_incomplete: false,
+            provider_identity_eof_fragment: false,
             delivered_signals: vec![],
             reaped: vec![],
             omitted_reaped: 0,
@@ -1490,6 +1496,7 @@ impl ProcessExit {
             cancel_delivered_before_exit: self.cancel_delivered_before_exit,
             provider_identity_conflict: self.provider_identity_conflict,
             provider_identity_evidence_incomplete: self.provider_identity_evidence_incomplete,
+            provider_identity_eof_fragment: self.provider_identity_eof_fragment,
             delivered_signals: self.delivered_signals.clone(),
             reaped: self.reaped.clone(),
             omitted_reaped: self.omitted_reaped,
@@ -1568,6 +1575,8 @@ struct StoredExit {
     provider_identity_conflict: bool,
     #[serde(default)]
     provider_identity_evidence_incomplete: bool,
+    #[serde(default)]
+    provider_identity_eof_fragment: bool,
     delivered_signals: Vec<i64>,
     reaped: Vec<ProcessIdentity>,
     omitted_reaped: u64,
@@ -1599,6 +1608,7 @@ pub struct ExitObservation {
     pub cancel_delivered_before_exit: Option<bool>,
     pub provider_identity_conflict: bool,
     pub provider_identity_evidence_incomplete: bool,
+    pub provider_identity_eof_fragment: bool,
     pub delivered_signals: Vec<i64>,
     pub reaped: Vec<ProcessIdentity>,
     pub omitted_reaped: u64,
@@ -1734,6 +1744,7 @@ pub fn observe(
                     provider_identity_conflict: record.provider_identity_conflict,
                     provider_identity_evidence_incomplete: record
                         .provider_identity_evidence_incomplete,
+                    provider_identity_eof_fragment: record.provider_identity_eof_fragment,
                     delivered_signals: record.delivered_signals,
                     reaped: record.reaped,
                     omitted_reaped: record.omitted_reaped,
@@ -2763,10 +2774,20 @@ mod exit_shape_tests {
             vec![],
         );
         exit.cancel_delivered_before_exit = None;
+        exit.provider_identity_eof_fragment = true;
+        assert!(exit.durable_observation().provider_identity_eof_fragment);
         let mut value = serde_json::to_value(exit).unwrap();
         assert!(value["cancel_delivered_before_exit"].is_null());
         let parsed: StoredExit = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(parsed.cancel_delivered_before_exit, None);
+        assert!(parsed.provider_identity_eof_fragment);
+
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_identity_eof_fragment");
+        let legacy: StoredExit = serde_json::from_value(value.clone()).unwrap();
+        assert!(!legacy.provider_identity_eof_fragment);
 
         value
             .as_object_mut()

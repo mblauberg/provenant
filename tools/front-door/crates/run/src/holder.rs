@@ -2762,15 +2762,31 @@ impl RunStore {
             )
         {
             // Live identity checks run before retained-tail truncation. If a
-            // frame was oversized, undecodable, or unreadable, the terminal
-            // owner cannot prove that the provider stayed in the admitted
-            // session. Do not turn a successful or steered result into a
-            // same-session continuation on incomplete evidence.
+            // delimiter-complete frame was oversized, undecodable, or
+            // unreadable, or capture drain timed out, the terminal owner
+            // cannot prove that the provider stayed in the admitted session.
+            // Do not continue on incomplete evidence.
             decoded.outcome = Outcome::Unsettled;
             decoded.complete = false;
             decoded.terminal_cause = None;
             decoded.reason =
                 Some("provider identity evidence was incomplete; continuation refused".into());
+        } else if exit.provider_identity_eof_fragment
+            && !(exit.cancel_delivered_before_exit == Some(true)
+                && matches!(
+                    exit.stop_reason,
+                    Some(StopReason::ExplicitCancellation | StopReason::Steered)
+                ))
+            && decoded.terminal_cause != Some(TerminalCause::IdentityMismatch)
+        {
+            // Only a fragment from an actual EOF is eligible for the
+            // intentional-stop exception. Natural completion and uncertain
+            // delivery cannot use it to claim a complete provider result.
+            decoded.outcome = Outcome::Unsettled;
+            decoded.complete = false;
+            decoded.terminal_cause = None;
+            decoded.reason =
+                Some("provider ended with an incomplete final frame; continuation refused".into());
         }
         if matches!(
             decoded.outcome,
