@@ -1168,23 +1168,11 @@ mod tests {
             let hook = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
                 .as_str()
                 .ok_or("missing hook command")?;
-            assert_eq!(
-                hook,
-                format!(
-                    "{} hook claude chair-start",
-                    super::quote(executable.to_str().ok_or("executable")?)
-                )
-            );
-            assert_eq!(
-                settings["hooks"]["Stop"][0]["hooks"][0]["command"].as_str(),
-                Some(
-                    format!(
-                        "{} hook claude chair-stop",
-                        super::quote(executable.to_str().ok_or("executable")?)
-                    )
-                    .as_str()
-                )
-            );
+            let stop_hook = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+                .as_str()
+                .ok_or("missing stop hook command")?;
+            assert!(!hook.is_empty());
+            assert!(!stop_hook.is_empty());
             let hook_argv = if shell == "/bin/zsh" {
                 vec![shell.into(), "-f".into(), "-c".into(), hook.into()]
             } else {
@@ -1194,9 +1182,28 @@ mod tests {
             hook_options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
             let hook_output = SystemExecutor::new(1)?.execute(hook_options)?;
             assert_eq!(hook_output.termination, Termination::Exit(0));
+            let hook_argv = std::str::from_utf8(&hook_output.stdout.bytes)?;
+            let mut hook_argv = hook_argv.lines();
+            assert_eq!(hook_argv.next(), executable.to_str());
             assert_eq!(
-                std::str::from_utf8(&hook_output.stdout.bytes)?,
-                format!("{}\nhook\nclaude\nchair-start\n", executable.display())
+                hook_argv.collect::<Vec<_>>(),
+                ["hook", "claude", "chair-start"]
+            );
+            let stop_argv = if shell == "/bin/zsh" {
+                vec![shell.into(), "-f".into(), "-c".into(), stop_hook.into()]
+            } else {
+                vec![shell.into(), "-c".into(), stop_hook.into()]
+            };
+            let mut stop_options = ExecOptions::new(&stop_argv, &home, Duration::from_secs(2));
+            stop_options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
+            let stop_output = SystemExecutor::new(1)?.execute(stop_options)?;
+            assert_eq!(stop_output.termination, Termination::Exit(0));
+            let stop_output = std::str::from_utf8(&stop_output.stdout.bytes)?;
+            let mut stop_output = stop_output.lines();
+            assert_eq!(stop_output.next(), executable.to_str());
+            assert_eq!(
+                stop_output.collect::<Vec<_>>(),
+                ["hook", "claude", "chair-stop"]
             );
             assert!(
                 lines
@@ -1213,12 +1220,15 @@ mod tests {
 
     #[test]
     fn chair_quote_encodes_apostrophes_and_backslashes() {
-        assert_eq!(super::quote("/a b/$x"), "'/a b/$x'");
-        assert_eq!(super::quote("/a'b"), "'/a'\"'\"'b'");
-        assert_eq!(super::quote("'a''"), "\"'\"'a'\"'\"\"'\"");
-        assert_eq!(super::quote(r"/a\b"), r#"'/a'"\\"'b'"#);
-        assert_eq!(super::quote(r"\"), r#""\\""#);
-        assert_eq!(super::quote(""), "''");
+        for input in ["/a b/$x", "/a'b", "'a''", r"/a\b", r"\", ""] {
+            let command = format!("printf %s {}", super::quote(input));
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-c", &command])
+                .output()
+                .expect("shell starts");
+            assert!(output.status.success());
+            assert_eq!(output.stdout, input.as_bytes());
+        }
     }
 
     #[test]

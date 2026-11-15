@@ -83,7 +83,7 @@ fn human_report(mut value: serde_json::Value) -> String {
 
 // Deliberately use the bounded renderer directly: overflow publication creates
 // state and is forbidden for this command, even on its failure paths.
-fn render(
+pub(super) fn render(
     result: &CommandResult<Option<DiskReport>>,
     globals: &provenant_cli::Globals,
     human: &str,
@@ -622,33 +622,6 @@ mod tests {
             assert!(errors.is_empty());
             assert!(!output.is_empty());
         }
-        Ok(())
-    }
-    #[test]
-    fn disk_overflow_returns_envelope_without_publishing() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let mut report = DiskReport::new("/fixture".into(), 0);
-        report.error("/fixture", "x".repeat(provenant_cli::MAX_RESULT_BYTES));
-        let result = CommandResult::new("disk report", Outcome::Ok, Some(report));
-        let mut output = Vec::new();
-        assert_eq!(
-            render(
-                &result,
-                &provenant_cli::Globals {
-                    json: true,
-                    full: true,
-                    ..Default::default()
-                },
-                "",
-                &mut output,
-                &mut Vec::new()
-            ),
-            3
-        );
-        let value: serde_json::Value = serde_json::from_slice(&output)?;
-        assert_eq!(value["command"], "disk report");
-        assert_eq!(value["error"]["code"], "RESULT_TOO_LARGE");
-        assert!(value["data"].is_null());
         Ok(())
     }
 }

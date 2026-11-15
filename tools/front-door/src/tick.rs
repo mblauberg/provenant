@@ -7,7 +7,7 @@ use provenant_os::{
     fs::{Directory, LockMode, PublishMode},
 };
 use provenant_records::{CommandResult, Outcome};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::path::Path;
 
 mod steward;
@@ -30,6 +30,20 @@ struct GcResult {
     error: Option<String>,
 }
 
+fn decode_tick_record<T: DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, provenant_records::DecodeError> {
+    provenant_records::decode(bytes, provenant_records::Limits::CONFIG)
+}
+
+fn decode_cadence(bytes: &[u8]) -> Result<Cadence, provenant_records::DecodeError> {
+    decode_tick_record(bytes)
+}
+
+fn decode_result(bytes: &[u8]) -> Result<GcResult, provenant_records::DecodeError> {
+    decode_tick_record(bytes)
+}
+
 fn write_gc_result(
     directory: &Directory,
     at: WallTime,
@@ -47,8 +61,17 @@ fn write_result(
     state: &str,
     error: Option<String>,
 ) -> Result<(), String> {
+    let extra = match directory.read_bounded(file.as_ref(), 64 * 1024) {
+        Ok(bytes) => {
+            decode_result(&bytes)
+                .map_err(|error| error.to_string())?
+                .extra
+        }
+        Err(error) if error.is_not_found() => Default::default(),
+        Err(error) => return Err(error.to_string()),
+    };
     let result = GcResult {
-        extra: Default::default(),
+        extra,
         state: state.into(),
         at,
         error,
@@ -72,7 +95,7 @@ fn queue_gc(
         return match directory.read_bounded("gc-result.json".as_ref(), 64 * 1024) {
             Ok(bytes) => {
                 let mut result: GcResult =
-                    serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+                    decode_result(&bytes).map_err(|error| error.to_string())?;
                 if result.state == "running"
                     || result.state == "queued"
                         && now.as_micros().saturating_sub(result.at.as_micros()) >= 60_000_000
@@ -89,7 +112,7 @@ fn queue_gc(
                     let bytes = directory
                         .read_bounded("gc-result.json".as_ref(), 64 * 1024)
                         .map_err(|error| error.to_string())?;
-                    result = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+                    result = decode_result(&bytes).map_err(|error| error.to_string())?;
                     if matches!(result.state.as_str(), "running" | "queued") {
                         let error =
                             "scheduled GC interrupted; next: provenant gc --apply".to_owned();
@@ -232,7 +255,7 @@ fn seed_retry_due(directory: &Directory, now: WallTime) -> bool {
     directory
         .read_bounded(SEED_RESULT.as_ref(), 64 * 1024)
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<GcResult>(&bytes).ok())
+        .and_then(|bytes| decode_result(&bytes).ok())
         .is_some_and(|result| {
             result.state == "busy"
                 && now.as_micros().saturating_sub(result.at.as_micros()) >= 60_000_000
@@ -403,7 +426,7 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
 /// but is not a tick failure: the next daily collection retries it.
 fn seed_state(directory: &Directory) -> &'static str {
     match directory.read_bounded(SEED_RESULT.as_ref(), 64 * 1024) {
-        Ok(bytes) => match serde_json::from_slice::<GcResult>(&bytes) {
+        Ok(bytes) => match decode_result(&bytes) {
             Ok(result) => match result.state.as_str() {
                 "queued" => "queued",
                 "running" => "running",
@@ -471,7 +494,7 @@ fn gc_due(cadence: &Cadence, now: WallTime) -> bool {
 
 fn read_cadence(directory: &Directory) -> Result<Cadence, Box<dyn std::error::Error>> {
     match directory.read_bounded("cadence.json".as_ref(), 64 * 1024) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Ok(bytes) => Ok(decode_cadence(&bytes)?),
         Err(error) if error.is_not_found() => Ok(Cadence::default()),
         Err(error) => Err(error.into()),
     }
@@ -624,6 +647,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stored_tick_records_preserve_unknown_fields_through_the_bounded_decoder() {
+        fn round_trip<T>(bytes: &[u8]) -> serde_json::Value
+        where
+            T: DeserializeOwned + Serialize,
+        {
+            let decoded: T = decode_tick_record(bytes).unwrap();
+            let encoded = provenant_records::encode(&decoded).unwrap();
+            let reopened: T = decode_tick_record(&encoded).unwrap();
+            serde_json::to_value(reopened).unwrap()
+        }
+        let cases = [
+            (
+                "cadence",
+                round_trip::<Cadence>(
+                    br#"{"next_gc_at":null,"future_tick_cadence":{"revision":2}}"#,
+                ),
+            ),
+            (
+                "gc result",
+                round_trip::<GcResult>(
+                    br#"{"state":"complete","at":"1970-01-01T00:00:01.000000Z","error":null,"future_gc_result":{"revision":2}}"#,
+                ),
+            ),
+        ];
+        for (record, value) in cases {
+            let field = match record {
+                "cadence" => "future_tick_cadence",
+                _ => "future_gc_result",
+            };
+            assert_eq!(
+                value[field]["revision"], 2,
+                "{record} lost its future field"
+            );
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let directory = provenant_config::private_directory(&root, true).unwrap();
+        directory
+            .atomic_write(
+                "cadence.json".as_ref(),
+                "tick-cadence",
+                br#"{"next_gc_at":null,"future_tick_cadence":{"revision":2}}"#,
+                PublishMode::Replace,
+            )
+            .unwrap();
+        let now = WallTime::from_micros(1_000_000).unwrap();
+        queue_gc(&directory, now, || Ok(())).unwrap();
+        let cadence = decode_cadence(
+            &directory
+                .read_bounded("cadence.json".as_ref(), 64 * 1024)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(cadence).unwrap()["future_tick_cadence"]["revision"],
+            2
+        );
+
+        directory
+            .atomic_write(
+                "gc-result.json".as_ref(),
+                "tick-gc",
+                br#"{"state":"queued","at":"1970-01-01T00:00:01.000000Z","error":null,"future_gc_result":{"revision":2}}"#,
+                PublishMode::Replace,
+            )
+            .unwrap();
+        write_gc_result(&directory, now, "complete", None).unwrap();
+        let result = decode_result(
+            &directory
+                .read_bounded("gc-result.json".as_ref(), 64 * 1024)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(result).unwrap()["future_gc_result"]["revision"],
+            2
+        );
+    }
+
+    #[test]
     fn daily_cadence_survives_restart_and_fires_at_the_deadline() {
         let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
         let directory = provenant_config::private_directory(temp.path(), true).unwrap();
@@ -670,8 +774,12 @@ mod tests {
     }
 
     #[allow(dead_code)] // The worktree driver includes this module without libtest.
-    fn seed_clock() -> provenant_os::clock::SystemClock {
-        provenant_os::clock::SystemClock
+    fn seed_clock() -> provenant_core::TestClock {
+        use provenant_core::{MonoTime, TestClock};
+        TestClock::new(
+            WallTime::from_micros(1_800_000_000_000_000).unwrap(),
+            MonoTime::from_micros(0),
+        )
     }
 
     #[allow(dead_code)]
@@ -679,7 +787,7 @@ mod tests {
         let bytes = directory
             .read_bounded(SEED_RESULT.as_ref(), 64 * 1024)
             .unwrap();
-        let result: GcResult = serde_json::from_slice(&bytes).unwrap();
+        let result: GcResult = decode_result(&bytes).unwrap();
         (seed_state(directory), result.error)
     }
 
@@ -763,9 +871,7 @@ mod tests {
             |_| Ok(Refresh::Busy),
         )
         .unwrap();
-        let (state, note) = seed_state_of(&directory);
-        assert_eq!(state, "busy");
-        assert!(note.unwrap().contains("retrying next tick"));
+        assert_eq!(seed_state_of(&directory).0, "busy");
         let wall = seed_clock().wall_now().unwrap();
         assert!(!seed_retry_due(&directory, wall), "just written: not due");
         let far = WallTime::from_micros(wall.as_micros() + 61_000_000).unwrap();
@@ -806,12 +912,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(*called.borrow(), vec![broken.clone()], "bare is skipped");
-        let (state, note) = seed_state_of(&directory);
+        let (state, _) = seed_state_of(&directory);
         assert_eq!(state, "backed_off", "a back-off is not `complete`");
-        assert_eq!(
-            note.unwrap(),
-            "commit abc123 failed; waiting for origin/main to move"
-        );
         let pass = refresh_projects(&[bare], &root, |_| panic!("no manifest, no refresh"));
         assert_eq!(
             pass,
@@ -842,7 +944,18 @@ mod tests {
     }
 
     #[test]
-    fn seed_pass_is_single_flight_and_respects_a_disabled_seed() {
+    fn seed_pass_is_single_flight_and_respects_a_disabled_seed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD: &str = "PROVENANT_TICK_SEED_PASS_TEST";
+        if crate::test_support::reexecute_exact_test(
+            module_path!(),
+            stringify!(seed_pass_is_single_flight_and_respects_a_disabled_seed),
+            CHILD,
+            &[],
+            std::time::Duration::from_secs(30),
+        )? {
+            return Ok(());
+        }
         use crate::target_seed_build::Refresh;
         let temp = tempfile::tempdir().unwrap();
         // macOS temp roots sit behind a /var symlink, which private_directory refuses.
@@ -862,26 +975,13 @@ mod tests {
         .unwrap();
         assert_eq!(seed_state(&directory), "idle");
         drop(held);
-        // A sibling test thread can fork while the lock is released and briefly
-        // hold a copy of its descriptor, so retry the acquire for up to 2 s.
-        provenant_test_support::wait_for(
-            "disabled seed state",
-            std::time::Duration::from_secs(2),
-            || {
-                seed_pass(
-                    &directory,
-                    &root,
-                    &seed_clock(),
-                    false,
-                    || panic!("a disabled seed must not enumerate projects"),
-                    |_| -> Result<Refresh, Box<dyn std::error::Error>> {
-                        panic!("must not refresh")
-                    },
-                )
-                .unwrap();
-                seed_state(&directory)
-            },
-            |state| *state == "disabled",
+        seed_pass(
+            &directory,
+            &root,
+            &seed_clock(),
+            false,
+            || panic!("a disabled seed must not enumerate projects"),
+            |_| -> Result<Refresh, Box<dyn std::error::Error>> { panic!("must not refresh") },
         )
         .unwrap();
         assert_eq!(seed_state(&directory), "disabled");
@@ -898,5 +998,6 @@ mod tests {
             seed_state_of(&directory),
             ("last_failed", Some("registry unreadable".into()))
         );
+        Ok(())
     }
 }

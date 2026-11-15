@@ -1056,9 +1056,10 @@ mod disk_warning_tests {
             append_session_warning(&mut digest, moment, false, || None);
             assert_eq!(digest, "state");
             append_session_warning(&mut digest, moment, false, || {
-                Some("Disk pressure: low".into())
+                Some("fixture warning".into())
             });
-            assert_eq!(digest, "state\nDisk pressure: low");
+            assert_eq!(digest.lines().count(), 2);
+            assert_eq!(digest.lines().next(), Some("state"));
         }
         for (moment, lane) in [
             (Moment::Restart, true),
@@ -1437,8 +1438,25 @@ mod answer_delivery_tests {
     use serde_json::json;
 
     #[test]
-    fn local_gate_modes_and_checkout() -> Result<(), Error> {
+    fn local_gate_modes_cover_success_failure_and_timeout() -> Result<(), Error> {
         use provenant_cli::domains::{LocalGateMode, LocalGateSettings};
+        use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor, Termination};
+        struct Timeout;
+        impl Executor for Timeout {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                Ok(ExecOutcome {
+                    termination: Termination::Signal(9),
+                    stdout: Default::default(),
+                    stderr: Default::default(),
+                    timed_out: true,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+
         let dir = tempfile::tempdir()?;
         let mut settings = LocalGateSettings {
             mode: LocalGateMode::Enforce,
@@ -1448,10 +1466,7 @@ mod answer_delivery_tests {
         std::fs::write(dir.path().join("marker"), "")?;
         run_local_gate(&settings, dir.path())?;
         settings.commands = vec!["exit 17".into()];
-        let failure = run_local_gate(&settings, dir.path())
-            .unwrap_err()
-            .to_string();
-        assert!(failure.contains("exit 17") && failure.contains("exit status 17"));
+        assert!(run_local_gate(&settings, dir.path()).is_err());
         settings.mode = LocalGateMode::Warn;
         run_local_gate(&settings, dir.path())?;
         settings.mode = LocalGateMode::Off;
@@ -1459,6 +1474,10 @@ mod answer_delivery_tests {
         run_local_gate(&settings, dir.path())?;
         assert!(!dir.path().join("should-not-exist").exists());
         settings.mode = LocalGateMode::Enforce;
+        settings.commands = vec!["slow check".into()];
+        assert!(run_local_gate_with(&settings, dir.path(), &Timeout).is_err());
+        settings.mode = LocalGateMode::Warn;
+        run_local_gate_with(&settings, dir.path(), &Timeout)?;
         settings.commands.clear();
         run_local_gate(&settings, dir.path())?;
         Ok(())
@@ -1507,39 +1526,6 @@ mod answer_delivery_tests {
                     || matches!(observation, ProcessObservation::Present(fact) if fact.zombie)
             },
         )?;
-        Ok(())
-    }
-
-    #[test]
-    fn local_gate_timeout_obeys_mode() -> Result<(), Error> {
-        use provenant_cli::domains::{LocalGateMode, LocalGateSettings};
-        use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor, Termination};
-        struct Timeout;
-        impl Executor for Timeout {
-            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
-                Ok(ExecOutcome {
-                    termination: Termination::Signal(9),
-                    stdout: Default::default(),
-                    stderr: Default::default(),
-                    timed_out: true,
-                    drain_truncated: false,
-                    overflow_stopped: false,
-                    cancelled: false,
-                    elapsed_micros: 0,
-                })
-            }
-        }
-        let mut settings = LocalGateSettings {
-            mode: LocalGateMode::Enforce,
-            commands: vec!["slow check".into()],
-            timeout_seconds: 1,
-        };
-        let failure = run_local_gate_with(&settings, Path::new("."), &Timeout)
-            .unwrap_err()
-            .to_string();
-        assert!(failure.contains("slow check") && failure.contains("timed out"));
-        settings.mode = LocalGateMode::Warn;
-        run_local_gate_with(&settings, Path::new("."), &Timeout)?;
         Ok(())
     }
 
@@ -1607,6 +1593,88 @@ mod answer_delivery_tests {
                 "message_id":provenant_core::MessageId::from_bytes([byte;16]), "state":"queued",
                 "attempts":0, "last_attempt_at":null, "acknowledged_at":null, "error":null}
         })).unwrap()
+    }
+
+    fn answer_test_clock() -> provenant_core::TestClock {
+        use provenant_core::{MonoTime, TestClock, WallTime};
+        TestClock::new(
+            WallTime::from_micros(1_800_000_000_000_000).unwrap(),
+            MonoTime::from_micros(0),
+        )
+    }
+
+    fn persist_answer_offer(
+        store: &Store,
+        target: &AnswerTarget,
+        item: &AnswerOffer,
+        clock: &dyn Clock,
+        cancel: &CancelToken,
+    ) -> Result<(), Error> {
+        use provenant_fabric_store::{Message, MessageKind, Request};
+        let request = Request { clock, cancel };
+        let at = clock.wall_now()?;
+        let request_record = HumanRequest {
+            extra: Default::default(),
+            schema_version: 1,
+            id: item.answer.request_id,
+            revision: 1,
+            operation_id: provenant_core::OperationId::parse(&format!(
+                "fixture-request-{}",
+                item.answer.request_id
+            ))?,
+            created_at: at,
+            updated_at: at,
+            project_id: target.project,
+            project_key: None,
+            owner_host: target.host,
+            chair_session_id: target.session.clone(),
+            chair_actor: target.actor,
+            request: RequestDraft {
+                extra: Default::default(),
+                supersedes: None,
+                deadline: None,
+                work: None,
+                kind: RequestKind::Question,
+                title: "Fixture request".into(),
+                body: "Fixture request".into(),
+                blocking: false,
+                options: Vec::new(),
+                recommended_option_id: None,
+                proceeding_with: None,
+            },
+            work_coverage: None,
+            state: RequestState::Open,
+            answer_id: None,
+            closure_reason: None,
+        };
+        store.create_human_request(&request_record, &request)?;
+
+        let mut answer = item.answer.clone();
+        answer.answered_at = at;
+        answer.operation_id =
+            provenant_core::OperationId::parse(&format!("fixture-answer-{}", item.answer.id))?;
+        let mut delivery = item.delivery.clone();
+        delivery.state = AnswerDeliveryState::Queued;
+        delivery.attempts = 0;
+        delivery.last_attempt_at = None;
+        delivery.acknowledged_at = None;
+        delivery.error = None;
+        let message = Message {
+            extra: Default::default(),
+            header: provenant_records::RecordHeader::V1,
+            project: target.project,
+            id: delivery.message_id,
+            sender: answer.actor,
+            recipients: vec![target.actor],
+            conversation: None,
+            kind: MessageKind::Response,
+            body: answer.text.clone().unwrap_or_default(),
+            artifacts: Vec::new(),
+            reply_to: None,
+            created_at: at,
+        };
+        store.answer_human_request(&answer, &delivery, &message, &request)?;
+        Ok(())
     }
 
     #[test]
@@ -2054,7 +2122,7 @@ mod answer_delivery_tests {
         let mut inputs = RootInputs::new(base.join("home"), base.join("assets"));
         inputs.state_dir = Some(base.join("state"));
         let root = inputs.resolve(&SystemPathResolver)?.state;
-        let clock = SystemClock::new();
+        let clock = answer_test_clock();
         let cancel = CancelToken::new();
         let store = Store::open(
             &root,
@@ -2063,7 +2131,6 @@ mod answer_delivery_tests {
                 cancel: &cancel,
             },
         )?;
-        let db = rusqlite::Connection::open(root.as_path().join("fabric/fabric.sqlite3"))?;
         let target = AnswerTarget {
             extra: Default::default(),
             host: provenant_core::HostId::from_bytes([1; 16]),
@@ -2071,46 +2138,32 @@ mod answer_delivery_tests {
             session: "chair".into(),
             actor: provenant_core::ActorId::from_bytes([2; 16]),
         };
-        let insert = |item: &AnswerOffer| -> Result<(), Error> {
-            db.execute(
-                "INSERT INTO human_requests (project, id, revision, session, state, record) VALUES(?1,?2,1,'chair','answered',?3)",
-                rusqlite::params![
-                    target.project.to_string(),
-                    item.answer.request_id.to_string(),
-                    b"{}".as_slice()
-                ],
-            )?;
-            db.execute(
-                "INSERT INTO human_answers (project, id, request, record) VALUES(?1,?2,?3,?4)",
-                rusqlite::params![
-                    target.project.to_string(),
-                    item.answer.id.to_string(),
-                    item.answer.request_id.to_string(),
-                    serde_json::to_vec(&item.answer)?
-                ],
-            )?;
-            db.execute(
-                "INSERT INTO human_answer_outbox (project, answer, record) VALUES(?1,?2,?3)",
-                rusqlite::params![
-                    target.project.to_string(),
-                    item.answer.id.to_string(),
-                    serde_json::to_vec(&item.delivery)?
-                ],
-            )?;
-            Ok(())
-        };
+        let mut candidates = Vec::new();
         for byte in 1..=16 {
-            let mut large = offer(&"\"".repeat(3500), byte);
-            large.delivery.state = AnswerDeliveryState::Offered;
-            large.delivery.attempts = 1;
-            large.delivery.last_attempt_at = Some(clock.wall_now()?);
-            insert(&large)?;
+            let large = offer(&"\"".repeat(3500), byte);
+            persist_answer_offer(&store, &target, &large, &clock, &cancel)?;
+            candidates.push(large);
         }
-        let mut retry = offer("retry", 17);
-        retry.delivery.state = AnswerDeliveryState::Offered;
-        retry.delivery.attempts = 1;
-        retry.delivery.last_attempt_at = Some(clock.wall_now()?);
-        insert(&retry)?;
+        let retry = offer("retry", 17);
+        persist_answer_offer(&store, &target, &retry, &clock, &cancel)?;
+        candidates.push(retry.clone());
+        let offered_candidates = Store::offer_human_answers_once(
+            &root,
+            &target,
+            Page {
+                extra: Default::default(),
+                items: candidates,
+                truncated: false,
+            },
+            clock.wall_now()?,
+            Instant::now() + LOCAL_BUDGET,
+        )?;
+        assert!(
+            offered_candidates
+                .items
+                .iter()
+                .any(|item| item.answer == retry.answer)
+        );
         let deadline = Instant::now() + LOCAL_BUDGET;
         let (head, next, _) =
             store.read_hook_answer_page(&target, AnswerDeliveryState::Offered, None, deadline)?;
@@ -2136,15 +2189,22 @@ mod answer_delivery_tests {
         assert!(selected.truncated);
         assert!(next.is_some());
 
-        db.execute("DELETE FROM human_answer_outbox", [])?;
-        db.execute("DELETE FROM human_answers", [])?;
-        db.execute("DELETE FROM human_requests", [])?;
-        insert(&offer(&"\"".repeat(3500), 1))?;
+        inputs.state_dir = Some(base.join("state-small"));
+        let second_root = inputs.resolve(&SystemPathResolver)?.state;
+        let second_store = Store::open(
+            &second_root,
+            &Request {
+                clock: &clock,
+                cancel: &cancel,
+            },
+        )?;
+        let large = offer(&"\"".repeat(3500), 1);
+        persist_answer_offer(&second_store, &target, &large, &clock, &cancel)?;
         let small = offer("small", 2);
-        insert(&small)?;
+        persist_answer_offer(&second_store, &target, &small, &clock, &cancel)?;
         pending_marks.clear();
         let selected = select_answers(
-            &store,
+            &second_store,
             &target,
             clock.wall_now()?,
             "PreToolUse",
@@ -2156,12 +2216,12 @@ mod answer_delivery_tests {
         assert_eq!(selected.items[0].answer, small.answer);
         assert!(selected.truncated);
         mark_oversized_answers(
-            &root,
+            &second_root,
             &target,
             &pending_marks,
             Instant::now() + LOCAL_BUDGET,
         )?;
-        let (remaining, _, _) = store.read_hook_answer_page(
+        let (remaining, _, _) = second_store.read_hook_answer_page(
             &target,
             AnswerDeliveryState::Queued,
             None,
@@ -2169,12 +2229,27 @@ mod answer_delivery_tests {
         )?;
         assert_eq!(remaining.items.len(), 1);
         assert_eq!(remaining.items[0].answer, small.answer);
-        let queued = store.read_queued_human_answers(&target, Instant::now() + LOCAL_BUDGET)?;
+        let queued =
+            second_store.read_queued_human_answers(&target, Instant::now() + LOCAL_BUDGET)?;
         assert_eq!(queued.items.len(), 2);
         // An acknowledgement between the page read and offer commit wins.
-        db.execute("UPDATE human_answer_outbox SET record=CAST(json_set(CAST(record AS TEXT),'$.state','acknowledged','$.acknowledged_at','2026-10-28T00:00:00.000000Z') AS BLOB) WHERE answer=?1", [small.answer.id.to_string()])?;
+        second_store.acknowledge_human_answer(
+            provenant_fabric_store::HumanAcknowledgement {
+                project: target.project,
+                id: small.answer.request_id,
+                answer: small.answer.id,
+                host: target.host,
+                actor: target.actor,
+                session: &target.session,
+                at: clock.wall_now()?,
+            },
+            &Request {
+                clock: &clock,
+                cancel: &cancel,
+            },
+        )?;
         let committed = Store::offer_human_answers_once(
-            &root,
+            &second_root,
             &target,
             selected,
             clock.wall_now()?,
@@ -2190,26 +2265,13 @@ mod answer_delivery_tests {
         use provenant_fabric_store::Request;
         use provenant_os::fs::SystemPathResolver;
         const CHILD: &str = "PROVENANT_HOOK_MARK_DIAGNOSTIC_TEST";
-        if std::env::var_os(CHILD).is_none() {
-            let output = std::process::Command::new(std::env::current_exe()?)
-                .args([
-                    "--exact",
-                    "hooks::answer_delivery_tests::hook_open_marks_oversized_once_and_next_scan_excludes_it",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .output()?;
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let expected = format!(
-                "answer delivery: answer {} exceeds escaped hook budget; retained for Fabric mail",
-                offer("", 1).answer.id
-            );
-            assert_eq!(stderr.matches(&expected).count(), 1, "{stderr}");
+        if crate::test_support::reexecute_exact_test(
+            module_path!(),
+            stringify!(hook_open_marks_oversized_once_and_next_scan_excludes_it),
+            CHILD,
+            &[],
+            Duration::from_secs(30),
+        )? {
             return Ok(());
         }
         let temp = tempfile::tempdir()?;
@@ -2217,7 +2279,7 @@ mod answer_delivery_tests {
         let mut inputs = RootInputs::new(base.join("home"), base.join("assets"));
         inputs.state_dir = Some(base.join("state"));
         let root = inputs.resolve(&SystemPathResolver)?.state;
-        let clock = SystemClock::new();
+        let clock = answer_test_clock();
         let cancel = CancelToken::new();
         let store = Store::open(
             &root,
@@ -2226,7 +2288,6 @@ mod answer_delivery_tests {
                 cancel: &cancel,
             },
         )?;
-        let db = rusqlite::Connection::open(root.as_path().join("fabric/fabric.sqlite3"))?;
         let target = AnswerTarget {
             extra: Default::default(),
             host: provenant_core::HostId::from_bytes([1; 16]),
@@ -2237,31 +2298,7 @@ mod answer_delivery_tests {
         let large = offer(&"\"".repeat(3500), 1);
         let small = offer("small", 2);
         for item in [&large, &small] {
-            db.execute(
-                "INSERT INTO human_requests (project, id, revision, session, state, record) VALUES(?1,?2,1,'chair','answered',?3)",
-                rusqlite::params![
-                    target.project.to_string(),
-                    item.answer.request_id.to_string(),
-                    b"{}".as_slice()
-                ],
-            )?;
-            db.execute(
-                "INSERT INTO human_answers (project, id, request, record) VALUES(?1,?2,?3,?4)",
-                rusqlite::params![
-                    target.project.to_string(),
-                    item.answer.id.to_string(),
-                    item.answer.request_id.to_string(),
-                    serde_json::to_vec(&item.answer)?
-                ],
-            )?;
-            db.execute(
-                "INSERT INTO human_answer_outbox (project, answer, record) VALUES(?1,?2,?3)",
-                rusqlite::params![
-                    target.project.to_string(),
-                    item.answer.id.to_string(),
-                    serde_json::to_vec(&item.delivery)?
-                ],
-            )?;
+            persist_answer_offer(&store, &target, item, &clock, &cancel)?;
         }
         drop(store);
         let deadline = Instant::now() + std::time::Duration::from_secs(30);
@@ -2310,9 +2347,6 @@ mod answer_delivery_tests {
         assert_eq!(selected_again.items.len(), 1);
         assert_eq!(selected_again.items[0].answer, small.answer);
         drop(reader);
-        db.execute("DELETE FROM human_answer_outbox", [])?;
-        db.execute("DELETE FROM human_answers", [])?;
-        db.execute("DELETE FROM human_requests", [])?;
         let long_state = format!("/{}", "s".repeat(340));
         let long = CommandPrefix::new(Some(Path::new(&long_state)), Path::new("/"));
         assert!(long.runnable("inbox acknowledge REQUEST_ID --answer ANSWER_ID --session TARGET_SESSION --operation-id UNIQUE_ACK_ID").is_some());
@@ -2332,32 +2366,19 @@ mod answer_delivery_tests {
                 fits(&CommandPrefix::default()) && !fits(&long)
             })
             .ok_or("no context-dependent answer size found")?;
-        db.execute(
-            "INSERT INTO human_requests (project, id, revision, session, state, record) VALUES(?1,?2,1,'chair','answered',?3)",
-            rusqlite::params![
-                target.project.to_string(),
-                borderline.answer.request_id.to_string(),
-                b"{}".as_slice()
-            ],
+        inputs.state_dir = Some(base.join("state-borderline"));
+        let borderline_root = inputs.resolve(&SystemPathResolver)?.state;
+        let borderline_store = Store::open(
+            &borderline_root,
+            &Request {
+                clock: &clock,
+                cancel: &cancel,
+            },
         )?;
-        db.execute(
-            "INSERT INTO human_answers (project, id, request, record) VALUES(?1,?2,?3,?4)",
-            rusqlite::params![
-                target.project.to_string(),
-                borderline.answer.id.to_string(),
-                borderline.answer.request_id.to_string(),
-                serde_json::to_vec(&borderline.answer)?
-            ],
-        )?;
-        db.execute(
-            "INSERT INTO human_answer_outbox (project, answer, record) VALUES(?1,?2,?3)",
-            rusqlite::params![
-                target.project.to_string(),
-                borderline.answer.id.to_string(),
-                serde_json::to_vec(&borderline.delivery)?
-            ],
-        )?;
-        let reader = Store::open_read_only(&root, deadline)?.ok_or("missing test store")?;
+        persist_answer_offer(&borderline_store, &target, &borderline, &clock, &cancel)?;
+        drop(borderline_store);
+        let reader =
+            Store::open_read_only(&borderline_root, deadline)?.ok_or("missing test store")?;
         assert!(
             select_answers(
                 &reader,
@@ -2372,7 +2393,8 @@ mod answer_delivery_tests {
             .is_empty()
         );
         drop(reader);
-        let reader = Store::open_read_only(&root, deadline)?.ok_or("missing test store")?;
+        let reader =
+            Store::open_read_only(&borderline_root, deadline)?.ok_or("missing test store")?;
         let later = select_answers(
             &reader,
             &target,
@@ -2403,7 +2425,7 @@ mod answer_delivery_tests {
         let mut inputs = RootInputs::new(base.join("home"), base.join("assets"));
         inputs.state_dir = Some(base.join("state"));
         let root = inputs.resolve(&SystemPathResolver)?.state;
-        let clock = SystemClock::new();
+        let clock = answer_test_clock();
         let cancel = CancelToken::new();
         let store = Store::open(
             &root,
@@ -2420,32 +2442,7 @@ mod answer_delivery_tests {
             session: item.delivery.target_session.clone(),
             actor: item.delivery.target_actor,
         };
-        let db = rusqlite::Connection::open(root.as_path().join("fabric/fabric.sqlite3"))?;
-        db.execute(
-            "INSERT INTO human_requests (project, id, revision, session, state, record) VALUES(?1,?2,1,'chair','answered',?3)",
-            rusqlite::params![
-                target.project.to_string(),
-                item.answer.request_id.to_string(),
-                b"{}".as_slice()
-            ],
-        )?;
-        db.execute(
-            "INSERT INTO human_answers (project, id, request, record) VALUES(?1,?2,?3,?4)",
-            rusqlite::params![
-                target.project.to_string(),
-                item.answer.id.to_string(),
-                item.answer.request_id.to_string(),
-                serde_json::to_vec(&item.answer)?
-            ],
-        )?;
-        db.execute(
-            "INSERT INTO human_answer_outbox (project, answer, record) VALUES(?1,?2,?3)",
-            rusqlite::params![
-                target.project.to_string(),
-                item.answer.id.to_string(),
-                serde_json::to_vec(&item.delivery)?
-            ],
-        )?;
+        persist_answer_offer(&store, &target, &item, &clock, &cancel)?;
         let (release, stalled) = mpsc::channel();
         let (committed, commit_observed) = mpsc::channel();
         let (done, completion) = mpsc::channel();

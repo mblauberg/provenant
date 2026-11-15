@@ -652,7 +652,7 @@ fn collect(
     receiver: &mpsc::Receiver<Update>,
     latest: &mut [Option<Reading>],
     settled: &mut Vec<usize>,
-    deadline: Instant,
+    mut remaining: impl FnMut() -> Duration,
     any: bool,
     changed: &mut impl FnMut(usize, &Reading),
 ) -> bool {
@@ -660,7 +660,7 @@ fn collect(
         if wait_done(latest, settled, any) {
             return true;
         }
-        let left = deadline.saturating_duration_since(Instant::now());
+        let left = remaining();
         let Ok(update) = receiver.recv_timeout(left) else {
             for reading in latest.iter_mut().flatten() {
                 if !reading.done() && reading.data.is_object() {
@@ -1334,7 +1334,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             &receiver,
             &mut latest,
             &mut settled,
-            deadline,
+            || deadline.saturating_duration_since(Instant::now()),
             command.any,
             &mut transition,
         );
@@ -1437,7 +1437,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_peer_source_remains_in_final_observation() {
+    fn completed_peer_source_is_recorded_as_remote() {
         let host = provenant_core::HostId::parse(&"a".repeat(32)).expect("fixture host");
         let completed_peer = Reading {
             settle: Settle::Succeeded,
@@ -1447,13 +1447,8 @@ mod tests {
         let mut history = ObservationHistory::default();
         history.record(&completed_peer, Some(&host));
 
-        let final_observation = history.render(
-            None,
-            &LocalCadence::compiled(Duration::from_millis(500)),
-            Some("event source unavailable: fixture parent missing"),
-        );
         assert!(completed_peer.done());
-        assert!(final_observation.contains("peer/relay or unrepresented rows reread every 500 ms"));
+        assert!(history.remote_source_seen);
     }
 
     #[test]
@@ -1513,19 +1508,7 @@ mod tests {
             LocalCadence::compiled(Duration::from_secs(1)),
         );
         assert!(!log.exists());
-        let clock = provenant_core::TestClock::new(
-            provenant_core::WallTime::from_micros(0).expect("valid fixture time"),
-            provenant_core::MonoTime::from_micros(0),
-        );
-        let wake = observation
-            .wait(Duration::ZERO, &CancelToken::new(), &clock)
-            .expect("zero deadline does not touch the clock");
-        assert_eq!(wake, ObservationWake::NativeTimeout);
-    }
-
-    #[test]
-    fn a_short_fallback_deadline_is_not_mistaken_for_a_paced_tick() {
-        let mut observation = LocalObservation::paced(
+        let mut fallback = LocalObservation::paced(
             LocalCadence::compiled(Duration::from_secs(1)),
             "fixture has no native event backend",
         );
@@ -1533,10 +1516,14 @@ mod tests {
             provenant_core::WallTime::from_micros(0).expect("valid fixture time"),
             provenant_core::MonoTime::from_micros(0),
         );
-        let wake = observation
-            .wait(Duration::ZERO, &CancelToken::new(), &clock)
-            .expect("zero deadline does not touch the clock");
-        assert_eq!(wake, ObservationWake::NativeTimeout);
+        for observation in [&mut observation, &mut fallback] {
+            assert_eq!(
+                observation
+                    .wait(Duration::ZERO, &CancelToken::new(), &clock)
+                    .expect("zero deadline does not touch the clock"),
+                ObservationWake::NativeTimeout
+            );
+        }
     }
 
     #[test]
@@ -1629,7 +1616,7 @@ mod tests {
                 &receiver,
                 &mut latest,
                 &mut settled,
-                Instant::now(),
+                || Duration::ZERO,
                 false,
                 &mut |_, _| {}
             ));
@@ -1679,7 +1666,7 @@ mod tests {
                 &receiver,
                 &mut latest,
                 &mut settled,
-                Instant::now(),
+                || Duration::ZERO,
                 false,
                 &mut |_, _| {},
             );
@@ -1713,8 +1700,13 @@ mod tests {
     #[test]
     fn bare_wait_reports_an_unreadable_graph_as_unsuccessful()
     -> Result<(), Box<dyn std::error::Error>> {
-        if crate::fabric::peer_tests::host_test(
-            "status_wait::tests::bare_wait_reports_an_unreadable_graph_as_unsuccessful",
+        const CHILD: &str = "PROVENANT_STATUS_WAIT_BARE_TEST";
+        if crate::test_support::reexecute_exact_test(
+            module_path!(),
+            stringify!(bare_wait_reports_an_unreadable_graph_as_unsuccessful),
+            CHILD,
+            &[],
+            std::time::Duration::from_secs(30),
         )? {
             return Ok(());
         }
@@ -1864,7 +1856,7 @@ mod tests {
             &receiver,
             &mut latest,
             &mut settled,
-            Instant::now() + Duration::from_millis(20),
+            || Duration::ZERO,
             any,
             &mut |_, _| {},
         );
@@ -1872,36 +1864,51 @@ mod tests {
     }
 
     #[test]
-    fn any_returns_at_the_first_settlement_and_takes_its_verdict() {
+    fn any_and_all_waits_use_the_settlement_rows() {
         use Settle::*;
-        let (outcome, settled) = wait_on(
-            &[
-                (0, Pending),
-                (1, Pending),
-                (1, Unsuccessful),
-                (0, Succeeded),
-            ],
-            2,
-            true,
-        );
-        assert_eq!(settled, [1], "the later settlement was never read");
-        assert_eq!(outcome, Outcome::Failed);
-        assert_eq!(
-            wait_on(&[(0, Pending), (1, NeedsInput)], 2, true).0,
-            Outcome::Pending
-        );
-    }
-
-    #[test]
-    fn all_waits_for_every_target_and_a_timeout_is_124() {
-        use Settle::*;
-        let (outcome, _) = wait_on(&[(0, Succeeded), (1, Pending)], 2, false);
-        assert_eq!(provenant_cli::exit_status(&outcome), 124);
-        let (outcome, _) = wait_on(&[(0, Succeeded), (1, Pending), (1, Succeeded)], 2, false);
-        assert_eq!(provenant_cli::exit_status(&outcome), 0);
-        let (outcome, _) = wait_on(&[(0, NeedsInput), (1, Unsuccessful)], 2, false);
-        assert_eq!(provenant_cli::exit_status(&outcome), 1);
-        assert_eq!(provenant_cli::exit_status(&wait_on(&[], 1, true).0), 124);
+        for (any, updates, expected, settled) in [
+            (
+                true,
+                vec![
+                    (0, Pending),
+                    (1, Pending),
+                    (1, Unsuccessful),
+                    (0, Succeeded),
+                ],
+                Outcome::Failed,
+                vec![1],
+            ),
+            (
+                true,
+                vec![(0, Pending), (1, NeedsInput)],
+                Outcome::Pending,
+                vec![1],
+            ),
+            (
+                false,
+                vec![(0, Succeeded), (1, Pending)],
+                Outcome::Timeout,
+                vec![0],
+            ),
+            (
+                false,
+                vec![(0, Succeeded), (1, Pending), (1, Succeeded)],
+                Outcome::Ok,
+                vec![0, 1],
+            ),
+            (
+                false,
+                vec![(0, NeedsInput), (1, Unsuccessful)],
+                Outcome::Failed,
+                vec![0, 1],
+            ),
+            (true, vec![], Outcome::Timeout, vec![]),
+        ] {
+            let (outcome, settled_actual) = wait_on(&updates, 2, any);
+            assert_eq!(outcome, expected, "any={any}, updates={updates:?}");
+            assert_eq!(settled_actual, settled, "any={any}, updates={updates:?}");
+        }
+        assert_eq!(provenant_cli::exit_status(&Outcome::Timeout), 124);
     }
 
     #[test]

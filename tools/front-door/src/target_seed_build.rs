@@ -547,29 +547,37 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::disallowed_methods)] // A real deadline bounds the fork-race retry.
-    fn refresh_runs_one_build_at_a_time_and_failure_publishes_nothing() {
-        let state = tempfile::tempdir().unwrap();
-        {
-            // Another host build holds the build lock: no second build starts.
-            target_seed::lock_store(state.path()).map(drop).unwrap();
-            let _running = target_seed::lock_build(state.path()).unwrap();
-            let outcome = refresh_with(state.path(), "p", "aaa", |_| panic!("must not build"));
-            assert_eq!(outcome.unwrap(), Refresh::Busy);
+    fn refresh_runs_one_build_at_a_time_and_failure_publishes_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD: &str = "PROVENANT_TARGET_SEED_BUILD_TEST";
+        if crate::test_support::reexecute_exact_test(
+            module_path!(),
+            stringify!(refresh_runs_one_build_at_a_time_and_failure_publishes_nothing),
+            CHILD,
+            &[],
+            std::time::Duration::from_secs(30),
+        )? {
+            return Ok(());
         }
-        // A sibling test thread can fork while the lock above is released and
-        // briefly hold a copy of its descriptor, so retry for at most 2 s.
-        let retry_deadline = std::time::Instant::now() + Duration::from_secs(2);
-        let failed = loop {
-            let attempt = refresh_with(state.path(), "p", "aaa", |_| {
-                Err(io::Error::other("build failed").into())
-            });
-            if !matches!(attempt, Ok(Refresh::Busy)) || std::time::Instant::now() >= retry_deadline
-            {
-                break attempt;
-            }
-            std::thread::yield_now();
-        };
+        let state = tempfile::tempdir().unwrap();
+        target_seed::lock_store(state.path()).map(drop).unwrap();
+        let lock_state = state.path().to_path_buf();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let running = target_seed::lock_build(&lock_state).unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(running);
+        });
+        locked_rx.recv().unwrap();
+        let outcome = refresh_with(state.path(), "p", "aaa", |_| panic!("must not build"));
+        assert_eq!(outcome.unwrap(), Refresh::Busy);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let failed = refresh_with(state.path(), "p", "aaa", |_| {
+            Err(io::Error::other("build failed").into())
+        });
         assert!(failed.is_err(), "{failed:?}");
         assert_eq!(newest_generation_commit(state.path()), None);
         // The failed commit is backed off; a newer commit builds again.
@@ -590,6 +598,7 @@ mod tests {
             "success clears the back-off"
         );
         freeze(state.path());
+        Ok(())
     }
 
     #[test]

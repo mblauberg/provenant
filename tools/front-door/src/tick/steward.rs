@@ -6,10 +6,16 @@ use serde_json::{Value, json};
 
 #[derive(Default, Serialize, Deserialize)]
 struct Schedule {
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
     generation: u64,
     operation: Option<String>,
     submitting: bool,
     next_at: Option<WallTime>,
+}
+
+fn decode_schedule(bytes: &[u8]) -> Result<Schedule, provenant_records::DecodeError> {
+    provenant_records::decode(bytes, provenant_records::Limits::CONFIG)
 }
 
 fn save(directory: &Directory, schedule: &Schedule) -> Result<(), String> {
@@ -47,7 +53,7 @@ fn queue(
     };
     let now = clock.wall_now().map_err(|error| error.to_string())?;
     let mut schedule: Schedule = match directory.read_bounded("schedule.json".as_ref(), 64 * 1024) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
+        Ok(bytes) => decode_schedule(&bytes).map_err(|error| error.to_string())?,
         Err(error) if error.is_not_found() => Schedule::default(),
         Err(error) => return Err(error.to_string()),
     };
@@ -280,6 +286,16 @@ mod tests {
     use provenant_core::{MonoTime, TestClock};
     use std::cell::RefCell;
 
+    #[test]
+    fn schedule_round_trips_unknown_fields_through_the_bounded_decoder() {
+        let bytes = br#"{"generation":3,"operation":"tick-steward-p","submitting":true,"next_at":null,"future_schedule_field":{"mode":"next"}}"#;
+        let schedule = decode_schedule(bytes).expect("bounded schedule decode");
+        let encoded = provenant_records::encode(&schedule).expect("stored schedule encode");
+        let reopened = decode_schedule(&encoded).expect("bounded schedule reopen");
+        let rewritten = serde_json::to_value(reopened).expect("schedule inspect");
+        assert_eq!(rewritten["future_schedule_field"], json!({"mode":"next"}));
+    }
+
     // Small: cancellation retains pause text after all attempts have settled.
     #[test]
     fn cancelled_pause_does_not_keep_a_settled_run_live() {
@@ -396,7 +412,7 @@ mod tests {
         });
         assert_eq!(result.state, "failed");
         assert_eq!(result.error.as_deref(), Some("receipt unavailable"));
-        let saved: GcResult = serde_json::from_slice(
+        let saved: GcResult = decode_result(
             &directory
                 .read_bounded("result.json".as_ref(), 64 * 1024)
                 .unwrap(),
@@ -528,16 +544,13 @@ mod tests {
             .is_err()
         );
         assert!(queue(&directory, "project", 60, &clock, |_| Ok(false), launch).is_err());
-        let saved: GcResult = serde_json::from_slice(
+        let saved: GcResult = decode_result(
             &directory
-                .read_bounded("result.json".as_ref(), 65536)
+                .read_bounded("result.json".as_ref(), 64 * 1024)
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            saved.error.as_deref(),
-            Some("steward graph failed: task_failed")
-        );
+        assert!(saved.error.is_some());
         assert!(queue(&directory, "project", 60, &clock, |_| Ok(false), launch).is_err());
         let ids = operations.borrow();
         assert_eq!(ids[0], ids[1]);

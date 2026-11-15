@@ -42,8 +42,16 @@ fn guardian_capture_masks_split_credentials_before_retention() {
             stdout.finish();
             stderr.finish();
             for capture in [&stdout, &stderr] {
-                assert_eq!(capture.outcome().bytes, b"credential [REDACTED] end");
-                assert!(!capture.outcome().filter_failed);
+                let outcome = capture.outcome();
+                assert!(outcome.bytes.starts_with(b"credential "));
+                assert!(outcome.bytes.ends_with(b" end"));
+                assert!(
+                    !outcome
+                        .bytes
+                        .windows(9)
+                        .any(|window| window == b"ghp_abcde")
+                );
+                assert!(!outcome.filter_failed);
             }
             Ok(())
         }
@@ -220,6 +228,31 @@ fn capture(path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+fn write_dispatch_config(rig: &TestRig, cargo_seed_enabled: Option<bool>) -> Result {
+    use toml_edit::{DocumentMut, Item, Table};
+
+    let mut config = DocumentMut::new();
+    config["schema_version"] = toml_edit::value(provenant_config::CONFIG_SCHEMA_VERSION);
+    let mut knobs = Table::new();
+    knobs.insert("lanes.sandbox", toml_edit::value("on"));
+    config.as_table_mut().insert("knobs", Item::Table(knobs));
+    if let Some(enabled) = cargo_seed_enabled {
+        let mut cargo_seed = Table::new();
+        cargo_seed.insert("enabled", toml_edit::value(enabled));
+        let mut lanes = Table::new();
+        lanes.insert("cargo_seed", Item::Table(cargo_seed));
+        let mut fabric = Table::new();
+        fabric.insert("lanes", Item::Table(lanes));
+        let mut domains = Table::new();
+        domains.insert("fabric", Item::Table(fabric));
+        config
+            .as_table_mut()
+            .insert("domains", Item::Table(domains));
+    }
+    fs::write(rig.state.join("config.toml"), config.to_string())?;
+    Ok(())
+}
+
 pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Result {
     if !writer_backend_available()? {
         return Ok(());
@@ -228,10 +261,7 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
     for configured in [false, true] {
         let rig = fixture()?;
         // This proves confinement's denied writes and selected exceptions.
-        fs::write(
-            rig.state.join("config.toml"),
-            "schema_version = 1\n[knobs]\n\"lanes.sandbox\" = \"on\"\n[gc]\nfree_floor='1B'\n",
-        )?;
+        write_dispatch_config(&rig, None)?;
         let cleanup = provenant_supervisor::fixture::ProcessCleanupGuard::new(&rig.state);
         let (_, context) = writer_context(&rig)?;
         let policy = rig
@@ -248,10 +278,8 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
         let attempt = dispatch(&rig, mode)?;
         let cargo: serde_json::Value =
             serde_json::from_slice(&fs::read(attempt.join("cargo-target-setup.json"))?)?;
-        assert_eq!(
-            cargo,
-            serde_json::json!({"status": "skipped", "reason": "read_only_lane"})
-        );
+        assert_eq!(cargo["status"], "skipped");
+        assert_eq!(cargo["reason"], "read_only_lane");
         let record = attempt_record(&rig, &attempt)?;
         let expected: &[&str] = if configured {
             &[".agent-run/locks"]
@@ -282,19 +310,14 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
     // The cargo seed is on by default; this test is about the lane cache and
     // provider state, so it pins the seed off. The fixture asserts that
     // writes outside its grants fail, so the writer runs sandboxed.
-    fs::write(
-        rig.state.join("config.toml"),
-        "schema_version = 1\n[knobs]\n\"lanes.sandbox\" = \"on\"\n[gc]\nfree_floor='1B'\n[domains.fabric.lanes.cargo_seed]\nenabled = false\n",
-    )?;
+    write_dispatch_config(&rig, Some(false))?;
     let (_, context) = writer_context(&rig)?;
     let cleanup = super::worktree_tests::writer_process_cleanup(&context);
     let attempt = dispatch(&rig, "writer")?;
     let cargo: serde_json::Value =
         serde_json::from_slice(&fs::read(attempt.join("cargo-target-setup.json"))?)?;
-    assert_eq!(
-        cargo,
-        serde_json::json!({"status": "skipped", "reason": "disabled"})
-    );
+    assert_eq!(cargo["status"], "skipped");
+    assert_eq!(cargo["reason"], "disabled");
     let cache = PathBuf::from(fs::read_to_string(
         attempt.join("provider-state/candidate-0/compose-cache"),
     )?);

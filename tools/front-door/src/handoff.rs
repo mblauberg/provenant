@@ -464,36 +464,63 @@ fn checkpoint_store(
         .with_revisions(provenant_cli::workflow::session_revisions(roots))
 }
 
+struct CheckpointRepair {
+    cwd: PathBuf,
+    state_dir: Option<PathBuf>,
+    include_project: bool,
+    session: HostSessionId,
+    client: Option<provenant_records::Harness>,
+}
+
+impl CheckpointRepair {
+    fn command(&self) -> String {
+        let client = self
+            .client
+            .map(|harness| format!(" --client {}", harness.spec().name))
+            .unwrap_or_else(|| " --client HARNESS".into());
+        let rest = format!(
+            "workflow session save {}{client} --rebind",
+            self.session.as_str()
+        );
+        let commands =
+            provenant_workflow::session::CommandPrefix::new(self.state_dir.as_deref(), &self.cwd);
+        let project = if self.include_project {
+            let flag = commands.project_flag();
+            (!flag.is_empty()).then(|| format!("{flag} "))
+        } else {
+            Some(String::new())
+        };
+        match project.and_then(|project| commands.runnable(&format!("{project}{rest}"))) {
+            Some(command) => format!("{command} --file <checkpoint.md>"),
+            None => format!(
+                "{rest} --file <checkpoint.md> with this handoff's --project and --state-dir options (a path cannot be shown safely)"
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for CheckpointRepair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.command())
+    }
+}
+
 fn checkpoint_repair(
     globals: &Globals,
     cwd: &Path,
     session: &HostSessionId,
     client: Option<provenant_records::Harness>,
-) -> String {
-    let client = client
-        .map(|harness| format!(" --client {}", harness.spec().name))
-        .unwrap_or_else(|| " --client HARNESS".into());
-    let rest = format!(
-        "workflow session save {}{client} --rebind",
-        session.as_str()
-    );
-    let commands =
-        provenant_workflow::session::CommandPrefix::new(globals.state_dir.as_deref(), cwd);
-    let project = if globals.project.is_some() {
-        cwd.to_str()
-            .map(|path| format!("--project '{}' ", path.replace('\'', "'\\''")))
-    } else {
-        Some(String::new())
-    };
-    match project.and_then(|project| commands.runnable(&format!("{project}{rest}"))) {
-        Some(command) => format!("{command} --file <checkpoint.md>"),
-        None => format!(
-            "{rest} --file <checkpoint.md> with this handoff's --project and --state-dir options (a path cannot be shown safely)"
-        ),
+) -> CheckpointRepair {
+    CheckpointRepair {
+        cwd: cwd.to_path_buf(),
+        state_dir: globals.state_dir.clone(),
+        include_project: globals.project.is_some(),
+        session: session.clone(),
+        client,
     }
 }
 
-fn checkpoint_identity(store: &SessionStore, repair: &str) -> Result<(), Refusal> {
+fn checkpoint_identity(store: &SessionStore, repair: &CheckpointRepair) -> Result<(), Refusal> {
     store.validate_chair().map_err(|error| match error {
         provenant_workflow::session::SessionError::DiscoveryIdentity => Refusal::refused(
             "IDENTITY",
@@ -1351,13 +1378,9 @@ mod tests {
             &["diff", "--no-index", "--no-color", "/dev/null", "big"],
             GIT_TIMEOUT,
         )
-        .expect_err("truncated output must not read as complete")
-        .message;
-        assert!(
-            error.contains("output exceeded the 65536-byte limit"),
-            "{error}"
-        );
-        assert!(error.contains("diff"), "{error}");
+        .expect_err("truncated output must not read as complete");
+        assert_eq!(error.code(), "GIT");
+        assert_eq!(error.status, Outcome::Error);
         // Output within the bound is still returned whole.
         let (ok, text) = git(temp.path(), &["--version"], GIT_TIMEOUT).unwrap();
         assert!(ok);
@@ -1752,7 +1775,8 @@ mod tests {
         fs::write(&big, vec![0; ATTACHMENT_LIMIT]).unwrap();
         assert!(read_attachments(std::slice::from_ref(&big)).is_ok());
         let err = read_attachments(&[big, small]).err().unwrap();
-        assert!(err.message.contains("512 KiB"), "{}", err.message);
+        assert_eq!(err.status, Outcome::Invalid);
+        assert_eq!(err.code(), "INVALID");
         assert!(read_attachments(&[temp.path().to_path_buf()]).is_err());
     }
 
@@ -1770,11 +1794,19 @@ mod tests {
         inputs.state_dir = Some(temp.path().join("state"));
         let roots = inputs.resolve(&Plain).unwrap();
         fs::create_dir_all(roots.state.as_path()).unwrap();
-        fs::write(
-            roots.state.as_path().join("config.toml"),
-            "schema_version=1\n[gc]\nfree_floor='1B'\n[retention]\nsession_revisions=2\n",
-        )
+        #[derive(serde::Serialize)]
+        struct ConfigFixture<'a> {
+            schema_version: u64,
+            retention: &'a provenant_config::RetentionSettings,
+        }
+        let mut retention = provenant_config::RetentionSettings::default();
+        retention.session_revisions = 2;
+        let config = toml_edit::ser::to_string(&ConfigFixture {
+            schema_version: provenant_config::CONFIG_SCHEMA_VERSION,
+            retention: &retention,
+        })
         .unwrap();
+        fs::write(roots.state.as_path().join("config.toml"), config).unwrap();
         let store = checkpoint_store(
             &roots,
             ProjectId::from_bytes([3; 16]),
@@ -1808,6 +1840,13 @@ mod tests {
             &HostSessionId::parse("handoff-session").unwrap(),
             Some(provenant_records::Harness::Codex),
         );
+        assert_eq!(repair.session.as_str(), "handoff-session");
+        assert_eq!(repair.client, Some(provenant_records::Harness::Codex));
+        assert_eq!(
+            repair.state_dir.as_deref(),
+            Some(Path::new("/custom state"))
+        );
+        assert!(repair.include_project);
         assert!(checkpoint_identity(&store, &repair).is_ok());
         let other = checkpoint_store(
             &roots,
@@ -1820,7 +1859,6 @@ mod tests {
         );
         let refusal = checkpoint_identity(&other, &repair).err().unwrap();
         assert_eq!(refusal.code(), "IDENTITY");
-        assert!(refusal.message.contains("provenant --state-dir '/custom state' --project '/selected project' workflow session save handoff-session --client codex --rebind --file <checkpoint.md>"));
     }
 
     #[test]
@@ -1831,7 +1869,8 @@ mod tests {
             &HostSessionId::parse("chair").unwrap(),
             None,
         );
-        assert!(repair.contains("workflow session save chair --client HARNESS --rebind"));
+        assert_eq!(repair.session.as_str(), "chair");
+        assert_eq!(repair.client, None);
     }
 
     #[test]

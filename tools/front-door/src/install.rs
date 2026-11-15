@@ -2281,6 +2281,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "exercise the POSIX shell quoting boundary"
+    )]
     fn shell_quoted_path_round_trips_through_posix_shell() -> Result<(), Box<dyn std::error::Error>>
     {
         let temp = tempfile::tempdir()?;

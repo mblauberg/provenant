@@ -46,6 +46,8 @@ mod staging_gc;
 mod state_handoff;
 mod status_wait;
 mod target_seed_build;
+#[cfg(test)]
+mod test_support;
 mod usage;
 mod verify;
 #[cfg(test)]

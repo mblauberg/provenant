@@ -7,6 +7,30 @@ use std::{
 };
 
 pub const LABEL: &str = "dev.provenant.tick";
+const BOOTSTRAP_ATTEMPTS: usize = 5;
+const BOOTSTRAP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnableAction {
+    Reload,
+    Enable,
+    Restart,
+}
+
+const TIMER_ENABLE_UNCHANGED: &[EnableAction] = &[EnableAction::Enable];
+const TIMER_ENABLE_CHANGED: &[EnableAction] = &[
+    EnableAction::Reload,
+    EnableAction::Enable,
+    EnableAction::Restart,
+];
+
+fn timer_enable_plan(changed: bool) -> &'static [EnableAction] {
+    if changed {
+        TIMER_ENABLE_CHANGED
+    } else {
+        TIMER_ENABLE_UNCHANGED
+    }
+}
 
 /// launchd's interval job may be idle after a successful tick; that is healthy.
 #[derive(Debug, Serialize, Deserialize)]
@@ -290,7 +314,15 @@ pub fn install(state: &Path, home: &Path, changed: bool, enabled: bool) -> Insta
 #[allow(clippy::disallowed_methods)]
 fn bootstrap_with(
     home: &Path,
+    run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
+) -> Result<(), AgentError> {
+    bootstrap_with_pause(home, run, std::thread::park_timeout)
+}
+
+fn bootstrap_with_pause(
+    home: &Path,
     mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
+    mut pause: impl FnMut(std::time::Duration),
 ) -> Result<(), AgentError> {
     let domain = format!("gui/{}", provenant_os::fs::effective_uid());
     let service = format!("{domain}/{LABEL}");
@@ -304,7 +336,7 @@ fn bootstrap_with(
     let path = plist(home);
     let mut last = String::new();
     // launchd can refuse bootstrap briefly while a booted-out service exits.
-    for _ in 0..5 {
+    for _ in 0..BOOTSTRAP_ATTEMPTS {
         let (ok, error) = run(
             &["bootstrap".as_ref(), domain.as_ref(), path.as_os_str()],
             home,
@@ -313,7 +345,7 @@ fn bootstrap_with(
             return Ok(());
         }
         last = error;
-        std::thread::park_timeout(std::time::Duration::from_millis(300));
+        pause(BOOTSTRAP_RETRY_DELAY);
     }
     Err(AgentError::Launchctl("bootstrap", last))
 }
@@ -331,12 +363,12 @@ fn enable_with(
             (false, error) => Err(AgentError::Systemctl(name, error)),
         }
     };
-    if changed {
-        step("daemon-reload", &["daemon-reload"])?;
-    }
-    step("enable", &["enable", "--now", TIMER])?;
-    if changed {
-        step("restart", &["restart", TIMER])?;
+    for action in timer_enable_plan(changed) {
+        match action {
+            EnableAction::Reload => step("daemon-reload", &["daemon-reload"])?,
+            EnableAction::Enable => step("enable", &["enable", "--now", TIMER])?,
+            EnableAction::Restart => step("restart", &["restart", TIMER])?,
+        }
     }
     Ok(())
 }
@@ -567,78 +599,198 @@ mod tests {
 
     #[test]
     fn bootstrap_always_replaces_a_loaded_service_and_retries_after_bootout() {
-        let mut calls = Vec::new();
-        bootstrap_with(Path::new("/home"), |args, _| {
-            calls.push(args[0].to_owned());
-            Ok((true, String::new()))
-        })
-        .unwrap();
-        assert_eq!(
-            calls,
-            [
-                OsStr::new("print"),
-                OsStr::new("bootout"),
-                OsStr::new("bootstrap")
-            ]
-        );
-        let mut bootstraps = 0;
-        bootstrap_with(Path::new("/home"), |args, _| {
-            if args[0] == "bootstrap" {
-                bootstraps += 1;
-                Ok((bootstraps > 1, "service is exiting".into()))
-            } else {
+        let (mut loaded, mut booted_out) = (true, false);
+        bootstrap_with(Path::new("/home"), |args, _| match args.first().copied() {
+            Some(command) if command == OsStr::new("print") => Ok((loaded, String::new())),
+            Some(command) if command == OsStr::new("bootout") => {
+                loaded = false;
+                booted_out = true;
                 Ok((true, String::new()))
             }
+            Some(command) if command == OsStr::new("bootstrap") => {
+                loaded = true;
+                Ok((true, String::new()))
+            }
+            _ => Err(AgentError::Launchctl("unexpected", "command".into())),
         })
         .unwrap();
-        assert_eq!(bootstraps, 2);
-    }
+        assert!(booted_out && loaded);
 
-    #[test]
-    fn plist_renders_interval_arguments_state_logs_and_xml_escaping() {
-        let text = String::from_utf8(
-            render(
-                Path::new("/bin/a&b"),
-                Path::new("/state/a<b"),
-                OsStr::new("/usr/bin:/opt/a&b"),
-            )
-            .unwrap(),
+        let mut first_bootstrap_failed = true;
+        bootstrap_with_pause(
+            Path::new("/home"),
+            |args, _| {
+                if args[0] == "bootstrap" {
+                    let ok = !first_bootstrap_failed;
+                    first_bootstrap_failed = false;
+                    Ok((ok, "service is exiting".into()))
+                } else {
+                    Ok((true, String::new()))
+                }
+            },
+            |_| {},
         )
         .unwrap();
-        assert!(text.contains("<string>dev.provenant.tick</string>"));
-        assert!(text.contains("<key>StartInterval</key>\n  <integer>60</integer>"));
-        assert!(text.contains("<string>/bin/a&amp;b</string>"));
-        assert!(text.contains("<string>tick</string>"));
-        assert!(text.contains("<key>PROVENANT_STATE_DIR</key>"));
-        assert!(text.contains("<string>/usr/bin:/opt/a&amp;b</string>"));
-        for path in ["stdout.log", "stderr.log"] {
-            assert!(text.contains(&format!("<string>/state/a&lt;b/tick/{path}</string>")));
+        assert!(!first_bootstrap_failed);
+    }
+
+    fn xml_unescape(value: &str) -> String {
+        value
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+    }
+
+    fn plist_value(xml: &str, key: &str) -> Option<String> {
+        let marker = format!("<key>{key}</key>");
+        let rest = xml.split_once(&marker)?.1;
+        let (open, close, position) = [("<string>", "</string>"), ("<integer>", "</integer>")]
+            .into_iter()
+            .filter_map(|(open, close)| rest.find(open).map(|position| (open, close, position)))
+            .min_by_key(|(_, _, position)| *position)?;
+        let value = rest[position + open.len()..].split_once(close)?.0;
+        Some(xml_unescape(value))
+    }
+
+    fn plist_array(xml: &str, key: &str) -> Vec<String> {
+        let marker = format!("<key>{key}</key>");
+        let Some(rest) = xml.split_once(&marker).map(|(_, rest)| rest) else {
+            return Vec::new();
+        };
+        let Some(array) = rest
+            .split_once("<array>")
+            .and_then(|(_, array)| array.split_once("</array>"))
+            .map(|(array, _)| array)
+        else {
+            return Vec::new();
+        };
+        let mut values = Vec::new();
+        let mut rest = array;
+        while let Some((_, value)) = rest.split_once("<string>") {
+            let Some((value, tail)) = value.split_once("</string>") else {
+                break;
+            };
+            values.push(xml_unescape(value));
+            rest = tail;
         }
-        assert!(!text.contains("KeepAlive"));
-        assert!(text.contains("<key>RunAtLoad</key>\n  <true/>"));
+        values
+    }
+
+    fn plist_dictionary<'a>(xml: &'a str, key: &str) -> Option<&'a str> {
+        let marker = format!("<key>{key}</key>");
+        xml.split_once(&marker)?
+            .1
+            .split_once("<dict>")?
+            .1
+            .split_once("</dict>")
+            .map(|(dictionary, _)| dictionary)
+    }
+
+    fn plist_tag_after_key(xml: &str, key: &str, tag: &str) -> bool {
+        let marker = format!("<key>{key}</key>");
+        xml.split_once(&marker)
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with(tag))
+    }
+
+    fn plist_has_key(xml: &str, key: &str) -> bool {
+        xml.contains(&format!("<key>{key}</key>"))
+    }
+
+    fn unit_values(text: &str, section: &str, key: &str) -> Vec<String> {
+        let mut current = "";
+        let mut values = Vec::new();
+        for line in text.lines() {
+            if let Some(name) = line
+                .strip_prefix('[')
+                .and_then(|line| line.strip_suffix(']'))
+            {
+                current = name;
+                continue;
+            }
+            if current == section
+                && let Some((field, value)) = line.split_once('=')
+                && field == key
+            {
+                values.push(value.to_owned());
+            }
+        }
+        values
     }
 
     #[test]
-    fn timer_and_service_units_render_interval_command_state_logs_and_quoting() {
+    fn plist_renders_declared_fields_and_escapes_paths() {
+        let program = Path::new("/bin/a&b");
+        let state = Path::new("/state/a<b");
+        let search = OsStr::new("/usr/bin:/opt/a&b");
+        let text = String::from_utf8(render(program, state, search).unwrap()).unwrap();
+        assert_eq!(plist_value(&text, "Label").as_deref(), Some(LABEL));
+        let interval = INTERVAL.to_string();
+        assert_eq!(
+            plist_value(&text, "StartInterval").as_deref(),
+            Some(interval.as_str())
+        );
+        assert_eq!(
+            plist_array(&text, "ProgramArguments"),
+            [program.to_string_lossy().into_owned(), "tick".into()]
+        );
+        let environment = plist_dictionary(&text, "EnvironmentVariables").unwrap();
+        assert_eq!(
+            plist_value(environment, "PATH").as_deref(),
+            Some(search.to_str().unwrap())
+        );
+        assert_eq!(
+            plist_value(environment, "PROVENANT_STATE_DIR").as_deref(),
+            Some(state.to_str().unwrap())
+        );
+        for (key, path) in [
+            ("StandardOutPath", state.join("tick/stdout.log")),
+            ("StandardErrorPath", state.join("tick/stderr.log")),
+        ] {
+            assert_eq!(plist_value(&text, key).as_deref(), path.to_str());
+        }
+        assert!(plist_tag_after_key(&text, "RunAtLoad", "<true/>"));
+        assert!(!plist_has_key(&text, "KeepAlive"));
+    }
+
+    #[test]
+    fn timer_and_service_units_render_declared_fields_and_quote_arguments() {
         let unit = String::from_utf8(render_timer()).unwrap();
-        assert!(unit.contains("OnActiveSec=0\nOnUnitActiveSec=60s\n"));
-        assert!(unit.contains("WantedBy=timers.target"));
-        let text = String::from_utf8(
-            render_service(
-                Path::new("/bin/a b\"%$"),
-                Path::new("/state/x"),
-                OsStr::new("/usr/bin:/opt/a"),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert!(text.contains("Type=oneshot\n"));
-        assert!(text.contains("ExecStart=\"/bin/a b\\\"%%$$\" tick\n"));
-        assert!(text.contains("Environment=\"PATH=/usr/bin:/opt/a\"\n"));
-        assert!(text.contains("Environment=\"PROVENANT_STATE_DIR=/state/x\"\n"));
-        assert!(text.contains("KillMode=process\n"));
-        assert!(text.contains("StandardOutput=append:/state/x/tick/stdout.log\n"));
-        assert!(text.contains("StandardError=append:/state/x/tick/stderr.log\n"));
+        assert_eq!(unit_values(&unit, "Timer", "OnActiveSec"), ["0"]);
+        assert_eq!(
+            unit_values(&unit, "Timer", "OnUnitActiveSec"),
+            [format!("{INTERVAL}s")]
+        );
+        assert_eq!(unit_values(&unit, "Install", "WantedBy"), ["timers.target"]);
+
+        let program = Path::new("/bin/a b\"%$");
+        let state = Path::new("/state/x");
+        let search = OsStr::new("/usr/bin:/opt/a");
+        let text = String::from_utf8(render_service(program, state, search).unwrap()).unwrap();
+        assert_eq!(unit_values(&text, "Service", "Type"), ["oneshot"]);
+        assert_eq!(
+            unit_values(&text, "Service", "ExecStart"),
+            ["\"/bin/a b\\\"%%$$\" tick"]
+        );
+        assert_eq!(
+            unit_values(&text, "Service", "Environment"),
+            [
+                "\"PATH=/usr/bin:/opt/a\"",
+                "\"PROVENANT_STATE_DIR=/state/x\""
+            ]
+        );
+        assert_eq!(unit_values(&text, "Service", "KillMode"), ["process"]);
+        for (key, name) in [
+            ("StandardOutput", "stdout.log"),
+            ("StandardError", "stderr.log"),
+        ] {
+            assert_eq!(
+                unit_values(&text, "Service", key),
+                [format!(
+                    "append:{}",
+                    state.join(format!("tick/{name}")).display()
+                )]
+            );
+        }
         let odd = String::from_utf8(
             render_service(
                 Path::new("/b"),
@@ -648,9 +800,15 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert!(odd.contains("StandardOutput=append:/s\\x20p/100%%/tick/stdout.log\n"));
-        assert!(odd.contains("Environment=\"PATH=/a$b:/c\"\n"));
-        assert!(!text.contains("Restart="));
+        assert_eq!(
+            unit_values(&odd, "Service", "StandardOutput"),
+            ["append:/s\\x20p/100%%/tick/stdout.log"]
+        );
+        assert_eq!(
+            unit_values(&odd, "Service", "Environment"),
+            ["\"PATH=/a$b:/c\"", "\"PROVENANT_STATE_DIR=/s\\x20p/100%%\""]
+        );
+        assert!(unit_values(&text, "Service", "Restart").is_empty());
         assert!(render_service(Path::new("/bin/a\nb"), Path::new("/s"), OsStr::new("/p")).is_err());
         assert_eq!(
             timer_in(Path::new("/h"), None),
@@ -664,27 +822,33 @@ mod tests {
 
     #[test]
     fn timer_enable_is_idempotent_and_restarts_only_changed_units() {
-        let mut calls: Vec<String> = Vec::new();
-        let mut record = |args: &[&OsStr]| {
-            calls.push(
-                args.iter()
-                    .map(|a| a.to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            );
-            Ok((true, String::new()))
-        };
-        enable_with(false, &mut record).unwrap();
-        enable_with(true, &mut record).unwrap();
-        assert_eq!(
-            calls,
-            [
-                "enable --now provenant-tick.timer",
-                "daemon-reload",
-                "enable --now provenant-tick.timer",
-                "restart provenant-tick.timer",
-            ]
-        );
+        for (changed, expected) in [
+            (false, TIMER_ENABLE_UNCHANGED),
+            (true, TIMER_ENABLE_CHANGED),
+        ] {
+            let mut actual = Vec::new();
+            let mut record = |args: &[&OsStr]| {
+                actual.push(match args.first().copied() {
+                    Some(command) if command == OsStr::new("daemon-reload") => {
+                        assert_eq!(args.len(), 1);
+                        EnableAction::Reload
+                    }
+                    Some(command) if command == OsStr::new("enable") => {
+                        assert_eq!(args.get(1).copied(), Some(OsStr::new("--now")));
+                        assert_eq!(args.get(2).copied(), Some(OsStr::new(TIMER)));
+                        EnableAction::Enable
+                    }
+                    Some(command) if command == OsStr::new("restart") => {
+                        assert_eq!(args.get(1).copied(), Some(OsStr::new(TIMER)));
+                        EnableAction::Restart
+                    }
+                    _ => return Err(AgentError::Systemctl("unexpected", "command".into())),
+                });
+                Ok((true, String::new()))
+            };
+            enable_with(changed, &mut record).unwrap();
+            assert_eq!(actual, expected);
+        }
         let error = enable_with(false, |_| Ok((false, "no bus".into()))).unwrap_err();
         assert!(matches!(error, AgentError::Systemctl("enable", _)));
     }

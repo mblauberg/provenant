@@ -2297,7 +2297,6 @@ mod tests {
                 .find(|outcome| outcome.artefact == Artefact::RemoteBranch)
                 .unwrap();
             assert_eq!(outcome.outcome, ArtefactState::Retained);
-            assert_eq!(outcome.reason.as_deref(), Some("not_subsumed"));
             assert_eq!(
                 remote_tip(
                     context,

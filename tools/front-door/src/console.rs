@@ -692,68 +692,117 @@ mod tests {
     }
 
     #[test]
-    fn oversized_single_board_row_explains_recovery() {
-        let value =
-            serde_json::json!({"lanes":[{"metadata":"x".repeat(provenant_cli::MAX_RESULT_BYTES)}]});
-        let result = provenant_records::CommandResult::new(
-            "console board",
-            provenant_records::Outcome::Ok,
-            Some(value),
-        );
-        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        assert_eq!(
-            super::render(
-                &result,
-                &provenant_cli::Globals {
-                    json: true,
-                    full: true,
-                    ..Default::default()
-                },
-                "",
-                &mut stdout,
-                &mut stderr
-            ),
-            3
-        );
-        let failure: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
-        assert_eq!(failure["error"]["code"], "RESULT_TOO_LARGE");
-        let message = failure["error"]["message"].as_str().unwrap();
-        assert!(message.contains("reduce --limit"));
-        assert!(message.contains("--limit 1 still fails"));
-        assert!(message.contains("provenant output ATTEMPT"));
-    }
+    fn result_overflow_contract_covers_each_cli_surface() {
+        type RenderCase = (&'static str, bool, Box<dyn Fn() -> (u8, Vec<u8>, Vec<u8>)>);
 
-    #[test]
-    fn oversized_human_catalogue_never_publishes() {
-        let row = serde_json::json!({"project_id":"x".repeat(32), "common_dir":{"encoding":"utf8","path":"a".repeat(180)}});
-        let value = serde_json::json!({"projects":vec![row; 6500], "coverage":{"scope":"local"}});
-        let human = provenant_cli::terse(&value);
-        assert!(human.len() > provenant_cli::MAX_RESULT_BYTES);
-        let result = provenant_records::CommandResult::new(
-            "console projects",
-            provenant_records::Outcome::Ok,
-            Some(value),
-        );
-        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        assert_eq!(
-            super::render(
-                &result,
-                &provenant_cli::Globals {
-                    json: false,
-                    full: true,
-                    ..Default::default()
-                },
-                &human,
-                &mut stdout,
-                &mut stderr
+        let cases: [RenderCase; 3] = [
+            (
+                "console board JSON",
+                true,
+                Box::new(|| {
+                    let value = serde_json::json!({
+                        "lanes": [{"metadata": "x".repeat(provenant_cli::MAX_RESULT_BYTES)}]
+                    });
+                    let result = provenant_records::CommandResult::new(
+                        "console board",
+                        provenant_records::Outcome::Ok,
+                        Some(value),
+                    );
+                    let mut stdout = Vec::new();
+                    let mut stderr = Vec::new();
+                    let status = super::render(
+                        &result,
+                        &provenant_cli::Globals {
+                            json: true,
+                            full: true,
+                            ..Default::default()
+                        },
+                        "",
+                        &mut stdout,
+                        &mut stderr,
+                    );
+                    (status, stdout, stderr)
+                }),
             ),
-            3
-        );
-        assert!(stdout.is_empty());
-        assert!(
-            String::from_utf8(stderr)
-                .unwrap()
-                .contains("RESULT_TOO_LARGE")
-        );
+            (
+                "console catalogue human",
+                false,
+                Box::new(|| {
+                    let row = serde_json::json!({
+                        "project_id": "x".repeat(32),
+                        "common_dir": {"encoding": "utf8", "path": "a".repeat(180)}
+                    });
+                    let value = serde_json::json!({
+                        "projects": vec![row; 6500],
+                        "coverage": {"scope": "local"}
+                    });
+                    let human = provenant_cli::terse(&value);
+                    let result = provenant_records::CommandResult::new(
+                        "console projects",
+                        provenant_records::Outcome::Ok,
+                        Some(value),
+                    );
+                    let mut stdout = Vec::new();
+                    let mut stderr = Vec::new();
+                    let status = super::render(
+                        &result,
+                        &provenant_cli::Globals {
+                            json: false,
+                            full: true,
+                            ..Default::default()
+                        },
+                        &human,
+                        &mut stdout,
+                        &mut stderr,
+                    );
+                    (status, stdout, stderr)
+                }),
+            ),
+            (
+                "disk report JSON",
+                true,
+                Box::new(|| {
+                    let mut report = provenant_os::disk::DiskReport::new("/fixture".into(), 0);
+                    report.error("/fixture", "x".repeat(provenant_cli::MAX_RESULT_BYTES));
+                    let result = provenant_records::CommandResult::new(
+                        "disk report",
+                        provenant_records::Outcome::Ok,
+                        Some(report),
+                    );
+                    let mut stdout = Vec::new();
+                    let mut stderr = Vec::new();
+                    let status = crate::disk::render(
+                        &result,
+                        &provenant_cli::Globals {
+                            json: true,
+                            full: true,
+                            ..Default::default()
+                        },
+                        "",
+                        &mut stdout,
+                        &mut stderr,
+                    );
+                    (status, stdout, stderr)
+                }),
+            ),
+        ];
+
+        for (surface, json, render) in cases {
+            let (status, stdout, stderr) = render();
+            assert_eq!(status, 3, "{surface}");
+            if json {
+                let result: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+                assert_eq!(result["error"]["code"], "RESULT_TOO_LARGE", "{surface}");
+                assert!(result["data"].is_null(), "{surface}");
+            } else {
+                assert!(stdout.is_empty(), "{surface}");
+                assert!(
+                    String::from_utf8(stderr)
+                        .unwrap()
+                        .contains("RESULT_TOO_LARGE"),
+                    "{surface}"
+                );
+            }
+        }
     }
 }

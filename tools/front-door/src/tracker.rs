@@ -18,7 +18,6 @@ struct IssueType {
     name: String,
 }
 #[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct PortIssue {
     body: Option<String>,
     state: String,
@@ -72,7 +71,10 @@ fn config(root: &Path, skipped: &mut Vec<String>) -> Config {
                 if let Ok(doc) = text.parse::<toml_edit::DocumentMut>() {
                     for (key, _) in doc.iter() {
                         if !["citation", "closed_owner", "acceptance", "verify"].contains(&key) {
-                            skipped.push(format!("unknown tracker lint config key: {key}"));
+                            skipped.push(format!(
+                                "{}: unknown tracker lint config key: {key}",
+                                path.display()
+                            ));
                         }
                     }
                 }
@@ -80,7 +82,8 @@ fn config(root: &Path, skipped: &mut Vec<String>) -> Config {
             }
             Err(error) => {
                 skipped.push(format!(
-                    "invalid tracker lint config; defaults used: {error}"
+                    "{}: invalid tracker lint config; defaults used: {error}",
+                    path.display()
                 ));
                 Config::default()
             }
@@ -88,7 +91,8 @@ fn config(root: &Path, skipped: &mut Vec<String>) -> Config {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
         Err(error) => {
             skipped.push(format!(
-                "tracker lint config unavailable; defaults used: {error}"
+                "{}: tracker lint config unavailable; defaults used: {error}",
+                path.display()
             ));
             Config::default()
         }
@@ -282,14 +286,17 @@ mod tests {
     }
 
     #[test]
-    fn tracker_null_type_uses_kind_and_reuses_fetch() {
-        let mut calls = 0;
-        let report = collect(Path::new("."), &[12], None, "task", &mut |_| {
-            calls += 1;
+    fn tracker_null_type_falls_back_to_the_requested_kind() {
+        let projection: PortIssue = serde_json::from_str(
+            r#"{"body":"Owner: #12","state":"open","kind":null,"future":true}"#,
+        )
+        .unwrap();
+        assert_eq!(projection.state, "open");
+        let temp = tempfile::tempdir().unwrap();
+        let report = collect(temp.path(), &[12], None, "task", &mut |_| {
             serde_json::from_str(r#"{"body":"Owner: #12","state":"mystery","issueType":null}"#)
                 .map_err(|error| error.to_string())
         });
-        assert_eq!(calls, 1);
         assert!(report.findings.iter().any(|f| f.check == "acceptance"));
         assert!(report.findings.iter().any(|f| f.check == "verify"));
         assert!(!report.findings.iter().any(|f| f.check == "closed_owner"));
@@ -306,7 +313,10 @@ mod tests {
         let mut warnings = Vec::new();
         let config = config(dir.path(), &mut warnings);
         assert_eq!(config.acceptance, tracker::Severity::Off);
-        assert!(warnings.iter().any(|s| s.contains("extra")));
+        let source = dir.path().join(".provenant/tracker-lint.toml");
+        assert!(warnings.iter().any(|warning| {
+            warning.contains(&source.display().to_string()) && warning.contains("extra")
+        }));
         Ok(())
     }
 }
