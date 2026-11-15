@@ -190,9 +190,11 @@ filter = 'package(=provenant) & binary(=graph_provider) & test(=simultaneous_fir
 threads-required = "num-test-threads"
 slow-timeout = { period = "10s", terminate-after = 6 }
 
-# These Git-history release fixtures all crossed 20s in one Linux shard while
-# running together. Each walks multiple commit trees and scans the release
-# artifact; reserve the full pool for these three without changing the 30s cap.
+# These release fixtures scan the running artifact; the history cases also
+# walk multiple commit trees. The bounded-evidence case launches six separate
+# checks and exceeded 30s on macOS. Reserve the full pool and allow four 30s
+# intervals for this measured workload without changing product/runtime limits.
 [[profile.ci.overrides]]
-filter = 'package(=provenant) & binary(=checks) & (test(=release_gate_allows_only_relative_links_to_tracked_regular_files) | test(=release_ignores_grafts_and_rejects_missing_ancestry_evidence) | test(=release_ranges_check_commit_identity_across_a_shallow_boundary))'
+filter = 'package(=provenant) & binary(=checks) & (test(=release_gate_allows_only_relative_links_to_tracked_regular_files) | test(=release_ignores_grafts_and_rejects_missing_ancestry_evidence) | test(=release_ranges_check_commit_identity_across_a_shallow_boundary) | test(=release_checks_legal_private_symlink_and_bounded_evidence))'
 threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 4 }
