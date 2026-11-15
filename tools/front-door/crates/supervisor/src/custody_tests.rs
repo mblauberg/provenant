@@ -27,15 +27,30 @@ fn provider_identity_is_read_from_spawned_and_settling_custody() -> TestResult {
         &cancel,
         &clock,
     )?;
-    let ProcessObservation::Present(fact) =
-        SystemProcessObserver.observe(i64::from(std::process::id()))
-    else {
-        return Err("test process identity unavailable".into());
+    let metadata = lease.directory.metadata()?;
+    let boot = lease.reservation.boot.clone();
+    let guardian = ProcessIdentity {
+        boot: boot.clone(),
+        pid: 10,
+        native_start: 1,
+        group_id: 10,
+        session_id: 10,
     };
-    let identity = fact.identity;
+    let identity = ProcessIdentity {
+        boot,
+        pid: 11,
+        native_start: 2,
+        group_id: 11,
+        session_id: 10,
+    };
     let mut reservation = lease.reservation.clone();
     reservation.launch_state = LaunchState::Spawned;
+    reservation.attempt_device = Some(metadata.device);
+    reservation.attempt_inode = Some(metadata.inode);
+    reservation.guardian = Some(guardian);
     reservation.provider = Some(identity.clone());
+    reservation.unresolved_cleanup = false;
+    reservation.census_incomplete = false;
     write_record(
         &lease.directory,
         "reservation.json",
@@ -906,12 +921,21 @@ fn guardian_publishes_typed_steered_stop_and_delivery_ordering() -> TestResult {
     std::fs::create_dir(&attempt_path)?;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let mut writer = crate::fixture::acquire_writer(
-        Directory::open_anchor(&writer_path)?,
+    let writer_directory = Directory::open_anchor(&writer_path)?;
+    let binding = crate::custody::WriterBinding::from_verified(
+        &writer_directory,
+        &writer_directory,
+        "refs/heads/fixture",
+        provenant_core::GitOid::Sha1([0; 20]),
+    )?;
+    let mut writer = crate::custody::acquire_writer_with_observer(
+        writer_directory,
         scope(),
+        binding,
         WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
         &cancel,
         &clock,
+        &SystemProcessObserver,
     )?;
     let publication = PublicationReservation::prepare(
         Directory::open_anchor(&attempt_path)?,

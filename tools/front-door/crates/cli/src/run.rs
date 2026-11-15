@@ -959,6 +959,11 @@ impl Registry<'_> {
                 return Ok(decoded);
             }
         };
+        if identity_mismatch {
+            let mut decoded = failed("provider identity mismatch");
+            decoded.terminal_cause = Some(run::TerminalCause::IdentityMismatch);
+            return Ok(decoded);
+        }
         if expected_session.is_some() && outcome.session().is_none() {
             return Ok(unproven(
                 "resumed provider did not report its retained session",
