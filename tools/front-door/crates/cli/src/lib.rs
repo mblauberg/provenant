@@ -2426,6 +2426,14 @@ mod tests {
             .iter()
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
+        // The parser covers every spelling above; each command's grammar needs
+        // only a spread of them, since one full CLI parse per value is costly.
+        let graph_sample = graph_targets
+            .iter()
+            .step_by(11)
+            .chain(graph_targets.last())
+            .cloned()
+            .collect::<Vec<_>>();
         let branch_names = ["main", "release/2.0", "feature_x", "@"]
             .map(str::to_owned)
             .to_vec();
@@ -2433,7 +2441,7 @@ mod tests {
         let cases = [
             (
                 super::metadata::TargetSyntax::Graph,
-                graph_targets,
+                graph_sample,
                 graph_refused
                     .iter()
                     .map(|value| (*value).to_owned())
