@@ -1,7 +1,8 @@
 # Rust workspace rules
 
 Owner: the chairs; manifests in `tools/front-door/Cargo.toml`
-Anchor: `tools/front-door/Cargo.toml` (workspace dependencies and lints)
+Anchor: `tools/front-door/Cargo.toml` (workspace dependencies and lints),
+`crates/test-support/src/lib.rs::root_inputs`, `crates/core/src/time.rs::Clock`
 
 Engineering rules for the Rust workspace under `tools/front-door/`, the sole
 runtime ([ADR 0021](../adr/0021-configured-workspace-dispatch-boundaries.md)). Paths are relative to
@@ -54,7 +55,8 @@ Diagnostics go to bounded, redacted stderr, never result bytes.
 
 Tests isolate user state and use controlled time and synchronisation.
 - Why: tests must not alter a real installation or depend on timing races.
-- Owner: `tests/support/mod.rs`
+- Owner: `crates/test-support/src/lib.rs` (`root_inputs`, `wait_for`),
+  `crates/core/src/time.rs::Clock`
 
 ## One owner per mechanism
 
