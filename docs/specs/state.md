@@ -13,10 +13,12 @@ Keys and defaults: `provenant config schema`. Operator steps: the
 ### Root selection never falls back
 
 An empty or relative explicit root fails and never yields to the default. A
-root that overlaps a declared credential, Git-metadata or other-state boundary
-is refused, whether it contains that location or lies inside it. Ordinary
-checkout/workspace directories and the retired agent-harness location warn
-with their source and proceed. OS binding captures existing Git markers and
+root inside a declared credential, Git-metadata or other-state boundary is
+refused. A root that contains an other-state boundary is refused too, but one
+that contains Git metadata, a credential store or an advisory location
+proceeds, because lane checkouts, provider homes and installed releases live
+under the state root. A root inside a checkout, a workspace or the retired
+agent-harness location warns with its source and proceeds. OS binding captures existing Git markers and
 linked-worktree metadata; installed release directories imply no Git boundary.
 Credential boundaries use the same concrete, sourced declarations as lane
 grant validation; a credential directory name elsewhere in a path establishes
