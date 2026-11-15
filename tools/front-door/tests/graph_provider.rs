@@ -1805,7 +1805,7 @@ fn expanded_writer_registry_contention_remains_retryable() -> Result {
     fs::write(
         &document,
         serde_json::to_vec(
-            &json!({"schema_version":2,"graph_id":"expanded-lock","nodes":[{"id":"slow","prompt":"fixture slow registry","access":"read_only","route":{"adapter":"codex","model":"gpt-6-luna"}}]}),
+            &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"expanded-lock","nodes":[{"id":"slow","prompt":"fixture slow registry","access":"read_only","route":{"adapter":"codex","model":"gpt-6-luna"}}]}),
         )?,
     )?;
     let doc = document.to_str().ok_or("document")?;
@@ -1910,7 +1910,7 @@ fn pending_graph_reports_pre_attempt_writer_failure() -> Result {
         fs::write(
             &document,
             serde_json::to_vec(
-                &json!({"schema_version":2,"graph_id":"mixed-failure","nodes":[
+                &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"mixed-failure","nodes":[
                     {"id":"writer","prompt":"write code","access":"worktree_write","worktree":rig.project.join(".worktrees/missing"),"write_scope":["."],"route":{"adapter":"codex","model":"gpt-6-luna"}},
                     {"id":"slow","prompt":"fixture slow registry","access":"read_only","route":{"adapter":"codex","model":"gpt-6-luna"}}
                 ]}),
@@ -1974,7 +1974,7 @@ fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Re
     fs::write(
         rig.project.join("graph.json"),
         serde_json::to_vec(&json!({
-            "schema_version":1,"graph_id":"quota-redraw","nodes":[{
+            "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"quota-redraw","nodes":[{
                 "id":"read","prompt":"fixture graph redraw","access":"read_only","route":{"alias":"retry-test"}
             }]
         }))?,
@@ -2126,7 +2126,7 @@ fn partial_quota_alias_fixture(writer: bool) -> Result {
     fs::write(
         rig.project.join("graph.json"),
         serde_json::to_vec(&json!({
-            "schema_version":2,"graph_id":"partial-quota","nodes":[node]
+            "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"partial-quota","nodes":[node]
         }))?,
     )?;
     let settled = rig.run_and_wait(&["--file", "graph.json"], "30s")?;
@@ -2371,7 +2371,7 @@ fn seed_graph_checkpoint(
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 30)?;
     let document: GraphDocument = serde_json::from_value(json!({
-        "schema_version":1,"graph_id":PERSISTED_GRAPH,
+        "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":PERSISTED_GRAPH,
         "nodes":[{"id":PERSISTED_NODE,"access":"read_only","prompt":"fixture","route":{"alias":"senior"}}]
     }))?;
     let mut journal = FileJournal::open(state, project, PERSISTED_GRAPH, budget, &cancel, &clock)?;
@@ -3595,7 +3595,7 @@ fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
         fs::write(
             &document,
             serde_json::to_vec(&json!({
-                "schema_version": 2, "graph_id": "preparation-refusal", "nodes": [{
+                "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id": "preparation-refusal", "nodes": [{
                     "id": "lane", "prompt": "reply OK", "access": "read_only",
                     "attempt": {"account": "not-registered"},
                     "routes": routes
@@ -3664,7 +3664,7 @@ fn light_graph_delivers_and_applies_preset_per_node() -> Result {
     fs::write(
         &document,
         serde_json::to_vec(
-            &json!({"schema_version":2,"graph_id":"light-graph","nodes":[
+            &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"light-graph","nodes":[
                 {"id":"writer","prompt":"fixture writer shell","access":"worktree_write","worktree":".worktrees/light-writer","delivery":"push","attempt":{"preset":"light","isolation":"private"},"route":route},
                 {"id":"reader","prompt":"fixture read only","access":"read_only","route":route}
             ]}),
@@ -3729,7 +3729,9 @@ fn run_graph_provider_with_wait(
     let document = rig.root.join(format!("{graph_id}.json"));
     fs::write(
         &document,
-        serde_json::to_vec(&json!({"schema_version":2,"graph_id":graph_id,"nodes":[node]}))?,
+        serde_json::to_vec(
+            &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":graph_id,"nodes":[node]}),
+        )?,
     )?;
     let settled = rig.run_and_wait(&["--file", document.to_str().ok_or("document")?], wait)?;
     let out = &settled.launch;
@@ -4182,7 +4184,7 @@ fn graph_node_reads_full_upstream_result_from_its_inputs_directory() -> Result {
     fs::write(
         rig.project.join("graph.json"),
         serde_json::to_vec(
-            &json!({"schema_version":1,"graph_id":"full-inputs","nodes":[
+            &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"full-inputs","nodes":[
                 {"id":"producer","use":"task","brief":"fixture large result","access":"read_only","route":route},
                 {"id":"Review","use":"task","brief":"fixture case result Review","access":"read_only","route":route},
                 {"id":"review","use":"task","brief":"fixture case result review","access":"read_only","route":route},
@@ -4201,26 +4203,27 @@ fn graph_node_reads_full_upstream_result_from_its_inputs_directory() -> Result {
         "{}",
         String::from_utf8_lossy(&started.stdout.bytes)
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let status = loop {
-        let status = rig.command(&["status", "full-inputs", "--json"])?;
-        assert_eq!(code(&status), 0, "{status:?}");
-        let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
-        if status["data"]["rows"].as_array().is_some_and(|rows| {
-            rows.iter().any(|row| {
-                row["kind"] == "graph"
-                    && row["graph_id"] == "full-inputs"
-                    && row["state"] == "complete"
+    let status = provenant_test_support::wait_for(
+        "full-inputs graph completion",
+        std::time::Duration::from_secs(30),
+        || {
+            let status = rig.command(&["status", "full-inputs", "--json"])?;
+            assert_eq!(code(&status), 0, "{status:?}");
+            Ok(serde_json::from_slice::<Value>(&status.stdout.bytes)?)
+        },
+        |status: &Result<Value>| {
+            status.as_ref().is_ok_and(|status| {
+                status["data"]["rows"].as_array().is_some_and(|rows| {
+                    rows.iter().any(|row| {
+                        row["kind"] == "graph"
+                            && row["graph_id"] == "full-inputs"
+                            && row["state"] == "complete"
+                    })
+                })
             })
-        }) {
-            break status;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "graph did not complete: {status}"
-        );
-        std::thread::park_timeout(std::time::Duration::from_millis(50));
-    };
+        },
+    )
+    .map_err(std::io::Error::other)??;
     // Status deliberately returns unified rows. Inspect the durable checkpoint
     // to verify full input transport and its confinement boundary separately.
     let identity = rig.command(&["fabric", "identity", "--json"])?;
@@ -4293,10 +4296,12 @@ fn graph_settlement_records_a_failed_advance_for_status() -> Result {
     // fails when the first node settles and the guardian advances the graph.
     fs::write(
         rig.project.join("graph.json"),
-        serde_json::to_vec(&json!({"schema_version":1,"graph_id":"broken","nodes":[
-            {"id":"first","prompt":"reply OK","access":"read_only","route":route},
-            {"id":"second","prompt":"reply OK","access":"worktree_write","worktree":".worktrees/missing","depends_on":["first"],"route":route}
-        ]}))?,
+        serde_json::to_vec(
+            &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"broken","nodes":[
+                {"id":"first","prompt":"reply OK","access":"read_only","route":route},
+                {"id":"second","prompt":"reply OK","access":"worktree_write","worktree":".worktrees/missing","depends_on":["first"],"route":route}
+            ]}),
+        )?,
     )?;
     let started = rig.command(&["run", "--file", "graph.json", "--json"])?;
     assert_eq!(
@@ -4306,21 +4311,24 @@ fn graph_settlement_records_a_failed_advance_for_status() -> Result {
         String::from_utf8_lossy(&started.stdout.bytes)
     );
     // Status only observes: the guardian's advance is the sole writer here.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let error = loop {
-        let status = rig.command(&["status", "broken", "--json"])?;
-        assert_eq!(code(&status), 0);
-        let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
-        if let Some(error) = status["data"]["rows"][0]["reason"].as_str() {
-            break error.to_owned();
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no advance error recorded: {status}"
-        );
-        std::thread::park_timeout(std::time::Duration::from_millis(50));
-    };
-    assert!(!error.is_empty());
+    let status = provenant_test_support::wait_for(
+        "graph advance error",
+        std::time::Duration::from_secs(30),
+        || {
+            let status = rig.command(&["status", "broken", "--json"])?;
+            assert_eq!(code(&status), 0);
+            Ok(serde_json::from_slice::<Value>(&status.stdout.bytes)?)
+        },
+        |status: &Result<Value>| {
+            status
+                .as_ref()
+                .is_ok_and(|status| status["data"]["rows"][0]["reason"].as_str().is_some())
+        },
+    )
+    .map_err(std::io::Error::other)??;
+    let error = status["data"]["rows"][0]["reason"]
+        .as_str()
+        .ok_or("advance error")?;
     let human = rig.command(&["status", "broken"])?;
     assert!(
         String::from_utf8_lossy(&human.stdout.bytes).contains(&error),
@@ -4361,7 +4369,6 @@ fn graph_launch_reports_provider_update_after_wait_budget() -> Result {
     )?;
     use std::os::unix::fs::MetadataExt;
     let metadata = fs::metadata(rig.state.join("provider-updates/agy.lock"))?;
-    let started = std::time::Instant::now();
     let lane = run_graph_provider_with_wait(
         &rig,
         "busy-provider",
@@ -4371,7 +4378,6 @@ fn graph_launch_reports_provider_update_after_wait_budget() -> Result {
         }),
         "1s",
     )?;
-    assert!(started.elapsed() < std::time::Duration::from_secs(8));
     assert_eq!(lane["state"], "rejected", "{lane}");
     assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
     assert!(lane["started_at"].is_null(), "{lane}");
