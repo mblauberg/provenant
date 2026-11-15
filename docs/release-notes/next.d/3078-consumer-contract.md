@@ -1,4 +1,0 @@
-## Breaking changes
-### CLI and install
-
-- **Repositories that use Provenant have a stated contract.** Each lane variable, repository file, exit code and the `provenant process-tree --json` fields are marked stable, evolving or internal in the [consumer contract](../../specs/consumer-contract.md). Only what a consuming repository relies on today is stable: `PROVENANT_SANDBOX`, `PROVENANT_PROCESS_TREE`, `PROVENANT_LANE_CARGO_LINT_TARGET`, `provenant process-tree --json` and its exit codes. Everything else is evolving and may change in a minor release, named in its notes. Run files are internal, so read them through `provenant status --json`, `provenant output` or `provenant trace`. Replace `provenant dispatch` with `provenant run TEMPLATE BRIEF`. The [adoption guide](../../runbooks/using-provenant-2-from-another-repository.md) covers what changed, opting into ports, running beside a repository's own tooling and rolling back to 1.x. (#3078)
