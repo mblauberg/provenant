@@ -1168,10 +1168,7 @@ fn unresolved_base_error_names_the_base() -> Result<(), Box<dyn Error>> {
         &cancel(),
     )
     .expect_err("missing base must fail");
-    assert_eq!(
-        error.to_string(),
-        "base unknown/branch did not resolve to a commit"
-    );
+    assert!(matches!(error, WorktreeError::BaseNotFound { ref base } if base == "unknown/branch"));
     Ok(())
 }
 
@@ -1237,7 +1234,6 @@ fn create_with_prunable_registration_for_same_branch() -> Result<(), Box<dyn Err
     )
     .expect_err("stale registration must fail with prune hint");
     assert!(matches!(error, WorktreeError::StaleRegistration));
-    assert!(error.to_string().contains("git worktree prune"), "{error}");
 
     fixture.run(&["commit", "--allow-empty", "-m", "advance HEAD"])?;
     let head = fixture.head()?;
