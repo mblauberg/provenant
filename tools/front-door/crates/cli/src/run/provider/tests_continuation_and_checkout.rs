@@ -120,7 +120,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         route: run::RequestedRoute::Model { required_family: None,
             extra: Default::default(),
             provider: "cursor".into(),
-            model: "cursor/gpt-5.3-codex-low".into(),
+            model: "cursor/composer-2.5".into(),
             effort: None,
         },
         account: None,

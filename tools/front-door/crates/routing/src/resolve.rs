@@ -337,6 +337,34 @@ pub fn list(
     })
 }
 
+fn in_model_scope(model: &ModelId, context: &RoutingContext<'_>) -> bool {
+    context
+        .config
+        .provider_scopes
+        .get(model.adapter())
+        .is_none_or(|settings| settings.permits_model(model.model()))
+}
+
+fn check_pin_scope(model: &ModelId, context: &RoutingContext<'_>) -> Result<(), RoutingError> {
+    if !in_model_scope(model, context)
+        && context
+            .config
+            .provider_scopes
+            .get(model.adapter())
+            .is_some_and(|settings| {
+                settings.out_of_scope_pin == provenant_config::OutOfScopePin::Refuse
+            })
+    {
+        return Err(RoutingError::UnsupportedLaunch(format!(
+            "{} is outside providers.{}.models (providers.{}.out_of_scope_pin = refuse)",
+            model.as_str(),
+            model.adapter(),
+            model.adapter()
+        )));
+    }
+    Ok(())
+}
+
 fn effective_pool_names(context: &RoutingContext<'_>) -> BTreeSet<String> {
     context
         .catalogue
@@ -354,6 +382,7 @@ fn effective_pool(context: &RoutingContext<'_>, name: &str) -> Option<Vec<RouteP
     Some(
         members
             .iter()
+            .filter(|member| in_model_scope(&member.model, context))
             .map(|member| member.reconciled(context.catalogue.model(&member.model)).0)
             .collect(),
     )
@@ -2207,6 +2236,7 @@ fn resolve_inner(
 ) -> Result<ResolvedRoute, RoutingError> {
     let (primary, pool_selection) = match &request.choice {
         RouteChoice::Model(model) => {
+            check_pin_scope(model, context)?;
             if let Some(detail) = excluded_members.family_reason(model) {
                 return Err(RoutingError::NoEligiblePoolMember {
                     exclusions: vec![format!("{}: {detail}", model.as_str())],
@@ -2234,13 +2264,16 @@ fn resolve_inner(
                     .preferred_model(request, risk, kind, context.now)
             });
             let mut pool = effective_pool(context, name);
-            if let Some(model) = preference {
+            if let Some(model) = preference.filter(|model| in_model_scope(model, context)) {
                 if pool.is_none() {
                     pool = context
                         .config
                         .routes
                         .get(name)
-                        .filter(|route| context.catalogue.model(&route.model).is_some())
+                        .filter(|route| {
+                            in_model_scope(&route.model, context)
+                                && context.catalogue.model(&route.model).is_some()
+                        })
                         .map(|route| {
                             vec![RoutePoolMember {
                                 model: route.model.clone(),
@@ -2283,6 +2316,14 @@ fn resolve_inner(
                     .routes
                     .get(name)
                     .ok_or(RoutingError::UnknownRoute)?;
+                if !in_model_scope(&named.model, context) {
+                    return Err(RoutingError::NoEligiblePoolMember {
+                        exclusions: vec![format!(
+                            "{}: outside provider model scope",
+                            named.model.as_str()
+                        )],
+                    });
+                }
                 if context.catalogue.model(&named.model).is_none() {
                     return Err(RoutingError::Catalogue);
                 }
@@ -2354,7 +2395,12 @@ fn resolve_inner(
         .filter(|model| privacy_allowed(model, request.confidential, context.catalogue))
         // A named route's fallback keeps to the same exclusions as its pool; a
         // pinned model's own fallback is never filtered.
-        .filter(|model| !named_route || excluded_members.reason(model, context).is_none())
+        .filter(|model| {
+            !named_route
+                || (in_model_scope(model, context)
+                    && excluded_members.reason(model, context).is_none())
+        })
+        .filter(|model| named_route || check_pin_scope(model, context).is_ok())
         .map(|model| {
             candidate(
                 model,

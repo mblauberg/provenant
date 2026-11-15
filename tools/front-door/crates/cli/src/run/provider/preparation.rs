@@ -3640,6 +3640,9 @@ pub(super) fn prepare_candidates(
             None
         };
         let mut provider_route = adapter_route(&route);
+        let model_id =
+            provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?;
+        provider_route.model = catalogue.launch_model(&model_id, route.effort.as_deref());
         let project_id_str = project_id.to_string();
         let project_key = format!("domains.lanes.projects.{project_id_str}.user_skills");
         let project_override = config
@@ -4106,6 +4109,14 @@ pub(super) fn prepare_candidates(
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }
         for warning in ignore_file_warnings(&route.adapter, task, roots.state.as_path()) {
+            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+        }
+        if matches!(
+            &task_request.choice,
+            provenant_routing::RouteChoice::Model(_)
+        ) && let Some(scope) = config.providers.get(&route.adapter)
+            && let Some(warning) = scope.pin_warning(&route.adapter, &route.model)
+        {
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }
         if route.eligibility == provenant_records::RouteEligibility::UnverifiedModel {

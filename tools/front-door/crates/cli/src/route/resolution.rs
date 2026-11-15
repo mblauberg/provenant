@@ -434,9 +434,11 @@ pub(super) fn with_context<T>(
             )
         })
         .collect();
+    let provider_scopes = resolved_config.providers.clone();
     let domains = resolved_config.domains;
     let policies = provenant_providers::scheduling_policies(&domains.quota, registry);
     let mut config = domains.routing;
+    config.provider_scopes = provider_scopes;
     config.preference_sources = preference_sources;
     let project = std::env::current_dir()
         .ok()

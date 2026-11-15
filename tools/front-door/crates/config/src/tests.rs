@@ -1983,3 +1983,39 @@ fn every_registered_knob_reports_the_layer_that_set_it() {
         }
     }
 }
+
+// Spec: docs/specs/routing.md#provider-model-scope
+#[test]
+fn provider_model_scope_defaults_overrides_and_pin_policy() {
+    let defaults = load::<&[u8]>(&roots(), None).unwrap();
+    let cursor = &defaults.providers["cursor"];
+    assert!(cursor.permits_model("composer-2.5"));
+    assert!(!cursor.permits_model("claude-sonnet"));
+    assert!(
+        cursor
+            .pin_warning("cursor", "claude-sonnet")
+            .unwrap()
+            .contains("providers.cursor.out_of_scope_pin")
+    );
+    let text = b"schema_version=1\n[providers.cursor]\nmodels=['*']\nout_of_scope_pin='allow'\n[providers.codex]\nmodels=['gpt-*']\nout_of_scope_pin='refuse'";
+    let configured = load(&roots(), Some(text.as_slice())).unwrap();
+    assert!(configured.providers["cursor"].permits_model("claude-sonnet"));
+    assert!(!configured.providers["codex"].permits_model("other"));
+    assert_eq!(
+        configured.providers["codex"].out_of_scope_pin,
+        OutOfScopePin::Refuse
+    );
+    assert!(
+        configured.providers["codex"]
+            .pin_warning("codex", "other")
+            .is_none()
+    );
+    assert!(matches!(
+        configured.origins["providers.cursor.models"],
+        Origin::User { .. }
+    ));
+    let invalid = b"schema_version=1\n[providers.cursor]\nmodels=['bad pattern']";
+    let recovered = load(&roots(), Some(invalid.as_slice())).unwrap();
+    assert!(!recovered.warnings.is_empty());
+    assert!(!recovered.providers["cursor"].permits_model("claude-sonnet"));
+}

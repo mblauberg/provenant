@@ -483,7 +483,7 @@ fn read_only_launch_requires_cwd_inside_a_declared_read_root() -> Result<(), Pro
 #[test]
 fn cursor_uses_outer_confinement_for_fresh_and_resumed_tool_access() -> Result<(), ProviderError> {
     let prompt = Prompt::new("--literal prompt".into());
-    let route = route("cursor", "fixture-model");
+    let route = route("cursor", "grok-4.7-high");
     let continuation = Continuation::retained("cursor", "fixture-session", &route, "fixture")?;
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         for resume in [false, true] {
@@ -508,7 +508,7 @@ fn cursor_uses_outer_confinement_for_fresh_and_resumed_tool_access() -> Result<(
             } else {
                 assert!(!has_flag("--resume"));
             }
-            assert!(has_pair("--model", "fixture-model"));
+            assert!(has_pair("--model", "grok-4.7-high"));
             assert!(spec.argv.iter().any(|arg| arg == prompt.text()));
             assert_eq!(spec.stdin, Stdin::Null);
             assert_eq!(spec.cwd, Path::new("/fixture/repo"));

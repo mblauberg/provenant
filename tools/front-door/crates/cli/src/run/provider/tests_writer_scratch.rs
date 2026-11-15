@@ -176,7 +176,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         route: run::RequestedRoute::Model { required_family: None,
             extra: Default::default(),
             provider: "cursor".into(),
-            model: "cursor/gpt-5.3-codex-low".into(),
+            model: "cursor/composer-2.5".into(),
             effort: None,
         },
         account: None,
@@ -259,7 +259,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         let saved_config = std::fs::read(state.join("config.toml")).ok();
         std::fs::write(
             state.join("config.toml"),
-            "schema_version=1\n[domains.routing]\nsettlement_retries=1\n[[domains.routing.pools.fence-fixture]]\nmodel='codex/gpt-6.1-sol'\nweight=1\nefforts=[]\n[[domains.routing.pools.fence-fixture]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n",
+            "schema_version=1\n[domains.routing]\nsettlement_retries=1\n[[domains.routing.pools.fence-fixture]]\nmodel='codex/gpt-6.1-sol'\nweight=1\nefforts=[]\n[[domains.routing.pools.fence-fixture]]\nmodel='cursor/composer-2.5'\nweight=1\nefforts=[]\n",
         )?;
         let mut pool = task.clone();
         pool.route = run::RequestedRoute::Named { required_family: None,
@@ -301,7 +301,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         assert_eq!(prepared.route.provider.as_deref(), Some("cursor"));
         assert_eq!(
             prepared.route.model.as_deref(),
-            Some("cursor/gpt-5.3-codex-low")
+            Some("cursor/composer-2.5")
         );
         let selection = prepared
             .route
@@ -332,6 +332,8 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             None => std::fs::remove_file(state.join("config.toml"))?,
         }
 
+        // Supply fixture-only privacy evidence; the shipped Composer row is unknown.
+        let _privacy = provenant_routing::fixture_training_override("cursor/composer-2.5", false)?;
         // A protected-paths project: confidential directories denied to every
         // lane, and a confidential task. Excluding a pool's first candidate at
         // preparation, for any cause, tries the next permitted member, even
@@ -347,7 +349,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         std::fs::write(
             state.join("config.toml"),
             format!(
-                "schema_version=1\n[domains.routing]\nsettlement_retries=0\n[[domains.routing.pools.protected-fixture]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n[[domains.routing.pools.protected-fixture]]\nmodel='cursor/grok-4.7'\nweight=1\nefforts=[]\n[[domains.routing.pools.protected-fixture]]\nmodel='codex/gpt-6.1-terra'\nweight=1\nefforts=['low']\n{protected_policy}"
+                "schema_version=1\n[domains.routing]\nsettlement_retries=0\n[[domains.routing.pools.protected-fixture]]\nmodel='cursor/composer-2.5'\nweight=1\nefforts=[]\n[[domains.routing.pools.protected-fixture]]\nmodel='cursor/grok-4.7'\nweight=1\nefforts=[]\n[[domains.routing.pools.protected-fixture]]\nmodel='codex/gpt-6.1-terra'\nweight=1\nefforts=['low']\n{protected_policy}"
             ),
         )?;
         let mut protected = task.clone();
@@ -464,7 +466,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
             routes,
             [
                 "codex/gpt-6.1-terra",
-                "cursor/gpt-5.3-codex-low",
+                "cursor/composer-2.5",
                 "cursor/grok-4.7"
             ],
             "{skipped_routes:?}"
@@ -513,6 +515,8 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         assert!(resolved.confinement.is_some());
         drop(resolved);
         std::fs::remove_file(state.join("config.toml"))?;
+
+        drop(_privacy);
 
         // A separate access omission retains the confinement guard that
         // refused the plan, rather than being labelled a disclosure denial.
@@ -1605,7 +1609,7 @@ printf 'agy 1.0.0\n'
     let saved_config = std::fs::read(state.join("config.toml"))?;
     std::fs::write(
         state.join("config.toml"),
-        "schema_version=1\n[domains.routing]\nsettlement_retries=1\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/grok-4.7'\nweight=1\nefforts=[]\n",
+        "schema_version=1\n[domains.routing]\nsettlement_retries=1\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/composer-2.5'\nweight=1\nefforts=[]\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/grok-4.7'\nweight=1\nefforts=[]\n",
     )?;
     let mut redraw_task = task.clone();
     redraw_task.route = run::RequestedRoute::Named { required_family: None,
@@ -1778,7 +1782,7 @@ printf 'agy 1.0.0\n'
     assert_eq!(launch.route.provider.as_deref(), Some("cursor"));
     assert_eq!(
         launch.route.model.as_deref(),
-        Some("cursor/gpt-5.3-codex-low")
+        Some("cursor/composer-2.5")
     );
     assert_eq!(launch.argv[0], executable.as_os_str());
     let scratch = paths.temporary.join("candidate-0");

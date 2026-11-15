@@ -608,7 +608,7 @@ fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
         ("codex", Some("high"), true),
         ("agy", Some("high"), true),
         ("opencode", Some("high"), true),
-        ("cursor", Some("high"), false),
+        ("cursor", Some("high"), true),
         ("cursor", None, true),
     ];
     for (provider, effort, accepted) in cases {
@@ -668,8 +668,8 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
         input.task.route = RequestedRoute::Model {
             required_family: None,
             extra: Default::default(),
-            provider: "cursor".into(),
-            model: "cursor/m".into(),
+            provider: "command".into(),
+            model: "command/m".into(),
             effort: Some("high".into()),
         };
         input
@@ -788,8 +788,8 @@ fn refusal_only_chair_leaves_accepted_identity_and_settlement_unbound() -> TestR
             input.task.route = RequestedRoute::Model {
                 required_family: None,
                 extra: Default::default(),
-                provider: "cursor".into(),
-                model: "cursor/m".into(),
+                provider: "command".into(),
+                model: "command/m".into(),
                 effort: Some("high".into()),
             };
             input
@@ -875,14 +875,14 @@ fn the_task_is_checked_before_a_writer_is_prepared() -> TestResult {
     input.task.route = RequestedRoute::Model {
         required_family: None,
         extra: Default::default(),
-        provider: "cursor".into(),
-        model: "cursor/m".into(),
+        provider: "command".into(),
+        model: "command/m".into(),
         effort: Some("high".into()),
     };
     let error = Service::new(&store)
         .dispatch(input, temp.path(), &call)
         .unwrap_err();
-    assert_eq!(error.to_string(), "cursor does not support effort");
+    assert_eq!(error.to_string(), "command does not support model");
     assert_eq!(
         store
             .operation(&operation, &call)?

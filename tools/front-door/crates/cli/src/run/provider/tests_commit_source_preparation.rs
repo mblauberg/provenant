@@ -97,7 +97,7 @@ impl CommitSourcePreparation {
             route: run::RequestedRoute::Model { required_family: None,
                 extra: Default::default(),
                 provider: "cursor".into(),
-                model: "cursor/gpt-5.3-codex-low".into(),
+                model: "cursor/composer-2.5".into(),
                 effort: None,
             },
             account: None,
@@ -165,7 +165,7 @@ fn commit_source_preparation_grants_an_immutable_materialised_view()
     let mut fixture = CommitSourcePreparation::new()?;
     std::fs::write(
         fixture.state.join("config.toml"),
-        "schema_version=1\n[[domains.routing.pools.senior]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n",
+        "schema_version=1\n[[domains.routing.pools.senior]]\nmodel='cursor/composer-2.5'\nweight=1\nefforts=[]\n",
     )?;
     fixture.task.route = run::RequestedRoute::Review { required_family: None,
         extra: Default::default(),
@@ -256,7 +256,7 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
         if plan_error == "resolver" {
             std::fs::write(
                 fixture.state.join("config.toml"),
-                "schema_version=1\n[[domains.routing.pools.preparation-fixture]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n",
+                "schema_version=1\n[[domains.routing.pools.preparation-fixture]]\nmodel='cursor/composer-2.5'\nweight=1\nefforts=[]\n",
             )?;
             fixture.task.route = run::RequestedRoute::Review { required_family: None,
                 extra: Default::default(),

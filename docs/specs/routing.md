@@ -51,6 +51,17 @@ preference always expires.
 - Why: changing operating policy should not need a Rust change, and a typo must
   not widen access.
 
+## Provider model scope
+
+Provider model patterns constrain automatic pool draws, named routes and their
+fallbacks. An explicit pin outside the scope follows the provider's configured
+`out_of_scope_pin` policy: warn once and launch, refuse, or allow silently.
+Provider model names are matched against literal patterns with `*` as a wildcard.
+Scope describes the requested model ID, not an underlying model selected by a
+provider's automatic mode. `Catalogue::launch_model` applies a recorded effort
+suffix only to a catalogued model with that supported effort; receipts retain the
+canonical model and effort.
+
 ## Capability and selection preferences
 
 Capability never excludes a listed pool member. Capability preferences rank

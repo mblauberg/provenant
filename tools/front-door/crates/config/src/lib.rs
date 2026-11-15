@@ -37,7 +37,9 @@ pub const NATIVE_CAPABILITY_UNAVAILABLE: &str = "native_capability_unavailable";
 pub mod policy;
 mod presets;
 mod providers;
-pub use providers::{ProviderSettings, ProviderUpdate};
+pub use providers::{
+    OutOfScopePin, ProviderSettings, ProviderUpdate, defaults as provider_defaults,
+};
 pub mod ports;
 mod project_binding;
 pub use ports::{

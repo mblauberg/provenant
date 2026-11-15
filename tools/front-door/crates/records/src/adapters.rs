@@ -1096,12 +1096,12 @@ adapter_specs! { $;
         quota_model_prefix: None,
         account_model_plans: &[],
         free_pool: None,
-        drop_unsupported_effort: false,
+        drop_unsupported_effort: true,
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: true,
             default_network: NetworkAccess::Open,
-            effort: false,
+            effort: true,
             resume: true,
             control: ControlCapabilities {
                 lane: ControlSupport::ContinuationOnly,
@@ -1828,7 +1828,7 @@ mod launch_tests {
             ("codex", effort, None),
             ("agy", effort, None),
             ("opencode", effort, None),
-            ("cursor", effort, Some(LaunchField::Effort)),
+            ("cursor", effort, None),
             ("cursor", None, None),
         ];
         for (name, effort, refused) in cases {
