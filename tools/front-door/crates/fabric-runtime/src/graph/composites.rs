@@ -987,7 +987,34 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
     checkpoint: &mut GraphCheckpoint,
     journal: &mut J,
 ) -> Result<(), GraphError<R::Error, J::Error>> {
-    if reconcile_progress(index, plan, positions, checkpoint) {
+    let node = plan
+        .nodes
+        .get(index)
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: format!("plan index {index}"),
+            invariant: "composite settlement index must match the planned graph",
+        })?;
+    let spec = node
+        .composite
+        .as_ref()
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "composite settlement requires a composite boundary",
+        })?;
+    let progress = checkpoint
+        .nodes
+        .get(index)
+        .ok_or_else(|| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "composite settlement requires its checkpoint row",
+        })?;
+    if progress.id != node.id {
+        return Err(GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant: "composite checkpoint row must match the planned boundary",
+        });
+    }
+    if reconcile_progress(index, node, spec, plan, positions, checkpoint) {
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     }
     Ok(())
@@ -1006,12 +1033,13 @@ pub(super) fn reconcile_checkpoint(plan: &PlannedGraph, checkpoint: &mut GraphCh
         .collect();
     // Expanded plans place members before their boundaries. A parent therefore
     // reads already-recomputed outputs from any nested composite it contains.
+    // Patch commit runs `loops::reconcile` first, aligning these rows with plan order.
     for (index, node) in plan.nodes.iter().enumerate() {
-        if node.composite.is_some()
-            && when::holds(&node.when)
+        if when::holds(&node.when)
             && !patch::skipped_by_patch(checkpoint, &node.id)
+            && let Some(spec) = node.composite.as_ref()
         {
-            reconcile_progress(index, plan, &positions, checkpoint);
+            reconcile_progress(index, node, spec, plan, &positions, checkpoint);
         }
     }
 }
@@ -1019,15 +1047,12 @@ pub(super) fn reconcile_checkpoint(plan: &PlannedGraph, checkpoint: &mut GraphCh
 /// Apply the member-derived state, outputs and errors to one composite row.
 fn reconcile_progress(
     index: usize,
+    node: &PlannedNode,
+    spec: &CompositeSpec,
     plan: &PlannedGraph,
     positions: &BTreeMap<String, usize>,
     checkpoint: &mut GraphCheckpoint,
 ) -> bool {
-    let node = &plan.nodes[index];
-    let spec = node
-        .composite
-        .as_ref()
-        .expect("composite reconciliation is called for a boundary");
     let mut state = state(node, plan, checkpoint, positions);
     let shortfall = (state == NodeState::Succeeded)
         .then(|| coverage_shortfall(spec, checkpoint, positions))
