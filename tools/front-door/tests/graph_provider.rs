@@ -705,6 +705,23 @@ fn fixture() -> Result {
     }
     Ok(())
 }
+/// OpenCode serves a model only through a registered Go or Zen plan; a bare
+/// local login declares none.
+fn register_opencode_plans(rig: &TestRig) -> Result {
+    let mut config = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(rig.state.join("config.toml"))?;
+    for plan in ["go", "zen"] {
+        writeln!(
+            config,
+            "[domains.accounts.entries.opencode-{plan}]\nadapter='opencode'\nlabel='{plan}'\nkey='{plan}'\nplan='{plan}'\ndirectory='{}'",
+            rig.home.display()
+        )?;
+    }
+    Ok(())
+}
+
 fn policy_codex_fixture() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
     for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
@@ -1036,6 +1053,7 @@ fn graph_opencode_observes_v2_wal_session() -> Result {
         let bin = rig.root.join("provider/bin");
         fs::create_dir_all(&bin)?;
         rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
+        register_opencode_plans(&rig)?;
         rig.env.retain(|(key, _)| key != "PATH");
         rig.env.push((
             "PATH".into(),
@@ -1315,7 +1333,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     );
     assert_eq!(named_launch.route.effort.as_deref(), Some("medium"));
     assert_eq!(named_launch.route.source.as_deref(), Some("named_route"));
-    assert_eq!(named_launch.route.extra["account_source"], "pin");
+    assert_eq!(json!(named_launch.route.account_source), "pin");
     let receipt = serde_json::to_string(&named_launch.route)?;
     assert!(!receipt.contains("synthetic-prompt-secret-2719"));
     assert!(!receipt.contains("credential-sentinel-2719-violet-fox"));
@@ -1363,7 +1381,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         &paths,
         None,
     )?;
-    assert_eq!(automatic.route.extra["account_source"], "automatic");
+    assert_eq!(json!(automatic.route.account_source), "automatic");
     let launch =
         provenant_run::Providers::prepare(&registry, &task, "fixture host-native", &paths, None)?;
     assert_eq!(launch.route.provider.as_deref(), Some("claude"));
@@ -3814,6 +3832,7 @@ fn opencode_usage_limit_stops_hanging_provider() -> Result {
     let bin = rig.root.join("provider/bin");
     fs::create_dir_all(&bin)?;
     rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
+    register_opencode_plans(&rig)?;
     rig.env.retain(|(key, _)| key != "PATH");
     rig.env.push((
         "PATH".into(),
@@ -3862,6 +3881,7 @@ fn opencode_stderr_live_quota() -> Result {
         let bin = rig.root.join("provider/bin");
         fs::create_dir_all(&bin)?;
         rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
+        register_opencode_plans(&rig)?;
         rig.env.retain(|(key, _)| key != "PATH");
         rig.env.push((
             "PATH".into(),
@@ -4552,7 +4572,7 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
         fail,
         "--json",
     ])?;
-    assert_eq!(code(&out), 1);
+    assert_eq!(code(&out), 1, "{out:?}");
     let data: Value = serde_json::from_slice(&out.stdout.bytes)?;
     let rows = data["data"]["rows"].as_array().ok_or("live rows")?;
     let passed = rows

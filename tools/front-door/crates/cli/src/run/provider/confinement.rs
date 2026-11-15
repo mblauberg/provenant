@@ -1420,7 +1420,7 @@ pub(super) fn apply_setup(
         match step {
             // Setup names a lane home by creating its parent, and that parent
             // can be a run-owned root, which exists by construction.
-            SetupStep::CreateDir(path) if roots.iter().any(|root| *root == path.as_path()) => {}
+            SetupStep::CreateDir(path) if roots.contains(&path.as_path()) => {}
             SetupStep::CreateDir(path) => {
                 let transcript_root =
                     claude_account.filter(|directory| path.starts_with(directory.join("projects")));
