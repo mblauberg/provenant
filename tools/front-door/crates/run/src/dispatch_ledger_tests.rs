@@ -65,10 +65,11 @@ fn write_grant_warning_threshold_preserves_a_large_terminal_record() -> TestResu
         &provider,
         &|record, _| {
             let route = record.applied_route.as_ref().expect("applied route");
-            assert_eq!(route.extra["write_grant_limit"]["value"], 256 * 1024);
+            let limit = route.write_grant_limit.as_ref().expect("write grant limit");
+            assert_eq!(limit.value, provenant_records::run::MAX_WRITE_GRANT_BYTES);
             assert_eq!(
-                route.extra["write_grant_limit"]["origin"],
-                "host configuration"
+                limit.origin,
+                provenant_records::run::WriteGrantLimitOrigin::Configuration
             );
             Err(RunError::Validation("fixture holder"))
         },
