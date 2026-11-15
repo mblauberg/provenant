@@ -153,9 +153,7 @@ pub fn chair_process() -> Option<provenant_records::custody::HolderProcess> {
         native_start: parent.identity.native_start,
     })
 }
-pub fn current_chair(
-    context: &Context,
-) -> Result<provenant_records::custody::Chair, EdgeError> {
+pub fn current_chair(context: &Context) -> Result<provenant_records::custody::Chair, EdgeError> {
     let inbox = context.inbox_address(None)?;
     let actor = inbox.actor;
     Ok(provenant_records::custody::Chair {
