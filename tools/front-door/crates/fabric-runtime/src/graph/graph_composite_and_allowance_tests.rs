@@ -1,5 +1,135 @@
 use super::*;
 
+// Spec: docs/specs/fabric.md#composite-settlement
+#[test]
+fn quota_reroute_recomputes_composite_before_checkpoint_resume() {
+    #[derive(Default)]
+    struct RestartBoundaryJournal {
+        saved: Option<GraphCheckpoint>,
+        boundary: Option<GraphCheckpoint>,
+    }
+
+    impl GraphJournal for RestartBoundaryJournal {
+        type Error = std::convert::Infallible;
+
+        fn load(&mut self, graph_id: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(self
+                .saved
+                .as_ref()
+                .filter(|checkpoint| checkpoint.graph_id == graph_id)
+                .cloned())
+        }
+
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            let rerouted_member_is_pending = checkpoint
+                .nodes
+                .iter()
+                .any(|node| node.id == "task--plan" && node.state == NodeState::Pending);
+            let reroute_is_recorded = checkpoint.expansions.iter().any(|expansion| {
+                expansion
+                    .patch
+                    .as_ref()
+                    .is_some_and(|patch| patch.restart.is_some())
+            });
+            if self.boundary.is_none() && rerouted_member_is_pending && reroute_is_recorded {
+                self.boundary = Some(checkpoint.clone());
+            }
+            self.saved = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "graph_id": "composite-quota-reroute",
+        "nodes": [{
+            "id": "task",
+            "kind": "composite",
+            "access": "read_only",
+            "composite": {
+                "nodes": [{
+                    "id": "plan",
+                    "access": "read_only",
+                    "prompt": "Plan the work",
+                    "routes": [
+                        {"adapter": "first", "model": "first/model"},
+                        {"adapter": "second", "model": "second/model"}
+                    ]
+                }],
+                "exports": [{"node": "plan", "outputs": ["result"]}]
+            }
+        }]
+    }))
+    .unwrap();
+    let mut owner = FakeOwner {
+        observations: [
+            terminal(AttemptOutcome::UsageLimited),
+            terminal_with_result(AttemptOutcome::Succeeded, "plan complete"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = RestartBoundaryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls[0].1.adapter.as_deref(), Some("first"));
+    assert_eq!(owner.calls[1].1.adapter.as_deref(), Some("second"));
+
+    let boundary = journal
+        .boundary
+        .expect("host reroute checkpoint boundary was saved");
+    let reroute = boundary
+        .expansions
+        .iter()
+        .filter_map(|expansion| expansion.patch.as_ref())
+        .find(|patch| patch.restart.is_some())
+        .expect("quota reroute patch was recorded");
+    assert_eq!(reroute.replaced.len(), 1);
+    assert_eq!(reroute.replaced[0].id, "task--plan");
+    assert_eq!(
+        reroute.restart.as_ref().unwrap().cause,
+        provenant_records::StopCause::UsageLimited
+    );
+    let boundary: GraphCheckpoint =
+        serde_json::from_slice(&serde_json::to_vec(&boundary).unwrap()).unwrap();
+    assert_eq!(
+        boundary.nodes.iter().find(|node| node.id == "task").unwrap().state,
+        NodeState::Pending
+    );
+    assert!(boundary
+        .nodes
+        .iter()
+        .find(|node| node.id == "task")
+        .unwrap()
+        .outputs
+        .is_none());
+
+    // Loading the exact patch boundary validates the composite/member pairing
+    // before it can launch the successor route, then continuation is idempotent.
+    let mut resumed_journal = RestartBoundaryJournal {
+        saved: Some(boundary),
+        boundary: None,
+    };
+    let mut resumed_owner = FakeOwner {
+        observations: [terminal_with_result(
+            AttemptOutcome::Succeeded,
+            "plan complete",
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let resumed = advance(&document, &mut resumed_owner, &mut resumed_journal).unwrap();
+    assert_eq!(resumed.status, GraphStatus::Complete);
+    assert_eq!(resumed_owner.calls.len(), 1);
+    assert_eq!(
+        resumed_owner.calls[0].1.adapter.as_deref(),
+        Some("second")
+    );
+    advance(&document, &mut resumed_owner, &mut resumed_journal).unwrap();
+    assert_eq!(resumed_owner.calls.len(), 1);
+}
+
 #[test]
 fn advisory_composite_settlement_preserves_cause_and_launches_dependant() {
     for outcome in [AttemptOutcome::ReviewRequired, AttemptOutcome::TaskFailed] {

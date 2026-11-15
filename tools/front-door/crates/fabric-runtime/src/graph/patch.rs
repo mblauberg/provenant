@@ -1513,6 +1513,7 @@ pub(super) fn commit(
             progress.skip_reason = Some(format!("skipped by patch revision {revision}"));
         }
     }
+    composites::reconcile_checkpoint(plan, checkpoint);
     plans::remaining(checkpoint, preview, limits);
     revision
 }

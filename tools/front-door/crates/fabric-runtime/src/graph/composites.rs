@@ -987,11 +987,43 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
     checkpoint: &mut GraphCheckpoint,
     journal: &mut J,
 ) -> Result<(), GraphError<R::Error, J::Error>> {
+    if reconcile_progress(index, plan, positions, checkpoint) {
+        journal.save(checkpoint).map_err(GraphError::Journal)?;
+    }
+    Ok(())
+}
+
+/// Recompute every composite boundary after a patch changes its member set or
+/// settlement. Patch admission saves the expansion and these derived rows as
+/// one checkpoint, so replay never sees a parent paired with obsolete members.
+pub(super) fn reconcile_checkpoint(plan: &PlannedGraph, checkpoint: &mut GraphCheckpoint) {
+    let positions = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect();
+    // Expanded plans place members before their boundaries. A parent therefore
+    // reads already-recomputed outputs from any nested composite it contains.
+    for (index, node) in plan.nodes.iter().enumerate() {
+        if node.composite.is_some() {
+            reconcile_progress(index, plan, &positions, checkpoint);
+        }
+    }
+}
+
+/// Apply the member-derived state, outputs and errors to one composite row.
+fn reconcile_progress(
+    index: usize,
+    plan: &PlannedGraph,
+    positions: &BTreeMap<String, usize>,
+    checkpoint: &mut GraphCheckpoint,
+) -> bool {
     let node = &plan.nodes[index];
     let spec = node
         .composite
         .as_ref()
-        .ok_or(GraphError::Invalid("composite boundary".into()))?;
+        .expect("composite reconciliation is called for a boundary");
     let mut state = state(node, plan, checkpoint, positions);
     let shortfall = (state == NodeState::Succeeded)
         .then(|| coverage_shortfall(spec, checkpoint, positions))
@@ -1019,24 +1051,28 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
     }
     let (exported, truncation_cause) =
         exported.map_or((None, None), |(output, cause)| (Some(output), cause));
+    let (advance_error_code, advance_error) = if let Some(reason) = shortfall {
+        (
+            Some("coverage_below_minimum".into()),
+            Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES)),
+        )
+    } else if let Some(reason) = export_error {
+        (Some("composite_findings_exceed_cap".into()), Some(reason))
+    } else {
+        (None, None)
+    };
     let progress = &mut checkpoint.nodes[index];
-    if progress.state != state
+    let changed = progress.state != state
         || progress.outputs != exported
         || progress.truncation_cause != truncation_cause
-    {
-        progress.state = state;
-        progress.outputs = exported;
-        progress.truncation_cause = truncation_cause;
-        if let Some(reason) = shortfall {
-            progress.advance_error_code = Some("coverage_below_minimum".into());
-            progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
-        } else if let Some(reason) = export_error {
-            progress.advance_error_code = Some("composite_findings_exceed_cap".into());
-            progress.advance_error = Some(reason);
-        }
-        journal.save(checkpoint).map_err(GraphError::Journal)?;
-    }
-    Ok(())
+        || progress.advance_error_code != advance_error_code
+        || progress.advance_error != advance_error;
+    progress.state = state;
+    progress.outputs = exported;
+    progress.truncation_cause = truncation_cause;
+    progress.advance_error_code = advance_error_code;
+    progress.advance_error = advance_error;
+    changed
 }
 
 fn state(
