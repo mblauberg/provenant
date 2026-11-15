@@ -374,7 +374,7 @@ pub fn program_paths(value: &str) -> Vec<String> {
 
 fn expand(word: &str, base: &Path) -> PathBuf {
     if let Some(rest) = word.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
+        && let Some(home) = std::env::var_os(provenant_core::consumer_env::HOME)
     {
         return Path::new(&home).join(rest);
     }

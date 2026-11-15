@@ -301,9 +301,11 @@ fn cached_run_history(dir: &Directory) -> Option<Vec<RunDuration>> {
 }
 
 fn settings_roots(state: &Path, project: &Path) -> Result<provenant_core::Roots, ObserveError> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
-        ObserveError::Unavailable("cannot resolve CI cadence configuration roots".into())
-    })?;
+    let home = std::env::var_os(provenant_core::consumer_env::HOME)
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            ObserveError::Unavailable("cannot resolve CI cadence configuration roots".into())
+        })?;
     let mut inputs = provenant_core::RootInputs::new(home, project.to_owned());
     inputs.state_dir = Some(state.to_owned());
     inputs.workspaces.push(project.to_owned());

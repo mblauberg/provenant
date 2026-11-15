@@ -48,7 +48,9 @@ pub fn product_root() -> Result<PathBuf, RootError> {
             return Ok(candidate.into());
         }
     }
-    let root = PathBuf::from(std::env::var_os("PROVENANT_ROOT").ok_or(RootError::Uninstalled)?);
+    let root = PathBuf::from(
+        std::env::var_os(provenant_core::consumer_env::ROOT).ok_or(RootError::Uninstalled)?,
+    );
     if !root.is_absolute() || !root.is_dir() {
         return Err(RootError::Uninstalled);
     }
@@ -277,7 +279,8 @@ pub fn child(home: &Path, assets: &Path, state_dir: PathBuf) -> Result<Roots, Ro
 }
 /// Canonical home used by root selection and home-relative Fabric identity.
 pub(crate) fn home() -> Result<PathBuf, RootError> {
-    let home = PathBuf::from(std::env::var_os("HOME").ok_or(RootError::Home)?);
+    let home =
+        PathBuf::from(std::env::var_os(provenant_core::consumer_env::HOME).ok_or(RootError::Home)?);
     if !home.is_absolute() {
         return Err(RootError::Home);
     }

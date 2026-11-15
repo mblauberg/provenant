@@ -1573,7 +1573,7 @@ impl ChairAlarms {
     pub fn new(project: &Path) -> Self {
         Self {
             project: project.to_owned(),
-            session: std::env::var("PROVENANT_SESSION_ID")
+            session: std::env::var(provenant_core::consumer_env::SESSION_ID)
                 .ok()
                 .filter(|value| !value.is_empty()),
         }
