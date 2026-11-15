@@ -99,7 +99,7 @@ fn check_config_shares_local_login_metadata_and_keeps_other_overlaps() -> Result
     let mut doc: toml_edit::DocumentMut = fs::read_to_string(&config_path)?.parse()?;
     doc["domains"]["accounts"]["entries"]["opencode-go"]["plan"] = toml_edit::value("go-plan");
     doc["domains"]["accounts"]["entries"]["opencode-zen"]["plan"] = toml_edit::value("zen-plan");
-    fs::write(config_path, doc.to_string())?;
+    fs::write(&config_path, doc.to_string())?;
 
     let checked = rig.command(&["check", "config", "--json"])?;
     assert_eq!(code(&checked), 0);

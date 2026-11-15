@@ -64,10 +64,6 @@ impl ProjectLayout {
     ) -> Result<Self, WorktreeError> {
         Self::from_identity(common.to_path_buf(), false, identity)
     }
-
-    pub(crate) fn for_verified_repo(repo: &VerifiedRepo) -> Result<Self, WorktreeError> {
-        Self::from_repo(repo, repo.private_git_dir() == repo.common_git_dir())
-    }
 }
 
 /// Resolve a registered common Git directory to the project-layout owner using
