@@ -1474,7 +1474,7 @@ pub(crate) fn land_cleanup(
             )?;
             let retention_owner = crate::retention_owner::Owner::new(&roots, &home, &project)
                 .with_merge_observation(&evidence);
-            match worktrees::collect(
+            match worktrees::collect_selected(
                 context,
                 std::slice::from_ref(&lane),
                 &worktrees::WorktreeGcPolicy {
@@ -1487,7 +1487,7 @@ pub(crate) fn land_cleanup(
                     regenerable: &regenerable,
                     keep: &settings.keep,
                     written_before_ns: now_ns,
-                    include_foreign: false,
+                    include_foreign: true,
                     retirement_port: Some(&retirement),
                     retirement_feeds: Some(&retention_owner),
                     integration_patterns: &[],

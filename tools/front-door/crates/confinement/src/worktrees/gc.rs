@@ -965,7 +965,19 @@ pub fn collect(
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
-    collect_impl(context, lanes, policy, cancel)
+    collect_impl(context, lanes, policy, true, cancel)
+}
+
+/// Collect lanes the caller named for removal, such as the branch a landing
+/// just merged. The first-pass preview of foreign worktrees exists to show an
+/// unattended sweep before it acts; an explicit request needs no preview.
+pub fn collect_selected(
+    context: &WorktreeContext<'_>,
+    lanes: &[WorktreeInfo],
+    policy: &WorktreeGcPolicy<'_>,
+    cancel: &CancelToken,
+) -> Result<WorktreeGcReport, WorktreeError> {
+    collect_impl(context, lanes, policy, false, cancel)
 }
 
 /// Revalidate a caller-supplied landing proof against the exact live worktree
@@ -1291,6 +1303,7 @@ fn collect_impl(
     context: &WorktreeContext<'_>,
     lanes: &[WorktreeInfo],
     policy: &WorktreeGcPolicy<'_>,
+    preview_foreign: bool,
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
     validate_binding(context)?;
@@ -1332,6 +1345,7 @@ fn collect_impl(
     let first_foreign = policy.mode == CollectionMode::Worktrees
         && foreign_seen
         && policy.include_foreign
+        && preview_foreign
         && first_foreign_pass(context)?;
     let dry = policy.dry_run || first_foreign;
     if dry {

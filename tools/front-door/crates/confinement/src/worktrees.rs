@@ -31,7 +31,7 @@ pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, WorktreeRepairKind, 
 pub use gc::{
     CandidateReport, CollectionMode, ForgeObservation, OutputEntry, RetirementFeeds,
     WorktreeGcPolicy, WorktreeGcReport, acknowledge_foreign_preview, branch_candidate, collect,
-    first_foreign_pass, resume_pending_retirements,
+    collect_selected, first_foreign_pass, resume_pending_retirements,
 };
 pub use inventory::*;
 pub use landed::{
