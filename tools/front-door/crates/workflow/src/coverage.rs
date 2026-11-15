@@ -31,10 +31,21 @@ pub enum Status {
     /// Coverage is short; more or different reviews could still pass.
     Incomplete,
 }
-/// Stable machine-readable reasons returned by review-coverage evaluation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DiagnosticCode {
+macro_rules! declare_diagnostic_codes {
+    ($($code:ident),+ $(,)?) => {
+        /// Stable machine-readable reasons returned by review-coverage evaluation.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum DiagnosticCode { $($code),+ }
+
+        impl DiagnosticCode {
+            /// Every emitted reason is paired with a coverage test case.
+            pub const ALL: &'static [Self] = &[$(Self::$code),+];
+        }
+    };
+}
+
+declare_diagnostic_codes! {
     AuthorTierUnknown,
     StaleSubject,
     BlockingReview,
@@ -46,22 +57,6 @@ pub enum DiagnosticCode {
     MissingReviews,
     MissingCrossFamilyLeg,
     MissingAdversarialLens,
-}
-impl DiagnosticCode {
-    /// Every emitted reason is paired with a coverage test case.
-    pub const ALL: [Self; 11] = [
-        Self::AuthorTierUnknown,
-        Self::StaleSubject,
-        Self::BlockingReview,
-        Self::InconclusiveReview,
-        Self::ReviewerNotIndependent,
-        Self::ReviewerRouteUnknown,
-        Self::ReviewerBelowAuthorTier,
-        Self::RepeatedReviewer,
-        Self::MissingReviews,
-        Self::MissingCrossFamilyLeg,
-        Self::MissingAdversarialLens,
-    ];
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Diagnostic {
@@ -529,7 +524,7 @@ mod tests {
             .chain(&repeated.diagnostics)
             .map(|diagnostic| diagnostic.code)
             .collect();
-        let declared: BTreeSet<_> = DiagnosticCode::ALL.into_iter().collect();
+        let declared: BTreeSet<_> = DiagnosticCode::ALL.iter().copied().collect();
         assert_eq!(emitted, declared);
     }
 
