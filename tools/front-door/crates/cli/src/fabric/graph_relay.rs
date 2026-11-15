@@ -2077,7 +2077,7 @@ mod provisioning_tests {
         }
         git(&["remote", "add", "origin", remote])?;
         git(&["checkout", "--detach", "-q"])?;
-        let request = json!({"op":"add","id":"writer","use":"implement","prompt":"Write","writer":true,"write_scope":["src"],"idempotency_key":"write"});
+        let request = json!({"op":"add","id":"writer","use":"implement","brief":"Write","writer":true,"write_scope":["src"],"idempotency_key":"write"});
         let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
         let path = receipt["worktree"].as_str().ok_or("missing worktree")?;
         assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
@@ -2164,7 +2164,7 @@ mod provisioning_tests {
                 })?;
                 journal.save(&checkpoint)?;
             }
-            let request = json!({"op":"add","id":"child","use":"task","prompt":"Read", "idempotency_key":"lost-reply"});
+            let request = json!({"op":"add","id":"child","use":"task","brief":"Read", "idempotency_key":"lost-reply"});
             let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
             let settled = {
                 let mut journal = open()?;
@@ -2189,7 +2189,7 @@ mod provisioning_tests {
             assert_eq!(replay["replayed"], true);
             assert_eq!(open()?.load("g-lost-receipt")?, Some(settled));
             let mut changed = request.clone();
-            changed["prompt"] = json!("Different");
+            changed["brief"] = json!("Different");
             assert!(
                 matches!(serve(&context, "caller", changed, budget, &cancel, &clock),
                 Err(ServiceError::Cli { code, .. }) if code == "idempotency_conflict")
@@ -2577,9 +2577,10 @@ mod panel_tests {
         );
         assert!(!routine["review-panel"].iter().any(|lens| lens == "tests"));
         document.context.as_mut().unwrap().risk_tier = Some("crucial".into());
-        document
-            .extra
-            .insert("review".into(), json!({"risk_tags": ["security"]}));
+        document.review = Some(provenant_routing::ReviewRequest {
+            risk_tags: vec!["security".into()],
+            ..Default::default()
+        });
         let crucial = launch_resolvers(&review, &document).unwrap();
         assert!(crucial["review-panel"].iter().any(|lens| lens == "tests"));
         assert!(
