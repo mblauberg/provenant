@@ -84,11 +84,13 @@ normally. The warning identifies the unsupported setting class without its value
 The [run spec](../specs/run.md#cargo-target-seed) owns the lifecycle;
 [GC](gc.md) owns retention.
 
-Native npm and pnpm launches keep host cache selectors when a provider changes
+Native npm, pnpm and Corepack launches keep host cache selectors when a provider changes
 HOME or XDG state. Explicit settings win. npm config lookup follows the first
 npm and Node installation in PATH, including ordinary NVM installations; it does
 not borrow a later Homebrew installation's settings. An unresolved shim or
-configuration warns and preserves the existing selector.
+configuration warns and preserves the existing selector. Corepack keeps its own
+package-manager downloads shared through `COREPACK_HOME`; it does not use
+pnpm's package-store directory.
 
 ## Recovery
 
