@@ -1239,6 +1239,19 @@ pub fn bind_writer_attempt(
     Ok(lease)
 }
 
+/// Fixture-only spawned-state publication through the typed custody owner.
+/// This models the guardian's durable reservation update without writing
+/// reservation records directly from a higher-level crate's test.
+#[doc(hidden)]
+pub fn record_spawned_provider(
+    lease: &mut crate::custody::CustodyLease,
+    attempt: &provenant_os::fs::Directory,
+    guardian: crate::census::ProcessIdentity,
+    provider: crate::census::ProcessIdentity,
+) -> crate::custody::Result<()> {
+    lease.record_fixture_spawned_provider(attempt, guardian, provider)
+}
+
 /// Run once after a contended writer attempt releases the short observer gate.
 /// This fixture seam synchronises observation tests without scheduler sleeps.
 pub fn on_writer_lock_wait(hook: impl FnOnce() + 'static) {
