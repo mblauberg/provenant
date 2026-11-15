@@ -486,45 +486,68 @@ mod tests {
     }
 
     #[test]
-    fn lane_roots_resolve_links_and_missing_tails() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let root = std::fs::canonicalize(temp.path())?;
-        std::fs::create_dir_all(root.join("lane"))?;
-        std::os::unix::fs::symlink(root.join("lane"), root.join("alias"))?;
-        let roots = LaneRoots::new([root.join("lane")]);
-        assert!(roots.contains(&root.join("lane/a/b")));
-        assert!(roots.contains(&root.join("alias/not/yet/created")));
-        assert!(roots.contains(&root.join("other/../lane/x")));
-        assert!(!roots.contains(&root.join("laneish")));
-        assert!(!roots.contains(Path::new("relative/lane")));
-        Ok(())
-    }
+    fn lane_root_link_shapes_resolve_with_kernel_path_semantics() -> TestResult {
+        #[derive(Clone, Copy)]
+        enum LinkShape {
+            AliasedRootAndMissingTail,
+            FinalLinkUnderRoot,
+            ParentAfterLink,
+        }
 
-    #[test]
-    fn lane_roots_include_symlinks_under_an_aliased_root() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let root = std::fs::canonicalize(temp.path())?;
-        std::fs::create_dir(root.join("lane"))?;
-        std::fs::write(root.join("outside"), "config")?;
-        std::os::unix::fs::symlink(root.join("lane"), root.join("alias"))?;
-        std::os::unix::fs::symlink(root.join("outside"), root.join("lane/config"))?;
-        let roots = LaneRoots::new([root.join("lane")]);
-        assert!(roots.contains(&root.join("alias/config")));
-        assert!(!roots.contains(&root.join("outside")));
-        Ok(())
-    }
-
-    #[test]
-    fn lane_roots_follow_parent_components_after_a_link() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let root = std::fs::canonicalize(temp.path())?;
-        std::fs::create_dir_all(root.join("lane/deep"))?;
-        std::fs::create_dir_all(root.join("safe"))?;
-        // `safe/link/../x` is `lane/x` for the kernel, not `safe/x`.
-        std::os::unix::fs::symlink(root.join("lane/deep"), root.join("safe/link"))?;
-        let roots = LaneRoots::new([root.join("lane")]);
-        assert!(roots.contains(&root.join("safe/link/../not-yet")));
-        assert!(!roots.contains(&root.join("safe/not-yet")));
+        for (label, shape) in [
+            (
+                "aliased root and missing tail",
+                LinkShape::AliasedRootAndMissingTail,
+            ),
+            ("final link under root", LinkShape::FinalLinkUnderRoot),
+            ("parent after link", LinkShape::ParentAfterLink),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let root = std::fs::canonicalize(temp.path())?;
+            let (roots, included, excluded) = match shape {
+                LinkShape::AliasedRootAndMissingTail => {
+                    std::fs::create_dir_all(root.join("lane"))?;
+                    std::os::unix::fs::symlink(root.join("lane"), root.join("alias"))?;
+                    (
+                        LaneRoots::new([root.join("lane")]),
+                        vec![
+                            root.join("lane/a/b"),
+                            root.join("alias/not/yet/created"),
+                            root.join("other/../lane/x"),
+                        ],
+                        vec![root.join("laneish"), PathBuf::from("relative/lane")],
+                    )
+                }
+                LinkShape::FinalLinkUnderRoot => {
+                    std::fs::create_dir(root.join("lane"))?;
+                    std::fs::write(root.join("outside"), "config")?;
+                    std::os::unix::fs::symlink(root.join("lane"), root.join("alias"))?;
+                    std::os::unix::fs::symlink(root.join("outside"), root.join("lane/config"))?;
+                    (
+                        LaneRoots::new([root.join("lane")]),
+                        vec![root.join("alias/config")],
+                        vec![root.join("outside")],
+                    )
+                }
+                LinkShape::ParentAfterLink => {
+                    std::fs::create_dir_all(root.join("lane/deep"))?;
+                    std::fs::create_dir_all(root.join("safe"))?;
+                    // `safe/link/../x` resolves under lane for the kernel.
+                    std::os::unix::fs::symlink(root.join("lane/deep"), root.join("safe/link"))?;
+                    (
+                        LaneRoots::new([root.join("lane")]),
+                        vec![root.join("safe/link/../not-yet")],
+                        vec![root.join("safe/not-yet")],
+                    )
+                }
+            };
+            for path in included {
+                assert!(roots.contains(&path), "{label}: expected {path:?} inside");
+            }
+            for path in excluded {
+                assert!(!roots.contains(&path), "{label}: expected {path:?} outside");
+            }
+        }
         Ok(())
     }
 
