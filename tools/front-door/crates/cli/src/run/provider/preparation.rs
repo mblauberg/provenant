@@ -2668,10 +2668,18 @@ pub(super) fn prepare_candidates(
         if entries.iter().any(|entry| entry.adapter == spec.name) {
             continue;
         }
-        let directory = registry
+        let host_directory = registry
             .host
-            .and_then(|host| host.default_account_directories.get(spec.name).cloned())
-            .or_else(|| host_provider_var(registry, environment).map(PathBuf::from))
+            .and_then(|host| host.default_account_directories.get(spec.name).cloned());
+        let environment_directory = host_provider_var(registry, environment);
+        let configured_by = match (host_directory.as_ref(), environment_directory.as_ref()) {
+            (Some(directory), Some(value)) if directory.as_os_str() == value => Some(environment),
+            (Some(_), _) => Some("host account-directory configuration"),
+            (None, Some(_)) => Some(environment),
+            (None, None) => None,
+        };
+        let directory = host_directory
+            .or_else(|| environment_directory.map(PathBuf::from))
             .unwrap_or_else(|| home.join(fallback));
         let mut entry = provenant_providers::accounts::Registration {
             adapter: spec.name.into(),
@@ -2694,8 +2702,9 @@ pub(super) fn prepare_candidates(
         let discovered = (|| -> Result<(), AccountObservationError> {
             let executable =
                 locate(spec.name).map_err(AccountObservationError::VersionUnavailable)?;
-            entry.directory = canonical(&directory)
-                .map_err(|detail| default_directory_error(spec, &directory, detail))?;
+            entry.directory = canonical(&directory).map_err(|detail| {
+                default_directory_error(spec, &directory, detail, configured_by)
+            })?;
             entry.key = provenant_providers::accounts::detect(
                 &executor,
                 spec.name,
@@ -2711,8 +2720,12 @@ pub(super) fn prepare_candidates(
         match discovered {
             Ok(()) => entries.push(entry),
             Err(error) => {
-                default_failures
-                    .insert(spec.name.to_owned(), (error.skip_kind(), error.to_string()));
+                let configured_directory =
+                    matches!(&error, AccountObservationError::ConfiguredDirectory(_));
+                default_failures.insert(
+                    spec.name.to_owned(),
+                    (error.skip_kind(), error.to_string(), configured_directory),
+                );
             }
         }
     }
@@ -3297,7 +3310,9 @@ pub(super) fn prepare_candidates(
                 reason,
                 provenant_records::RouteExclusionReason::UnknownAvailability
             ) {
-                if let Some((kind, detail)) = default_failures.get(&route.adapter) {
+                if let Some((kind, detail, configured_directory)) =
+                    default_failures.get(&route.adapter)
+                {
                     previous_outcome = if *kind == SkipKind::AuthRequired {
                         provenant_routing::FallbackOutcome::AuthRequired
                     } else {
@@ -3309,7 +3324,7 @@ pub(super) fn prepare_candidates(
                     } else {
                         reason.clone()
                     });
-                    if *kind == SkipKind::AuthRequired {
+                    if *kind == SkipKind::AuthRequired || *configured_directory {
                         skipped.detail = provenant_records::diagnostic::safe_text(detail);
                     }
                     reasons.push(name_skipped_accounts(skipped, &route, &entries));
