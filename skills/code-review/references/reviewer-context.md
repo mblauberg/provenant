@@ -47,10 +47,13 @@ Each finding names the location, the mechanism and the fix. Claims that
 something is missing or unused cite the search that shows it. Give each
 finding a `trigger` with:
 
-- `sequence`: the real steps that reach the state;
+- `sequence`: one string describing the real steps in order that reach the
+  state; it is a string, not an array;
 - `reach`: `default_path`, `operator_mistake` or `attacker_or_unreachable`;
 - `observed`: `true` if you saw it happen in a run or its output, `false` if
   you inferred it from the code.
+
+For example: `"trigger":{"sequence":"Run the command, then observe the refusal","reach":"default_path","observed":true}`.
 
 `proposed_fix` removes the cause, because a patch at the symptom leaves the
 next case open. A proposed guard says whether a design would make the state
