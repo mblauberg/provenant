@@ -1524,20 +1524,16 @@ mod tests {
         ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
         std::fs::write(config.join("ports.json"), serde_json::to_vec(&ports)?)?;
         allocations.push(separate.join(".claude/worktrees"));
-        let inventory = MandatoryRoots::for_host(
-            &roots,
-            &root.join("home"),
-            &active_source,
-            &[],
-            &[],
-            &[],
-        )?;
-        assert!(inventory
-            .validate_extra_write(&PathGrant {
-                path: active_source,
-                scope: PathScope::Subtree,
-            })
-            .is_err());
+        let inventory =
+            MandatoryRoots::for_host(&roots, &root.join("home"), &active_source, &[], &[], &[])?;
+        assert!(
+            inventory
+                .validate_extra_write(&PathGrant {
+                    path: active_source,
+                    scope: PathScope::Subtree,
+                })
+                .is_err()
+        );
         for allocation in allocations {
             // A context-free host inventory cannot infer project layout from
             // the registered common directory. Git-aware launch callers add
