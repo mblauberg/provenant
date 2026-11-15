@@ -178,6 +178,8 @@ jobs:
         run: python3 -m unittest discover -s skills/improve/scripts/tests -v
 
       - name: Require documentation inventory and resolvable evidence
+        # Advisory for the 2.0 cutover (owner ruling); restore as blocking after.
+        continue-on-error: true
         run: scripts/check-doc-truth --inventory-only --strict-inventory
       - name: Install spelling checker
         uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
