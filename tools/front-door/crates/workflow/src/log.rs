@@ -657,15 +657,67 @@ mod tests {
         assert_eq!(output["kind"], "update");
         assert_eq!(output["markdown"], "entry");
     }
+    #[derive(Clone, Copy, Debug)]
+    enum ChairCommit {
+        LogAppend,
+        SummaryUpdate,
+    }
+
     #[test]
-    fn log_commit_signals_chair() {
+    fn chair_commits_signal_chair_for_log_append_and_summary_update() {
         let (_tmp, store) = fixture();
-        let before = provenant_os::changes::read(store.root.as_path()).unwrap();
-        store
-            .append(update("signal", 1, "entry"), retention(), 1)
-            .unwrap();
-        let after = provenant_os::changes::read(store.root.as_path()).unwrap();
-        assert!(after.chair > before.chair);
+        for commit in [ChairCommit::LogAppend, ChairCommit::SummaryUpdate] {
+            let before = match commit {
+                ChairCommit::LogAppend => {
+                    let before = provenant_os::changes::read(store.root.as_path()).unwrap();
+                    store
+                        .append(update("signal", 1, "entry"), retention(), 1)
+                        .unwrap();
+                    before
+                }
+                ChairCommit::SummaryUpdate => {
+                    use crate::session::{HostSessionId, SessionStore, SummaryPatch};
+                    use provenant_core::{ActorId, HostId, MonoTime, TestClock, UtcMicros};
+
+                    let session = SessionStore::new(
+                        store.root.clone(),
+                        store.project,
+                        HostSessionId::parse("summary").unwrap(),
+                    )
+                    .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]));
+                    let clock = TestClock::new(
+                        UtcMicros::from_micros(1).unwrap(),
+                        MonoTime::from_micros(0),
+                    );
+                    let budget = WaitBudget::cli(clock.mono_now(), 1).unwrap();
+                    session
+                        .save(
+                            b"---\nprovenant_summary:\n  schema_version: 1\n  revision: 1\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"First\"\n  next: \"Next\"\n  needs_you: []\n  risk: \"None\"\n---\nBody\n",
+                            budget,
+                            &CancelToken::new(),
+                            &clock,
+                        )
+                        .unwrap();
+                    let before = provenant_os::changes::read(store.root.as_path()).unwrap();
+                    session
+                        .update_summary(
+                            SummaryPatch {
+                                now: Some("Updated".into()),
+                                ..Default::default()
+                            },
+                            1,
+                            &OperationId::parse("summary-signal").unwrap(),
+                            budget,
+                            &CancelToken::new(),
+                            &clock,
+                        )
+                        .unwrap();
+                    before
+                }
+            };
+            let after = provenant_os::changes::read(store.root.as_path()).unwrap();
+            assert!(after.chair > before.chair, "{commit:?}");
+        }
     }
     #[test]
     fn log_operation_replay_pagination_correction_pruning_and_restart() {
