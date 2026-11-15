@@ -23,6 +23,8 @@ pub use skill_stage::{SkillWarning, StagedUserSkills};
 pub mod opencode;
 pub mod quota;
 pub mod quota_live;
+#[cfg(any(test, feature = "recording"))]
+pub mod recording;
 mod stream;
 mod swift;
 pub use swift::toolchain_available as swift_toolchain_available;
