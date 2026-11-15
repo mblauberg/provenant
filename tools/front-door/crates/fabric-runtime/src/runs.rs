@@ -49,6 +49,8 @@ pub struct AttemptSummary {
     pub queued_at: provenant_core::WallTime,
     pub started_at: Option<provenant_core::WallTime>,
     pub last_output_at: Option<provenant_core::WallTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering: Option<provenant_records::run::SteeringStatus>,
 }
 
 impl From<AttemptRecord> for AttemptSummary {
@@ -82,6 +84,7 @@ impl From<AttemptRecord> for AttemptSummary {
             queued_at: record.queued_at,
             started_at: record.started_at,
             last_output_at: record.last_output_at,
+            steering: projected.steering,
         }
     }
 }

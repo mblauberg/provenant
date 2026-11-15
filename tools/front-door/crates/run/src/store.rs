@@ -32,7 +32,11 @@ pub(crate) fn cancel_requested(
         .ok()
         .flatten()
         .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
-        .is_some_and(|request| request.get("scope") == serde_json::to_value(scope).ok().as_ref())
+        .is_some_and(|request| {
+            request.get("scope") == serde_json::to_value(scope).ok().as_ref()
+                && request.get("reason").and_then(serde_json::Value::as_str)
+                    == Some("explicit_cancellation")
+        })
 }
 
 pub(crate) fn import_cancelled(
@@ -850,7 +854,7 @@ impl RunStore {
                 profile: task.profile.clone(),
                 limits: None,
                 schema_version: 2, attempt_id, project_id: context.project_id, attempt_number: u64::from(key.attempt()), revision: 1, generation: 0,
-                delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
+                delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, steering: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
                 queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
                 terminal_evidence: None, settlement_reason: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
                 prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: input.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
@@ -1473,7 +1477,9 @@ impl RunStore {
                     .clone()
                     .ok_or(RunError::Validation("unsettled reason missing"))?,
             }
-        } else if publication.outcome == Outcome::Cancelled && cancellation_delivered == Some(true)
+        } else if publication.outcome == Outcome::Cancelled
+            && publication.terminal_cause != Some(TerminalCause::Steered)
+            && cancellation_delivered == Some(true)
         {
             TerminalEvidence::EffectiveCancellation
         } else if durable_exit.is_some() {
@@ -1511,6 +1517,7 @@ impl RunStore {
         if import_cancellation {
             next.cancellation_disposition = Some(CancellationDisposition::ImportEffective);
         } else if publication.outcome == Outcome::Cancelled
+            && publication.terminal_cause != Some(TerminalCause::Steered)
             && (!launched || cancellation_delivered == Some(true))
         {
             next.cancellation_disposition = Some(CancellationDisposition::Effective);

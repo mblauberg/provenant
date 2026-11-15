@@ -116,6 +116,43 @@ pub(crate) fn advance_graphs_after_settlement(
         provenant_cli::run::launch_budget_wrap_up(&session, run, &edge, &call, host)
             .map_err(|failure| std::io::Error::other(failure.message))?;
     }
+    let before_steer = store.record(settled.attempt_id, &call)?;
+    if matches!(
+        before_steer.state,
+        provenant_run::AttemptState::Terminal { .. }
+    ) && !store.steer_intent(settled.attempt_id, &call)?.is_empty()
+    {
+        let successor = match store.prepare_steer_continuation(settled.attempt_id, &call) {
+            Ok(successor) => successor,
+            Err(error) => {
+                let operation = store
+                    .attempt_operation(settled.attempt_id, &call)?
+                    .operation_id;
+                if let Some(graph) =
+                    matching_graph_hint(&roots.state, settled.project_id, &before_steer, &operation)
+                {
+                    let _ = FileJournal::set_advance_error(
+                        &roots.state,
+                        settled.project_id,
+                        &graph,
+                        Some(&error.to_string()),
+                    );
+                }
+                return Err(Box::new(error));
+            }
+        };
+        if let Some(run) = successor {
+            let edge = provenant_cli::run::Edge {
+                roots: &roots,
+                home: &settled.roots.home,
+                assets: &settled.roots.checkout,
+                cwd: &host.cwd,
+            };
+            provenant_cli::run::launch_graph_continuation(&session, run, &edge, &call, host)
+                .map_err(|failure| std::io::Error::other(failure.message))?;
+            store.resolve_steer_intents(settled.attempt_id, &call)?;
+        }
+    }
     let record = store.record(settled.attempt_id, &call)?;
     let operation = store
         .attempt_operation(settled.attempt_id, &call)?

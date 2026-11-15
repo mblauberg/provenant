@@ -1,7 +1,7 @@
 //! The attempt holder: Run's admission and terminal transaction, composed into
 //! the same-binary guardian. It runs while the guardian still holds custody.
 use crate::{artifacts::read_sealed, launch::Providers, *};
-use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, RootInputs};
+use provenant_core::{ActorId, AttemptId, CancelToken, Clock, OperationId, ProjectId, RootInputs};
 use provenant_os::{clock::SystemClock, exec::Termination, fs::Directory};
 use provenant_supervisor::{
     custody::{self, CustodyError, ExitObservation},
@@ -1127,6 +1127,98 @@ impl RunStore {
         }
     }
 
+    /// Admit the graph-owned same-session successor for a persisted steer.
+    /// The stable operation and attempt IDs make settlement replay idempotent.
+    pub fn prepare_steer_continuation(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<Option<AttemptId>> {
+        let record = self.record(id, call)?;
+        let (outcome, terminal_cause, finished_at) = match &record.state {
+            AttemptState::Terminal {
+                outcome,
+                terminal_cause,
+                finished_at,
+                ..
+            } => (*outcome, *terminal_cause, *finished_at),
+            _ => return Ok(None),
+        };
+        let intents = self.steer_intent(id, call)?;
+        if intents.is_empty() {
+            return Ok(None);
+        }
+        // A natural success can race with the interrupt publication. If any
+        // other typed stop or terminal outcome won, keep the accepted text for
+        // inspection but do not turn that stop into an automatic continuation.
+        let natural_settlement = terminal_cause.is_none()
+            && matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired);
+        if terminal_cause != Some(TerminalCause::Steered) && !natural_settlement {
+            self.resolve_steer_intents(id, call)?;
+            return Ok(None);
+        }
+        let Some(session) = record.session.as_deref() else {
+            return Err(RunError::SteerSessionUnavailable);
+        };
+        let ready = self.steer_session_ready(id, call)?;
+        if terminal_cause == Some(TerminalCause::Steered) && ready.is_none() {
+            return Err(RunError::SteerSessionUnavailable);
+        }
+        if let Some(ready) = ready {
+            let route_digest = record
+                .applied_route
+                .as_ref()
+                .map(crate::controls::steer_route_digest)
+                .transpose()?
+                .ok_or(RunError::SteerSessionMismatch)?;
+            if ready.conflict
+                || !ready.terminal_confirmed
+                || ready.generation != Self::scope(&record).generation
+                || ready.route_digest != route_digest
+                || ready.session != session
+            {
+                return Err(RunError::SteerSessionMismatch);
+            }
+        }
+        let previous_context = record
+            .context
+            .as_ref()
+            .ok_or(RunError::Validation("steered graph context missing"))?;
+        if previous_context.attempt != Some(record.key.attempt()) {
+            return Err(RunError::Validation("steered graph work key mismatch"));
+        }
+        let mut context = previous_context.clone();
+        context.attempt = Some(
+            record
+                .key
+                .attempt()
+                .checked_add(1)
+                .ok_or(RunError::Validation("graph continuation work key"))?,
+        );
+        let request = self.request(id, call)?;
+        context.writer_predecessor = request.task.writer.as_ref().map(|_| id);
+        let operation_id = OperationId::parse(&format!("graph-steer-{id}"))
+            .map_err(|_| RunError::Validation("steer continuation operation"))?;
+        let digest = provenant_records::CanonicalV1::record_digest("graph-steer-attempt", 1, &id)?;
+        let mut attempt_bytes = [0; 16];
+        attempt_bytes.copy_from_slice(&digest.as_bytes()[16..]);
+        let prompt = intents
+            .iter()
+            .map(|intent| intent.text.as_str())
+            .collect::<Vec<_>>()
+            .join(crate::controls::STEER_TEXT_SEPARATOR);
+        let input = crate::Resume {
+            prior: id,
+            expected_generation: 0,
+            operation_id,
+            attempt_id: AttemptId::from_bytes(attempt_bytes),
+            prompt: format!("{}{prompt}", crate::controls::STEER_PROMPT_PREFIX),
+            created_at: finished_at,
+            extend: Vec::new(),
+        };
+        Ok(Some(self.resume_graph(&input, &context, call)?.attempt_id))
+    }
+
     /// Reconcile a failed import as a final failure once custody proves that
     /// the guardian is gone. Never rewrite its sealed terminal decision.
     pub(crate) fn settle_failed_import(
@@ -1539,6 +1631,12 @@ impl RunStore {
         if matches!(record.state, AttemptState::Terminal { .. }) {
             return self.finish_effects(record, attempt, &completion, call);
         }
+        if self.steer_session_ready(id, call)?.is_some() {
+            let terminal_provider = custody::provider_identity(attempt, exit.scope)
+                .ok()
+                .flatten();
+            self.confirm_steer_terminal_process(id, exit.scope, terminal_provider.as_ref(), call)?;
+        }
         // Upgraded guardians may not have called provider_exited. Capacity is
         // independent of writer custody and is free as soon as exit is known.
         self.write(call, |tx| {
@@ -1572,8 +1670,13 @@ impl RunStore {
         let mut import_stopped = false;
         // A late request alone cannot invalidate a verified clean exit. If the
         // current guardian could not establish ordering, its receipt stays unknown.
+        let steered = exit.stop_reason == Some(StopReason::Steered)
+            && (exit.never_spawned || exit.cancel_delivered_before_exit == Some(true));
         let mut cancelled = if exit.never_spawned {
-            exit.stop_reason == Some(StopReason::ExplicitCancellation)
+            matches!(
+                exit.stop_reason,
+                Some(StopReason::ExplicitCancellation | StopReason::Steered)
+            )
         } else {
             exit.cancel_delivered_before_exit == Some(true)
         };
@@ -2288,6 +2391,7 @@ impl RunStore {
             // applies; a scope-only cancellation marker carries no user cause.
             if let Some(reason) = cancellation_reason(cancellation.as_deref())
                 && !typed_deadline
+                && !steered
                 && !crate::store::import_cancelled(
                     attempt,
                     exit.scope,
@@ -2640,11 +2744,16 @@ impl RunStore {
             decoded.reason = Some("cancellation delivery before provider exit is unknown".into());
         } else if cancelled {
             decoded.outcome = Outcome::Cancelled;
+            if steered {
+                decoded.terminal_cause = Some(TerminalCause::Steered);
+                decoded.reason = Some(TerminalCause::Steered.detail().into());
+            }
         }
         if matches!(
             decoded.outcome,
             Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
-        ) {
+        ) && decoded.terminal_cause != Some(TerminalCause::Steered)
+        {
             decoded.terminal_cause = None;
         }
         if trailing_verdict_tolerated {

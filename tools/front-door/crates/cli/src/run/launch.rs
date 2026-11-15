@@ -177,6 +177,18 @@ pub fn launch_budget_wrap_up(
     launch_on_host_with_wait(session, attempt, edge, call, Some(host), None, None)
 }
 
+/// Launch a queued same-session graph continuation after predecessor custody
+/// has settled and been released.
+pub fn launch_graph_continuation(
+    session: &Session,
+    attempt: AttemptId,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    host: &run::HostLaunchContext,
+) -> Result<Vec<run::Started>, Fail> {
+    launch_on_host_with_wait(session, attempt, edge, call, Some(host), None, None)
+}
+
 /// The detached launcher's entry point. It reopens the admitted run and uses
 /// the ordinary host launch path, including writer custody and guardian handoff.
 pub fn launch_worker(id: AttemptId, provider_lease_wait: Option<u64>, edge: &Edge<'_>) -> Reply {

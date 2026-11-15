@@ -86,6 +86,8 @@ pub enum CustodyError {
     ProfileHandoffUnknown,
     #[error("operation was cancelled; custody is retained")]
     Cancelled,
+    #[error("another stop request already owns this attempt")]
+    StopConflict,
     #[error("wait budget expired; custody is retained")]
     Timeout,
     #[error(transparent)]
@@ -843,6 +845,28 @@ pub fn reservation_guardian(
     Ok(reservation.guardian)
 }
 
+/// Read the exact provider process retained by one attempt's custody record.
+/// The caller supplies that attempt's evidence directory; this observation
+/// grants no signalling authority.
+pub fn provider_identity(evidence: &Directory, scope: Scope) -> Result<Option<ProcessIdentity>> {
+    let reservation: Reservation = read_record(evidence, "reservation.json", RECORD_LIMIT)?;
+    validate_anchor(evidence, &reservation)?;
+    if reservation.scope != scope
+        || !matches!(
+            reservation.launch_state,
+            LaunchState::Spawned | LaunchState::Settling
+        )
+    {
+        return Err(CustodyError::InvalidRecord);
+    }
+    if let Some(provider) = &reservation.provider {
+        provider
+            .validate()
+            .map_err(|_| CustodyError::InvalidRecord)?;
+    }
+    Ok(reservation.provider)
+}
+
 fn create_attempt_evidence(directory: &Directory, scope: Scope) -> Result<Directory> {
     let name = scope.attempt.to_string();
     match directory.mkdir(OsStr::new(&name), 0o700) {
@@ -1296,6 +1320,12 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
         Err(CustodyError::Filesystem(error)) if error.is_exists() => {
             match read_record::<CancelRequest>(&handle.directory, "cancel.json", RECORD_LIMIT) {
                 Ok(previous) if previous == request => return Ok(StopReceipt::AlreadyRequested),
+                Ok(previous)
+                    if request.reason == StopReason::Steered
+                        && previous.reason != StopReason::Steered =>
+                {
+                    return Err(CustodyError::StopConflict);
+                }
                 // A stale reattached handle never displaces a later
                 // generation's request. A held scope is the guardian's own,
                 // so a later generation beside it can only be forged.

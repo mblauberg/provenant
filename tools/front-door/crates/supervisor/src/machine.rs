@@ -23,6 +23,8 @@ pub enum Phase {
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
     ExplicitCancellation,
+    /// The chair queued a steering turn for this exact provider session.
+    Steered,
     WallDeadline,
     ProtocolRejected,
     SupervisorSignal,

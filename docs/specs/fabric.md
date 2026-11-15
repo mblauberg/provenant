@@ -154,10 +154,41 @@ A composite's state, outputs and error summary derive from its members. A patch 
 - Why: recovery must validate a checkpoint against the topology it records.
 - Owner: `crates/fabric-runtime/src/graph/composites.rs`, `crates/fabric-runtime/src/graph/patch.rs`
 
-### Live steering unavailable
+### Session-ready steering
 
-Every provider currently returns `control_unsupported` for live steering; delivery transports come later (2.1, #3278).
-The host verifies launch evidence and ownership before reading steering input.
+`provenant steer` accepts bounded, operation-idempotent instructions for the
+exact running graph attempt. Each accepted operation has its own durable text
+and receipt; settlement combines them in arrival order into one continuation.
+The host's shared adapter stream decoder records the first validated session
+identity against the admitted provider route and spawned process identity. It
+requests an interrupt through the attempt's existing custody owner only after
+that readiness record is durable. If readiness is not yet available, the text
+stays queued while the provider continues. After settlement, the graph resumes
+the same provider, model, account and session with the saved instructions as
+the next user turn. It must preserve writer custody and must not fall back to a
+fresh session when retained provider state is missing or expired.
+
+The receipt says `queued` only after the text is durable. It does not claim a
+provider interrupt or resumed continuation; graph/run status owns those later
+outcomes. Status exposes `queued`, `resumed` or `not_continued`, the stable
+operation and message IDs, and the successor when known. It never echoes the
+steering text into generic receipts or status. Replaying an operation with the
+same text returns the same intent, while reusing its ID with different text
+conflicts. The host verifies launch
+evidence and ownership before reading steering input. If natural completion
+races with readiness or the interrupt request, settlement adopts the durable
+intent when terminal session evidence is valid. A different typed stop wins
+and leaves the saved input without an automatic continuation. If the live
+session or process identity changes, or the terminal session disagrees with the
+first validated identity, the input remains recorded and the graph reports the
+mismatch instead of starting a fresh session.
+
+This is continuation transport for #3318, not live input injection. Adapters
+advertise `continuation` only when their run path can retain and resume the
+provider session; other routes remain `unsupported`. The shared live decoder
+uses each adapter's existing stream parser, so readiness does not need a second
+provider parser or a new control protocol. Live injection may later optimise
+the same contract without changing its receipt or control identity.
 Only the current live continuation leaf may receive control; authenticated
 peer requests must also match the origin and receiver identities. Missing,
 conflicting, terminal or unverifiable ownership is refused.

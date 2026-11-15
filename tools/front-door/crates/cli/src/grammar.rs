@@ -151,7 +151,7 @@ pub enum Command {
     /// Retry a graph, node or attempt
     #[command(name = "retry", add = crate::metadata::CoreCommand(5, "provenant retry fix-login"))]
     Retry(Resume),
-    /// Live steering is unavailable on every provider (control_unsupported); delivery transports come later
+    /// Save input durably; interrupt after live session validation and resume the same session after settlement
     #[command(add = crate::metadata::CoreCommand(3, "provenant steer fix-login/implement --brief-file - < message.md"))]
     Steer(crate::inbox::Steer),
     /// Apply a patch to unstarted graph nodes

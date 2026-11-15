@@ -207,7 +207,26 @@ fn peer_inbox_execute(
             "peer operation",
         ));
     }
-    provenant_fabric_runtime::inbox::execute(
+    let edge = provenant_cli::run::Edge {
+        roots: &context.roots,
+        home,
+        assets: &factory.assets,
+        cwd,
+    };
+    let steer = |attempt: provenant_core::AttemptId,
+                 operation: &provenant_core::OperationId,
+                 text: &str,
+                 call: &provenant_fabric_store::Request<'_>| {
+        provenant_cli::inbox::deliver_steer(
+            &edge,
+            &context.identity,
+            attempt,
+            operation,
+            text,
+            call,
+        )
+    };
+    provenant_fabric_runtime::inbox::execute_with_steer(
         &context.roots.state,
         &context.identity,
         &context.config,
@@ -230,17 +249,9 @@ fn peer_inbox_execute(
                     "control target",
                 ));
             }
-            provenant_cli::inbox::resolve_control(
-                &provenant_cli::run::Edge {
-                    roots: &context.roots,
-                    home,
-                    assets: &factory.assets,
-                    cwd,
-                },
-                &context.identity,
-                input,
-            )
+            provenant_cli::inbox::resolve_control(&edge, &context.identity, input)
         },
+        Some(&steer),
     )
 }
 

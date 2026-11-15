@@ -65,6 +65,11 @@ lane_row! {
         protected_paths: Value => nullable(array(super::schema::worktree_path()));
         delivery: Value => any();
         continuation: Value => any();
+        steering: crate::run::SteeringStatus => object(&[
+            ("state", choices(&["queued", "resumed", "not_continued"])),
+            ("operations", array(object(&[("operation_id", string()), ("message_id", string())], &[]))),
+            ("successor", nullable(string())),
+        ], &[]);
         cache_read_share: Option<f64> => nullable(number());
         result_path: Value => nullable(super::schema::worktree_path());
         transcript: Option<LaneTranscript> => nullable(object(&[("adapter", string()), ("session", string()), ("path", nullable(super::schema::worktree_path()))], &[]));
@@ -461,6 +466,7 @@ impl LaneRow {
             protected_paths: json!(protected_paths),
             delivery,
             continuation: json!(lane.continuation),
+            steering: lane.steering.clone(),
             cache_read_share: facts.cache_read_share,
             result_path: json!(facts.result_path),
             transcript: facts.transcript,
@@ -576,6 +582,7 @@ impl crate::run::TerminalCause {
         Self::ContextHandoff,
         Self::Blocked,
         Self::LaneTokenLost,
+        Self::Steered,
     ];
 }
 
@@ -615,7 +622,8 @@ mod terminal_cause_tests {
             | TerminalCause::EmptyWriterResult
             | TerminalCause::ContextHandoff
             | TerminalCause::Blocked
-            | TerminalCause::LaneTokenLost => {}
+            | TerminalCause::LaneTokenLost
+            | TerminalCause::Steered => {}
         }
     }
 

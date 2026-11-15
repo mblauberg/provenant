@@ -144,3 +144,4 @@ restart into a chair decision. See [routing](routing.md) for route selection.
 | `lost` | `chair` | no | 0 |
 | `unsettled` | `chair` | no | 0 |
 | `quarantined` | `chair` | no | 0 |
+| `steered` | `chair` | yes | 0 |
