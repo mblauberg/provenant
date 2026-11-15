@@ -248,7 +248,9 @@ fn lane_roots(
         (Some(private), Some(common)) => {
             transport::LaneRoots::for_repository(cwd, &private, &common, &extra, host_state)
         }
-        _ => transport::LaneRoots::project(cwd, host_state),
+        // An unreadable port table (for example inside a lane) narrows the
+        // lane areas to the run state rather than refusing the advertisement.
+        _ => Ok(transport::LaneRoots::project(cwd, host_state).unwrap_or(extra)),
     }
 }
 

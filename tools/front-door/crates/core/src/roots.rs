@@ -561,11 +561,18 @@ fn protected_roots(inputs: &RootInputs) -> Vec<ProtectedRoot> {
 }
 
 /// One decision for both lexical and bound paths. Containing a boundary is as
-/// unsafe as being inside it; advisory overlaps always warn and proceed.
+/// unsafe as being inside it for data integrity. Lane checkouts and provider
+/// homes live under the state root, so containing Git metadata or a credential
+/// store is expected; only a state root inside one is refused. Advisory
+/// overlaps always warn and proceed.
 fn classify(candidate: &Path, protected: &[ProtectedRoot]) -> Result<Vec<RootWarning>, RootError> {
     let mut warnings = Vec::new();
     for root in protected {
-        if !candidate.starts_with(&root.path) && !root.path.starts_with(candidate) {
+        let inside = candidate.starts_with(&root.path);
+        if !inside && !root.path.starts_with(candidate) {
+            continue;
+        }
+        if !inside && contained_is_expected(root.boundary) {
             continue;
         }
         if let Some(boundary) = root.boundary {
@@ -583,6 +590,13 @@ fn classify(candidate: &Path, protected: &[ProtectedRoot]) -> Result<Vec<RootWar
         });
     }
     Ok(warnings)
+}
+
+fn contained_is_expected(boundary: Option<RootBoundary>) -> bool {
+    matches!(
+        boundary,
+        Some(RootBoundary::GitIsolation | RootBoundary::Credentials)
+    )
 }
 
 #[cfg(test)]
@@ -637,8 +651,12 @@ mod tests {
             }
             for candidate in candidates {
                 input.state_dir = Some(candidate.clone());
+                // Containing Git metadata or credentials is expected (lane
+                // checkouts and provider homes live under the state root).
                 let overlaps = |root: &&ProtectedRoot| {
-                    candidate.starts_with(&root.path) || root.path.starts_with(&candidate)
+                    candidate.starts_with(&root.path)
+                        || (root.path.starts_with(&candidate)
+                            && !contained_is_expected(root.boundary))
                 };
                 let boundary = declared
                     .iter()

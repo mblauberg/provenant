@@ -610,7 +610,10 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 br#"{"baseRefName":"main","url":"https://github.com/owner/repo/pull/1668"}"#,
             )?;
         }
-        value if value.starts_with("api repos/{owner}/{repo}/git/commits/") => {
+        value
+            if value.starts_with("api repos/{owner}/{repo}/git/commits/")
+                || value.starts_with("api repos/owner/repo/git/commits/") =>
+        {
             let commit = value.rsplit('/').next().ok_or("commit")?;
             let tree = if Path::new("live-pr").exists() {
                 let git = provenant_os::git::resolve_git_executable(None)
