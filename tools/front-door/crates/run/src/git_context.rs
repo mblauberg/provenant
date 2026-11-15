@@ -728,25 +728,31 @@ pub fn review_diff_context_at(
         .map(|path| String::from_utf8_lossy(path).into_owned())
         .collect();
     let size_data = (|| -> Option<(String, String)> {
-        let numstat = String::from_utf8(read_complete(
-            &[
-                "diff",
-                "--numstat",
-                "--no-renames",
-                "-z",
-                &merge_base,
-                &head,
-                "--",
-            ],
-            CONTEXT_LIMIT,
-        )?)
+        let numstat = String::from_utf8(
+            read_complete(
+                &[
+                    "diff",
+                    "--numstat",
+                    "--no-renames",
+                    "-z",
+                    &merge_base,
+                    &head,
+                    "--",
+                ],
+                CONTEXT_LIMIT,
+            )
+            .ok()?,
+        )
         .ok()?;
         let mut tree = Vec::new();
         for revision in [&merge_base, &head] {
-            tree.extend(read_complete(
-                &["ls-tree", "-r", "-z", "--name-only", revision],
-                CONTEXT_LIMIT,
-            )?);
+            tree.extend(
+                read_complete(
+                    &["ls-tree", "-r", "-z", "--name-only", revision],
+                    CONTEXT_LIMIT,
+                )
+                .ok()?,
+            );
         }
         Some((numstat, String::from_utf8(tree).ok()?))
     })();
