@@ -14,6 +14,76 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+fn ensure_host_seed_environment_eligible() -> Result<()> {
+    let environment = std::env::vars_os().collect::<Vec<_>>();
+    if let Some(setting) = target_seed::unsupported_seed_build_environment(&environment) {
+        return Err(io::Error::other(format!(
+            "shared Cargo target seed is unavailable while {setting} is set; native Cargo builds keep that setting"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn cargo_config_ineligibility(reason: &str) -> io::Error {
+    io::Error::other(format!(
+        "shared Cargo target seed is unavailable because Cargo configuration cannot be represented ({reason})"
+    ))
+}
+
+fn check_host_cargo_config_file(path: &Path) -> Result<()> {
+    use std::io::Read;
+
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(cargo_config_ineligibility("cargo_config_unreadable").into()),
+    };
+    if !metadata.is_file() {
+        return Err(cargo_config_ineligibility("cargo_config_unreadable").into());
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .and_then(|file| file.take(65537).read_to_end(&mut bytes))
+        .map_err(|_| cargo_config_ineligibility("cargo_config_unreadable"))?;
+    target_seed::cargo_config_cannot_select_seed_compiler(&bytes)
+        .map_err(|reason| cargo_config_ineligibility(reason).into())
+}
+
+fn check_host_cargo_configuration(state: &Path) -> Result<()> {
+    let environment = std::env::vars_os().collect::<Vec<_>>();
+    let home = environment
+        .iter()
+        .find(|(key, _)| key == "HOME")
+        .map(|(_, value)| PathBuf::from(value));
+    let explicit_cargo_home = environment
+        .iter()
+        .find(|(key, _)| key == "CARGO_HOME")
+        .is_some_and(|(_, value)| !value.is_empty());
+    if home.is_none() && !explicit_cargo_home {
+        return Err(cargo_config_ineligibility("cargo_home_unresolved").into());
+    }
+    let home = home.unwrap_or_default();
+    let cargo_home = provenant_confinement::cargo::CargoHome::resolve(&home, |name| {
+        environment
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+    })
+    .map_err(|_| cargo_config_ineligibility("cargo_home_unresolved"))?;
+    let mut directories = std::collections::BTreeSet::new();
+    directories.insert(cargo_home.path);
+    for ancestor in target_seed::store_path(state).ancestors() {
+        directories.insert(ancestor.join(".cargo"));
+    }
+    for directory in directories {
+        for name in provenant_confinement::cargo::CONFIG_FILES {
+            check_host_cargo_config_file(&directory.join(name))?;
+        }
+    }
+    Ok(())
+}
+
 fn seed_error(stage: &str, error: &(dyn Error + 'static)) -> io::Error {
     let mut cause = Some(error);
     while let Some(error) = cause {
@@ -177,16 +247,16 @@ fn read_verify_base_file(
         budget,
         cancel,
     )
-    .map_err(|error| seed_error("reading verify-base toolchain pin", &error))?;
+    .map_err(|error| seed_error("reading verify-base file", &error))?;
     if blob.termination != Termination::Exit(0)
         || blob.timed_out
         || blob.stdout.truncated
         || blob.stdout.read_failed
     {
-        return Err(io::Error::other("reading verify-base toolchain pin failed").into());
+        return Err(io::Error::other("reading verify-base file failed").into());
     }
-    if blob.stdout.bytes.len() > 16 * 1024 {
-        return Err(io::Error::other("verify-base toolchain pin is too large").into());
+    if blob.stdout.bytes.len() > 64 * 1024 {
+        return Err(io::Error::other("verify-base file exceeds its size limit").into());
     }
     Ok(Some(blob.stdout.bytes))
 }
@@ -261,6 +331,7 @@ fn verify_base(host_state: &Path, project: &Path, workspace: &Path) -> Result<Ve
         utility::{UtilityBudget, UtilityRuntime},
         worktrees::RepoFacts,
     };
+    check_host_cargo_configuration(host_state)?;
     let executable =
         provenant_os::git::git_executable().ok_or_else(|| io::Error::other("git unavailable"))?;
     let utility = UtilityRuntime::read_only(executable, host_state)?;
@@ -301,19 +372,32 @@ fn verify_base(host_state: &Path, project: &Path, workspace: &Path) -> Result<Ve
     }
     let mut toolchain_files = Vec::new();
     let mut directory = workspace.to_path_buf();
+    let mut found_nearest_toolchain_pin = false;
     loop {
-        let mut found_in_directory = false;
-        for name in ["rust-toolchain", "rust-toolchain.toml"] {
-            let path = directory.join(name);
+        for name in provenant_confinement::cargo::CONFIG_FILES {
+            let path = directory.join(".cargo").join(name);
             if let Some(bytes) =
                 read_verify_base_file(&repo, &executor, &utility, budget, &cancel, tree, &path)?
             {
-                found_in_directory = true;
-                toolchain_files.push((path, bytes));
+                target_seed::cargo_config_cannot_select_seed_compiler(&bytes)
+                    .map_err(cargo_config_ineligibility)?;
             }
         }
-        if found_in_directory {
-            break;
+        if !found_nearest_toolchain_pin {
+            for name in ["rust-toolchain", "rust-toolchain.toml"] {
+                let path = directory.join(name);
+                if let Some(bytes) =
+                    read_verify_base_file(&repo, &executor, &utility, budget, &cancel, tree, &path)?
+                {
+                    if bytes.len() > 16 * 1024 {
+                        return Err(
+                            io::Error::other("verify-base toolchain pin is too large").into()
+                        );
+                    }
+                    found_nearest_toolchain_pin = true;
+                    toolchain_files.push((path, bytes));
+                }
+            }
         }
         if !directory.pop() {
             break;
@@ -479,6 +563,7 @@ fn cargo_build_profile(state: &Path) -> Result<CargoBuildProfile> {
 #[allow(dead_code)]
 pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
     refuse_in_lane()?;
+    ensure_host_seed_environment_eligible()?;
     let (identity, workspace) = match refresh_identity(state, project)? {
         IdentityRefresh::NotCargo => return Ok(Refresh::NotCargo),
         IdentityRefresh::Busy => return Ok(Refresh::Busy),
@@ -594,6 +679,7 @@ fn refuse_in_lane() -> Result<()> {
 
 pub fn build(state: &Path, project: &Path) -> Result<String> {
     refuse_in_lane()?;
+    ensure_host_seed_environment_eligible()?;
     let workspace = workspace_relative(state, project)?
         .ok_or_else(|| io::Error::other("project has no selected Cargo workspace"))?;
     let base = verify_base(state, project, &workspace)?;
@@ -841,6 +927,59 @@ mod checkout_tests {
             String::from_utf8(git(&checkout, &["rev-parse".into(), "HEAD".into()]).unwrap())
                 .unwrap();
         assert_eq!(actual.trim(), pinned);
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn verify_base_rejects_unrepresented_cargo_compiler_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let remote = temp.path().join("remote");
+        let project = temp.path().join("project");
+        fs::create_dir_all(remote.join(".cargo")).unwrap();
+        git(&remote, &["init".into(), "--initial-branch=main".into()]).unwrap();
+        fs::write(
+            remote.join("Cargo.toml"),
+            "[package]\nname='seed-fixture'\nversion='0.1.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        fs::write(
+            remote.join(".cargo/config.toml"),
+            "[build]\nrustc = '/private/compiler-path'\n",
+        )
+        .unwrap();
+        git(
+            &remote,
+            &[
+                "add".into(),
+                "Cargo.toml".into(),
+                ".cargo/config.toml".into(),
+            ],
+        )
+        .unwrap();
+        provenant_os::fixture::run_git(&remote, &["commit", "-m", "seed base"]).unwrap();
+        git(
+            temp.path(),
+            &[
+                "clone".into(),
+                "--".into(),
+                remote.as_os_str().into(),
+                project.as_os_str().into(),
+            ],
+        )
+        .unwrap();
+
+        let state = temp.path().join("state");
+        fs::create_dir(&state).unwrap();
+        let workspace = PathBuf::new();
+        let error = verify_base(&state, &project, &workspace)
+            .err()
+            .expect("pinned Cargo config selects a compiler");
+        let message = error.to_string();
+        assert!(
+            message.contains("cargo_config_selects_compiler"),
+            "{message}"
+        );
+        assert!(!message.contains("/private/compiler-path"), "{message}");
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed
