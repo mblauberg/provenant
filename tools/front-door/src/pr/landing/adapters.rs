@@ -1738,7 +1738,7 @@ mod tests {
         std::fs::write(&gh, r##"#!/bin/sh
 echo "$*" >> calls
 case "$*" in
-  *"repos/{owner}/{repo}"*) echo '{"full_name":"fixture/repository"}' ;;
+  *" repos/{owner}/{repo}") echo '{"full_name":"fixture/repository"}' ;;
   *"--method PUT"*) touch merged; cat pending.json ;;
   *"merge-async/"*) cat merged.json ;;
   *"stacks/42"*) echo '{"number":42,"pull_requests":[{"number":7,"state":"open","merged_at":null},{"number":8,"state":"open","merged_at":null}]}' ;;
