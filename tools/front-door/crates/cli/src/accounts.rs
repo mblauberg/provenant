@@ -84,7 +84,7 @@ fn directory_inventory_findings(
             // These entries classify quota/menu metadata for the same local
             // login; they do not claim isolated account trees. Preserve every
             // HOME and cross-adapter check, and all registered-account checks.
-            if shares_unregistered_local_login(*adapter, *other_adapter) {
+            if shares_unregistered_local_login(adapter, other_adapter) {
                 continue;
             }
             if paths.iter().any(|path| {
