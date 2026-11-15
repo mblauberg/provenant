@@ -2,16 +2,26 @@
 impl super::Factory {
     pub(crate) fn requester_lane_path(&self) -> Vec<u8> {
         use std::os::unix::ffi::OsStringExt;
-        let Ok(project) = self.graph_checkout() else {
+        let Some(git) = self
+            .host_launch
+            .as_ref()
+            .map(|host| host.git.clone())
+            .or_else(provenant_os::git::git_executable)
+        else {
             return Vec::new();
         };
-        provenant_run::FilteredLanePath::for_requester(
+        let cancel = CancelToken::new();
+        let Ok(path) = provenant_cli::run::filtered_requester_lane_path(
             self.host_launch.as_ref(),
-            &project,
             &self.cwd,
-        )
-        .map(|path| path.path().to_os_string().into_vec())
-        .unwrap_or_default()
+            &self.cwd,
+            &git,
+            &self.executor,
+            &cancel,
+        ) else {
+            return Vec::new();
+        };
+        path.path().to_os_string().into_vec()
     }
 }
 

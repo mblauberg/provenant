@@ -90,34 +90,35 @@ pub(super) fn prepare_command(
         .filter(|program| !program.is_empty())
         .ok_or("configured command has no executable")?;
     let source = source_cwd(registry, task)?;
+    let git = canonical(&match registry.host {
+        Some(host) => host.git.clone(),
+        None => provenant_os::git::git_executable().ok_or("Git unavailable")?,
+    })?;
+    let fallback_cancel = provenant_core::CancelToken::new();
+    let cancel = registry.cancel.unwrap_or(&fallback_cancel);
+    let git_executor = provenant_os::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
     let isolated = task.access.source_root.is_some() && !task.access.source_live;
     let cwd = if isolated {
         let assets = registry.assets.ok_or("product assets are unavailable")?;
         super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
-        let git = canonical(&match registry.host {
-            Some(host) => host.git.clone(),
-            None => provenant_os::git::git_executable().ok_or("Git unavailable")?,
-        })?;
         super::source_tree::snapshot_source(registry, task, paths, &source, &git)?
     } else {
         source.clone()
     };
     let requester_cwd = registry.cwd.unwrap_or(&source);
-    let same_source = task.writer.is_none() && canonical(requester_cwd)? == source;
-    let path_project = match task.writer.as_ref() {
-        Some(writer) => writer.project.clone(),
-        None => requester_path_project_root(requester_cwd)?,
+    let project_path = match task.writer.as_ref() {
+        Some(writer) => writer.project.as_path(),
+        None => requester_cwd,
     };
-    let path_worktree = if task.writer.is_some() {
-        cwd.clone()
-    } else if same_source || source == path_project {
-        path_project.clone()
-    } else {
-        requester_path_project_root(&source)?
-    };
-    let lane_path =
-        run::FilteredLanePath::for_requester(registry.host, &path_project, &path_worktree)
-            .map_err(|error| error.to_string())?;
+    let worktree_path = if task.writer.is_some() { &cwd } else { &source };
+    let lane_path = crate::run::filtered_requester_lane_path(
+        registry.host,
+        project_path,
+        worktree_path,
+        &git,
+        &git_executor,
+        cancel,
+    )?;
     let invocation = command_executable(program, &cwd, &lane_path, locate_override)?;
     let executable = canonical(&invocation).map_err(|_| executable_unavailable(program))?;
     let runtimes = command
@@ -131,10 +132,6 @@ pub(super) fn prepare_command(
         .project_id
         .ok_or("selected project identity is unavailable")?;
     let launch_policy = run::launch_policy(roots.state.as_path(), &project.to_string(), task);
-    let git = canonical(&match registry.host {
-        Some(host) => host.git.clone(),
-        None => provenant_os::git::git_executable().ok_or("Git unavailable")?,
-    })?;
     let (scratch_directory, scratch_name) =
         super::preparation::fresh_scratch_directory(&paths.temporary, provider, None)?;
     let scratch = scratch_directory

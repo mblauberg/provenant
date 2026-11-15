@@ -177,9 +177,10 @@ Unsandboxed lanes inherit host environment, tool caches and credentials.
 `FilteredLanePath` selects retained requester PATH, captured host search path
 for older handoffs, or process PATH only without a host handoff. It filters
 canonical directories and executable symlink targets under the enclosing
-project and selected worktree, even when the requester starts below the
-checkout root. Lane model/account identity and version probes, bare commands and
-native provider launches share that PATH. Sandboxed provider launches prepend
+primary project and selected worktree, including both roots for a linked
+checkout and requesters starting in a subdirectory. Lane model/account identity
+and version probes, bare commands and native provider launches share that PATH.
+Sandboxed provider launches prepend
 their fixed tool directories and private wrappers to the filtered requester
 PATH; PATH entries do not add filesystem or executable grants. Host delivery
 filters its captured host PATH through the same owner for tool lookup. Explicit

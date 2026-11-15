@@ -719,26 +719,59 @@ fn registry_provider_resolves_prepares_and_reports_quota(
 }
 
 #[test]
-fn requester_path_excludes_checkout_binaries_when_called_from_a_subdirectory()
+fn requester_path_excludes_primary_and_linked_checkout_binaries()
 -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::unix::fs::PermissionsExt;
+    use provenant_core::CancelToken;
+    use provenant_os::exec::SystemExecutor;
+    use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
 
     let temp = tempfile::tempdir()?;
     let project = temp.path().join("project");
-    let nested = project.join("src/nested");
-    let bin = project.join("bin");
+    let linked = temp.path().join("linked");
+    let home = temp.path().join("git-home");
+    let primary_bin = project.join("bin");
+    let linked_bin = linked.join("bin");
+    let external_bin = temp.path().join("external/bin");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&project)?;
+    std::fs::create_dir_all(&external_bin)?;
+    let executor = SystemExecutor::new(2)?;
+    let git = init_fixture_repository(&executor, &project, &home)?;
+    let linked_text = linked.to_str().ok_or("linked worktree path")?;
+    provenant_os::fixture::run_git(
+        &project,
+        &["worktree", "add", "-q", "-b", "linked", linked_text],
+    )?;
+    let nested = linked.join("src/nested");
+    std::fs::create_dir_all(&primary_bin)?;
     std::fs::create_dir_all(&nested)?;
-    std::fs::create_dir_all(&bin)?;
-    provenant_os::fixture::run_git(&project, &["init", "-q"])?;
-    let executable = bin.join("provider");
-    std::fs::write(&executable, "#!/bin/sh\nexit 0\n")?;
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::create_dir_all(&linked_bin)?;
+    let primary_executable = primary_bin.join("primary-provider");
+    let linked_executable = linked_bin.join("linked-provider");
+    let safe_executable = external_bin.join("safe-provider");
+    for executable in [&primary_executable, &linked_executable, &safe_executable] {
+        std::fs::write(executable, "#!/bin/sh\nexit 0\n")?;
+        std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))?;
+    }
 
-    let path = std::env::join_paths([bin.as_path()])?;
-    let project_root = requester_path_project_root(&nested)?;
-    assert_eq!(project_root, std::fs::canonicalize(&project)?);
-    let filtered = run::FilteredLanePath::from_path(&path, &project_root, &nested)?;
-    assert!(filtered.resolve("provider").is_err());
+    let path = std::env::join_paths([
+        primary_bin.as_os_str(),
+        linked_bin.as_os_str(),
+        external_bin.as_os_str(),
+    ])?;
+    let mut host = run::HostLaunchContext::from_environment(&home, &nested, git.clone());
+    host.lane_path = Some(path.as_os_str().as_bytes().to_vec());
+    let filtered = crate::run::filtered_requester_lane_path(
+        Some(&host),
+        &nested,
+        &nested,
+        &git,
+        &executor,
+        &CancelToken::new(),
+    )?;
+    assert!(filtered.resolve("primary-provider").is_err());
+    assert!(filtered.resolve("linked-provider").is_err());
+    assert_eq!(filtered.resolve("safe-provider")?, safe_executable);
     Ok(())
 }
 
