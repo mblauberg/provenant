@@ -17,7 +17,7 @@ verifies the package SHA-256 before running anything from it. State defaults to
 `--state-dir`, `PROVENANT_STATE_DIR` and `--bin-dir` (absolute paths).
 
 A first install on a terminal prompts for providers, instruction files (replace,
-append or skip), Claude hooks and Claude accounts. `--yes` and any rerun with a
+append or skip), native harness hooks and Claude accounts. `--yes` and any rerun with a
 receipt skip the prompts. A bare `provenant install --source "$RELEASE"` targets
 every detected client CLI and `~/.claude-*` directory; with a receipt it reuses
 the recorded targets and binary directory.
@@ -114,12 +114,15 @@ and `accounts register` per account (`--adapter codex` for Codex). Dispatch
 needs registered accounts, and `quota tick` initialises quota state.
 
 - Read the dry-run: a failed preview prevents writes.
-- Hooks stay off on a first install. `--hooks on` registers them (Claude
-  today; rerun after an upgrade to pick up new handlers, see
-  [Claude hooks](claude-hooks.md)). Omitting `--hooks` keeps owned hooks and
-  refreshes unchanged ones. `--hooks off` removes unchanged ones and releases
-  edited ones. `--hooks on` refuses an edited Claude hook: run `--hooks off`
-  first.
+- Hooks stay off on a first install. `--hooks on` registers each selected
+  harness's declared native events (see [hook behaviour](claude-hooks.md)).
+  Omitting `--hooks` keeps owned hooks and refreshes unchanged ones.
+  `--hooks off` removes unchanged ones and releases edited ones. An edited
+  managed hook is preserved; follow the reported recovery before replacing it.
+- Supported global instruction files link the same release instruction asset.
+  Install findings name the reason and source for unavailable native
+  integrations. No MCP server is registered: the old Fabric MCP command has
+  been removed.
 - Occupied or foreign entries are refused. If the preview shows an exact match
   you accept, rerun with `--adopt-existing`.
 - A directory that is not a registered account needs `install --harness claude`

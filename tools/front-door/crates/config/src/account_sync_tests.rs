@@ -16,7 +16,7 @@ fn account(f: &Fixture, label: &str) -> AccountHome {
 /// One batch of the process edge: a single target, hooks on, off or inherited.
 fn apply(f: &mut Fixture, harness: Harness, base: &Path, hooks: Option<bool>) -> InstallOutcome {
     f.targets.harnesses = vec![HarnessTarget::at(harness, &f.home, base)];
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     f.targets.hooks = hooks == Some(true);
     f.targets.remove_hooks = hooks == Some(false);
     let clock = SystemClock::new();
@@ -43,6 +43,7 @@ fn rules(f: &Fixture) -> Vec<(String, PathBuf)> {
     inspection
         .findings
         .into_iter()
+        .filter(|finding| !finding.is_advisory())
         .map(|finding| (finding.rule, finding.path.to_path_buf().unwrap()))
         .collect()
 }
@@ -110,7 +111,10 @@ fn a_new_account_takes_the_hooks_and_leaves_user_settings_alone() {
     let installed = fs::read_to_string(&settings).unwrap();
     assert!(installed.contains("\"model\": \"opus\""), "{installed}");
     assert!(installed.contains("\"command\": \"mine\""), "{installed}");
-    assert_eq!(hook_lines(&settings).len(), 3);
+    assert_eq!(
+        hook_lines(&settings).len(),
+        crate::hooks::registrations(&[Harness::Claude]).len()
+    );
     assert_eq!(
         hook_lines(&settings),
         hook_lines(&f.home.join(".claude/settings.json"))
@@ -225,7 +229,7 @@ fn read_json(path: &Path) -> serde_json::Value {
 }
 fn apply_result(f: &mut Fixture, base: &Path, force: bool) -> Result<InstallOutcome, InstallError> {
     f.targets.harnesses = vec![HarnessTarget::at(Harness::Claude, &f.home, base)];
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     f.targets.force_settings = force;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -475,7 +479,7 @@ fn a_live_edit_between_plan_and_publish_is_not_lost() {
     f.targets.shared_settings = Some(shared(&f, serde_json::json!({"outputStyle": "terse"})));
     f.targets.accounts = vec![work.clone()];
     f.targets.harnesses = vec![HarnessTarget::at(Harness::Claude, &f.home, &work.home)];
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let plan = f.plan();
     // A running Claude session saves its own settings after the snapshot.
     let live = work.home.join("settings.json");
@@ -573,7 +577,7 @@ fn a_failed_write_mid_sync_reports_exactly_what_completed() {
     apply(&mut f, Harness::Claude, &claude, Some(true));
     f.targets.accounts = vec![work.clone()];
     f.targets.harnesses = vec![HarnessTarget::at(Harness::Claude, &f.home, &work.home)];
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let plan = f.plan();
     let clock = SystemClock::new();
     let cancel = TestCancelToken::new();

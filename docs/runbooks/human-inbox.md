@@ -83,18 +83,13 @@ rounds are exhausted. Answer `stop`, `extend` (one round) or `accept`, or reply
 
 ## Delivery service
 
-Every adapter receives answers through Fabric mail. Hook injection is the
-exception; `scripts/check-doc-truth` compares this table with
-`delivery_capabilities()` in `crates/cli/src/hooks.rs` and the adapter specs.
-
-| Provider | Transport | Local offer reader | Live injection |
-|---|---|---|---|
-| `claude` | Fabric mail | Library API | Unavailable |
-| `claude` | `PreToolUse` hook | Available | Tool-call boundary |
-| Every other adapter | Fabric mail | Unavailable | Unavailable |
-
-Claude's `PreToolUse` hook may offer answers on Bash calls; offering never
-acknowledges them.
+Every adapter receives answers through Fabric mail. Native pre-tool hook
+injection is available only where the adapter's declared response contract can
+carry context without denying the tool. Offering an answer never acknowledges
+it. `HarnessInstall.answer_delivery` owns this capability and its reason and
+source; `delivery_capabilities()` derives library and live delivery from that
+same declaration. `provenant check install` reports native integration limits
+as informational warnings.
 
 ## Steering
 

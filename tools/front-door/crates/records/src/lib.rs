@@ -4,9 +4,19 @@
 mod adapters;
 pub use adapters::{
     ADAPTER_SPECS, AccountModelPlan, AccountQuota, AdapterSpec, COMMAND_OUTPUT_TAIL_BYTES,
-    GithubAuth, LaunchCapabilities, LaunchField, LaunchRequest, LoginObservation, LoginReprobe,
-    ModelObservation, NamedEntry, QuotaProbeKind, SetupRoot, SkillLocation, UnsupportedLaunch,
+    CapabilitySupport, GithubAuth, HarnessInstall, HookAction, HookEvent, HookProtocol,
+    HookTimeoutUnit, INSTRUCTION_ASSET, LaunchCapabilities, LaunchField, LaunchRequest,
+    LoginObservation, LoginReprobe, ModelObservation, NamedEntry, QuotaProbeKind, SetupRoot,
+    SkillLocation, UnsupportedLaunch,
 };
+
+/// The instruction content bound into this product build and projected into
+/// each isolated harness configuration.
+pub const INSTRUCTION_CONTENT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../../GLOBAL-AGENTS.md"
+));
+
 mod artifact_ref;
 mod attempt_fact;
 mod attempt_file;

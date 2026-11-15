@@ -1,5 +1,5 @@
 //! Configured commands share the provider launch and settlement machinery.
-use crate::launch::{Access, Session, base_env, exact, node_tools, rust_tools, subtree};
+use crate::launch::{Access, Session, base_env, exact, subtree};
 use crate::{LaunchSpec, PrepareInput, ProviderError, ProviderEvent, Stdin, StreamState};
 use provenant_confinement::permissions::{ProviderProfile, ProviderProfileSpec};
 
@@ -41,7 +41,7 @@ fn decode(_: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError> {
 
 fn prepare(
     input: &PrepareInput<'_>,
-    access: Access,
+    _access: Access,
     session: Session,
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
@@ -125,32 +125,6 @@ fn prepare(
         .extend(command.runtimes.iter().map(exact));
     let mut setup = Vec::new();
     let omitted_discovery = Vec::new();
-    let mut tool_requirements = crate::launch::ToolRequirements::default();
-    if input.sandboxed() {
-        if [".cargo/bin", ".rustup/toolchains"]
-            .iter()
-            .all(|path| input.home.join(path).is_dir())
-        {
-            rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
-        } else {
-            crate::launch::system_tools(
-                access,
-                &mut tool_requirements.reads,
-                &mut tool_requirements.exec,
-                &mut env,
-            );
-            let cwd = subtree(input.cwd);
-            tool_requirements.exec.push(cwd.clone());
-            tool_requirements.required_exec.push(cwd);
-        }
-        node_tools(
-            input.home,
-            access,
-            scratch,
-            &mut tool_requirements,
-            &mut env,
-        );
-    }
     Ok(LaunchSpec {
         argv,
         env,
@@ -160,7 +134,7 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: Default::default(),
-        tool_requirements,
+        tool_requirements: Default::default(),
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),

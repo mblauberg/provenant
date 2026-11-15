@@ -824,7 +824,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
 }
 
 #[test]
-fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), ProviderError> {
+fn cursor_uses_outer_confinement_for_fresh_and_resumed_tool_access() -> Result<(), ProviderError> {
     let prompt = Prompt::new("--literal prompt".into());
     let route = route("cursor", "fixture-model");
     let continuation = Continuation::retained("cursor", "fixture-session", &route, "fixture")?;
@@ -845,10 +845,7 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
                 "--sandbox",
                 "disabled",
             ];
-            match access {
-                Access::ReadOnly => expected.extend(["--mode", "ask"]),
-                Access::WorktreeWrite => expected.push("--force"),
-            }
+            expected.push("--force");
             if resume {
                 expected.extend(["--resume", "fixture-session"]);
             }
@@ -1369,11 +1366,7 @@ fn read_only_handoff_native_permissions_match_private_state() -> Result<(), Prov
         ))?;
         assert_eq!(spec.cwd, cwd);
         match id {
-            "cursor" => assert!(
-                spec.argv
-                    .windows(2)
-                    .any(|args| args[0] == "--mode" && args[1] == "ask")
-            ),
+            "cursor" => assert!(spec.argv.iter().any(|arg| arg == "--force")),
             "codex" => assert!(
                 spec.argv
                     .iter()
@@ -1393,14 +1386,14 @@ fn read_only_handoff_native_permissions_match_private_state() -> Result<(), Prov
                     );
                 } else {
                     assert!(spec.argv.windows(2).any(|args| {
-                        args[0] == "--tools"
-                            && args[1]
-                                .to_string_lossy()
-                                .split(',')
-                                .any(|tool| tool == "Bash")
+                        args[0] == "--permission-mode" && args[1] == "bypassPermissions"
                     }));
-                    assert!(spec.argv.windows(2).any(|args| args[0] == "--allowedTools"
-                        && args[1].to_string_lossy().contains("Bash")));
+                    assert!(
+                        spec.argv
+                            .windows(2)
+                            .any(|args| { args[0] == "--tools" && args[1] == "default" })
+                    );
+                    assert!(spec.argv.iter().all(|arg| arg != "--allowedTools"));
                 }
             }
             "opencode" => {
@@ -1412,8 +1405,7 @@ fn read_only_handoff_native_permissions_match_private_state() -> Result<(), Prov
                 let config: serde_json::Value =
                     serde_json::from_str(&config.1.to_string_lossy()).unwrap();
                 let pattern = format!("{}/**", private.display());
-                assert_eq!(config["permission"]["bash"], "allow");
-                assert_eq!(config["permission"]["edit"], "deny");
+                assert_eq!(config["permission"]["*"], "allow");
                 assert_eq!(
                     config["permission"]["external_directory"][&pattern],
                     "allow"
@@ -1545,8 +1537,7 @@ fn every_adapter_finalises_missing_lane_environment() -> Result<(), ProviderErro
             let mut route = route(id, if id == "command" { "" } else { "fixture-model" });
             route.account_key = None;
             let host_var = |name: &str| {
-                (native && name == provenant_core::consumer_env::SANDBOX)
-                    .then(|| "off".into())
+                (native && name == provenant_core::consumer_env::SANDBOX).then(|| "off".into())
             };
             let mut input = fixture_input(
                 &route,

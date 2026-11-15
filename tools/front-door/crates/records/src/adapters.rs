@@ -5,6 +5,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+/// One release-owned instruction asset shared by native harness files.
+pub const INSTRUCTION_ASSET: &str = "instructions/AGENTS.md";
+
 /// Latest command output retained by the guardian and adapter.
 pub const COMMAND_OUTPUT_TAIL_BYTES: usize = 65_536;
 
@@ -128,6 +131,398 @@ pub struct AccountModelPlan {
     pub quota: AccountQuota,
 }
 
+/// Provider integration support, including the evidence for a native limitation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilitySupport {
+    Supported,
+    Unsupported {
+        reason: &'static str,
+        source: &'static str,
+    },
+}
+
+/// Wire format used by a native harness hook registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookProtocol {
+    CommandGroups { timeout_unit: HookTimeoutUnit },
+    CursorCommands { timeout_unit: HookTimeoutUnit },
+    NamedGroups { timeout_unit: HookTimeoutUnit },
+    OpenCodePlugin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookTimeoutUnit {
+    Seconds,
+    Milliseconds,
+}
+
+// Keep semantic identities, CLI spellings and the invariant's domain in one
+// declaration: adding an action adds one row, not parallel enum/match lists.
+macro_rules! hook_actions {
+    ($( $action:ident => $command:literal ),+ $(,)?) => {
+        /// Provenant hook handler independent of a provider's wire event name.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum HookAction { $( $action, )+ }
+        impl HookAction {
+            pub const ALL: &'static [Self] = &[ $( Self::$action, )+ ];
+            pub const fn command(self) -> &'static str {
+                match self { $( Self::$action => $command, )+ }
+            }
+        }
+    };
+}
+hook_actions! {
+    PreToolUse => "pre-tool-use",
+    PreCompact => "pre-compact",
+    Compact => "compact",
+    ChairPrompt => "chair-prompt",
+    ChairStart => "chair-start",
+    ChairStop => "chair-stop",
+    SessionStart => "session-start",
+    Stop => "stop",
+    WorktreeCreate => "worktree-create",
+    WorktreeRemove => "worktree-remove",
+}
+
+/// Native mapping or a sourced provider limitation for one Provenant action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookEvent {
+    Supported {
+        action: HookAction,
+        event: &'static str,
+        matcher: Option<&'static str>,
+        timeout_seconds: Option<u64>,
+    },
+    Unsupported {
+        action: HookAction,
+        reason: &'static str,
+        source: &'static str,
+    },
+}
+impl CapabilitySupport {
+    pub const fn is_supported(self) -> bool {
+        matches!(self, Self::Supported)
+    }
+}
+
+/// Managed harness paths and native integration capabilities. Wire formats stay
+/// in config; this is the single declaration of which integrations exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HarnessInstall {
+    pub home: &'static str,
+    /// Environment variable and suffix that bind a provider launch to its
+    /// isolated native configuration home.
+    pub lane_home: (&'static str, &'static str),
+    pub config: &'static str,
+    /// Config relative to the user home when using the default harness home.
+    pub default_home_config: Option<&'static str>,
+    pub instruction: Option<&'static str>,
+    pub hook_file: Option<&'static str>,
+    /// Provider CLI option that loads a generated hook settings document.
+    pub hook_settings_arg: Option<&'static str>,
+    pub hooks: CapabilitySupport,
+    pub hook_protocol: Option<HookProtocol>,
+    pub hook_events: &'static [HookEvent],
+    pub answer_delivery: CapabilitySupport,
+    /// Whether a pre-compaction response reaches the model's context.
+    pub precompact_context: CapabilitySupport,
+    pub mcp: CapabilitySupport,
+    pub instructions: CapabilitySupport,
+    pub source: &'static str,
+}
+
+const MCP_UNAVAILABLE: CapabilitySupport = CapabilitySupport::Unsupported {
+    reason: "Provenant has no MCP server entrypoint; installing a registration would invoke a removed command",
+    source: "crates/cli/src/fabric.rs; crates/config/src/install_artifacts.rs",
+};
+const CHAIR_HOOKS_NOT_APPLICABLE: &str =
+    "Provenant chair switching is enabled only for adapters declaring chair_switch";
+const CHAIR_HOOKS_SOURCE: &str = "AdapterSpec.chair_switch in crates/records/src/adapters.rs";
+const CLAUDE_HOOK_EVENTS: &[HookEvent] = &[
+    HookEvent::Supported {
+        action: HookAction::PreToolUse,
+        event: "PreToolUse",
+        matcher: None,
+        timeout_seconds: None,
+    },
+    HookEvent::Supported {
+        action: HookAction::PreCompact,
+        event: "PreCompact",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Compact,
+        event: "SessionStart",
+        matcher: Some("compact"),
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::ChairPrompt,
+        event: "UserPromptSubmit",
+        matcher: None,
+        timeout_seconds: Some(10),
+    },
+    HookEvent::Supported {
+        action: HookAction::ChairStart,
+        event: "SessionStart",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::ChairStop,
+        event: "Stop",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::SessionStart,
+        event: "SessionStart",
+        matcher: Some("startup|resume|clear"),
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Stop,
+        event: "Stop",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::WorktreeCreate,
+        event: "WorktreeCreate",
+        matcher: None,
+        timeout_seconds: Some(60),
+    },
+    HookEvent::Supported {
+        action: HookAction::WorktreeRemove,
+        event: "WorktreeRemove",
+        matcher: None,
+        timeout_seconds: Some(60),
+    },
+];
+const CODEX_HOOK_EVENTS: &[HookEvent] = &[
+    HookEvent::Supported {
+        action: HookAction::PreToolUse,
+        event: "PreToolUse",
+        matcher: None,
+        timeout_seconds: None,
+    },
+    HookEvent::Supported {
+        action: HookAction::PreCompact,
+        event: "PreCompact",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Compact,
+        event: "SessionStart",
+        matcher: Some("compact"),
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairPrompt,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStart,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStop,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Supported {
+        action: HookAction::SessionStart,
+        event: "SessionStart",
+        matcher: Some("startup|resume|clear|fork"),
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Stop,
+        event: "Stop",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeCreate,
+        reason: "Codex has no native worktree lifecycle hook event",
+        source: "https://learn.chatgpt.com/docs/hooks#where-codex-looks-for-hooks",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeRemove,
+        reason: "Codex has no native worktree lifecycle hook event",
+        source: "https://learn.chatgpt.com/docs/hooks#where-codex-looks-for-hooks",
+    },
+];
+const CURSOR_HOOK_EVENTS: &[HookEvent] = &[
+    HookEvent::Unsupported {
+        action: HookAction::PreToolUse,
+        reason: "Cursor preToolUse does not accept Provenant's additionalContext answer response",
+        source: "https://cursor.com/docs/hooks#pretooluse",
+    },
+    HookEvent::Supported {
+        action: HookAction::PreCompact,
+        event: "preCompact",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Unsupported {
+        action: HookAction::Compact,
+        reason: "Cursor exposes preCompact but no post-compaction event",
+        source: "https://cursor.com/docs/hooks#supported-hooks",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairPrompt,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStart,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStop,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Supported {
+        action: HookAction::SessionStart,
+        event: "sessionStart",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Stop,
+        event: "stop",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeCreate,
+        reason: "Cursor has no native worktree lifecycle hook event",
+        source: "https://cursor.com/docs/hooks#supported-hooks",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeRemove,
+        reason: "Cursor has no native worktree lifecycle hook event",
+        source: "https://cursor.com/docs/hooks#supported-hooks",
+    },
+];
+const AGY_HOOK_EVENTS: &[HookEvent] = &[
+    HookEvent::Unsupported {
+        action: HookAction::PreToolUse,
+        reason: "Antigravity PreToolUse returns a tool decision and argument overwrite, not Provenant's additionalContext answer response",
+        source: "https://antigravity.google/docs/hooks#input-and-output-contract",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::PreCompact,
+        reason: "Antigravity exposes no pre-compaction event",
+        source: "https://antigravity.google/docs/hooks#supported-events",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::Compact,
+        reason: "Antigravity exposes no post-compaction event",
+        source: "https://antigravity.google/docs/hooks#supported-events",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairPrompt,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStart,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStop,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Supported {
+        action: HookAction::SessionStart,
+        event: "SessionStart",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Stop,
+        event: "Stop",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeCreate,
+        reason: "Antigravity exposes no worktree lifecycle event",
+        source: "https://antigravity.google/docs/hooks#supported-events",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeRemove,
+        reason: "Antigravity exposes no worktree lifecycle event",
+        source: "https://antigravity.google/docs/hooks#supported-events",
+    },
+];
+const OPENCODE_HOOK_EVENTS: &[HookEvent] = &[
+    HookEvent::Unsupported {
+        action: HookAction::PreToolUse,
+        reason: "OpenCode tool.execute.before hooks cannot inject additional context into the active session",
+        source: "https://opencode.ai/docs/build/plugins/server#tool-execution",
+    },
+    HookEvent::Supported {
+        action: HookAction::PreCompact,
+        event: "session.compaction",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Compact,
+        event: "session.compaction.ended",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairPrompt,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStart,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Unsupported {
+        action: HookAction::ChairStop,
+        reason: CHAIR_HOOKS_NOT_APPLICABLE,
+        source: CHAIR_HOOKS_SOURCE,
+    },
+    HookEvent::Supported {
+        action: HookAction::SessionStart,
+        event: "session.context",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Supported {
+        action: HookAction::Stop,
+        event: "session.idle",
+        matcher: None,
+        timeout_seconds: Some(5),
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeCreate,
+        reason: "OpenCode exposes worktree strategy transforms but no generic worktree lifecycle callback",
+        source: "https://opencode.ai/docs/build/plugins/server#worktrees",
+    },
+    HookEvent::Unsupported {
+        action: HookAction::WorktreeRemove,
+        reason: "OpenCode exposes worktree strategy transforms but no generic worktree lifecycle callback",
+        source: "https://opencode.ai/docs/build/plugins/server#worktrees",
+    },
+];
+
 #[derive(Debug, Clone, Copy)]
 pub struct AdapterSpec {
     pub id: Harness,
@@ -135,6 +530,8 @@ pub struct AdapterSpec {
     /// Provider family used by declared route constraints.
     pub family: &'static str,
     pub binary: &'static str,
+    /// None for execution entries without a native managed harness.
+    pub install: Option<HarnessInstall>,
     pub skills: Option<SkillLocation>,
     /// Home-relative installation roots that can supply linked skills.
     /// They describe discovery provenance, not an eligibility allowlist.
@@ -201,8 +598,6 @@ pub struct AdapterSpec {
     pub allowance_windows: &'static [&'static str],
     pub namespaced_models: bool,
     pub chair_switch: bool,
-    /// The local hook can read pending answer offers for this adapter.
-    pub local_offer_reader: bool,
     /// The account reports the models it offers; a launch naming another model is refused.
     pub offered_models: bool,
     pub github_auth: Option<GithubAuth>,
@@ -412,6 +807,23 @@ adapter_specs! { $;
         name: "claude",
         family: "anthropic",
         binary: "claude",
+        install: Some(HarnessInstall {
+            home: ".claude",
+            lane_home: ("CLAUDE_CONFIG_DIR", ""),
+            config: ".claude.json",
+            default_home_config: Some(".claude.json"),
+            instruction: Some("CLAUDE.md"),
+            hook_file: Some("settings.json"),
+            hook_settings_arg: Some("--settings"),
+            hooks: CapabilitySupport::Supported,
+            hook_protocol: Some(HookProtocol::CommandGroups { timeout_unit: HookTimeoutUnit::Seconds }),
+            hook_events: CLAUDE_HOOK_EVENTS,
+            answer_delivery: CapabilitySupport::Supported,
+            precompact_context: CapabilitySupport::Supported,
+            mcp: MCP_UNAVAILABLE,
+            instructions: CapabilitySupport::Supported,
+            source: "https://docs.anthropic.com/en/docs/claude-code/settings; https://docs.anthropic.com/en/docs/claude-code/hooks",
+        }),
         skills: Some(SkillLocation {
             environment: None,
             fallback: ".claude",
@@ -450,7 +862,6 @@ adapter_specs! { $;
         allowance_windows: &[],
         namespaced_models: false,
         chair_switch: true,
-        local_offer_reader: true,
         offered_models: false,
         github_auth: Some(GithubAuth::Environment),
         session_handoff: true,
@@ -495,6 +906,26 @@ adapter_specs! { $;
         name: "codex",
         family: "openai",
         binary: "codex",
+        install: Some(HarnessInstall {
+            home: ".codex",
+            lane_home: ("CODEX_HOME", ""),
+            config: "config.toml",
+            default_home_config: None,
+            instruction: Some("AGENTS.md"),
+            hook_file: Some("hooks.json"),
+            hook_settings_arg: None,
+            hooks: CapabilitySupport::Supported,
+            hook_protocol: Some(HookProtocol::CommandGroups { timeout_unit: HookTimeoutUnit::Seconds }),
+            hook_events: CODEX_HOOK_EVENTS,
+            answer_delivery: CapabilitySupport::Supported,
+            precompact_context: CapabilitySupport::Unsupported {
+                reason: "Codex PreCompact accepts only a systemMessage UI notice, not model context",
+                source: "https://developers.openai.com/codex/hooks",
+            },
+            mcp: MCP_UNAVAILABLE,
+            instructions: CapabilitySupport::Supported,
+            source: "https://learn.chatgpt.com/docs/hooks; https://developers.openai.com/codex/guides/agents-md",
+        }),
         skills: Some(SkillLocation {
             environment: None,
             fallback: ".agents",
@@ -537,7 +968,6 @@ adapter_specs! { $;
         allowance_windows: &[],
         namespaced_models: false,
         chair_switch: false,
-        local_offer_reader: false,
         offered_models: false,
         github_auth: Some(GithubAuth::ShellEnvironment),
         session_handoff: false,
@@ -582,6 +1012,32 @@ adapter_specs! { $;
         name: "cursor",
         family: "cursor",
         binary: "cursor-agent",
+        install: Some(HarnessInstall {
+            home: ".cursor",
+            lane_home: ("HOME", ".cursor"),
+            config: "mcp.json",
+            default_home_config: None,
+            instruction: None,
+            hook_file: Some("hooks.json"),
+            hook_settings_arg: None,
+            hooks: CapabilitySupport::Supported,
+            hook_protocol: Some(HookProtocol::CursorCommands { timeout_unit: HookTimeoutUnit::Seconds }),
+            hook_events: CURSOR_HOOK_EVENTS,
+            answer_delivery: CapabilitySupport::Unsupported {
+                reason: "Cursor preToolUse does not accept the additionalContext response used by Provenant answer delivery",
+                source: "https://cursor.com/docs/hooks#pretooluse",
+            },
+            precompact_context: CapabilitySupport::Unsupported {
+                reason: "Cursor preCompact accepts only user_message output shown to the user, not model context",
+                source: "https://cursor.com/docs/hooks#precompact",
+            },
+            mcp: MCP_UNAVAILABLE,
+            instructions: CapabilitySupport::Unsupported {
+                reason: "Cursor global instructions are settings-managed; AGENTS.md is project-root scoped",
+                source: "https://docs.cursor.com/context/rules-for-ai",
+            },
+            source: "https://docs.cursor.com/hooks; https://docs.cursor.com/context/rules-for-ai",
+        }),
         skills: Some(SkillLocation {
             environment: None,
             fallback: ".cursor",
@@ -623,7 +1079,6 @@ adapter_specs! { $;
         allowance_windows: &[],
         namespaced_models: false,
         chair_switch: false,
-        local_offer_reader: false,
         offered_models: false,
         github_auth: None,
         session_handoff: false,
@@ -668,6 +1123,29 @@ adapter_specs! { $;
         name: "agy",
         family: "google",
         binary: "agy",
+        install: Some(HarnessInstall {
+            home: ".gemini",
+            lane_home: ("HOME", ".gemini"),
+            config: "config/mcp_config.json",
+            default_home_config: None,
+            instruction: Some("AGENTS.md"),
+            hook_file: Some("config/hooks.json"),
+            hook_settings_arg: None,
+            hooks: CapabilitySupport::Supported,
+            hook_protocol: Some(HookProtocol::NamedGroups { timeout_unit: HookTimeoutUnit::Seconds }),
+            hook_events: AGY_HOOK_EVENTS,
+            answer_delivery: CapabilitySupport::Unsupported {
+                reason: "Antigravity PreToolUse returns a tool decision and argument overwrite, not injected context",
+                source: "https://antigravity.google/docs/hooks#input-and-output-contract",
+            },
+            precompact_context: CapabilitySupport::Unsupported {
+                reason: "Antigravity exposes no PreCompact event",
+                source: "https://antigravity.google/docs/hooks#supported-events",
+            },
+            mcp: MCP_UNAVAILABLE,
+            instructions: CapabilitySupport::Supported,
+            source: "https://antigravity.google/docs/hooks; https://antigravity.google/docs/customization-discovery",
+        }),
         skills: Some(SkillLocation {
             environment: None,
             fallback: ".gemini",
@@ -713,7 +1191,6 @@ adapter_specs! { $;
         allowance_windows: &[],
         namespaced_models: false,
         chair_switch: false,
-        local_offer_reader: false,
         offered_models: true,
         github_auth: None,
         session_handoff: false,
@@ -758,6 +1235,26 @@ adapter_specs! { $;
         name: "opencode",
         family: "opencode",
         binary: "opencode",
+        install: Some(HarnessInstall {
+            home: ".config/opencode",
+            lane_home: ("XDG_CONFIG_HOME", "opencode"),
+            config: "opencode.jsonc",
+            default_home_config: None,
+            instruction: Some("AGENTS.md"),
+            hook_file: Some("plugins/provenant/index.ts"),
+            hook_settings_arg: None,
+            hooks: CapabilitySupport::Supported,
+            hook_protocol: Some(HookProtocol::OpenCodePlugin),
+            hook_events: OPENCODE_HOOK_EVENTS,
+            answer_delivery: CapabilitySupport::Unsupported {
+                reason: "OpenCode tool.execute.before hooks cannot inject additional context into the active session",
+                source: "https://opencode.ai/docs/build/plugins/server#tool-execution",
+            },
+            precompact_context: CapabilitySupport::Supported,
+            mcp: MCP_UNAVAILABLE,
+            instructions: CapabilitySupport::Supported,
+            source: "https://opencode.ai/docs/build/plugins/; https://opencode.ai/docs/instructions",
+        }),
         skills: Some(SkillLocation {
             environment: Some("XDG_CONFIG_HOME"),
             fallback: ".config",
@@ -801,7 +1298,6 @@ adapter_specs! { $;
         allowance_windows: &["five_hour", "seven_day", "thirty_day"],
         namespaced_models: true,
         chair_switch: false,
-        local_offer_reader: false,
         offered_models: false,
         github_auth: None,
         session_handoff: false,
@@ -849,6 +1345,7 @@ adapter_specs! { $;
         name: "command",
         family: "command",
         binary: "",
+        install: None,
         skills: None,
         skill_install_roots: &[],
         default_account_directory: None,
@@ -883,7 +1380,6 @@ adapter_specs! { $;
         allowance_windows: &[],
         namespaced_models: false,
         chair_switch: false,
-        local_offer_reader: false,
         offered_models: false,
         github_auth: None,
         session_handoff: false,
@@ -930,6 +1426,7 @@ adapter_specs! { $;
         name: "host-native",
         family: "host-native",
         binary: "",
+        install: None,
         skills: None,
         skill_install_roots: &[],
         default_account_directory: None,
@@ -964,7 +1461,6 @@ adapter_specs! { $;
         allowance_windows: &[],
         namespaced_models: false,
         chair_switch: false,
-        local_offer_reader: false,
         offered_models: false,
         github_auth: None,
         session_handoff: false,
@@ -1010,6 +1506,7 @@ adapter_specs! { $;
         name: "fixture-provider",
         family: "fixture",
         binary: "fixture-provider",
+        install: None,
         skills: None,
         skill_install_roots: &[],
         default_account_directory: None,
@@ -1044,7 +1541,6 @@ adapter_specs! { $;
         allowance_windows: &[],
         namespaced_models: false,
         chair_switch: false,
-        local_offer_reader: false,
         offered_models: false,
         github_auth: None,
         session_handoff: false,
@@ -1199,6 +1695,55 @@ mod tests {
             ),
         ] {
             assert_eq!(spec.check_launch(&request).unwrap_err().field, field);
+        }
+    }
+
+    #[test]
+    fn managed_harness_capabilities_are_sourced_and_coherent() {
+        for spec in ADAPTER_SPECS {
+            let Some(install) = spec.install else {
+                continue;
+            };
+            assert!(!install.home.is_empty(), "{}", spec.name);
+            assert!(!install.config.is_empty(), "{}", spec.name);
+            assert!(!install.source.is_empty(), "{}", spec.name);
+            assert_eq!(
+                install.hooks.is_supported(),
+                install.hook_file.is_some(),
+                "{}",
+                spec.name
+            );
+            assert_eq!(
+                install.instructions.is_supported(),
+                install.instruction.is_some(),
+                "{}",
+                spec.name
+            );
+            for support in [
+                install.hooks,
+                install.mcp,
+                install.instructions,
+                install.answer_delivery,
+                install.precompact_context,
+            ] {
+                if let CapabilitySupport::Unsupported { reason, source } = support {
+                    assert!(!reason.trim().is_empty(), "{}", spec.name);
+                    assert!(!source.trim().is_empty(), "{}", spec.name);
+                }
+            }
+            assert_eq!(
+                spec.launch.default_network,
+                NetworkAccess::Open,
+                "{}",
+                spec.name
+            );
+            for network in ALL_NETWORK {
+                assert!(spec.launch.network.contains(network), "{}", spec.name);
+            }
+            assert!(
+                spec.launch.write,
+                "managed providers share worktree-write capability"
+            );
         }
     }
 

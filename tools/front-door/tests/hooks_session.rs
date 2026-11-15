@@ -740,7 +740,16 @@ fn worktree_hooks_refuse_bad_names_the_primary_and_foreign_paths() -> Result {
     }
     assert!(!rig.project.join(".worktrees").exists());
     let wrong_event = json!({"hook_event_name":"WorktreeRemove","cwd":rig.project,"name":"x"});
-    assert_eq!(code(&run_hook(&rig, "worktree-create", &wrong_event)?), 2);
+    let skipped = run_hook(&rig, "worktree-create", &wrong_event)?;
+    assert_eq!(code(&skipped), 0);
+    assert!(String::from_utf8_lossy(&skipped.stderr.bytes).contains("skipped"));
+    let malformed = rig.execute(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &["hook", "claude", "worktree-create"],
+        Some(b"{"),
+    )?;
+    assert_eq!(code(&malformed), 0);
+    assert!(!rig.project.join(".worktrees").exists());
     // The primary checkout and a directory the owner does not list stay put.
     let foreign = rig.root.join("foreign");
     fs::create_dir(&foreign)?;

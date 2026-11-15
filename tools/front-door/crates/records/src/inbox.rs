@@ -236,7 +236,7 @@ pub enum AnswerDeliveryState {
 #[serde(rename_all = "snake_case")]
 pub enum AnswerTransport {
     FabricMail,
-    ClaudeHook,
+    ProviderHook,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

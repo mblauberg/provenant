@@ -3,8 +3,7 @@
 //! Claude makes for a native agent is registered with its owner from the start,
 //! and removal clears what the owner's removal clears. The hooks add no
 //! deletion of their own: removal is the owner's non-forcing path, which
-//! refuses dirty, live-writer and primary worktrees, and a refusal exits
-//! non-zero so Claude keeps the worktree and shows the cause.
+//! refuses dirty, live-writer and primary worktrees so Claude keeps the tree.
 use crate::hook_state::Cli;
 use provenant_cli::Globals;
 use provenant_os::{exec::SystemExecutor, sys::hook_io};
@@ -52,6 +51,15 @@ fn fail(hook: &str, error: &dyn std::fmt::Display) -> u8 {
         error.to_string().chars().take(512).collect::<String>()
     );
     2
+}
+
+fn abstain(hook: &str, reason: &dyn std::fmt::Display) -> u8 {
+    let _ = writeln!(
+        io::stderr().lock(),
+        "{hook}: skipped: {}",
+        reason.to_string().chars().take(512).collect::<String>()
+    );
+    0
 }
 
 /// Claude's suggested slug becomes the branch `claude/<slug>`. Anything outside
@@ -218,13 +226,21 @@ fn forget(state: &Path, canonical: &Path) {
 // Hook I/O is bounded by real monotonic deadlines.
 #[allow(clippy::disallowed_methods)]
 pub fn create(globals: &Globals) -> u8 {
+    let input = match hook_io::read_stdin(INPUT_CAP, Instant::now() + INPUT_TIME) {
+        Ok(bytes) => match serde_json::from_slice::<CreateInput>(&bytes) {
+            Ok(input) => input,
+            Err(error) => return abstain("worktree-create", &error),
+        },
+        Err(error) => return abstain("worktree-create", &error),
+    };
+    if input.hook_event_name != "WorktreeCreate" || !input.cwd.is_absolute() {
+        return abstain("worktree-create", "unrecognised hook input");
+    }
+    let branch = match branch_for(&input.name) {
+        Ok(branch) => branch,
+        Err(error) => return fail("worktree-create", &error),
+    };
     let result = (|| -> Result<PathBuf, Error> {
-        let input = hook_io::read_stdin(INPUT_CAP, Instant::now() + INPUT_TIME)?;
-        let input: CreateInput = serde_json::from_slice(&input)?;
-        if input.hook_event_name != "WorktreeCreate" || !input.cwd.is_absolute() {
-            return Err("invalid hook input".into());
-        }
-        let branch = branch_for(&input.name)?;
         let deadline = Instant::now() + WORK_TIME;
         let executor = SystemExecutor::new(1)?;
         let cli = Cli::new(globals, &input.cwd, &executor)?;
@@ -276,12 +292,17 @@ pub fn create(globals: &Globals) -> u8 {
 // Hook I/O is bounded by real monotonic deadlines.
 #[allow(clippy::disallowed_methods)]
 pub fn remove(globals: &Globals) -> u8 {
+    let input = match hook_io::read_stdin(INPUT_CAP, Instant::now() + INPUT_TIME) {
+        Ok(bytes) => match serde_json::from_slice::<RemoveInput>(&bytes) {
+            Ok(input) => input,
+            Err(error) => return abstain("worktree-remove", &error),
+        },
+        Err(error) => return abstain("worktree-remove", &error),
+    };
+    if input.hook_event_name != "WorktreeRemove" || !input.worktree_path.is_absolute() {
+        return abstain("worktree-remove", "unrecognised hook input");
+    }
     let result = (|| -> Result<(), Error> {
-        let input = hook_io::read_stdin(INPUT_CAP, Instant::now() + INPUT_TIME)?;
-        let input: RemoveInput = serde_json::from_slice(&input)?;
-        if input.hook_event_name != "WorktreeRemove" || !input.worktree_path.is_absolute() {
-            return Err("invalid hook input".into());
-        }
         let target = match std::fs::canonicalize(&input.worktree_path) {
             Ok(target) => target,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),

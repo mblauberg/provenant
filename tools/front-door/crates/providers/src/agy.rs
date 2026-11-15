@@ -337,7 +337,6 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    let mut tool_requirements = crate::launch::ToolRequirements::default();
     if plan.selected_authentication.as_deref() != Some("keychain") {
         return Err(input.boundary_error(
             "AGY_PREPARE_CREDENTIALS",
@@ -430,8 +429,7 @@ fn prepare(
     }
     argv.extend(["--print".into(), input.prompt.text().into()]);
 
-    let shell = access == Access::WorktreeWrite;
-    let path = crate::launch::tool_search_path(input.home, shell, input.policy)?;
+    let path = crate::launch::tool_search_path(input.home, true, input.policy)?;
     let mut env = base_env(input, &plan.scratch.path, path);
     for (key, value) in &mut env {
         if key == "HOME" && (input.sandboxed() || input.account.is_some()) {
@@ -482,16 +480,6 @@ fn prepare(
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ]);
     }
-    if shell && input.sandboxed() {
-        crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
-        crate::launch::node_tools(
-            input.home,
-            access,
-            crate::launch::lane_cache(input),
-            &mut tool_requirements,
-            &mut env,
-        );
-    }
     Ok(LaunchSpec {
         argv,
         env,
@@ -501,7 +489,7 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: staged_skills,
-        tool_requirements,
+        tool_requirements: Default::default(),
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),

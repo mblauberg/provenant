@@ -711,11 +711,12 @@ strength = "refuse"
 justification = "Required wrapper executable and state paths must remain anchored when providers scrub inherited environment and HOME."
 
 [[rule]]
-code = "LANE_LANERUNTIME_CLAUDE_AUTHORITY"
-site = "providers/src/lane.rs#LaneRuntime::claude"
-boundary = "authority"
-strength = "refuse"
-justification = "Claude's isolated settings must retain the Provenant pre-tool guard; an unrepresentable hook executable or state path cannot safely substitute inherited settings."
+code = "LANE_LANERUNTIME_HOOK_PROJECTION"
+site = "providers/src/launch.rs#lane_hooks"
+boundary = "none"
+strength = "warn"
+knob = "policy.LANE_LANERUNTIME_HOOK_PROJECTION"
+justification = "An unrepresentable optional hook projection warns and lets the lane run without that integration; filesystem boundaries remain enforced by host setup."
 
 [[rule]]
 code = "LAUNCH_RUNSTORE_START_INNER_AUTHORITY_2"
