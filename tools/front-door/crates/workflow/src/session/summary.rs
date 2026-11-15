@@ -185,7 +185,7 @@ impl super::SessionStore {
         )?;
         self.recover_pending(&dir)?;
         match self.begin_update(&dir, patch, expected, operation_id, budget, cancel, clock)? {
-            Begun::Replayed(outcome) => Ok(outcome),
+            Begun::Replayed(outcome) => Ok(*outcome),
             Begun::Pending(pending) => self
                 .finish_pending(&dir, *pending)
                 .map(|receipt| receipt.outcome(false)),
@@ -216,7 +216,7 @@ impl super::SessionStore {
             if receipt.digest != digest {
                 return Err(super::SessionError::OperationConflict);
             }
-            return Ok(Begun::Replayed(receipt.outcome(true)));
+            return Ok(Begun::Replayed(Box::new(receipt.outcome(true))));
         }
         self.check_discovery_identity(self.load_discovery(dir)?.as_ref())?;
         let text = match dir.open_read(std::ffi::OsStr::new("checkpoint.md")) {
@@ -403,7 +403,7 @@ fn read_receipts(dir: &super::Directory) -> Result<Receipts, super::SessionError
 }
 
 pub(super) enum Begun {
-    Replayed(SummaryOutcome),
+    Replayed(Box<SummaryOutcome>),
     Pending(Box<Pending>),
 }
 

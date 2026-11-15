@@ -188,10 +188,11 @@ const BACKOFF_RULES: &[BackoffRule] = &[
 ];
 
 pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option<u64>) -> u64 {
-    let rule = BACKOFF_RULES
-        .iter()
-        .find(|rule| rule.failure == failure)
-        .expect("every probe failure declares a backoff rule");
+    // The table covers every failure (tested); an unlisted one waits the longest declared cap.
+    let Some(rule) = BACKOFF_RULES.iter().find(|rule| rule.failure == failure) else {
+        let cap = BACKOFF_RULES.iter().map(|rule| rule.cap_seconds).max().unwrap_or(300);
+        return cap.max(retry_after_seconds.unwrap_or(0));
+    };
     let base = if rule.first_seconds == rule.cap_seconds {
         rule.first_seconds
     } else {

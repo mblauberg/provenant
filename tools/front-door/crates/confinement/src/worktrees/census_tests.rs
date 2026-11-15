@@ -314,7 +314,7 @@ fn native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree()
     use provenant_os::pid::{
         OccupancyObservation, ProcessUids, SealedSystemImage, UnreadablePolicyExcusal,
     };
-    use provenant_supervisor::census::{Census, ObservationIssue, ProcessIdentity};
+    use provenant_supervisor::census::{Census, ObservationIssue};
 
     // Model a foreign sealed system process with an unreadable cwd. The native
     // process-observer smoke test is covered separately below.
@@ -826,7 +826,7 @@ impl CwdObserver for RefusedCwd {
     }
     fn unreadable_policy_uids(
         &self,
-        pid: i64,
+        _pid: i64,
         _: &[CensusIgnoreEntry],
     ) -> Result<
         provenant_os::pid::UnreadablePolicyExcusal,

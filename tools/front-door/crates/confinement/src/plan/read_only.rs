@@ -40,6 +40,7 @@ impl ReadOnlyPolicy {
             .into_owned();
         let (policy, warnings) =
             decode_policy(&source, &bytes).map_err(|_| PermissionError::InvalidReadOnlyPolicy)?;
+        #[allow(clippy::print_stderr, reason = "unknown policy keys warn with their source shown")]
         for warning in warnings {
             eprintln!("warning: {warning}");
         }

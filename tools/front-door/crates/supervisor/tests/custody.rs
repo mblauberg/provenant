@@ -760,7 +760,7 @@ fn unchanged_census_does_not_publish_tracking(root: &Path) -> Result<()> {
         .join(scope().attempt.to_string())
         .join("reservation.json");
     let before = std::fs::read(&reservation)?;
-    provenant_test_support::wait_for(
+    let _observed = provenant_test_support::wait_for(
         "next full census",
         Duration::from_secs(5),
         || std::fs::read(&trace).map(|trace| count_full_censuses(&trace)),

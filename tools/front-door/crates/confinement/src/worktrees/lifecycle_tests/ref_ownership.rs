@@ -319,7 +319,7 @@ fn attempt_and_operation_replays_share_generation_rules() -> Result<(), Box<dyn 
     impl Owner {
         fn attempt_id(&self) -> Option<AttemptId> {
             match self {
-                Self::Attempt(id) => Some(id.clone()),
+                Self::Attempt(id) => Some(*id),
                 Self::Operation(_) => None,
             }
         }

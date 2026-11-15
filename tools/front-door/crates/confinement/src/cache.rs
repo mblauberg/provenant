@@ -2215,7 +2215,8 @@ mod tests {
         #[test]
         fn gc_refuses_owner_identity_changes_at_each_sweep_boundary()
         -> Result<(), Box<dyn std::error::Error>> {
-            let cases: [(&str, fn() -> Result<(), Box<dyn std::error::Error>>); 3] = [
+            type Case = (&'static str, fn() -> Result<(), Box<dyn std::error::Error>>);
+            let cases: [Case; 3] = [
                 (
                     "before rename",
                     gc_refuses_replacement_identity_after_rename,

@@ -123,7 +123,7 @@ fn cancellation_directory_watch_allows_idle_backoff_with_polling_fallback() {
         super::cancel_poll_interval(false),
         super::CANCEL_FALLBACK_POLL_MS
     );
-    assert!(super::CANCEL_WATCH_POLL_MS > super::CANCEL_FALLBACK_POLL_MS);
+    const { assert!(super::CANCEL_WATCH_POLL_MS > super::CANCEL_FALLBACK_POLL_MS) };
 }
 
 #[cfg(all(feature = "fixture", target_os = "macos"))]
