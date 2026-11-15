@@ -2603,7 +2603,7 @@ mod result_tests {
             project: locator.key,
             result: PeerResult::Output {
                 extra: Default::default(),
-                data: OutputResult::Chunk {
+                data: Box::new(OutputResult::Chunk {
                     peer: provenant_records::run::PeerOutputFields {
                         graph: provenant_records::run::PeerGraphFields {
                             peer_origin_work_key: Some(origin.clone()),
@@ -2621,7 +2621,7 @@ mod result_tests {
                     eof: true,
                     digest,
                     bytes: OutputBytes::Utf8(text.clone()),
-                },
+                }),
             },
         };
         std::fs::write(&response, serde_json::to_vec(&reply)?)?;
@@ -2777,10 +2777,8 @@ mod result_tests {
             } else {
                 remote_host
             };
-            if let PeerResult::Output {
-                data: OutputResult::Chunk { peer, .. },
-                ..
-            } = &mut reply.result
+            if let PeerResult::Output { data, .. } = &mut reply.result
+                && let OutputResult::Chunk { peer, .. } = data.as_mut()
             {
                 peer.graph.peer_origin_work_key = Some(provenant_records::WorkKey::new(
                     factory.context.identity.project,
@@ -2807,17 +2805,14 @@ mod result_tests {
             assert!(run.checkpoint.successful());
             assert!(owner.consumed);
         }
-        if let PeerResult::Output {
-            data:
-                OutputResult::Chunk {
+        if let PeerResult::Output { data, .. } = &mut reply.result
+            && let OutputResult::Chunk {
                     peer,
                     next_offset,
                     eof,
                     bytes,
                     ..
-                },
-            ..
-        } = &mut reply.result
+                } = data.as_mut()
         {
             peer.length = Some(text.len() as u64);
             peer.graph.peer_origin_work_key = Some(origin.clone());
@@ -2855,17 +2850,14 @@ mod result_tests {
         let second_response = rig.root.join("second-response");
         let second_seen = rig.root.join("second-seen");
         let mut second: PeerResponse = serde_json::from_slice(&serde_json::to_vec(&reply)?)?;
-        if let PeerResult::Output {
-            data:
-                OutputResult::Chunk {
+        if let PeerResult::Output { data, .. } = &mut second.result
+            && let OutputResult::Chunk {
                     offset,
                     next_offset,
                     eof,
                     bytes,
                     ..
-                },
-            ..
-        } = &mut second.result
+                } = data.as_mut()
         {
             *offset = 5;
             *next_offset = text.len() as u64;
@@ -2895,10 +2887,8 @@ mod result_tests {
         };
         assert_eq!(std::fs::read_to_string(path)?, text);
         assert!(second_seen.exists());
-        if let PeerResult::Output {
-            data: OutputResult::Chunk { peer, .. },
-            ..
-        } = &mut second.result
+        if let PeerResult::Output { data, .. } = &mut second.result
+            && let OutputResult::Chunk { peer, .. } = data.as_mut()
         {
             peer.graph.peer_origin_work_key = Some(origin.next_attempt().unwrap());
         }

@@ -92,11 +92,9 @@ fn resolve_provider(name: &str, command: &str) -> Option<ResolvedHook> {
     if requested == HookAction::PreToolUse && !install.answer_delivery.is_supported() {
         return None;
     }
-    let HookEvent::Supported { event, .. } =
-        install.hook_events.iter().find_map(|event| match event {
-            HookEvent::Supported { action, .. } if *action == requested => Some(event),
-            _ => None,
-        })?
+    let HookEvent::Supported { event, .. } = install.hook_events.iter().find(
+        |event| matches!(event, HookEvent::Supported { action, .. } if *action == requested),
+    )?
     else {
         return None;
     };
@@ -104,7 +102,7 @@ fn resolve_provider(name: &str, command: &str) -> Option<ResolvedHook> {
         handler: handler(requested),
         client: Some(spec.id),
         action: Some(requested),
-        event: *event,
+        event,
         protocol: install.hook_protocol,
     })
 }

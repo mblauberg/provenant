@@ -405,7 +405,7 @@ pub enum PeerAction {
     Submit {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
-        graph_context: GraphSubmitContext,
+        graph_context: Box<GraphSubmitContext>,
         input: Box<crate::coordination::facade::SubmitInput>,
     },
     Output {
@@ -739,7 +739,7 @@ pub enum PeerResult {
         extra: provenant_records::ExtraFields,
     },
     Output {
-        data: crate::coordination::facade::OutputResult,
+        data: Box<crate::coordination::facade::OutputResult>,
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
     },
@@ -1115,7 +1115,7 @@ mod tests {
                 extra: Default::default(),
                 target: facade::AttemptTarget {
                     extra: Default::default(),
-                    attempt: AttemptId::from_bytes([9; 16]),
+                    attempt: provenant_core::AttemptId::from_bytes([9; 16]),
                     host: None,
                 },
             },
@@ -1622,12 +1622,12 @@ mod tests {
         .unwrap();
         submit.action = PeerAction::Submit {
             extra: Default::default(),
-            graph_context: GraphSubmitContext {
+            graph_context: Box::new(GraphSubmitContext {
                 launch_actor: ActorId::from_bytes([9; 16]),
                 attempt: crate::graph::AttemptSpec::default(),
                 retry_limit: None,
                 network: None,
-            },
+            }),
             input: Box::new(facade::SubmitInput::Submit {
                 extra: Default::default(),
                 origin_work_key: None,

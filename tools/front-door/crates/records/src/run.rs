@@ -939,7 +939,7 @@ pub struct AppliedAccessGrantReceipt {
     #[serde(default)]
     pub path: String,
     #[serde(default)]
-    pub scope: crate::PathScope,
+    pub scope: PathScope,
     #[serde(default)]
     pub path_id: String,
     #[serde(flatten)]
@@ -3166,6 +3166,7 @@ mod tests {
             base_ref: None,
             route: RequestedRoute::Named {
                 extra: Default::default(),
+                required_family: None,
                 name: "junior".into(),
                 effort: None,
             },

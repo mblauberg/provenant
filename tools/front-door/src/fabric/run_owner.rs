@@ -1058,7 +1058,7 @@ impl BinaryRunOwner<'_> {
                 host,
                 PeerAction::Submit {
                     extra: Default::default(),
-                    graph_context,
+                    graph_context: Box::new(graph_context),
                     input,
                 },
                 budget,
@@ -1209,7 +1209,7 @@ impl BinaryRunOwner<'_> {
             cancel,
         )? {
             return match answer {
-                PeerResult::Output { data: value, .. } => Ok(value),
+                PeerResult::Output { data: value, .. } => Ok(*value),
                 _ => Err(FacadeError::StateCorrupt),
             };
         }

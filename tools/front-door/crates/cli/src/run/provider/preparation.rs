@@ -1481,6 +1481,7 @@ pub(super) fn prepare_with_wait(
         let mut delegated = task.clone();
         delegated.route = run::RequestedRoute::Model {
             extra: Default::default(),
+            required_family: task.route.required_family().map(str::to_owned),
             provider: provider.into(),
             model: model.clone(),
             effort: effort.clone(),
@@ -4173,7 +4174,7 @@ pub(super) fn prepare_candidates(
         }
         provider.project_paths = Some(serde_json::from_value(project_paths)?);
         provider.argv_prompt_limit = Some(provenant_records::run::ArgvPromptLimitReceipt {
-            value: argv_limit,
+            value: argv_limit as u64,
             key: ARGV_LIMIT_KEY.into(),
             origin: argv_origin_record,
             extra: Default::default(),
@@ -4459,6 +4460,7 @@ mod receipt_tests {
         let resolved = provenant_routing::resolve(&request, &context)?;
         let requested = run::RequestedRoute::Named {
             extra: Default::default(),
+            required_family: None,
             name: "fixture".into(),
             effort: None,
         };
@@ -4484,6 +4486,7 @@ mod receipt_tests {
         );
         let pinned = run::RequestedRoute::Model {
             extra: Default::default(),
+            required_family: None,
             provider: "codex".into(),
             model: "codex/gpt-6.1-sol".into(),
             effort: Some("high".into()),
@@ -4926,7 +4929,7 @@ mod user_skills_tests {
         .unwrap();
         assert_eq!(record["exposed"], false);
         assert_eq!(record["staged_file_count"], 0);
-        assert_eq!(record["source"], origin);
+        assert_eq!(record["source"], serde_json::to_value(&origin).unwrap());
         let off = serde_json::to_value(user_skills_exposure(
             provenant_records::UserSkillsMode::Off,
             Default::default(),

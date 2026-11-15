@@ -147,7 +147,7 @@ pub(super) fn read_inner(
                     }
                     continue;
                 }
-                seen.insert(key, (work_key.clone(), parents.clone(), store_path.clone()));
+                seen.insert(key, (work_key.clone(), parents, store_path.clone()));
                 let usage =
                     serde_json::to_value(attempt.effective_usage()).map_err(|_| Error::Encode)?;
                 for (name, (sum, missing)) in &mut totals {

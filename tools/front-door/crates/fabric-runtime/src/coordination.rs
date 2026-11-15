@@ -182,7 +182,7 @@ pub enum EventsResult {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        observation: Option<EventObservation>,
+        observation: Option<Box<EventObservation>>,
         page: Page<Event>,
         cursor: i64,
         timed_out: bool,
@@ -734,7 +734,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                 let cursor = page.items.last().map(|event| event.seq).unwrap_or(start);
                 Ok(EventsResult::Read {
                     extra: Default::default(),
-                    observation,
+                    observation: observation.map(Box::new),
                     page,
                     cursor,
                     timed_out,

@@ -116,12 +116,11 @@ pub(super) fn output_summary(
             }
         }
     }
-    if let Some(error) = data.get("handoff").and_then(|value| value.get("Err")) {
-        if let Ok(error) =
+    if let Some(error) = data.get("handoff").and_then(|value| value.get("Err"))
+        && let Ok(error) =
             serde_json::from_value::<provenant_records::handoff::HandoffError>(error.clone())
-        {
-            lines.push(crate::bounded_text(&error.to_string(), 2048));
-        }
+    {
+        lines.push(crate::bounded_text(&error.to_string(), 2048));
     }
     if headed && let Some(fallback) = data.get("planner_fallback") {
         lines.push(format!(

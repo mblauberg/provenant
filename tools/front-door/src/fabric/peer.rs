@@ -718,7 +718,7 @@ pub fn peer(
                         Ok(data)
                     }),
                 |data| PeerResult::Output {
-                    data,
+                    data: Box::new(data),
                     extra: Default::default(),
                 },
             ),
