@@ -1064,12 +1064,23 @@ mod tests {
                 overlay[name] = entry;
                 let bytes = serde_json::to_vec(&overlay).unwrap();
                 std::fs::write(host.join("ports.json"), &bytes).unwrap();
-                std::fs::write(project.join(PORTS_CONFIG), &bytes).unwrap();
 
-                for (project_path, expected_source) in [
+                for (project_overlay, expected_source) in [
                     (None, PortSource::Host),
-                    (Some(project.as_path()), PortSource::Project),
+                    (
+                        Some(serde_json::json!({"schema_version": PORTS_SCHEMA_VERSION})),
+                        PortSource::Host,
+                    ),
+                    (Some(overlay.clone()), PortSource::Project),
                 ] {
+                    if let Some(document) = &project_overlay {
+                        std::fs::write(
+                            project.join(PORTS_CONFIG),
+                            serde_json::to_vec(document).unwrap(),
+                        )
+                        .unwrap();
+                    }
+                    let project_path = project_overlay.as_ref().map(|_| project.as_path());
                     let table = PortTable::read_for(project_path, &host).unwrap();
                     for (port, source, _, _, _) in table.entries() {
                         assert_eq!(
