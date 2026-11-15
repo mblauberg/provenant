@@ -125,61 +125,61 @@ pub(crate) fn bind_native(
     let warn_pnpm = cache_selector_conflict || store_selector_conflict;
     let mut legacy_selector_injected = false;
 
-    if bind_cache && !cache_explicit {
-        if let Some(family) = family {
-            match pnpm_global_path(home, host_var, "cacheDir", "cache-dir") {
-                Setting::Missing => {
-                    set_pnpm_selector(
-                        env,
-                        family,
-                        "npm_config_cache_dir",
-                        "pnpm_config_cache_dir",
-                        pnpm_default_cache(home, host_var),
-                    );
-                    legacy_selector_injected |= family == PnpmSelectorFamily::Legacy;
-                }
-                Setting::Present(Some(path)) => {
-                    set_pnpm_selector(
-                        env,
-                        family,
-                        "npm_config_cache_dir",
-                        "pnpm_config_cache_dir",
-                        path,
-                    );
-                    legacy_selector_injected |= family == PnpmSelectorFamily::Legacy;
-                }
-                Setting::Present(None) => warn_unsupported(),
+    if bind_cache
+        && !cache_explicit
+        && let Some(family) = family
+    {
+        match pnpm_global_path(home, host_var, "cacheDir", "cache-dir") {
+            Setting::Missing => {
+                set_pnpm_selector(
+                    env,
+                    family,
+                    "npm_config_cache_dir",
+                    "pnpm_config_cache_dir",
+                    pnpm_default_cache(home, host_var),
+                );
+                legacy_selector_injected |= family == PnpmSelectorFamily::Legacy;
             }
+            Setting::Present(Some(path)) => {
+                set_pnpm_selector(
+                    env,
+                    family,
+                    "npm_config_cache_dir",
+                    "pnpm_config_cache_dir",
+                    path,
+                );
+                legacy_selector_injected |= family == PnpmSelectorFamily::Legacy;
+            }
+            Setting::Present(None) => warn_unsupported(),
         }
     }
 
-    if bind_store {
-        if !store_explicit {
-            if let Some(family) = family {
-                match pnpm_global_path(home, host_var, "storeDir", "store-dir") {
-                    Setting::Missing => {
-                        set_pnpm_selector(
-                            env,
-                            family,
-                            "npm_config_store_dir",
-                            "pnpm_config_store_dir",
-                            pnpm_default_store(home, host_var),
-                        );
-                        legacy_selector_injected |= family == PnpmSelectorFamily::Legacy;
-                    }
-                    Setting::Present(Some(path)) => {
-                        set_pnpm_selector(
-                            env,
-                            family,
-                            "npm_config_store_dir",
-                            "pnpm_config_store_dir",
-                            path,
-                        );
-                        legacy_selector_injected |= family == PnpmSelectorFamily::Legacy;
-                    }
-                    Setting::Present(None) => warn_unsupported(),
-                }
+    if bind_store
+        && !store_explicit
+        && let Some(family) = family
+    {
+        match pnpm_global_path(home, host_var, "storeDir", "store-dir") {
+            Setting::Missing => {
+                set_pnpm_selector(
+                    env,
+                    family,
+                    "npm_config_store_dir",
+                    "pnpm_config_store_dir",
+                    pnpm_default_store(home, host_var),
+                );
+                legacy_selector_injected |= family == PnpmSelectorFamily::Legacy;
             }
+            Setting::Present(Some(path)) => {
+                set_pnpm_selector(
+                    env,
+                    family,
+                    "npm_config_store_dir",
+                    "pnpm_config_store_dir",
+                    path,
+                );
+                legacy_selector_injected |= family == PnpmSelectorFamily::Legacy;
+            }
+            Setting::Present(None) => warn_unsupported(),
         }
     }
 
@@ -280,9 +280,7 @@ fn package_json(path: &Path) -> Option<serde_json::Value> {
 
 fn pnpm_family_from_version(version: &str) -> Option<PnpmSelectorFamily> {
     let version = version.split('+').next()?.trim();
-    let major = version
-        .split(|character| character == '.' || character == '-')
-        .next()?;
+    let major = version.split(['.', '-']).next()?;
     if major.is_empty() || !major.chars().all(|character| character.is_ascii_digit()) {
         return None;
     }
@@ -715,15 +713,15 @@ fn preserve_pnpm_selectors(
 ) -> (bool, bool) {
     let legacy = selector_value(legacy_selector, host_var, env);
     let current = selector_value(current_selector, host_var, env);
-    if env_value(env, legacy_selector).is_none() {
-        if let Some(value) = host_var_value(host_var, legacy_selector) {
-            set_env(env, legacy_selector, value);
-        }
+    if env_value(env, legacy_selector).is_none()
+        && let Some(value) = host_var_value(host_var, legacy_selector)
+    {
+        set_env(env, legacy_selector, value);
     }
-    if env_value(env, current_selector).is_none() {
-        if let Some(value) = host_var_value(host_var, current_selector) {
-            set_env(env, current_selector, value);
-        }
+    if env_value(env, current_selector).is_none()
+        && let Some(value) = host_var_value(host_var, current_selector)
+    {
+        set_env(env, current_selector, value);
     }
 
     let conflict = match family {
