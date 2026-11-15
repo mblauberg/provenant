@@ -216,6 +216,8 @@ fn chair_custody_matches_checkpoint_identity_for_harnesses_and_overrides() -> Re
         let discovery: Value = serde_json::from_slice(&std::fs::read(rig.state.join(format!(
             "workflow/projects/{project}/sessions/{session}/discovery.json"
         )))?)?;
+        let identity = call(&rig, &["fabric", "identity"], 0)?["data"].clone();
+        assert_eq!(identity["inbox"]["actor"], discovery["chair_actor"]);
         if let Some(session_override) = session_override {
             rig.env
                 .push(("PROVENANT_SESSION_ID".into(), session_override.into()));
