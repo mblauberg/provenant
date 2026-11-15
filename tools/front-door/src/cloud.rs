@@ -117,16 +117,14 @@ fn project_binding_directory_diagnostic(
 
 #[cfg(test)]
 mod diagnostic_tests {
-    use super::*;
-
     #[test]
     fn unsafe_binding_error_keeps_safe_local_location_and_remedy() {
         let error = provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
-            path: PathBuf::from("/private/project-state"),
+            path: std::path::PathBuf::from("/private/project-state"),
             mode: 0o755,
             owner_matches: true,
         };
-        let diagnostic = project_binding_directory_diagnostic(&error).unwrap();
+        let diagnostic = super::project_binding_directory_diagnostic(&error).unwrap();
         assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
             detail.contains("/private/project-state") && detail.contains("mode 0755")
         }));
@@ -137,7 +135,7 @@ mod diagnostic_tests {
                 .is_some_and(|next| { next.contains("chmod 700 '/private/project-state'") })
         );
         assert!(
-            project_binding_directory_diagnostic(
+            super::project_binding_directory_diagnostic(
                 &provenant_config::ConfigError::InvalidProjectBinding
             )
             .is_none()

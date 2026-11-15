@@ -2122,7 +2122,15 @@ mod cargo_setup_tests {
                 Err(String::from_utf8_lossy(&output.stderr).into_owned().into())
             }
         };
-        run_git(&root, &["init", "-q", seed.to_str().ok_or("seed path")?])?;
+        run_git(
+            &root,
+            &[
+                "init",
+                "-q",
+                "--initial-branch=main",
+                seed.to_str().ok_or("seed path")?,
+            ],
+        )?;
         run_git(&seed, &["config", "user.name", "Fixture"])?;
         run_git(&seed, &["config", "user.email", "fixture@example.invalid"])?;
         std::fs::write(seed.join("README.md"), "bare layout\n")?;
@@ -2144,8 +2152,8 @@ mod cargo_setup_tests {
                 common.to_str().ok_or("common path")?,
                 "worktree",
                 "add",
-                "main",
                 source.to_str().ok_or("source path")?,
+                "main",
             ],
         )?;
         std::fs::create_dir_all(writer_path.parent().ok_or("writer parent")?)?;
