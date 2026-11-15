@@ -726,6 +726,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Set Rust temporary directory
         env:
           TMPDIR: ${{ runner.temp }}
@@ -771,6 +772,20 @@ jobs:
             --harness codex --bin-dir "$RUNNER_TEMP/bin"
           HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
             --state-dir "$RUNNER_TEMP/state" uninstall --harness codex
+      - name: Check candidate release range
+        run: |
+          release_head="$(git rev-parse --verify --end-of-options "${GITHUB_SHA}^{commit}")"
+          release_base="$(git rev-parse --verify --end-of-options "${release_head}^")"
+          if [ "$release_base" = "$release_head" ] \
+            || ! git merge-base --is-ancestor "$release_base" "$release_head"; then
+            echo "Cannot check candidate release: ${GITHUB_SHA} has no nonempty ancestor range." >&2
+            exit 1
+          fi
+          umask 077
+          mkdir -p "$RUNNER_TEMP/release-check-home" "$RUNNER_TEMP/release-check-state"
+          HOME="$RUNNER_TEMP/release-check-home" "$RUNNER_TEMP/release/bin/provenant" \
+            --state-dir "$RUNNER_TEMP/release-check-state" check release \
+            --base "$release_base" --head "$release_head"
       # Clippy lives in the macOS test job, which compiles and caches the
       # workspace; only the Swift package tests (shared client, menu bar and
       # console) stay here, to balance the two jobs.
