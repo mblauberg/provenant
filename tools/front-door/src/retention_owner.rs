@@ -222,8 +222,8 @@ impl worktrees::RetirementFeeds for Owner<'_> {
     #[allow(clippy::disallowed_methods)] // Native read-only store open deadline.
     fn custody(&self, lane: &WorktreeInfo) -> Result<(), String> {
         let context = self.context()?;
-        let chair = provenant_cli::fabric::current_chair(&context)
-            .map_err(|error| error.to_string())?;
+        let chair =
+            provenant_cli::fabric::current_chair(&context).map_err(|error| error.to_string())?;
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let call = Request {

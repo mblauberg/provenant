@@ -2563,6 +2563,7 @@ fn seed_composite_output_graph(rig: &TestRig, graph_id: &str, root_ids: &[&str])
     journal.bind(GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),
