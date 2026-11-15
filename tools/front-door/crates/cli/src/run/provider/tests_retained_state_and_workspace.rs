@@ -1446,9 +1446,10 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
     let state = base.join("state");
     let project = base.join("repo");
     let git_home = base.join("git-home");
-    for directory in [&home, &state, &project, &git_home] {
+    for directory in [&home, &project, &git_home] {
         std::fs::create_dir(directory)?;
     }
+    provenant_os::fixture::private_state_dir(&state)?;
     let executor = provenant_os::exec::SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
     std::fs::write(project.join("subject"), "registered source")?;
@@ -1508,10 +1509,6 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
 
         task.access.source_root = Some(source.clone());
         task.access.source_identity = Some(source_identity(&source)?);
-        let resolved = run::resolve_reader_source(&state, &project, &source).unwrap_or_else(|error| {
-            panic!("source {} resolution failed: {error:?}", source.display())
-        });
-        assert_eq!(resolved, source);
         let admission = crate::run::admit_source_root(
             &project,
             &state,
@@ -1519,6 +1516,7 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
             &credentials,
             crate::run::SourceAdmissionMode::Registered,
         )?;
+        assert_eq!(admission.path, source);
         let prepared = source_cwd(&registry, &task).unwrap_or_else(|error| {
             panic!("source {}: {error}", source.display())
         });
