@@ -354,7 +354,9 @@ fn public_patch_skip_survives_unrelated_edits_and_retry_supersedes_it() {
         state(&checkpoint, "active--member"),
         Some(NodeState::Skipped)
     );
-    assert_eq!(state(&checkpoint, "active"), Some(NodeState::Blocked));
+    // The upstream hold is still running, so its composite is running until
+    // that dependency settles; the later checkpoint must become blocked.
+    assert_eq!(state(&checkpoint, "active"), Some(NodeState::Running));
     assert_eq!(state(&checkpoint, "loose"), Some(NodeState::Pending));
 
     let restored: GraphCheckpoint =
