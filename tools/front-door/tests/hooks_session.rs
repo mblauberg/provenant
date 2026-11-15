@@ -477,7 +477,7 @@ fn stop_hook_refreshes_only_an_existing_quiet_checkpoint() -> Result {
 fn lane_sessions_report_but_never_write_checkpoint_state() -> Result {
     let mut rig = TestRig::new()?;
     rig.env
-        .push((provenant_run::LANE_DEPTH_ENV.into(), "1".into()));
+        .push((provenant_core::consumer_env::LANE_DEPTH.into(), "1".into()));
     let checkpoint = store(&rig, "lane-session")?;
     save(&checkpoint, "notes")?;
     let input =

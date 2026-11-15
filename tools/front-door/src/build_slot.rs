@@ -26,20 +26,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Set in the environment of a gated build to `pid:start`, the holder shim's
-/// pid and native process start time. A cargo run nested inside it (a build
-/// script, a test that spawns cargo) skips the gate only while that exact
-/// process is a live ancestor of the nested shim and is a provenant process,
-/// so it does not queue behind the slot its own parent holds. Naming any
-/// other process, even a live ancestor, is ignored.
-pub(crate) const HELD: &str = "PROVENANT_BUILD_SLOT";
-/// Host state root that holds the slot directory.
-pub(crate) const STATE_ENV: &str = "PROVENANT_BUILD_SLOT_STATE";
-/// How many builds the host runs at once.
-pub(crate) const SLOTS_ENV: &str = "PROVENANT_BUILD_SLOTS";
-/// Which cargo subcommands the host lets this lane run, written into the shim
-/// script from the `lanes.local_cargo` knob and never from a lane's arguments.
-pub(crate) const LOCAL_ENV: &str = "PROVENANT_LOCAL_CARGO";
+// `PROVENANT_BUILD_SLOT` is set in a gated build to `pid:start`, the holder shim's
+// pid and native process start time. A cargo run nested inside it (a build
+// script, a test that spawns cargo) skips the gate only while that exact
+// process is a live ancestor of the nested shim and is a provenant process,
+// so it does not queue behind the slot its own parent holds. Naming any
+// other process, even a live ancestor, is ignored.
+// The shim's other variables (slot directory, slot count and the cargo
+// subcommands the host lets this lane run) come from the host, written into
+// the shim script from settings and never from a lane's arguments.
+use provenant_core::consumer_env::{
+    BUILD_DISK_LIMITS, BUILD_SLOT, BUILD_SLOT_STATE, BUILD_SLOTS, CARGO_SOURCE_WRITES,
+    CARGO_SOURCE_WRITES_SOURCE, LOCAL_CARGO,
+};
 
 /// The compiling cargo commands a lane may run locally.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -56,7 +55,7 @@ impl Local {
     pub(crate) fn from_env(env: &[(OsString, OsString)]) -> Self {
         match env
             .iter()
-            .find(|(key, _)| key == OsStr::new(LOCAL_ENV))
+            .find(|(key, _)| key == OsStr::new(LOCAL_CARGO))
             .and_then(|(_, value)| value.to_str())
         {
             Some("check") => Self::Check,
@@ -123,11 +122,11 @@ impl Settings {
                 .find(|(key, _)| key == OsStr::new(name))
                 .map(|(_, value)| value)
         };
-        let state = PathBuf::from(get(STATE_ENV)?);
+        let state = PathBuf::from(get(BUILD_SLOT_STATE)?);
         let number = |name: &str| get(name)?.to_str()?.parse::<u64>().ok();
         Some(Self {
             state: state.is_absolute().then_some(state)?,
-            slots: number(SLOTS_ENV).filter(|n| (1..=64).contains(n))?,
+            slots: number(BUILD_SLOTS).filter(|n| (1..=64).contains(n))?,
         })
     }
 }
@@ -262,7 +261,7 @@ fn nested(env: &[(OsString, OsString)]) -> bool {
 fn nested_with(env: &[(OsString, OsString)], observer: &dyn ProcessObserver) -> bool {
     let Some(holder) = env
         .iter()
-        .find(|(name, _)| name == HELD)
+        .find(|(name, _)| name == BUILD_SLOT)
         .and_then(|(_, value)| Holder::parse(value.to_str()?))
     else {
         return false;
@@ -327,8 +326,8 @@ fn run_with(
     if held.is_some()
         && let Some((me, _)) = own(&SystemProcessObserver)
     {
-        env.retain(|(name, _)| name != HELD);
-        env.push((HELD.into(), me.marker().into()));
+        env.retain(|(name, _)| name != BUILD_SLOT);
+        env.push((BUILD_SLOT.into(), me.marker().into()));
     }
     // `held` stays open while the child runs; the descriptor is the slot.
     let code = match execute(Path::new(program), args, &env) {
@@ -339,11 +338,11 @@ fn run_with(
     if code != 0
         && env
             .iter()
-            .any(|(key, value)| key == "PROVENANT_CARGO_SOURCE_WRITES" && value == "false")
+            .any(|(key, value)| key == CARGO_SOURCE_WRITES && value == "false")
     {
         let source = env
             .iter()
-            .find(|(key, _)| key == "PROVENANT_CARGO_SOURCE_WRITES_SOURCE")
+            .find(|(key, _)| key == CARGO_SOURCE_WRITES_SOURCE)
             .and_then(|(_, value)| value.to_str())
             .unwrap_or("compiled default");
         warning(&format!(
@@ -361,7 +360,7 @@ fn check_disk(env: &[(OsString, OsString)]) -> Result<(), String> {
             .find(|(key, _)| key == OsStr::new(name))
             .and_then(|(_, value)| value.to_str())
     };
-    let Some(encoded_limits) = value("PROVENANT_BUILD_DISK_LIMITS") else {
+    let Some(encoded_limits) = value(BUILD_DISK_LIMITS) else {
         return Ok(());
     };
     let observed = (|| {
@@ -611,15 +610,15 @@ mod tests {
                 .map(|(k, v)| (OsString::from(k), OsString::from(v)))
                 .collect::<Vec<_>>()
         };
-        let good = env(&[(STATE_ENV, "/s"), (SLOTS_ENV, "2")]);
+        let good = env(&[(BUILD_SLOT_STATE, "/s"), (BUILD_SLOTS, "2")]);
         let settings = Settings::from_env(&good).unwrap();
         assert_eq!(settings.slots, 2);
         for bad in [
             env(&[]),
-            env(&[(STATE_ENV, "relative"), (SLOTS_ENV, "2")]),
-            env(&[(STATE_ENV, "/s"), (SLOTS_ENV, "0")]),
-            env(&[(STATE_ENV, "/s"), (SLOTS_ENV, "65")]),
-            env(&[(STATE_ENV, "/s"), (SLOTS_ENV, "x")]),
+            env(&[(BUILD_SLOT_STATE, "relative"), (BUILD_SLOTS, "2")]),
+            env(&[(BUILD_SLOT_STATE, "/s"), (BUILD_SLOTS, "0")]),
+            env(&[(BUILD_SLOT_STATE, "/s"), (BUILD_SLOTS, "65")]),
+            env(&[(BUILD_SLOT_STATE, "/s"), (BUILD_SLOTS, "x")]),
         ] {
             assert!(Settings::from_env(&bad).is_none());
         }

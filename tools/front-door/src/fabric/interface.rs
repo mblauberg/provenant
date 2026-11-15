@@ -1289,7 +1289,10 @@ impl Factory {
             .load_dir(Layer::User, &config.join("provenant/templates"))
             .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
         library
-            .load_dir(Layer::Repository, &self.cwd.join(".provenant/templates"))
+            .load_dir(
+                Layer::Repository,
+                &self.cwd.join(provenant_config::repository_files::TEMPLATES),
+            )
             .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
         if let Some(inline) = inline.filter(|value| !value.is_null()) {
             let templates: BTreeMap<String, Template> = serde_json::from_value(inline.clone())

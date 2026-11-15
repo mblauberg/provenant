@@ -255,7 +255,11 @@ fn resolve(override_path: Option<&Path>, candidates: &[PathBuf]) -> Option<PathB
 
 /// Read `PROVENANT_GIT` and resolve the selected executable.
 pub fn git_executable() -> Option<PathBuf> {
-    resolve_git_executable(std::env::var_os("PROVENANT_GIT").as_deref().map(Path::new))
+    resolve_git_executable(
+        std::env::var_os(provenant_core::consumer_env::GIT)
+            .as_deref()
+            .map(Path::new),
+    )
 }
 
 #[cfg(test)]

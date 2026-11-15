@@ -3686,7 +3686,7 @@ pub(super) fn prepare_candidates(
                 home: &home,
                 user: &user,
                 host_var: &|key| {
-                    if key == provenant_confinement::run_config::SANDBOX_ENV {
+                    if key == provenant_core::consumer_env::SANDBOX {
                         Some(sandbox.env_value().into())
                     } else {
                         host_provider_var(registry, key)
@@ -3829,9 +3829,11 @@ pub(super) fn prepare_candidates(
             }
         }
         if let Some(head) = &task.head {
-            spec.env.push(("PROVENANT_LANE_HEAD".into(), head.into()));
+            spec.env
+                .push((provenant_core::consumer_env::LANE_HEAD.into(), head.into()));
             if let Some(base) = &task.base {
-                spec.env.push(("PROVENANT_LANE_BASE".into(), base.into()));
+                spec.env
+                    .push((provenant_core::consumer_env::LANE_BASE.into(), base.into()));
             }
         }
         if sandbox.effective {

@@ -69,7 +69,7 @@ fn lane_command_with_launch(
         let attempt = rig
             .env
             .iter()
-            .find(|(key, _)| key == provenant_run::PARENT_ATTEMPT_ENV)
+            .find(|(key, _)| key == provenant_core::consumer_env::PARENT_ATTEMPT_ID)
             .and_then(|(_, value)| value.to_str())
             .ok_or("lane parent attempt")?
             .parse()?;
@@ -518,9 +518,9 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
             provenant_core::RUN_STATE_DIRECTORY_ENV.into(),
             child_state.clone().into_os_string(),
         ),
-        (provenant_run::LANE_DEPTH_ENV.into(), "1".into()),
+        (provenant_core::consumer_env::LANE_DEPTH.into(), "1".into()),
         (
-            provenant_run::PARENT_ATTEMPT_ENV.into(),
+            provenant_core::consumer_env::PARENT_ATTEMPT_ID.into(),
             caller.to_string().into(),
         ),
     ]);

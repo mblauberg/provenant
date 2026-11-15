@@ -12,9 +12,9 @@ use serde::Serialize;
 use std::{ffi::OsString, io::Write, path::Path, time::Duration};
 
 const COMMAND: &str = "verify";
-const CONFIG_JSON_ENV: &str = "PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON";
-const PROJECT_ENV: &str = "PROVENANT_VERIFY_PROJECT_ROOT";
-const TIER_ENV: &str = "PROVENANT_VERIFY_TIER";
+use provenant_core::consumer_env::{
+    VERIFY_EFFECTIVE_CONFIG_JSON, VERIFY_PROJECT_ROOT, VERIFY_TIER,
+};
 
 #[derive(Serialize)]
 struct Report {
@@ -85,9 +85,15 @@ pub fn run(tier: Option<&str>, globals: &Globals) -> u8 {
         PortBackend::Builtin | PortBackend::None => None,
     };
     let environment = [
-        (OsString::from(CONFIG_JSON_ENV), effective_config),
-        (OsString::from(PROJECT_ENV), project.as_os_str().to_owned()),
-        (OsString::from(TIER_ENV), OsString::from(&tier)),
+        (
+            OsString::from(VERIFY_EFFECTIVE_CONFIG_JSON),
+            effective_config,
+        ),
+        (
+            OsString::from(VERIFY_PROJECT_ROOT),
+            project.as_os_str().to_owned(),
+        ),
+        (OsString::from(VERIFY_TIER), OsString::from(&tier)),
     ];
     let timeout = Duration::from_secs(provenant_core::MAX_LANE_RUNTIME_SECONDS);
     let cancel = CancelToken::new();

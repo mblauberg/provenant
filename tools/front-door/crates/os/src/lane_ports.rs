@@ -13,16 +13,13 @@
 //! lane can still bind outside its block, and another program can use a port
 //! inside it.
 use crate::fs::{Directory, FsError, LockGuard, LockMode, Result};
+use provenant_core::consumer_env::{LANE_PORT_BASE, LANE_PORT_COUNT};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
 /// Directory below the host state root that holds the block lock files.
 pub const DIRECTORY: &str = "lane-ports";
-/// Environment variable naming the first port of a lane's block.
-pub const BASE_ENV: &str = "PROVENANT_LANE_PORT_BASE";
-/// Environment variable naming how many consecutive ports the block holds.
-pub const COUNT_ENV: &str = "PROVENANT_LANE_PORT_COUNT";
 
 /// The configured port space: `blocks` consecutive blocks of `size` ports
 /// from `base`.
@@ -61,8 +58,8 @@ impl Lease {
     /// The environment that tells the lane which ports are its own.
     pub fn environment(&self) -> [(&'static str, String); 2] {
         [
-            (BASE_ENV, self.base.to_string()),
-            (COUNT_ENV, self.size.to_string()),
+            (LANE_PORT_BASE, self.base.to_string()),
+            (LANE_PORT_COUNT, self.size.to_string()),
         ]
     }
 }
@@ -196,7 +193,10 @@ mod tests {
         assert_eq!(again.base, freed);
         assert_eq!(
             again.environment(),
-            [(BASE_ENV, freed.to_string()), (COUNT_ENV, "16".into())]
+            [
+                (LANE_PORT_BASE, freed.to_string()),
+                (LANE_PORT_COUNT, "16".into())
+            ]
         );
         drop((first, third));
     }

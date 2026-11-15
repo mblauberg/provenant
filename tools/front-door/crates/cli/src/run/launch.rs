@@ -2,7 +2,8 @@ use super::*;
 
 pub fn preview_project_id(roots: &Roots, cwd: &Path) -> Option<provenant_core::ProjectId> {
     if crate::fabric::in_lane() {
-        let gitdir = std::env::var_os("PROVENANT_WORKTREE_GITDIR").map(PathBuf::from)?;
+        let gitdir =
+            std::env::var_os(provenant_core::consumer_env::WORKTREE_GITDIR).map(PathBuf::from)?;
         return project_id_for_lane_gitdir(roots, &gitdir);
     }
     let git = provenant_os::git::git_executable()?;
@@ -42,8 +43,8 @@ pub(super) fn project_id_for_lane_gitdir(
 }
 
 pub fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
-    let parent_depth = environment_text(run::LANE_DEPTH_ENV)?;
-    let parent_attempt = environment_text(run::PARENT_ATTEMPT_ENV)?;
+    let parent_depth = environment_text(provenant_core::consumer_env::LANE_DEPTH)?;
+    let parent_attempt = environment_text(provenant_core::consumer_env::PARENT_ATTEMPT_ID)?;
     let config = crate::config_reads::read_for(roots, "knobs")
         .map_err(|error| Fail::config(Status::Error, error))?;
     let max_depth = config

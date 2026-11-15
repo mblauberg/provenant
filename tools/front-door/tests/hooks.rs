@@ -41,7 +41,7 @@ fn recorded_claude_events_use_native_protocol_and_never_touch_legacy_state() -> 
     let mut rig = TestRig::new()?;
     // Exercise the lane's pinned Git and private temporary directory too.
     rig.env
-        .push((provenant_run::LANE_DEPTH_ENV.into(), "1".into()));
+        .push((provenant_core::consumer_env::LANE_DEPTH.into(), "1".into()));
     publish_checkpoint(&rig)?;
     for spec in provenant_cli::hooks::HOOK_SPECS
         .iter()

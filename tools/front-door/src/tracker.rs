@@ -169,7 +169,7 @@ fn disposition_name(disposition: PortCommandDisposition) -> &'static str {
 }
 
 fn config(root: &Path, skipped: &mut Vec<String>) -> Config {
-    let path = root.join(".provenant/tracker-lint.toml");
+    let path = root.join(provenant_config::repository_files::TRACKER_LINT);
     match std::fs::read_to_string(&path) {
         Ok(text) => match toml_edit::de::from_str(&text) {
             Ok(config) => {

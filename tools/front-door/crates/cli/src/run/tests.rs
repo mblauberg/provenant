@@ -16,8 +16,8 @@ pub(super) fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error
     ];
     let removed = [
         OsStr::new(provenant_core::RUN_STATE_DIRECTORY_ENV),
-        OsStr::new(run::LANE_DEPTH_ENV),
-        OsStr::new(run::PARENT_ATTEMPT_ENV),
+        OsStr::new(provenant_core::consumer_env::LANE_DEPTH),
+        OsStr::new(provenant_core::consumer_env::PARENT_ATTEMPT_ID),
     ];
     let env: Vec<_> = std::env::vars_os()
         .filter(|(key, _)| !removed.contains(&key.as_os_str()))
@@ -458,8 +458,8 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     // The regression exercises a top-level submission, even when the
     // contributor running it is itself inside a nested lane.
     if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some()
-        || std::env::var_os(run::LANE_DEPTH_ENV).is_some()
-        || std::env::var_os(run::PARENT_ATTEMPT_ENV).is_some()
+        || std::env::var_os(provenant_core::consumer_env::LANE_DEPTH).is_some()
+        || std::env::var_os(provenant_core::consumer_env::PARENT_ATTEMPT_ID).is_some()
     {
         let argv = vec![
             std::env::current_exe()?.into_os_string(),
@@ -469,8 +469,8 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         ];
         let removed = [
             OsStr::new(provenant_core::RUN_STATE_DIRECTORY_ENV),
-            OsStr::new(run::LANE_DEPTH_ENV),
-            OsStr::new(run::PARENT_ATTEMPT_ENV),
+            OsStr::new(provenant_core::consumer_env::LANE_DEPTH),
+            OsStr::new(provenant_core::consumer_env::PARENT_ATTEMPT_ID),
         ];
         let env: Vec<_> = std::env::vars_os()
             .filter(|(key, _)| !removed.contains(&key.as_os_str()))

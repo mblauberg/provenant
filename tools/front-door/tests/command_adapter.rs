@@ -305,10 +305,10 @@ printf '%s\n' "$PROVENANT_PROCESS_TREE"
         ("memory-sandboxed", false),
     ] {
         rig.env
-            .retain(|(key, _)| key != provenant_supervisor::process_tree::ENV);
+            .retain(|(key, _)| key != provenant_core::consumer_env::PROCESS_TREE);
         if foreign {
             rig.env.push((
-                provenant_supervisor::process_tree::ENV.into(),
+                provenant_core::consumer_env::PROCESS_TREE.into(),
                 "/foreign/process-tree.json".into(),
             ));
         }

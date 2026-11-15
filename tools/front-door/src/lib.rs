@@ -945,7 +945,8 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
     };
     // Inside a lane, account state is out of reach whatever root was selected.
     if matches!(command, Command::Quota { .. })
-        && std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some_and(|depth| depth != "0")
+        && std::env::var_os(provenant_core::consumer_env::LANE_DEPTH)
+            .is_some_and(|depth| depth != "0")
     {
         return fail(
             &inv.leaf,
@@ -1794,7 +1795,7 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             usage_project,
             provenant_cli::fabric::current_session().as_deref(),
-            std::env::var(provenant_run::PARENT_ATTEMPT_ENV)
+            std::env::var(provenant_core::consumer_env::PARENT_ATTEMPT_ID)
                 .ok()
                 .and_then(|id| id.parse().ok()),
             status_wait,

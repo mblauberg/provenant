@@ -110,7 +110,8 @@ impl PreparedLaunch {
         cancel: &provenant_core::CancelToken,
         policy: &provenant_records::policy::Policy,
     ) -> Result<()> {
-        use provenant_confinement::run_config::{SANDBOX_ENV, SandboxRestriction};
+        use provenant_confinement::run_config::SandboxRestriction;
+        use provenant_core::consumer_env::SANDBOX;
         use std::io::Write as _;
         let Some(confinement) = self.confinement.as_mut().filter(|c| c.sandbox.effective) else {
             return Ok(());
@@ -133,9 +134,9 @@ impl PreparedLaunch {
         if let Some(warning) = &mode.warning {
             let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
         }
-        self.environment.retain(|(name, _)| name != SANDBOX_ENV);
+        self.environment.retain(|(name, _)| name != SANDBOX);
         self.environment
-            .push((SANDBOX_ENV.into(), mode.env_value().into()));
+            .push((SANDBOX.into(), mode.env_value().into()));
         self.route.extra.insert(
             provenant_records::run::SANDBOX_ROUTE_FIELD.into(),
             serde_json::to_value(mode)
@@ -1234,25 +1235,28 @@ impl RunStore {
         };
         let execution = if binding.valid() {
             let environment = [
-                ("PROVENANT_PORT_PHASE".into(), command_phase.into()),
                 (
-                    "PROVENANT_ADMISSION_ATTEMPT".into(),
+                    provenant_core::consumer_env::PORT_PHASE.into(),
+                    command_phase.into(),
+                ),
+                (
+                    provenant_core::consumer_env::ADMISSION_ATTEMPT.into(),
                     attempt.to_string().into(),
                 ),
                 (
-                    "PROVENANT_ADMISSION_WORKTREE".into(),
+                    provenant_core::consumer_env::ADMISSION_WORKTREE.into(),
                     writer.worktree.as_os_str().to_owned(),
                 ),
                 (
-                    "PROVENANT_ADMISSION_PROJECT".into(),
+                    provenant_core::consumer_env::ADMISSION_PROJECT.into(),
                     writer.project.as_os_str().to_owned(),
                 ),
                 (
-                    "PROVENANT_ADMISSION_OWNER_PID".into(),
+                    provenant_core::consumer_env::ADMISSION_OWNER_PID.into(),
                     std::process::id().to_string().into(),
                 ),
                 (
-                    "PROVENANT_ADMISSION_EPOCH".into(),
+                    provenant_core::consumer_env::ADMISSION_EPOCH.into(),
                     binding.lease_epoch.to_string().into(),
                 ),
             ];
@@ -2470,8 +2474,16 @@ fn set_lane_environment(
     depth: u64,
     parent: AttemptId,
 ) {
-    set_environment_value(environment, LANE_DEPTH_ENV, depth.to_string());
-    set_environment_value(environment, PARENT_ATTEMPT_ENV, parent.to_string());
+    set_environment_value(
+        environment,
+        provenant_core::consumer_env::LANE_DEPTH,
+        depth.to_string(),
+    );
+    set_environment_value(
+        environment,
+        provenant_core::consumer_env::PARENT_ATTEMPT_ID,
+        parent.to_string(),
+    );
 }
 
 fn set_environment_value(environment: &mut Vec<(OsString, OsString)>, name: &str, value: String) {
@@ -2584,7 +2596,10 @@ mod lane_environment_tests {
     fn lane_environment_overrides_adapter_values() {
         let parent = AttemptId::from_bytes([6; 16]);
         let mut environment = vec![
-            (OsString::from(LANE_DEPTH_ENV), OsString::from("99")),
+            (
+                OsString::from(provenant_core::consumer_env::LANE_DEPTH),
+                OsString::from("99"),
+            ),
             (OsString::from("OTHER"), OsString::from("kept")),
         ];
         set_lane_environment(&mut environment, 2, parent);
@@ -2592,9 +2607,12 @@ mod lane_environment_tests {
             environment,
             vec![
                 (OsString::from("OTHER"), OsString::from("kept")),
-                (OsString::from(LANE_DEPTH_ENV), OsString::from("2")),
                 (
-                    OsString::from(PARENT_ATTEMPT_ENV),
+                    OsString::from(provenant_core::consumer_env::LANE_DEPTH),
+                    OsString::from("2")
+                ),
+                (
+                    OsString::from(provenant_core::consumer_env::PARENT_ATTEMPT_ID),
                     OsString::from(parent.to_string())
                 ),
             ]
@@ -3048,8 +3066,12 @@ mod admission_port_lifecycle_tests {
                     .map(|(_, value)| value.to_string_lossy().into_owned())
                     .unwrap_or_default()
             };
-            let phase = value(std::ffi::OsStr::new("PROVENANT_PORT_PHASE"));
-            let epoch = value(std::ffi::OsStr::new("PROVENANT_ADMISSION_EPOCH"));
+            let phase = value(std::ffi::OsStr::new(
+                provenant_core::consumer_env::PORT_PHASE,
+            ));
+            let epoch = value(std::ffi::OsStr::new(
+                provenant_core::consumer_env::ADMISSION_EPOCH,
+            ));
             self.calls
                 .lock()
                 .expect("gate calls mutex")

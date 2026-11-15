@@ -3,6 +3,7 @@
 
 mod bytes;
 pub mod changes;
+pub mod consumer_env;
 mod refs;
 pub use refs::*;
 mod ids;

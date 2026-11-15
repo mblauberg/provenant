@@ -269,7 +269,8 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
     // The legacy CLI recognised the parent marker on its own. Keep that
     // confinement boundary even when the other lane markers are absent.
     rig.env.retain(|(key, _)| {
-        key != provenant_core::RUN_STATE_DIRECTORY_ENV && key != provenant_run::LANE_DEPTH_ENV
+        key != provenant_core::RUN_STATE_DIRECTORY_ENV
+            && key != provenant_core::consumer_env::LANE_DEPTH
     });
     let launched = host(&rig, &["run", "task", "Parent marker only", "--json"])?;
     assert_eq!(launched["data"]["parent_attempt"], attempt.to_string());

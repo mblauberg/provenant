@@ -1471,11 +1471,11 @@ fn process_tree_path_replaces_foreign_environment_and_clears_it_when_unavailable
     let input = [
         ("PATH".into(), "/bin".into()),
         (
-            crate::process_tree::ENV.into(),
+            provenant_core::consumer_env::PROCESS_TREE.into(),
             "/foreign/process-tree.json".into(),
         ),
         (
-            crate::process_tree::ENV.into(),
+            provenant_core::consumer_env::PROCESS_TREE.into(),
             "/another/process-tree.json".into(),
         ),
     ];
@@ -1485,7 +1485,10 @@ fn process_tree_path_replaces_foreign_environment_and_clears_it_when_unavailable
         env,
         [
             (OsString::from("PATH"), OsString::from("/bin")),
-            (crate::process_tree::ENV.into(), path.as_os_str().to_owned())
+            (
+                provenant_core::consumer_env::PROCESS_TREE.into(),
+                path.as_os_str().to_owned()
+            )
         ]
     );
     assert_eq!(
@@ -1608,8 +1611,14 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
     assert!(warning.is_none());
     let env = vec![
         ("PATH".into(), "/bin".into()),
-        (provenant_os::lane_ports::BASE_ENV.into(), "1".into()),
-        (provenant_os::lane_ports::COUNT_ENV.into(), "2".into()),
+        (
+            provenant_core::consumer_env::LANE_PORT_BASE.into(),
+            "1".into(),
+        ),
+        (
+            provenant_core::consumer_env::LANE_PORT_COUNT.into(),
+            "2".into(),
+        ),
     ];
     assert_eq!(
         without_lane_ports(&env),

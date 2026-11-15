@@ -270,8 +270,8 @@ fn main() -> Result {
         let status = std::process::Command::new(std::env::current_exe()?)
             .args(&args)
             .env_remove(provenant_core::RUN_STATE_DIRECTORY_ENV)
-            .env_remove(provenant_run::LANE_DEPTH_ENV)
-            .env_remove(provenant_run::PARENT_ATTEMPT_ENV)
+            .env_remove(provenant_core::consumer_env::LANE_DEPTH)
+            .env_remove(provenant_core::consumer_env::PARENT_ATTEMPT_ID)
             .status()?;
         return if status.success() {
             Ok(())

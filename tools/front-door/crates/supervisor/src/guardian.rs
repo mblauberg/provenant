@@ -823,8 +823,8 @@ fn lane_port_allocation(
 fn without_lane_ports(env: &[(OsString, OsString)]) -> Vec<(OsString, OsString)> {
     env.iter()
         .filter(|(name, _)| {
-            name != provenant_os::lane_ports::BASE_ENV
-                && name != provenant_os::lane_ports::COUNT_ENV
+            name != provenant_core::consumer_env::LANE_PORT_BASE
+                && name != provenant_core::consumer_env::LANE_PORT_COUNT
         })
         .cloned()
         .collect()
@@ -853,9 +853,12 @@ fn with_process_tree_path(
     path: Option<&Path>,
 ) -> Vec<(OsString, OsString)> {
     let mut env = env.to_vec();
-    env.retain(|(name, _)| name != crate::process_tree::ENV);
+    env.retain(|(name, _)| name != provenant_core::consumer_env::PROCESS_TREE);
     if let Some(path) = path {
-        env.push((crate::process_tree::ENV.into(), path.as_os_str().to_owned()));
+        env.push((
+            provenant_core::consumer_env::PROCESS_TREE.into(),
+            path.as_os_str().to_owned(),
+        ));
     }
     env
 }
