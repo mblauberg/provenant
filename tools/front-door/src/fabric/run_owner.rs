@@ -1740,8 +1740,8 @@ impl BinaryRunOwner<'_> {
                 let call = self.call(cancel);
                 let reason = format!("cancelled by Fabric operation {operation_id}");
                 let service = provenant_run::Service::new(&store);
-                let receipt = service
-                    .cancel(target.attempt, &reason, &call)
+                let (_cancelled_attempt, receipt) = store
+                    .cancel_graph(target.attempt, &reason, &call)
                     .map_err(run_error)?;
                 // Without a launch summary nothing was asked to stop.
                 if let provenant_run::CancelReceipt::Unobservable { .. } = receipt {
@@ -1751,6 +1751,9 @@ impl BinaryRunOwner<'_> {
                 }
                 Ok(RunResult::Cancel {
                     extra: Default::default(),
+                    // Keep the graph operation's target identity stable for
+                    // peer replay; cancel_graph routes the stop to the
+                    // validated current leaf when admission already won.
                     attempt: service.status(target.attempt, &call).map_err(run_error)?,
                 })
             }

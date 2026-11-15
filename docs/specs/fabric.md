@@ -216,6 +216,12 @@ live session or process identity changes, or the terminal session disagrees
 with the bound expectation, status records the safe mismatch cause instead of
 starting a fresh session.
 
+Owner cancellation and same-session graph continuation admission serialize on
+the parent attempt's publication fence. A cancellation accepted before a child
+exists leaves a durable explicit-stop intent for the gate; if the child was
+already admitted, graph cancellation follows the validated continuation chain
+and targets its current leaf. The durable intent does not assert signal delivery.
+
 This is continuation transport for #3318, not live input injection. Adapters
 advertise support as `continuation` only when their run path can retain and
 resume the provider session; other routes remain `unsupported`. The shared

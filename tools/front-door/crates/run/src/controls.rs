@@ -83,6 +83,7 @@ struct ResumeOptions<'a> {
     providers: Option<&'a dyn Providers>,
     budget_remaining: Option<u64>,
     graph_context: Option<&'a provenant_records::run::WorkContext>,
+    parent_publication_locked: bool,
 }
 
 pub(crate) fn steer_route_digest(route: &RouteRecord) -> Result<String> {
@@ -3467,27 +3468,41 @@ impl RunStore {
     /// retried within the call budget.
     // Cancellation coordinates with a real guardian handoff under a hard cap.
     pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
-        self.cancel_with_observer(id, reason, call, &SystemProcessObserver)
+        self.cancel_inner(id, reason, call, &SystemProcessObserver, false)
+            .map(|(_, receipt)| receipt)
+    }
+    /// Cancel the current host-owned continuation of a graph target. The
+    /// returned attempt is the exact validated leaf whose stop was accepted.
+    pub fn cancel_graph(
+        &self,
+        id: AttemptId,
+        reason: &str,
+        call: &Request<'_>,
+    ) -> Result<(AttemptId, CancelReceipt)> {
+        self.cancel_inner(id, reason, call, &SystemProcessObserver, true)
     }
     pub(crate) fn cancel_with_observer(
         &self,
         id: AttemptId,
         reason: &str,
         call: &Request<'_>,
-        _observer: &dyn ProcessObserver,
+        observer: &dyn ProcessObserver,
     ) -> Result<CancelReceipt> {
+        self.cancel_inner(id, reason, call, observer, false)
+            .map(|(_, receipt)| receipt)
+    }
+    fn cancel_inner(
+        &self,
+        mut id: AttemptId,
+        reason: &str,
+        call: &Request<'_>,
+        _observer: &dyn ProcessObserver,
+        follow_graph_successors: bool,
+    ) -> Result<(AttemptId, CancelReceipt)> {
+        let mut pending_steer_parent = None;
         loop {
             let record = self.record(id, call)?;
             match record.state {
-                AttemptState::Terminal { .. } => {
-                    self.record_cancellation(
-                        id,
-                        record.generation,
-                        CancellationDisposition::AcknowledgedIneffective,
-                        call,
-                    )?;
-                    return Ok(CancelReceipt::AlreadyTerminal);
-                }
                 AttemptState::Queued { .. } => {
                     let now = call
                         .clock
@@ -3503,17 +3518,18 @@ impl RunStore {
                         now,
                         call,
                     ) {
-                        Ok(Some(_)) => return Ok(CancelReceipt::Cancelled),
-                        Ok(None) => {
-                            let terminal = self.record(id, call)?;
-                            self.record_cancellation(
+                        Ok(Some(_)) => {
+                            return self.finish_graph_cancel(
                                 id,
-                                terminal.generation,
-                                CancellationDisposition::AcknowledgedIneffective,
+                                pending_steer_parent,
+                                CancelReceipt::Cancelled,
                                 call,
-                            )?;
-                            return Ok(CancelReceipt::AlreadyTerminal);
+                            );
                         }
+                        // The expected queued state lost. Re-read under the
+                        // publication fence so a terminal steer cannot accept
+                        // this cancel without preserving its continuation veto.
+                        Ok(None) => continue,
                         // A concurrent start took it; it is no longer queued.
                         Err(RunError::Conflict) => continue,
                         Err(error) => return Err(error),
@@ -3522,45 +3538,101 @@ impl RunStore {
                 _ => {}
             }
             let dir = self.attempt_dir(id, false)?;
-            let mut starting_request = None;
-            let unlaunched = if matches!(record.state, AttemptState::Starting { .. }) {
-                // Serialize cancellation publication with the launch owner's
-                // Starting -> Queued admission-skip transition. A stale read of
-                // Starting must not leave a queued attempt with an orphaned stop.
-                let publication = dir.lock(
-                    std::ffi::OsStr::new("publication.lock"),
-                    provenant_os::fs::LockMode::Exclusive,
-                    call.lock_budget(),
-                    call.cancel,
-                    call.clock,
-                )?;
-                let current = self.record(id, call)?;
-                if current.state != record.state {
-                    drop(publication);
-                    continue;
+            // Terminal publication, continuation admission, and every started
+            // cancellation use this same fence. Re-read after acquiring it:
+            // a stale Running snapshot must not publish a stop behind an
+            // already admitted continuation.
+            let publication = dir.lock(
+                std::ffi::OsStr::new("publication.lock"),
+                provenant_os::fs::LockMode::Exclusive,
+                call.lock_budget(),
+                call.cancel,
+                call.clock,
+            )?;
+            let current = self.record(id, call)?;
+            if current.state != record.state
+                || matches!(&current.state, AttemptState::Queued { .. })
+            {
+                drop(publication);
+                continue;
+            }
+            if follow_graph_successors && let Some(successor) = current.superseded_by {
+                pending_steer_parent = self
+                    .validate_graph_cancel_successor(&current, successor, call)?
+                    .then_some(id);
+                drop(publication);
+                id = successor;
+                continue;
+            }
+            if matches!(&current.state, AttemptState::Terminal { .. }) {
+                // This is an owner intent only. It remains distinct from the
+                // guardian's stop reason and signal-delivery evidence; the
+                // locked continuation gate will observe it and refuse a child.
+                if current.superseded_by.is_none()
+                    && current.steering.as_ref().is_some_and(|steering| {
+                        steering.state == provenant_records::run::SteeringState::Queued
+                    })
+                {
+                    if let Err(error) = custody::request_stop(
+                        dir.try_clone()?,
+                        Self::scope(&current),
+                        current.verified_owner.unwrap_or(self.context.actor_id),
+                        StopReason::ExplicitCancellation,
+                    ) {
+                        drop(publication);
+                        return Ok((
+                            id,
+                            CancelReceipt::Unobservable {
+                                reason: error.to_string(),
+                            },
+                        ));
+                    }
                 }
-                let scope = Self::scope(&current);
-                let unlaunched = matches!(
+                self.record_cancellation(
+                    id,
+                    current.generation,
+                    CancellationDisposition::AcknowledgedIneffective,
+                    call,
+                )?;
+                drop(publication);
+                return self.finish_graph_cancel(
+                    id,
+                    pending_steer_parent,
+                    CancelReceipt::AlreadyTerminal,
+                    call,
+                );
+            }
+            let scope = Self::scope(&current);
+            let starting = matches!(&current.state, AttemptState::Starting { .. });
+            let mut starting_request = None;
+            let unlaunched = if starting {
+                matches!(
                     custody::reattach(dir.try_clone()?, scope),
                     Err(CustodyError::Filesystem(ref error)) if error.is_not_found()
-                );
+                )
+            } else {
+                false
+            };
+            if starting {
+                // Serialize the Starting handoff request with the launch
+                // owner's admission-skip transition.
                 starting_request = Some(custody::request_stop(
                     dir.try_clone()?,
                     scope,
                     current.verified_owner.unwrap_or(self.context.actor_id),
                     StopReason::ExplicitCancellation,
                 ));
-                drop(publication);
-                unlaunched
-            } else {
-                false
-            };
-            if let Some(Err(error)) = starting_request.as_ref() {
-                return Ok(CancelReceipt::Unobservable {
-                    reason: error.to_string(),
-                });
             }
-            let stopped = match custody::reattach(dir.try_clone()?, Self::scope(&record)) {
+            if let Some(Err(error)) = starting_request.as_ref() {
+                drop(publication);
+                return Ok((
+                    id,
+                    CancelReceipt::Unobservable {
+                        reason: error.to_string(),
+                    },
+                ));
+            }
+            let stopped = match custody::reattach(dir.try_clone()?, scope) {
                 Ok(handle) => custody::stop(&handle, StopReason::ExplicitCancellation),
                 Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
                     if let Some(request) = starting_request {
@@ -3568,29 +3640,85 @@ impl RunStore {
                     } else {
                         custody::request_stop(
                             dir,
-                            Self::scope(&record),
-                            record.verified_owner.unwrap_or(self.context.actor_id),
+                            scope,
+                            current.verified_owner.unwrap_or(self.context.actor_id),
                             StopReason::ExplicitCancellation,
                         )
                     }
                 }
                 Err(error) => Err(error),
             };
+            drop(publication);
             if unlaunched && stopped.is_ok() {
                 // No guardian exists to act on the request. Settle it here so
                 // the queue place and the writer are free before we return.
                 if self.settle_cancelled_unlaunched(id, call)? {
-                    return Ok(CancelReceipt::Cancelled);
+                    return self.finish_graph_cancel(
+                        id,
+                        pending_steer_parent,
+                        CancelReceipt::Cancelled,
+                        call,
+                    );
                 }
             }
-            return Ok(match stopped {
+            let receipt = match stopped {
                 Ok(StopReceipt::Requested) => CancelReceipt::Requested,
                 Ok(StopReceipt::AlreadyRequested) => CancelReceipt::AlreadyRequested,
                 Err(error) => CancelReceipt::Unobservable {
                     reason: error.to_string(),
                 },
-            });
+            };
+            return self.finish_graph_cancel(id, pending_steer_parent, receipt, call);
         }
+    }
+    fn validate_graph_cancel_successor(
+        &self,
+        parent: &AttemptRecord,
+        successor_id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<bool> {
+        let successor = self.record(successor_id, call)?;
+        let operation = self.attempt_operation(successor_id, call)?;
+        let graph_steer = format!("graph-steer-{}", parent.attempt_id);
+        let budget_wrap_up = format!("budget-wrap-up-{}", parent.attempt_id);
+        let operation_id = operation.operation_id.as_str();
+        if successor.project_id != parent.project_id
+            || successor.retry_of != Some(parent.attempt_id)
+            || successor.key.graph() != parent.key.graph()
+            || successor.key.node() != parent.key.node()
+            || successor.key.attempt() != parent.key.attempt().saturating_add(1)
+            || operation.kind != provenant_records::run::OperationKind::Resume
+            || operation.project_id != parent.project_id
+            || (operation_id != graph_steer && operation_id != budget_wrap_up)
+        {
+            return Err(RunError::Conflict);
+        }
+        Ok(operation_id == graph_steer)
+    }
+    fn finish_graph_cancel(
+        &self,
+        cancelled: AttemptId,
+        pending_steer_parent: Option<AttemptId>,
+        receipt: CancelReceipt,
+        call: &Request<'_>,
+    ) -> Result<(AttemptId, CancelReceipt)> {
+        if let Some(parent) = pending_steer_parent {
+            let child = self.record(cancelled, call)?;
+            let parent_record = self.record(parent, call)?;
+            if matches!(&child.state, AttemptState::Terminal { .. })
+                && child.provider_launched == Some(false)
+                && parent_record.steering.as_ref().is_some_and(|steering| {
+                    steering.state == provenant_records::run::SteeringState::Queued
+                })
+            {
+                self.record_steer_not_continued(
+                    parent,
+                    provenant_records::run::SteeringCause::TerminalStop,
+                    call,
+                )?;
+            }
+        }
+        Ok((cancelled, receipt))
     }
     /// Settle a cancelled attempt whose provider never launched. A launcher
     /// that is still alive watches for the request and unwinds its own
@@ -3649,6 +3777,26 @@ impl RunStore {
             call,
             ResumeOptions {
                 graph_context: Some(context),
+                ..Default::default()
+            },
+        )
+        .map(|(run, _)| run)
+    }
+    /// Same-session graph continuation when the caller already holds the
+    /// predecessor's exclusive publication fence. That fence itself protects
+    /// provider state from retention, so this path must not reacquire it.
+    pub(crate) fn resume_graph_with_parent_publication_lock(
+        &self,
+        input: &Resume,
+        context: &provenant_records::run::WorkContext,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        self.resume_mode(
+            input,
+            call,
+            ResumeOptions {
+                graph_context: Some(context),
+                parent_publication_locked: true,
                 ..Default::default()
             },
         )
@@ -3934,6 +4082,7 @@ impl RunStore {
             providers,
             budget_remaining,
             graph_context,
+            parent_publication_locked,
         } = options;
         let prior = self.record(input.prior, call)?;
         if !matches!(prior.state, AttemptState::Terminal { .. }) {
@@ -3944,6 +4093,9 @@ impl RunStore {
             self.check_continuation_writer(input.prior, call)?;
         }
         let _retention = if replay || fresh.is_some() {
+            None
+        } else if parent_publication_locked {
+            self.ensure_provider_state_not_expired(input.prior)?;
             None
         } else {
             Some(self.retain_provider_state(input.prior, call)?)
@@ -6524,6 +6676,99 @@ mod tests {
             "accepted text stays private and durable"
         );
         assert!(ledger[0].1, "a non-continuable stop resolves the intent");
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn graph_cancel_and_steer_admission_have_one_ordered_winner() -> TestResult {
+        for admission_first in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let clock = crate::tests::clock();
+            let cancel = provenant_core::CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let context = crate::tests::context(temp.path())?;
+            let store = RunStore::open(&context, &call)?;
+            let run = crate::tests::input();
+            let parent = run.attempt_id;
+            store.create(&run, &call)?;
+            store.mark_starting(
+                &store.record(parent, &call)?,
+                &crate::tests::route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let running = store
+                .claim(parent, &clock, &call)?
+                .ok_or("parent not admitted")?;
+            assert!(matches!(
+                store.steer(
+                    parent,
+                    OperationId::parse("steer-cancel-admission-order")?,
+                    "Continue this task in its existing session.",
+                    &call,
+                )?,
+                SteerReceipt::Queued { .. }
+            ));
+            let mut exit = crate::tests::exit();
+            exit.scope = RunStore::scope(&running);
+            crate::dispatch_tests::seal_exit(&store, &exit)?;
+            let mut publication = crate::tests::publication();
+            publication.session = Some("fixture-session".into());
+            store.publish_terminal(parent, running.revision, &publication, &exit, &call)?;
+
+            if admission_first {
+                let child = store
+                    .prepare_steer_continuation(parent, &call)?
+                    .ok_or("continuation was not admitted")?;
+                let (cancelled, receipt) =
+                    store.cancel_graph(parent, "cancel current graph continuation", &call)?;
+                assert_eq!(cancelled, child);
+                assert_eq!(receipt, CancelReceipt::Cancelled);
+                assert!(matches!(
+                    store.record(child, &call)?.state,
+                    AttemptState::Terminal {
+                        outcome: Outcome::Cancelled,
+                        ..
+                    }
+                ));
+                assert_eq!(
+                    store.record(parent, &call)?.steering.unwrap().state,
+                    provenant_records::run::SteeringState::NotContinued,
+                    "a cancelled, never-launched child closes the pending intent"
+                );
+            } else {
+                let (cancelled, receipt) =
+                    store.cancel_graph(parent, "cancel pending continuation", &call)?;
+                assert_eq!(cancelled, parent);
+                assert_eq!(receipt, CancelReceipt::AlreadyTerminal);
+                let attempt = store.attempt_dir(parent, false)?;
+                let request: crate::store::CancellationEvidence = crate::db::decode(
+                    &crate::artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+                        .ok_or("terminal graph cancel intent was not persisted")?,
+                )?;
+                assert_eq!(request.scope, RunStore::scope(&running));
+                assert_eq!(request.requester, context.actor_id);
+                assert_eq!(request.reason, StopReason::ExplicitCancellation);
+                assert_eq!(
+                    store.prepare_steer_continuation(parent, &call)?,
+                    None,
+                    "the serialized gate observes a terminal graph cancel"
+                );
+                assert_eq!(store.record(parent, &call)?.superseded_by, None);
+                let status = store.record(parent, &call)?.steering.unwrap();
+                assert_eq!(
+                    status.state,
+                    provenant_records::run::SteeringState::NotContinued
+                );
+                assert_eq!(
+                    status.cause,
+                    Some(provenant_records::run::SteeringCause::TerminalStop)
+                );
+            }
+        }
         Ok(())
     }
 
