@@ -1827,29 +1827,30 @@ pub(super) fn peer_retained_receipt(
 
 #[cfg(test)]
 mod peer_project_root_tests {
-    use super::*;
-    use provenant_core::RootInputs;
-
-    fn git(cwd: &Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-        let output = provenant_os::fixture::git_command()
-            .current_dir(cwd)
-            .args(args)
-            .output()?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(std::io::Error::other(format!(
-                "git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&output.stderr)
-            ))
-            .into())
-        }
-    }
 
     #[test]
     fn peer_refusal_precedes_binding_writes_and_holds_bare_common_metadata()
     -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_core::RootInputs;
+
+        fn git(cwd: &Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+            let output = provenant_os::fixture::git_command()
+                .current_dir(cwd)
+                .args(args)
+                .output()?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!(
+                    "git {:?} failed: {}",
+                    args,
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into())
+            }
+        }
+
         // Spec: docs/specs/run-git.md#project-layout-ownership
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
