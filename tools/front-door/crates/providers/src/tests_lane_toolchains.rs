@@ -144,6 +144,7 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
         .map_err(|error| std::io::Error::other(format!("Agy fixture account: {error}")))?;
     let project = tempfile::tempdir()?;
     std::fs::create_dir_all(project.path().join(".git"))?;
+    let project_root = project.path();
     let prompt = Prompt::new("fixture".into());
 
     for id in ["agy", "opencode", "codex", "cursor"] {
@@ -158,13 +159,26 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
                 Some("login")
             }
         };
-        let plan = fixture_access_plan(Access::ReadOnly, authentication, false);
+        let base_plan = fixture_access_plan(Access::ReadOnly, authentication, false);
+        let mut permissions = base_plan.permissions().clone();
+        // The package-config fixture needs a real temp cwd; bind that cwd into
+        // read_roots and keep credential roots aligned with fixture_input HOME.
+        permissions.credential_roots = provenant_core::CredentialRoots::for_home(home);
+        permissions.read_roots = vec![crate::launch::subtree(project_root)];
+        let plan = provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
+            scope: base_plan.scope(),
+            permissions,
+            codex: provenant_confinement::CodexPolicy::Clean,
+            extensions: provenant_confinement::ExtensionPolicy::Deny,
+            agy_state: None,
+        })
+        .expect("cache fixture cwd is inside its read root");
         let adapter = REGISTRY
             .iter()
             .find(|entry| entry.adapter.id() == id)
             .expect("native adapter")
             .adapter;
-        let mut input = fixture_input(&route, &plan, &prompt, project.path(), None);
+        let mut input = fixture_input(&route, &plan, &prompt, project_root, None);
         input.host_var = &host_var;
         if id == "agy" {
             input.account = Some(&account);
