@@ -4448,7 +4448,7 @@ pub(super) fn prepare_candidates(
             (true, None) => {
                 return Err(PrepareError::Refusal {
                     message: "provider prepared a resumed invocation without its retained session binding".into(),
-                    cause: provenant_records::run::TerminalCause::ContinuationRefused,
+                    cause: provenant_records::run::TerminalCause::HandoffRefused,
                     note: None,
                 });
             }

@@ -110,6 +110,15 @@ pub struct ContinuationExpectation {
     pub session: String,
 }
 
+/// Host-owned decode context for a resumed provider invocation.
+#[derive(Clone, Copy)]
+pub struct ContinuationDecodeContext<'a> {
+    /// The sealed roots used by terminal settlement, when available.
+    pub context: Option<&'a HolderContext>,
+    /// The retained session that the child must prove it continued.
+    pub expectation: Option<&'a ContinuationExpectation>,
+}
+
 pub struct PreparedLaunch {
     pub argv: Vec<OsString>,
     pub environment: Vec<(OsString, OsString)>,
@@ -816,10 +825,9 @@ pub trait Providers {
         stderr: &[u8],
         exit: &ExitObservation,
         provider_state: &std::path::Path,
-        context: Option<&crate::HolderContext>,
-        continuation: Option<&ContinuationExpectation>,
+        continuation: ContinuationDecodeContext<'_>,
     ) -> std::result::Result<Decoded, String> {
-        if continuation.is_some() {
+        if continuation.expectation.is_some() {
             return Ok(Decoded {
                 terminal_cause: None,
                 outcome: Outcome::Unsettled,
@@ -835,7 +843,14 @@ pub trait Providers {
                 turns: Vec::new(),
             });
         }
-        self.decode_captures(route, stdout, stderr, exit, provider_state, context)
+        self.decode_captures(
+            route,
+            stdout,
+            stderr,
+            exit,
+            provider_state,
+            continuation.context,
+        )
     }
 }
 enum HandOff {
