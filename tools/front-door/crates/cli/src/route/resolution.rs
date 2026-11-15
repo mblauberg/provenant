@@ -409,6 +409,38 @@ pub(super) fn with_context<T>(
         &provenant_providers::accounts::Settings,
     ) -> Result<T, EdgeError>,
 ) -> Result<T, EdgeError> {
+    with_context_with_time(
+        roots,
+        registry,
+        availability,
+        access,
+        host,
+        requested_models,
+        revalidated_auth,
+        launch_policy,
+        None,
+        action,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn with_context_with_time<T>(
+    roots: &Roots,
+    registry: &[provenant_providers::Registration],
+    availability: &[AvailabilityRecord],
+    access: &[AccessContext<'_>],
+    host: &str,
+    requested_models: &[ModelId],
+    revalidated_auth: bool,
+    launch_policy: Option<&provenant_records::policy::Policy>,
+    at: Option<WallTime>,
+    action: impl FnOnce(
+        &RoutingContext<'_>,
+        &[provenant_quota::AccountRecord],
+        &[provenant_quota::QuotaPolicy],
+        &provenant_providers::accounts::Settings,
+    ) -> Result<T, EdgeError>,
+) -> Result<T, EdgeError> {
     let resolved_config = crate::config_reads::read_for(roots, "route")?;
     let partial_headroom_source = resolved_config
         .knobs
@@ -465,7 +497,10 @@ pub(super) fn with_context<T>(
     };
     // Cached accounts also supply reset_of references outside the probed route.
     // Quota facts never grant executable or account readiness.
-    let timestamp = SystemClock::new().wall_now()?;
+    let timestamp = match at {
+        Some(timestamp) => timestamp,
+        None => SystemClock::new().wall_now()?,
+    };
     let timestamp = timestamp.as_timestamp();
     domains
         .quota
@@ -614,6 +649,38 @@ pub(crate) fn resolve_dispatch(
         rules,
         &[],
         None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+pub(crate) fn resolve_dispatch_at(
+    request: &provenant_routing::RouteRequest,
+    roots: &Roots,
+    account: Option<&str>,
+    seed: (&str, u64),
+    availability: &[AvailabilityRecord],
+    access: &[AccessContext<'_>],
+    host: &str,
+    excluded_families: Option<(&[String], bool, &[String])>,
+    rules: &[provenant_routing::ExclusionRule],
+    at: WallTime,
+) -> Result<provenant_records::ResolvedRoute, DispatchError> {
+    resolve_dispatch_rejecting(
+        request,
+        roots,
+        REGISTRY,
+        account,
+        seed,
+        availability,
+        access,
+        host,
+        excluded_families,
+        rules,
+        &[],
+        None,
+        Some(at),
     )
 }
 
@@ -632,8 +699,9 @@ pub(crate) fn resolve_dispatch_rejecting(
     rules: &[provenant_routing::ExclusionRule],
     rejected: &[ModelId],
     choice_context: Option<(&str, &str)>,
+    at: Option<WallTime>,
 ) -> Result<provenant_records::ResolvedRoute, DispatchError> {
-    resolve_dispatch_rejecting_family(
+    resolve_dispatch_rejecting_family_with_time(
         request,
         roots,
         registry,
@@ -649,6 +717,7 @@ pub(crate) fn resolve_dispatch_rejecting(
         None,
         None,
         None,
+        at,
     )
 }
 
@@ -669,6 +738,45 @@ pub(crate) fn resolve_dispatch_rejecting_family(
     required_family: Option<&str>,
     selection_evidence: Option<&provenant_routing::SelectionEvidence>,
     launch_policy: Option<&provenant_records::policy::Policy>,
+) -> Result<provenant_records::ResolvedRoute, DispatchError> {
+    resolve_dispatch_rejecting_family_with_time(
+        request,
+        roots,
+        registry,
+        account,
+        seed,
+        availability,
+        access,
+        host,
+        excluded_families,
+        rules,
+        rejected,
+        choice_context,
+        required_family,
+        selection_evidence,
+        launch_policy,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_dispatch_rejecting_family_with_time(
+    request: &provenant_routing::RouteRequest,
+    roots: &Roots,
+    registry: &[provenant_providers::Registration],
+    account: Option<&str>,
+    seed: (&str, u64),
+    availability: &[AvailabilityRecord],
+    access: &[AccessContext<'_>],
+    host: &str,
+    excluded_families: Option<(&[String], bool, &[String])>,
+    rules: &[provenant_routing::ExclusionRule],
+    rejected: &[ModelId],
+    choice_context: Option<(&str, &str)>,
+    required_family: Option<&str>,
+    selection_evidence: Option<&provenant_routing::SelectionEvidence>,
+    launch_policy: Option<&provenant_records::policy::Policy>,
+    at: Option<WallTime>,
 ) -> Result<provenant_records::ResolvedRoute, DispatchError> {
     let catalogue = Catalogue::bundled()?;
     let (excluded_families, required, preferred) = match excluded_families {
@@ -712,6 +820,7 @@ pub(crate) fn resolve_dispatch_rejecting_family(
         required_family,
         selection_evidence,
         launch_policy,
+        at,
     );
     // Relax when the unused families have no eligible member, including fresh
     // snapshot exhaustion, or the selected account is blocked by persisted
@@ -744,6 +853,7 @@ pub(crate) fn resolve_dispatch_rejecting_family(
             required_family,
             selection_evidence,
             launch_policy,
+            at,
         );
         match (relaxed, selected) {
             // Keep the preferred-stage route when relaxing would only trade one
@@ -785,6 +895,7 @@ pub(crate) fn resolve_dispatch_rejecting_family(
             required_family,
             selection_evidence,
             launch_policy,
+            at,
         );
         match (relaxed, selected) {
             // Relaxing must not trade a spent route for another one.
@@ -846,6 +957,7 @@ pub(super) fn resolve_dispatch_excluding_family(
     required_family: Option<&str>,
     selection_evidence: Option<&provenant_routing::SelectionEvidence>,
     launch_policy: Option<&provenant_records::policy::Policy>,
+    at: Option<WallTime>,
 ) -> Result<provenant_records::ResolvedRoute, EdgeError> {
     let mut requested_models = Vec::new();
     if let RouteChoice::Model(model) = &request.choice {
@@ -854,7 +966,7 @@ pub(super) fn resolve_dispatch_excluding_family(
     if let Fallback::Models(models) = &request.fallback {
         requested_models.extend_from_slice(models.as_slice());
     }
-    with_context(
+    with_context_with_time(
         roots,
         registry,
         availability,
@@ -863,6 +975,7 @@ pub(super) fn resolve_dispatch_excluding_family(
         &requested_models,
         true,
         launch_policy,
+        at,
         |context, records, policies, _| {
             let scoped = RoutingContext {
                 choice_context,
@@ -1103,12 +1216,20 @@ pub(crate) fn check_dispatch_candidate(
     route: &provenant_records::ResolvedRoute,
     registry: &[provenant_providers::Registration],
 ) -> Result<(), EdgeError> {
+    check_dispatch_candidate_at(roots, route, registry, SystemClock::new().unix_seconds())
+}
+
+pub(super) fn check_dispatch_candidate_at(
+    roots: &Roots,
+    route: &provenant_records::ResolvedRoute,
+    registry: &[provenant_providers::Registration],
+    now: i64,
+) -> Result<(), EdgeError> {
     let catalogue = Catalogue::bundled()?;
     let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
     let resolved_config = crate::config_reads::read_for(roots, "route")?;
     let domains = resolved_config.domains;
     let pools = catalogue.admission_pools(&model);
-    let now = SystemClock::new().unix_seconds();
     let records = crate::quota::read_cache(roots)?;
     let (records, policies) = account_evidence(&domains.quota, records, now, registry);
     provenant_quota::Admission {
@@ -1128,6 +1249,27 @@ pub fn resolve_review_family(
     tier: &serde_json::Value,
     required_family: Option<&str>,
     exclude: &[String],
+) -> Result<String, String> {
+    resolve_review_family_with_time(roots, tier, required_family, exclude, None)
+}
+
+#[cfg(test)]
+pub(crate) fn resolve_review_family_at(
+    roots: &Roots,
+    tier: &serde_json::Value,
+    required_family: Option<&str>,
+    exclude: &[String],
+    at: WallTime,
+) -> Result<String, String> {
+    resolve_review_family_with_time(roots, tier, required_family, exclude, Some(at))
+}
+
+fn resolve_review_family_with_time(
+    roots: &Roots,
+    tier: &serde_json::Value,
+    required_family: Option<&str>,
+    exclude: &[String],
+    at: Option<WallTime>,
 ) -> Result<String, String> {
     let (_, lowered) = crate::fabric::graph_relay::tier_route("review", tier, None, true)?;
     let routes: Vec<_> = lowered
@@ -1166,7 +1308,7 @@ pub fn resolve_review_family(
                 confidential: false,
                 fallback: Fallback::None,
             };
-            with_context(
+            with_context_with_time(
                 roots,
                 REGISTRY,
                 &[],
@@ -1175,6 +1317,7 @@ pub fn resolve_review_family(
                 &[],
                 false,
                 None,
+                at,
                 |context, records, policies, settings| {
                     let rules = effective_exclusion_rules(exclude, roots)?;
                     // Preview has no availability probes. Account exclusions

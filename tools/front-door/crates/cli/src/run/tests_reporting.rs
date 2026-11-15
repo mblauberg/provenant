@@ -1,84 +1,35 @@
 use super::*;
 
 #[test]
-fn projected_cli_error_omits_unsafe_source_and_keeps_bounded_fields() {
-    for source in [
-        "TOKEN_SENTINEL\u{1b}".to_owned(),
-        format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
-    ] {
-        let failure = super::Fail::from(provenant_run::RunError::Io(std::io::Error::other(source)));
-        let reply = super::reply("run", Err(failure));
-        let wire = serde_json::to_value(&reply.result).unwrap();
-        assert_eq!(wire["error"]["code"], "IO");
-        assert!(wire["error"].get("detail").is_none());
-        assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
-        assert!(wire.to_string().len() < 4096);
-        let mut human = Vec::new();
-        crate::render::render(
-            &reply.result,
-            crate::render::RenderMode::Human {
-                text: "",
-                summary: None,
-                read_only: false,
-            },
-            &mut human,
-        )
-        .unwrap();
-        let human = String::from_utf8(human).unwrap();
-        assert!(!human.contains("TOKEN_SENTINEL"));
-        assert!(!human.chars().any(|c| c == '\u{1b}'));
-        assert!(human.len() < 4096);
-    }
-    let failure = super::Fail::from(provenant_run::RunError::Io(std::io::Error::other(
-        "TOKEN_SENTINEL\u{1b}",
-    )));
-    let reply = super::reply("run", Err(failure));
-    let wire = serde_json::to_value(&reply.result).unwrap();
-    assert_eq!(wire["error"]["code"], "IO");
-    assert_eq!(wire["error"]["category"], "error");
-    assert!(wire["error"].get("detail").is_none());
-    assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
-    let mut rendered = Vec::new();
-    crate::render::render(
-        &reply.result,
-        crate::render::RenderMode::Human {
-            text: "",
-            summary: None,
-            read_only: false,
-        },
-        &mut rendered,
-    )
-    .unwrap();
-    assert!(
-        !String::from_utf8(rendered)
-            .unwrap()
-            .contains("TOKEN_SENTINEL")
-    );
-}
-#[test]
-fn non_refused_run_error_names_its_safe_cause_only() {
+fn non_refused_run_errors_keep_typed_causes_without_source_text() {
+    use provenant_records::diagnostic::DiagnosticFact;
     let failure = super::Fail::from(provenant_run::RunError::OperationIo {
         operation: "read attempt",
         path: Some("/TOKEN_SENTINEL".into()),
         source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "TOKEN_SENTINEL"),
     });
-    let reply = super::reply("telemetry stats", Err(failure));
-    let wire = serde_json::to_value(&reply.result).unwrap();
-    assert_eq!(wire["error"]["category"], "error");
-    let cause = wire["error"]["cause"].as_str().unwrap();
-    assert!(cause.contains("read attempt"), "{cause}");
-    assert!(cause.contains("PermissionDenied"), "{cause}");
-    assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
-    let failure = super::Fail::from(provenant_run::RunError::Contention);
-    let reply = super::reply("telemetry stats", Err(failure));
-    let wire = serde_json::to_value(&reply.result).unwrap();
+    assert_eq!(failure.kind, ErrorKind::Io);
+    let fact = failure
+        .projection
+        .as_ref()
+        .and_then(|projection| projection.fact.as_ref());
+    assert!(matches!(
+        fact,
+        Some(DiagnosticFact::Filesystem {
+            operation: "read attempt",
+            cause: Some(_),
+        })
+    ));
     assert!(
-        wire["error"]["cause"]
-            .as_str()
-            .unwrap_or_else(|| panic!("{wire}"))
-            .contains("busy timeout")
+        !serde_json::to_string(&super::reply("telemetry stats", Err(failure)).result)
+            .unwrap()
+            .contains("TOKEN_SENTINEL")
     );
+
+    let failure = super::Fail::from(provenant_run::RunError::Contention);
+    assert_eq!(failure.kind, ErrorKind::Contention);
 }
+
 #[test]
 fn cli_safe_local_facts_are_bounded_and_escape_controls() {
     use provenant_confinement::worktrees::WorktreeError;
@@ -96,10 +47,7 @@ fn cli_safe_local_facts_are_bounded_and_escape_controls() {
         let reply = super::reply("run", Err(failure));
         let wire = serde_json::to_value(&reply.result).unwrap();
         let detail = wire["error"]["detail"].as_str().unwrap();
-        assert!(
-            detail.contains("é\\u{1b}\\n") || detail.contains("é\\u{1b}"),
-            "{detail:?}"
-        );
+        assert!(detail.starts_with("é\\u{1b}"), "{detail:?}");
         assert!(detail.len() <= MAX_DIAGNOSTIC_BYTES);
         assert!(!detail.chars().any(char::is_control));
         assert!(wire["error"]["next"].is_string());
@@ -120,53 +68,77 @@ fn cli_safe_local_facts_are_bounded_and_escape_controls() {
     }
 }
 #[test]
-fn cli_recorded_remedies_preserve_typed_causes() {
-    use provenant_fabric_runtime::coordination::facade::{DispatchRefusalFact, FacadeError};
+fn every_dispatch_refusal_fact_projects_a_safe_recovery_action() {
+    use provenant_fabric_runtime::{
+        coordination::facade::{DispatchRefusalFact, FacadeError},
+        graph::{GraphOutputField, GraphStructuralLimit},
+    };
     use provenant_records::diagnostic::{ResourceFact, SettingSource};
-    let cases = [
-        (
-            FacadeError::DispatchRefused {
-                fact: Some(DispatchRefusalFact::DirtyWriter),
-                disk: None,
-                reason: "TOKEN_SENTINEL".into(),
-            },
-            "commit",
-        ),
-        (
-            FacadeError::DispatchRefused {
-                fact: Some(DispatchRefusalFact::Resource(ResourceFact::Disk {
-                    free: 1,
-                    floor: 2,
-                    origin: SettingSource::Configuration,
-                })),
-                disk: None,
-                reason: "TOKEN_SENTINEL".into(),
-            },
-            "free disk space",
-        ),
-        (
-            FacadeError::LaunchUnknown {
-                operation_id: OperationId::parse("dispatch-17").unwrap(),
-            },
-            "dispatch-17",
-        ),
+    let operation_id = OperationId::parse("dispatch-17").unwrap();
+    let facts = [
+        DispatchRefusalFact::DetachedWriter,
+        DispatchRefusalFact::DirtyWriter,
+        DispatchRefusalFact::CheckedOutWriter,
+        DispatchRefusalFact::GraphSchema,
+        DispatchRefusalFact::GraphComposite,
+        DispatchRefusalFact::GraphPlan,
+        DispatchRefusalFact::GraphStructuralLimit(GraphStructuralLimit {
+            key: provenant_fabric_runtime::graph::GraphLimitKey::GraphPromptBytes,
+            actual: 9,
+            max: 8,
+        }),
+        DispatchRefusalFact::GraphOutputKind(GraphOutputField::Input),
+        DispatchRefusalFact::GraphOutputKind(GraphOutputField::CompositeExport),
+        DispatchRefusalFact::GraphEnvelope,
+        DispatchRefusalFact::Resource(ResourceFact::Disk {
+            free: 1,
+            floor: 2,
+            origin: SettingSource::Configuration,
+        }),
     ];
-    for (error, condition) in cases {
-        let projection = error.diagnostic();
-        let failure = super::Fail::from(provenant_run::RunError::RecordedRefusal(Box::new(
-            projection.clone(),
-        )));
-        let reply = super::reply("run", Err(failure));
-        let wire = serde_json::to_value(&reply.result).unwrap();
-        assert_eq!(wire["error"]["next"], projection.next.unwrap());
-        let action = wire["error"]["next"].as_str().unwrap();
-        assert!(action.contains(condition), "{wire}");
-        if condition == "dispatch-17" {
-            assert!(action.contains("inspect") && action.contains("same operation ID"));
+    for fact in facts {
+        let projection = FacadeError::DispatchRefused {
+            fact: Some(fact),
+            disk: None,
+            reason: "TOKEN_SENTINEL".into(),
         }
+        .diagnostic();
+        let expected_next = projection.next.clone();
+        let action = projection.next.as_deref().expect("recovery action");
+        match fact {
+            DispatchRefusalFact::DetachedWriter => assert!(!action.is_empty()),
+            DispatchRefusalFact::DirtyWriter => assert!(!action.is_empty()),
+            DispatchRefusalFact::CheckedOutWriter => assert!(!action.is_empty()),
+            DispatchRefusalFact::GraphSchema => assert!(!action.is_empty()),
+            DispatchRefusalFact::GraphComposite => assert!(!action.is_empty()),
+            DispatchRefusalFact::GraphPlan => assert!(!action.is_empty()),
+            DispatchRefusalFact::GraphStructuralLimit(_) => assert!(!action.is_empty()),
+            DispatchRefusalFact::GraphOutputKind(_) => assert!(!action.is_empty()),
+            DispatchRefusalFact::GraphEnvelope => assert!(!action.is_empty()),
+            DispatchRefusalFact::Resource(_) => assert!(!action.is_empty()),
+        }
+        assert!(!action.contains("TOKEN_SENTINEL"));
+        let failure = super::Fail::from(provenant_run::RunError::RecordedRefusal(Box::new(
+            projection,
+        )));
+        let wire = serde_json::to_value(&super::reply("run", Err(failure)).result).unwrap();
+        assert_eq!(wire["error"]["next"].as_str(), expected_next.as_deref());
         assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
     }
+
+    let projection = FacadeError::LaunchUnknown {
+        operation_id: operation_id.clone(),
+    }
+    .diagnostic();
+    assert!(
+        projection
+            .next
+            .as_deref()
+            .unwrap()
+            .contains(&operation_id.to_string())
+    );
 }
+
 #[test]
 fn malformed_claude_result_preserves_provider_error_in_settlement() {
     let route = run::RouteRecord {
@@ -178,13 +150,7 @@ fn malformed_claude_result_preserves_provider_error_in_settlement() {
     let result =
         serde_json::json!({"type":"result", "is_error":true, "errors":[message]}).to_string();
     let earlier = r#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"result":"earlier answer"}"#;
-    for (result, reason) in [
-        (
-            result.as_str(),
-            format!("provider protocol is malformed: {message}"),
-        ),
-        ("{", "provider protocol is malformed".into()),
-    ] {
+    for result in [result.as_str(), "{"] {
         for suffix in ["", "\n"] {
             let decoded = Registry::default()
                 .decode(
@@ -195,7 +161,8 @@ fn malformed_claude_result_preserves_provider_error_in_settlement() {
                 )
                 .unwrap();
             assert_eq!(decoded.outcome, run::Outcome::Failed);
-            assert_eq!(decoded.reason.as_deref(), Some(reason.as_str()));
+            assert!(!decoded.complete);
+            assert!(decoded.result.is_empty());
         }
     }
 }

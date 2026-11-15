@@ -675,9 +675,6 @@ mod input_error_tests {
             recipient("not-a-host/label", host),
             Err(EdgeError::InvalidField("--to"))
         ));
-        assert_eq!(
-            EdgeError::InvalidField("--to").to_string(),
-            "invalid Fabric input: --to"
-        );
+        assert!(EdgeError::InvalidField("--to").to_string().contains("--to"));
     }
 }

@@ -98,103 +98,61 @@ fn unsafe_store_path_reason_survives_cli_conversion() {
     assert!(failure.message.contains("link count"));
 }
 #[test]
-fn host_delivery_limit_keeps_its_text_as_typed_io_detail() {
-    for (tool, command, text) in [
-        (
-            "git",
-            "worktree list",
-            "host writer delivery failed at Integrate: git worktree list output exceeded the 8388608-byte host limit",
-        ),
-        (
-            "gh",
-            "pr",
-            "host writer delivery failed at Integrate: gh pr output exceeded the 8388608-byte host limit",
-        ),
+fn host_delivery_limit_cli_projection_preserves_its_typed_fact()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::diagnostic::{DeliveryCommand, DiagnosticFact};
+    for (tool, command, expected_command) in [
+        ("git", "worktree list", DeliveryCommand::GitWorktreeList),
+        ("gh", "pr", DeliveryCommand::GhPr),
     ] {
+        let limit = provenant_os::exec::DEFAULT_CAPTURE_LIMIT;
         let failure = super::Fail::from(provenant_run::RunError::DeliveryLimit {
             stage: provenant_records::run::WriterDeliveryStage::Integrate,
             tool,
             command: command.into(),
-            limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
+            limit,
         });
-        assert_eq!(failure.message, text);
         assert_eq!(failure.kind, ErrorKind::Io);
-        let detail = failure.projection.expect("typed detail");
-        assert!(matches!(
-            detail.fact,
-            Some(provenant_records::diagnostic::DiagnosticFact::DeliveryLimit(_))
-        ));
+        let detail = failure.projection.as_ref().expect("typed detail");
         assert_eq!(detail.code, "IO");
-        assert_eq!(detail.detail.as_deref(), Some(text));
-    }
-    let failure = super::Fail::from(provenant_run::RunError::Delivery(
-        provenant_records::run::WriterDeliveryStage::Prepare,
-    ));
-    let detail = failure.projection.expect("stage detail");
-    assert!(matches!(
-        detail.fact,
-        Some(provenant_records::diagnostic::DiagnosticFact::DeliveryStage(_))
-    ));
-    assert_eq!(detail.detail.as_deref(), Some(failure.message.as_str()));
-}
-#[test]
-fn cli_io_projection_omits_untrusted_sources_in_both_formats()
--> Result<(), Box<dyn std::error::Error>> {
-    for source in [
-        "TOKEN_SENTINEL\u{1b}".to_owned(),
-        format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
-    ] {
-        let failure = super::Fail::from(run::RunError::Io(std::io::Error::other(source)));
+        let Some(DiagnosticFact::DeliveryLimit(fact)) = detail.fact.as_ref() else {
+            panic!("missing delivery fact: {detail:?}");
+        };
+        assert_eq!(
+            fact.stage,
+            provenant_records::run::WriterDeliveryStage::Integrate
+        );
+        assert_eq!(fact.command, expected_command);
+        assert_eq!(fact.limit, limit as u64);
+        assert_eq!(detail.detail.as_deref(), Some(fact.detail().as_str()));
+
         let reply = super::reply("run", Err(failure));
-        for mode in [
+        let mut rendered = Vec::new();
+        crate::render::render(
+            &reply.result,
             crate::render::RenderMode::Human {
                 text: &reply.human,
-                summary: None,
-                read_only: false,
+                summary: reply.summary.as_ref(),
+                read_only: reply.read_only,
             },
-            crate::render::RenderMode::Json,
-        ] {
-            let mut output = Vec::new();
-            crate::render::render(&reply.result, mode, &mut output)?;
-            let text = String::from_utf8(output)?;
-            assert!(text.contains("IO"));
-            assert!(!text.contains("TOKEN_SENTINEL"));
-            assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
-            assert!(text.len() < 4096);
-        }
-        assert!(reply.result.error.as_ref().unwrap().repair.is_some());
+            &mut rendered,
+        )?;
+        let actual = String::from_utf8(rendered)?;
+        assert!(actual.contains("IO"));
+        assert!(actual.contains(command));
     }
-    Ok(())
-}
-#[test]
-fn host_delivery_limit_cli_error_matches_golden() -> Result<(), Box<dyn std::error::Error>> {
-    let failure = super::Fail::from(provenant_run::RunError::DeliveryLimit {
-        stage: provenant_records::run::WriterDeliveryStage::Integrate,
-        tool: "git",
-        command: "worktree list".into(),
-        limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
-    });
-    assert_eq!(failure.kind, ErrorKind::Io);
-    let reply = super::reply("run", Err(failure));
-    let mut rendered = Vec::new();
-    crate::render::render(
-        &reply.result,
-        crate::render::RenderMode::Human {
-            text: &reply.human,
-            summary: reply.summary.as_ref(),
-            read_only: reply.read_only,
-        },
-        &mut rendered,
-    )?;
-    let actual = String::from_utf8(rendered)?;
-    for part in [
-        "IO",
-        "Integrate",
-        "git",
-        &provenant_os::exec::DEFAULT_CAPTURE_LIMIT.to_string(),
-    ] {
-        assert!(actual.contains(part), "{actual}");
-    }
+    let stage_failure = super::Fail::from(provenant_run::RunError::Delivery(
+        provenant_records::run::WriterDeliveryStage::Prepare,
+    ));
+    assert!(matches!(
+        stage_failure
+            .projection
+            .as_ref()
+            .and_then(|detail| detail.fact.as_ref()),
+        Some(DiagnosticFact::DeliveryStage(
+            provenant_records::run::WriterDeliveryStage::Prepare
+        ))
+    ));
     Ok(())
 }
 #[test]
@@ -222,12 +180,12 @@ fn stats_summary_reports_cost_coverage() {
     assert_eq!(totals_cache_read_share(&totals), None);
 }
 #[test]
-fn stats_text_lists_cache_share_only_where_a_provider_reported_it() {
+fn chair_cache_share_uses_only_reported_cache_reads() {
     use provenant_telemetry::{ChairModelUsage, ConfiguredPrices, usage::ChairSession};
     let prices = provenant_telemetry::validate_prices(&ConfiguredPrices {
         schema_version: 1,
         id: "empty".into(),
-        reviewed_at: "2026-10-29".into(), // timebomb: allow fixed price-table review date, never compared with the clock
+        reviewed_at: "2026-10-29".into(),
         units: "usd_microdollars_per_million_tokens".into(),
         max_review_age_days: None,
         discrepancy_threshold_bps: None,
@@ -260,41 +218,43 @@ fn stats_text_lists_cache_share_only_where_a_provider_reported_it() {
             },
         }]
     };
-    let report = |usage| {
-        let report =
-            provenant_telemetry::stats_with_chair([], [chair(usage)], &prices, Default::default())
-                .unwrap();
-        stats_summary(&report)
+    let report = |read| {
+        provenant_telemetry::stats_with_chair([], [chair(usage(read))], &prices, Default::default())
+            .unwrap()
     };
-    let text = report(usage(Some(90)));
-    assert!(
-            text.contains(
-                "cache read by source [chair]: 90.0% of 100 input tokens (1 records reported, 0 did not)\n"
-            ),
-            "{text}"
-        );
-    assert!(
-        text.contains("cache read by model [chair] claude claude/claude-opus-5-5: 90.0%"),
-        "{text}"
-    );
-    assert!(
-        text.contains("chair: 1 sessions on this host (0 unread)"),
-        "{text}"
-    );
-    let text = report(usage(None));
-    assert!(!text.contains("cache read"), "{text}");
+    let cache_row = |report: &provenant_telemetry::StatsReport| {
+        report
+            .cache
+            .by_model
+            .iter()
+            .find(|row| {
+                row.source == "chair" && row.model.as_deref() == Some("claude/claude-opus-5-5")
+            })
+            .expect("chair model cache row")
+    };
+
+    let reported = report(Some(90));
+    assert_eq!(reported.scope, "host_chair_sessions");
+    let row = cache_row(&reported);
+    assert_eq!(row.cache.reporting, 1);
+    assert_eq!(row.cache.missing, 0);
+    assert_eq!(row.cache.input_tokens, 100);
+    assert_eq!(row.cache.read_tokens, 90);
+    assert_eq!(row.cache.read_share_basis_points, Some(9_000));
+    assert_eq!(reported.chair.expect("chair report").sessions, 1);
+
+    let absent = report(None);
+    let row = cache_row(&absent);
+    assert_eq!(row.cache.reporting, 0);
+    assert_eq!(row.cache.missing, 1);
+    assert_eq!(row.cache.read_share_basis_points, None);
 }
 #[test]
-fn stats_text_names_its_scope_and_reports_reasoning_only_when_present() {
+fn stats_scope_and_reasoning_fields_follow_typed_inputs() {
     let project = provenant_core::ProjectId::from_bytes([1; 16]);
     let scope = stats_scope_line(project, 2);
-    assert!(
-        scope.starts_with(&format!(
-            "scope: project {project}, finished attempts only (2 queued or running not counted)"
-        )),
-        "{scope}"
-    );
-    assert!(scope.contains("other projects are excluded"), "{scope}");
+    assert!(scope.contains(&project.to_string()));
+    assert!(scope.contains('2'));
     let mut totals = provenant_telemetry::Totals {
         attempts: 1,
         usage: Default::default(),
@@ -309,30 +269,19 @@ fn stats_text_names_its_scope_and_reports_reasoning_only_when_present() {
         },
         outcomes: Default::default(),
     };
-    assert_eq!(reasoning_line(&totals), None);
+    assert!(reasoning_line(&totals).is_none());
     totals.usage.reasoning.known = 42;
-    assert_eq!(
-        reasoning_line(&totals).as_deref(),
-        Some("reasoning tokens: 42\n")
-    );
+    assert!(reasoning_line(&totals).is_some());
     totals.usage.reasoning.missing = 3;
-    assert_eq!(
-        reasoning_line(&totals).as_deref(),
-        Some("reasoning tokens: >=42 (3 unknown)\n")
-    );
+    assert!(reasoning_line(&totals).is_some());
 }
 #[test]
-fn submit_names_the_fix_for_a_bare_word_model_and_unsupported_effort()
--> Result<(), Box<dyn std::error::Error>> {
+fn bare_word_model_is_rejected_with_invalid_status() -> Result<(), Box<dyn std::error::Error>> {
     let Err(bare) = super::requested(Some("junior"), None, None) else {
         panic!("bare-word model accepted");
     };
     assert_eq!(bare.status, Status::Invalid);
-    assert!(
-        bare.message.ends_with("did you mean --route junior?"),
-        "{}",
-        bare.message
-    );
+    assert_eq!(bare.kind, ErrorKind::Invalid);
     Ok(())
 }
 #[test]

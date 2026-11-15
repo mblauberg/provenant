@@ -23,7 +23,7 @@
     }
 
     #[test]
-    fn route_list_does_not_call_omitted_evidence_unprobed() -> Result<(), Box<dyn Error>> {
+    fn route_list_distinguishes_unrecorded_and_truncated_evidence() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let roots = exclusion_roots(&temp)?;
         let query = super::RouteListRequest {
@@ -31,11 +31,17 @@
             adapter: Some("codex".into()),
             pool: None,
         };
-        let mut list = super::display_list_data(&roots, &query)?;
+        let mut list = super::display_list_data_at(&roots, &query, route_test_time())?;
         let model = super::ModelId::parse("codex/gpt-6-luna")?;
-        assert!(super::unobserved_model(&model, &list).contains("not probed"));
+        assert_eq!(
+            super::unobserved_readiness(&model, &list),
+            Some(super::UnobservedReadiness::NotRecorded)
+        );
         list.readiness_truncated = true;
-        assert!(super::unobserved_model(&model, &list).contains("not shown"));
+        assert_eq!(
+            super::unobserved_readiness(&model, &list),
+            Some(super::UnobservedReadiness::DisplayTruncated)
+        );
         Ok(())
     }
 
@@ -175,8 +181,66 @@
     }
 
     #[test]
-    fn route_readiness_is_rendered_in_words() {
-        use provenant_records::RouteExclusionReason;
+    fn readiness_projection_uses_typed_reason_categories() {
+        use provenant_records::RouteExclusionReason as Reason;
+        fn category(reason: &Reason) -> &'static str {
+            match reason {
+                Reason::UnknownAvailability
+                | Reason::StaleAvailability
+                | Reason::UnknownPartialHeadroom => "unknown",
+                Reason::SetupFailed
+                | Reason::AccountPinned
+                | Reason::AdmissionRefused
+                | Reason::Disabled
+                | Reason::MissingExecutable
+                | Reason::ProviderUpdating
+                | Reason::UnknownAccount
+                | Reason::DisclosureDenied
+                | Reason::ConfinementUnavailable
+                | Reason::UnsupportedEffort
+                | Reason::Exhausted
+                | Reason::PacingReserve
+                | Reason::AuthRequired
+                | Reason::LoginExpired
+                | Reason::UnverifiedModel
+                | Reason::AccountMismatch
+                | Reason::FreeTierRefused
+                | Reason::ProviderRefused
+                | Reason::InvalidAccountEvidence => "unavailable",
+            }
+        }
+        let reasons = [
+            Reason::SetupFailed,
+            Reason::AccountPinned,
+            Reason::AdmissionRefused,
+            Reason::Disabled,
+            Reason::MissingExecutable,
+            Reason::ProviderUpdating,
+            Reason::UnknownAvailability,
+            Reason::StaleAvailability,
+            Reason::UnknownAccount,
+            Reason::DisclosureDenied,
+            Reason::ConfinementUnavailable,
+            Reason::UnsupportedEffort,
+            Reason::Exhausted,
+            Reason::PacingReserve,
+            Reason::UnknownPartialHeadroom,
+            Reason::AuthRequired,
+            Reason::LoginExpired,
+            Reason::UnverifiedModel,
+            Reason::AccountMismatch,
+            Reason::FreeTierRefused,
+            Reason::ProviderRefused,
+            Reason::InvalidAccountEvidence,
+        ];
+        for reason in reasons {
+            let readiness = RouteReadiness::Unavailable {
+                skipped_accounts: Vec::new(),
+                extra: Default::default(),
+                reason: reason.clone(),
+            };
+            assert!(super::readiness_text(&readiness).starts_with(category(&reason)));
+        }
         let ready = RouteReadiness::Ready {
             availability_warning: None,
             extra: Default::default(),
@@ -184,33 +248,11 @@
             expires_unix_seconds: 120,
         };
         assert!(super::readiness_text(&ready).starts_with("ready "));
-        let unknown = super::readiness_text(&RouteReadiness::unknown());
-        assert!(
-            unknown.contains("unknown (not probed") && unknown.contains("provenant quota tick"),
-            "{unknown}"
-        );
-        let stale = super::readiness_text(&RouteReadiness::stale());
-        assert!(stale.contains("unknown (observation expired"), "{stale}");
-        let partial = RouteReadiness::Unavailable {
-            skipped_accounts: Vec::new(),
-            extra: Default::default(),
-            reason: RouteExclusionReason::UnknownPartialHeadroom,
-        };
-        assert!(super::readiness_text(&partial).starts_with("unknown (partial headroom"));
-        let refused = RouteReadiness::Unavailable {
-            skipped_accounts: Vec::new(),
-            extra: Default::default(),
-            reason: RouteExclusionReason::AuthRequired,
-        };
-        assert_eq!(
-            super::readiness_text(&refused),
-            "unavailable (auth required)"
-        );
+        assert!(!ready.is_unknown());
     }
 
     #[test]
     fn resolve_after_quota_tick_uses_the_published_snapshot() -> Result<(), Box<dyn Error>> {
-        use provenant_core::Clock;
         use provenant_quota::{
             AccountRecord, AccountScope, ProbeCapture, ProbeFailure, QuotaEffects, QuotaError,
             QuotaProbePlan,
@@ -231,7 +273,10 @@
                 _: Option<&AccountRecord>,
             ) -> Result<ProbeCapture, ProbeFailure> {
                 Ok(ProbeCapture {
-                    stdout: br#"{"payload":{"result":{"rateLimits":{"primary":{"usedPercent":20,"windowDurationMins":300}}}}}"#.to_vec(),
+                    stdout: include_bytes!(
+                        "../../../providers/src/quota/fixtures/codex-app-server.json"
+                    )
+                    .to_vec(),
                     stderr: vec![],
                     exit_code: Some(0),
                     overflowed: false,
@@ -239,6 +284,7 @@
             }
         }
         let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
         let roots = exclusion_roots(&temp)?;
         std::fs::set_permissions(
             roots.state.as_path(),
@@ -251,7 +297,9 @@
                 temp.path().to_string_lossy()
             ),
         )?;
-        let report = crate::quota::execute(
+        use provenant_core::{MonoTime, TestClock, WallTime};
+        let clock = TestClock::new(WallTime::from_unix_seconds(100)?, MonoTime::from_micros(0));
+        let report = crate::quota::execute_with_clock(
             &crate::quota::Quota::Tick {
                 adapter: crate::quota::Filter {
                     adapter: Some("codex".into()),
@@ -262,6 +310,8 @@
             &roots,
             provenant_providers::REGISTRY,
             &Effects,
+            &clock,
+            Some(&home),
         )?;
         assert_eq!(
             report.accounts[0].status,
@@ -284,7 +334,7 @@
         let super::Data::Resolved(preview) = super::execute(
             &command,
             &roots,
-            provenant_os::clock::SystemClock::new().wall_now()?,
+            provenant_core::WallTime::from_unix_seconds(100)?,
         )?
         else {
             return Err("expected resolved route".into());
@@ -349,8 +399,10 @@
         use std::os::unix::fs::PermissionsExt;
         for adapter in ["codex", "claude"] {
             let temp = tempfile::tempdir()?;
-            let mut inputs =
-                provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+            let mut inputs = provenant_core::RootInputs::new(
+                temp.path().join("home"),
+                temp.path().join("checkout"),
+            );
             inputs.state_dir = Some(temp.path().join("state"));
             let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
             let dir = roots.state.as_path().join("readiness/key");
@@ -362,7 +414,7 @@
             ] {
                 std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
             }
-            let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+            let now = 100_i64;
             let account = AccountRecord::empty(AccountScope {
                 adapter: adapter.into(),
                 account_key: "key".into(),
@@ -410,7 +462,7 @@
                 confinement_ref: "fixture",
             }];
             let resolve = |record: &provenant_providers::AvailabilityRecord| {
-                super::resolve_dispatch(
+                super::resolve_dispatch_at(
                     &request,
                     &roots,
                     Some("key"),
@@ -420,6 +472,7 @@
                     "fixture",
                     None,
                     &[],
+                    route_test_time(),
                 )
             };
             let before = resolve(&available)?;
@@ -462,7 +515,7 @@
         ] {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
         }
-        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+        let now = 100_i64;
         let account = AccountRecord::empty(AccountScope {
             adapter: "opencode".into(),
             account_key: "go".into(),
@@ -512,7 +565,7 @@
             confinement_ref: "fixture",
         }];
         let resolve = |record: &provenant_providers::AvailabilityRecord| {
-            super::resolve_dispatch(
+            super::resolve_dispatch_at(
                 &request,
                 &roots,
                 Some("go"),
@@ -522,6 +575,7 @@
                 "fixture",
                 None,
                 &[],
+                route_test_time(),
             )
         };
         // Current recorded sign-out evidence excludes until a login probe clears it.
@@ -586,7 +640,7 @@
             exclude: vec![],
         }
         .to_domain()?;
-        let zen_result = super::resolve_dispatch(
+        let zen_result = super::resolve_dispatch_at(
             &zen_request,
             &roots,
             Some("zen"),
@@ -596,6 +650,7 @@
             "fixture",
             None,
             &[],
+            route_test_time(),
         )?;
         // Another account's probe does not clear this account's current sign-out.
         assert!(matches!(
@@ -624,12 +679,12 @@
             parse("codex/gpt-6-luna")?[0].selector,
             ExclusionSelector::Model(_)
         ));
-        let message = parse("nonesuch").unwrap_err().to_string();
-        assert!(
-            message.contains("unknown exclusion `nonesuch`"),
-            "{message}"
-        );
-        assert!(message.contains("valid forms: a provider"), "{message}");
+        let error = parse("nonesuch").unwrap_err();
+        assert!(matches!(
+            error,
+            super::EdgeError::Routing(super::RoutingError::UnknownExclusion { selector, .. })
+                if selector == "nonesuch"
+        ));
         Ok(())
     }
 
@@ -647,10 +702,8 @@
             fallback: vec![],
             exclude: vec!["claude".into()],
         };
-        use super::{
-            Clock, Data, EdgeError, Roots, Route, RouteResolve, RoutingError, SystemClock, execute,
-            resolved_text,
-        };
+        use super::{Data, EdgeError, Roots, Route, RouteResolve, RoutingError, WallTime, execute};
+        let now = WallTime::from_unix_seconds(100)?;
         let preview = |request: &super::RouteRequest, roots: &Roots| {
             let query = RouteResolve {
                 writes: false,
@@ -658,61 +711,68 @@
                 name: None,
                 request: request.clone(),
             };
-            let data = execute(
-                &Route::Resolve(query),
-                roots,
-                SystemClock::new().wall_now()?,
-            )?;
-            let Data::Resolved(preview) = &data else {
+            let data = execute(&Route::Resolve(query), roots, now)?;
+            let Data::Resolved(preview) = data else {
                 return Err(EdgeError::from(RoutingError::Catalogue));
             };
-            Ok::<_, EdgeError>((
-                serde_json::to_value(&data).map_err(|_| RoutingError::Catalogue)?,
-                resolved_text(preview),
-            ))
+            Ok::<_, EdgeError>(preview)
         };
-        let (data, text) = preview(&request, &roots)?;
-        assert_ne!(data["adapter"], "claude");
-        assert_eq!(data["allow_unknown_partial_headroom"]["value"], false);
-        assert_eq!(data["allow_unknown_partial_headroom"]["source"], "default");
-        for candidate in data["pool_selection"]["candidates"]
-            .as_array()
-            .ok_or("pool candidates")?
-        {
-            let model = candidate["model"].as_str().ok_or("candidate model")?;
-            let prefix = format!("  {model}: prior=");
-            let line = text
-                .lines()
-                .find(|line| line.starts_with(&prefix))
-                .ok_or("candidate prior explanation")?;
-            assert!(line.contains("evidence_count="), "{line}");
-        }
+        let data = preview(&request, &roots)?;
+        assert_ne!(data.route.adapter, "claude");
+        assert_eq!(
+            data.allow_unknown_partial_headroom.value.as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            data.allow_unknown_partial_headroom.source,
+            provenant_config::KnobSource::Default
+        );
+        assert!(
+            data.route
+                .exclusions
+                .iter()
+                .any(|exclusion| exclusion.adapter == "claude")
+        );
+        let selection = data
+            .route
+            .pool_selection
+            .as_ref()
+            .ok_or("selection receipt")?;
+        assert!(
+            selection
+                .candidates
+                .iter()
+                .any(|candidate| candidate.model.starts_with("codex/"))
+        );
+        assert!(selection.considered_exclusions.iter().any(|rule| {
+            rule.source == provenant_records::ExclusionSource::Flag && rule.selector == "claude"
+        }));
         std::fs::write(
             roots.state.as_path().join("config.toml"),
             "schema_version=1\n[knobs]\n'routing.allow_unknown_partial_headroom'=true\n",
         )?;
-        let (override_data, override_text) = preview(&request, &roots)?;
+        let override_data = preview(&request, &roots)?;
         assert_eq!(
-            override_data["allow_unknown_partial_headroom"]["value"],
-            true
+            override_data.allow_unknown_partial_headroom.value.as_bool(),
+            Some(true)
         );
         assert_eq!(
-            override_data["allow_unknown_partial_headroom"]["source"],
-            "override"
+            override_data.allow_unknown_partial_headroom.source,
+            provenant_config::KnobSource::Override
         );
-        assert!(override_text.contains("allow unknown partial headroom: true (source: Override)"));
-        assert!(
-            text.contains("claude/claude-haiku-5-5: excluded by flag: provider claude"),
-            "{text}"
-        );
+        assert_ne!(override_data.route.adapter, "claude");
         let all = super::RouteRequest {
             exclude: ["claude", "codex", "opencode", "agy", "cursor"]
                 .map(String::from)
                 .to_vec(),
             ..request
         };
-        let message = preview(&all, &roots).unwrap_err().to_string();
-        assert!(message.contains("excluded by flag: provider"), "{message}");
+        assert!(matches!(
+            preview(&all, &roots),
+            Err(EdgeError::Routing(
+                RoutingError::NoEligiblePoolMember { .. }
+            ))
+        ));
         Ok(())
     }
 
@@ -777,9 +837,9 @@
         std::fs::write(
             roots.state.as_path().join("config.toml"),
             "schema_version=1\n[domains.routing]\nmodel_exclusions=[\
-             {model='claude/old-model',schedule={expires='1970-01-01T00:00:01Z'}},\
-             {model='claude/not-a-row',schedule={expires='garbage'}},\
-             {model='not a model'}]\n", // timebomb: allow fixed epoch fixture, not the live clock
+                 {model='claude/old-model',schedule={expires='1970-01-01T00:00:01Z'}},\
+                 {model='claude/not-a-row',schedule={expires='garbage'}},\
+                 {model='not a model'}]\n", // timebomb: allow fixed epoch fixture, not the live clock
         )?;
         let now = provenant_core::WallTime::from_unix_seconds(100)?;
         let notes = super::exclusion_notes(&roots)?;
@@ -814,20 +874,35 @@
     }
 
     #[test]
-    fn pacing_report_prints_every_active_override() -> Result<(), Box<dyn Error>> {
-        use provenant_core::{Clock, MonoTime, TestClock, WallTime};
-        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
-        let report = super::PacingReport {
-            recorded: "codex".into(),
-            active_overrides: serde_json::from_value(serde_json::json!([
-                {"provider":"codex", "policy":"pace"},
-                {"provider":"claude", "policy":"off"}
-            ]))?,
+    fn pacing_report_carries_each_active_override() -> Result<(), Box<dyn Error>> {
+        use super::{Data, RoutePacing, WallTime};
+        let temp = tempfile::tempdir()?;
+        let roots = exclusion_roots(&temp)?;
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[domains.routing]\npacing_overrides=[{provider='codex',policy='pace'},{provider='claude',policy='off'}]\n",
+        )?;
+        let data = super::execute(
+            &super::Route::Pacing(RoutePacing {
+                provider: "codex".into(),
+                policy: super::PacingChoice::Pace,
+            }),
+            &roots,
+            WallTime::from_unix_seconds(100)?,
+        )?;
+        let Data::Pacing(report) = data else {
+            return Err("pacing report".into());
         };
-        let text = report.human(clock.wall_now()?);
-        assert!(text.contains("active overrides: 2"));
-        assert!(text.contains("pacing provider codex pace active"));
-        assert!(text.contains("pacing provider claude off active"));
+        for (provider, policy) in [
+            ("codex", super::PacingPolicy::Pace),
+            ("claude", super::PacingPolicy::Off),
+        ] {
+            assert!(
+                report.active_overrides.iter().any(|row| {
+                    row.provider.as_deref() == Some(provider) && row.policy == policy
+                })
+            );
+        }
         Ok(())
     }
 

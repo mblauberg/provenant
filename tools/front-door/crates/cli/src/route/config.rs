@@ -17,7 +17,21 @@ pub(super) fn list_data_and_accounts(
     ),
     EdgeError,
 > {
-    with_context(
+    list_data_and_accounts_at(roots, query, SystemClock::new().wall_now()?)
+}
+
+fn list_data_and_accounts_at(
+    roots: &Roots,
+    query: &RouteListRequest,
+    now: WallTime,
+) -> Result<
+    (
+        Box<provenant_routing::RouteList>,
+        provenant_providers::accounts::Settings,
+    ),
+    EdgeError,
+> {
+    with_context_with_time(
         roots,
         REGISTRY,
         &[],
@@ -26,6 +40,7 @@ pub(super) fn list_data_and_accounts(
         &[],
         false,
         None,
+        Some(now),
         |context, _, _, accounts| {
             Ok((
                 Box::new(provenant_routing::list(
@@ -46,9 +61,17 @@ pub(super) fn display_list_data(
     roots: &Roots,
     query: &RouteListRequest,
 ) -> Result<Box<RouteListDisplay>, EdgeError> {
-    let (routes, accounts) = list_data_and_accounts(roots, query)?;
+    display_list_data_at(roots, query, SystemClock::new().wall_now()?)
+}
+
+pub(super) fn display_list_data_at(
+    roots: &Roots,
+    query: &RouteListRequest,
+    now: WallTime,
+) -> Result<Box<RouteListDisplay>, EdgeError> {
+    let (routes, accounts) = list_data_and_accounts_at(roots, query, now)?;
     let catalogue = Catalogue::bundled()?;
-    let now = SystemClock::new().unix_seconds();
+    let now = now.as_timestamp().as_second();
     let mut models = BTreeSet::new();
     models.extend(routes.models.iter().map(|entry| entry.model.clone()));
     models.extend(routes.valid_pairs.iter().map(|pair| pair.model.clone()));
@@ -801,8 +824,8 @@ pub(super) fn edit_model_exclusion(
 
 pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeError> {
     match command {
-        Route::List(query) => Ok(Data::List(display_list_data(roots, query)?)),
-        Route::Resolve(query) => with_context(
+        Route::List(query) => Ok(Data::List(display_list_data_at(roots, query, now)?)),
+        Route::Resolve(query) => with_context_with_time(
             roots,
             REGISTRY,
             &[],
@@ -811,6 +834,7 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
             &[],
             false,
             None,
+            Some(now),
             |context, records, policies, accounts| {
                 let context = &RoutingContext {
                     policy_account_hint: query.account.as_deref(),

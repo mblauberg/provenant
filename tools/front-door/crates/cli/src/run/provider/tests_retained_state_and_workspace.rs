@@ -373,6 +373,13 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         ..Default::default()
     };
     let inventory = credential_roots(&registry, &home, &settings)?;
+    for declared in provenant_core::CredentialRoots::for_home(&home).entries() {
+        assert!(inventory.entries().iter().any(|entry| {
+            entry.path == declared.path
+                && entry.scope == declared.scope
+                && entry.kind == declared.kind
+        }));
+    }
     assert!(inventory.entries().iter().any(|entry| {
         entry.path == root.join("agent/socket")
             && entry.scope == provenant_core::CredentialScope::Exact
@@ -592,122 +599,9 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
 }
 
 #[test]
-fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_providers::Adapter;
-    let temp = tempfile::tempdir()?;
-    let root = std::fs::canonicalize(temp.path())?;
-    let home = root.join("home");
-    let cwd = root.join("project");
-    let state = root.join("state");
-    let scratch = root.join("scratch");
-    let private_state = state.join("attempt/provider-state");
-    let assets = root.join("release/active");
-    for path in [&home, &cwd, &scratch, &assets] {
-        std::fs::create_dir_all(path)?;
-    }
-    provenant_os::fixture::private_state_dir(&state)?;
-    std::fs::create_dir_all(&private_state)?;
-    let mut inputs = provenant_core::RootInputs::new(home.clone(), cwd.clone());
-    inputs.state_dir = Some(state.clone());
-    let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let image = root.join("outside/shot.png");
-    let access = run::LaneAccess {
-        attachments: vec![image.clone()],
-        ..Default::default()
-    };
-    let plan = ConfinedPlan::new(confinement_request(
-        ProjectId::parse("0123456789abcdef0123456789abcdef")?,
-        ConfinementRoots {
-            host_roots: Some(&host_roots),
-            cwd: &cwd,
-            home: &home,
-            state: &state,
-            credential_roots: &provenant_core::CredentialRoots::default(),
-            github_roots: &[],
-            protected_worktrees: &[],
-            scratch: &scratch,
-            private_state: &private_state,
-            assets: &assets,
-            prompt_file: None,
-        },
-        None,
-        &access,
-        &Default::default(),
-        "codex",
-        false,
-        InventoryContext::Sandboxed,
-    )?)?;
-    let route = provenant_records::ResolvedRoute {
-        selection_context: Default::default(),
-        diagnostics: Default::default(),
-        user_skills: true,
-        extra: Default::default(),
-        adapter: "codex".into(),
-        model: "fixture".into(),
-        effort: None,
-        catalogue_revision: "fixture".into(),
-        account_key: None,
-        host: "local".into(),
-        alternatives: Default::default(),
-        exclusions: Vec::new(),
-        eligibility: provenant_records::RouteEligibility::Eligible,
-        readiness: provenant_records::RouteReadiness::Ready {
-            availability_warning: None,
-            extra: Default::default(),
-            availability_ref: "fixture".into(),
-            expires_unix_seconds: 100,
-        },
-        confidentiality: provenant_records::RouteConfidentiality {
-            extra: Default::default(),
-            evidence_ref: "fixture".into(),
-        },
-        pool_selection: None,
-    };
-    let prompt = Prompt::new("describe".into());
-    let launch_policy = provenant_records::policy::Policy::default();
-    let launch = provenant_providers::codex::Codex.prepare(PrepareInput {
-        credential_roots: plan.permissions().credential_roots.clone(),
-        images: &access.attachments,
-        policy: &launch_policy,
-        command: None,
-        route: &route,
-        confined: &plan,
-        prompt: &prompt,
-        continuation: None,
-        grant_digest: "fixture",
-        executable: Path::new("/opt/homebrew/Cellar/codex/fixture/bin/codex"),
-        home: &home,
-        user: "fixture".as_ref(),
-        host_var: &|_| None,
-        skill_stage_max_bytes: 0,
-        account: None,
-        token: None,
-        cwd: &cwd,
-        git_context: false,
-        nonce: [0; 16],
-        provenant: LaneRuntime {
-            executable: Path::new("/fixture/provenant/bin/provenant"),
-            git: Path::new("/usr/bin/git"),
-            state: &state,
-            home: &home,
-            depth: 1,
-            attempt: provenant_core::AttemptId::from_bytes([7; 16]),
-            assets: &assets,
-        },
-    })?;
-    let image_argument = image.to_str().ok_or("image path")?;
-    assert!(
-        launch
-            .argv
-            .windows(2)
-            .any(|pair| pair == ["--image", image_argument])
-    );
-    Ok(())
-}
-
-#[test]
 fn lane_plan_declares_exact_attachment_and_release_grants() -> Result<(), Box<dyn std::error::Error>>
 {
+    use provenant_providers::Adapter;
     let temp = tempfile::tempdir()?;
     let root = std::fs::canonicalize(temp.path())?;
     let home = root.join("home");
@@ -730,6 +624,7 @@ fn lane_plan_declares_exact_attachment_and_release_grants() -> Result<(), Box<dy
         attachments: vec![image.clone()],
         ..Default::default()
     };
+    let mut codex_attachment_flag_covered = false;
     for entry in REGISTRY {
         let request = confinement_request(
             ProjectId::parse("0123456789abcdef0123456789abcdef")?,
@@ -780,7 +675,82 @@ fn lane_plan_declares_exact_attachment_and_release_grants() -> Result<(), Box<dy
                 .iter()
                 .any(|grant| { grant.path == prompt.parent().expect("attempt") })
         );
+        if entry.adapter.id() == "codex" {
+            let catalogue = provenant_routing::Catalogue::bundled()?;
+            let model = catalogue
+                .models()
+                .iter()
+                .find(|model| model.model.as_str().starts_with("codex/"))
+                .ok_or("Codex catalogue model")?;
+            let route = ResolvedRoute {
+                selection_context: Default::default(),
+                diagnostics: Default::default(),
+                user_skills: true,
+                extra: Default::default(),
+                adapter: "codex".into(),
+                model: model.model.as_str().into(),
+                effort: None,
+                catalogue_revision: catalogue.revision().into(),
+                account_key: None,
+                host: "local".into(),
+                alternatives: Default::default(),
+                exclusions: Vec::new(),
+                eligibility: provenant_records::RouteEligibility::Eligible,
+                readiness: provenant_records::RouteReadiness::Ready {
+                    availability_warning: None,
+                    extra: Default::default(),
+                    availability_ref: "fixture".into(),
+                    expires_unix_seconds: u64::MAX,
+                },
+                confidentiality: provenant_records::RouteConfidentiality {
+                    extra: Default::default(),
+                    evidence_ref: "fixture".into(),
+                },
+                pool_selection: None,
+            };
+            let prompt = Prompt::new("describe".into());
+            let policy = provenant_records::policy::Policy::default();
+            let launch = provenant_providers::codex::Codex.prepare(PrepareInput {
+                credential_roots: plan.permissions().credential_roots.clone(),
+                images: &access.attachments,
+                policy: &policy,
+                command: None,
+                route: &route,
+                confined: &plan,
+                prompt: &prompt,
+                continuation: None,
+                grant_digest: "fixture",
+                executable: Path::new("/fixture/codex/bin/codex"),
+                home: &home,
+                user: "fixture".as_ref(),
+                host_var: &|_| None,
+                skill_stage_max_bytes: 0,
+                account: None,
+                token: None,
+                cwd: &cwd,
+                git_context: false,
+                nonce: [0; 16],
+                provenant: LaneRuntime {
+                    executable: Path::new("/fixture/provenant/bin/provenant"),
+                    git: Path::new("/usr/bin/git"),
+                    state: &state,
+                    home: &home,
+                    depth: 1,
+                    attempt: provenant_core::AttemptId::from_bytes([7; 16]),
+                    assets: &assets,
+                },
+            })?;
+            let image_argument = image.to_str().ok_or("image path")?;
+            assert!(
+                launch
+                    .argv
+                    .windows(2)
+                    .any(|pair| pair == ["--image", image_argument])
+            );
+            codex_attachment_flag_covered = true;
+        }
     }
+    assert!(codex_attachment_flag_covered);
     Ok(())
 }
 
@@ -1234,13 +1204,19 @@ fn live_child_source_uses_its_selected_directory_and_rechecks_authority()
         .as_mut()
         .ok_or("identity")?
         .inode ^= 1;
-    assert!(source_cwd(&registry, &changed_identity).is_err());
+    assert!(matches!(
+        source_cwd(&registry, &changed_identity),
+        Err(SourceCwdError::Authority(_))
+    ));
     for root in [&state, &home.join(".codex")] {
         std::fs::create_dir_all(root)?;
         let mut denied = task.clone();
         denied.access.source_root = Some(root.clone());
         denied.access.source_identity = Some(source_identity(root)?);
-        assert!(source_cwd(&registry, &denied).is_err());
+        assert!(matches!(
+            source_cwd(&registry, &denied),
+            Err(SourceCwdError::Authority(_))
+        ));
     }
     Ok(())
 }

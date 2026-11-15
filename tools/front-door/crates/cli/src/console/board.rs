@@ -1,6 +1,6 @@
 //! Board envelope and opaque, filter-bound continuation tokens.
 use super::{Error, PAGE_SIZE_LIMIT};
-use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots};
+use provenant_core::{ActorId, CancelToken, ProjectId, Roots};
 use provenant_fabric_runtime::chairs::{ChairIndex, Request as ChairRequest};
 use provenant_os::clock::SystemClock;
 use provenant_records::CanonicalV1;
@@ -41,7 +41,6 @@ fn cursor_position(cursor: &str, filters: &Value) -> Result<(u64, u64), Error> {
     Ok((high_water, before))
 }
 
-#[allow(clippy::disallowed_methods)] // Explicit real-time deadline for the read-only Fabric boundary.
 pub(super) fn read(
     roots: &Roots,
     selected: Option<ProjectId>,
@@ -49,15 +48,27 @@ pub(super) fn read(
     limit: u64,
     cursor: Option<&str>,
 ) -> Result<Value, Error> {
-    if !(1..=PAGE_SIZE_LIMIT).contains(&limit) {
-        return Err(provenant_run::RunError::Validation("board page bounds").into());
-    }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let call = provenant_run::Request {
+    let request = provenant_run::Request {
         clock: &clock,
         cancel: &cancel,
     };
+    read_with_request(roots, selected, all, limit, cursor, &request)
+}
+
+#[allow(clippy::disallowed_methods)] // Explicit real-time deadline for the read-only Fabric boundary.
+fn read_with_request(
+    roots: &Roots,
+    selected: Option<ProjectId>,
+    all: bool,
+    limit: u64,
+    cursor: Option<&str>,
+    request: &provenant_run::Request<'_>,
+) -> Result<Value, Error> {
+    if !(1..=PAGE_SIZE_LIMIT).contains(&limit) {
+        return Err(provenant_run::RunError::Validation("board page bounds").into());
+    }
     let context = ExecutionContext {
         state_root: roots.state.clone(),
         project_id: selected.unwrap_or(ProjectId::from_bytes([0; 16])),
@@ -78,7 +89,7 @@ pub(super) fn read(
     let position = cursor
         .map(|cursor| cursor_position(cursor, &filters))
         .transpose()?;
-    let store = RunStore::open_read_only(&context, &call)?;
+    let store = RunStore::open_read_only(&context, request)?;
     if position.is_some() && store.is_none() {
         return Err(Error::BoardCursor);
     }
@@ -91,7 +102,7 @@ pub(super) fn read(
                 limit,
                 position.map_or(0, |p| p.1),
                 position.map(|p| p.0),
-                &call,
+                request,
             )
         })
         .transpose()
@@ -106,8 +117,8 @@ pub(super) fn read(
     let high_water = page.as_ref().map_or(0, |page| page.high_water);
     let snapshot = binding(high_water, &filters)?;
     let chair_call = ChairRequest {
-        clock: &clock,
-        cancel: &cancel,
+        clock: request.clock,
+        cancel: request.cancel,
     };
     let chairs = ChairIndex::open_read_only(
         &roots.state,
@@ -140,10 +151,10 @@ pub(super) fn read(
                 project_id,
                 ..context.clone()
             };
-            if let Ok(Some(store)) = RunStore::open_read_only(&context, &call) {
+            if let Ok(Some(store)) = RunStore::open_read_only(&context, request) {
                 for lane in &mut page.lanes {
                     if lane.attempt.project_id == project_id
-                        && let Ok(record) = store.record(lane.attempt.attempt_id, &call)
+                        && let Ok(record) = store.record(lane.attempt.attempt_id, request)
                         && record.generation == lane.attempt.generation
                     {
                         lane.attempt.last_output_at = record.last_output_at;
@@ -161,7 +172,7 @@ pub(super) fn read(
                     .filter(|attempt| attempt.project_id == project_id)
                     .cloned()
                     .collect();
-                waits.extend(store.lane_waits(&selected, &call));
+                waits.extend(store.lane_waits(&selected, request));
             }
         }
         for lane in page.lanes {
@@ -207,7 +218,7 @@ pub(super) fn read(
                 attempt,
                 &waits,
                 roots.state.as_path(),
-                clock.wall_now().ok(),
+                request.clock.wall_now().ok(),
                 false,
             );
             lanes.push(json!({"lane_id":{"host":host,"key":work_key,
@@ -219,7 +230,7 @@ pub(super) fn read(
     }
     Ok(
         json!({"schema_version":BOARD_SCHEMA_VERSION,"snapshot":snapshot,"high_water":high_water,"generation":generation,
-        "observed_at":clock.wall_now().map_err(|_| Error::Encode)?,"filters":filters,
+        "observed_at":request.clock.wall_now().map_err(|_| Error::Encode)?,"filters":filters,
         "lanes":lanes,"next_cursor":next,"truncated":next.is_some(),
         "coverage":{"scope":"local","host":host,"runs":if store.is_some() { "complete" } else { "empty" },"chairs":chair_coverage,
             "observations":if observed.len() == lanes.len() { "complete" } else if observed.is_empty() { "unavailable" } else { "partial" },
@@ -230,60 +241,111 @@ pub(super) fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provenant_core::{
+        ActorId, AttemptId, CancelToken, Clock, Digest, MonoTime, OperationId, ProjectId,
+        RootInputs, TestClock, WallTime,
+    };
+    use provenant_records::CanonicalV1;
+    use provenant_run::{CanonicalRequest, PreparedRun, TerminalPublication};
+    use std::collections::BTreeSet;
 
-    #[test]
-    fn board_paging_end_to_end() -> Result<(), Box<dyn std::error::Error>> {
-        const PAGE: u64 = PAGE_SIZE_LIMIT / 2;
-        const ATTEMPTS: u8 = PAGE_SIZE_LIMIT as u8 + 1;
-        const SELECTED_ATTEMPTS: u64 = (ATTEMPTS as u64 + 1) / 2;
-        use provenant_core::{
-            AttemptId, Digest, MonoTime, OperationId, RootInputs, TestClock, WallTime,
-        };
-        use provenant_run::{CanonicalRequest, PreparedRun};
-        let temp = tempfile::tempdir()?;
-        let base = temp.path().canonicalize()?;
-        std::fs::create_dir(base.join("home"))?;
-        std::fs::create_dir(base.join("checkout"))?;
-        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
-        inputs.state_dir = Some(base.join("state"));
-        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        assert_eq!(read(&roots, None, false, PAGE, None)?["lanes"], json!([]));
-        assert!(!roots.state.as_path().join("run.sqlite3").exists());
-        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
-        let cancel = CancelToken::new();
-        let call = provenant_run::Request {
-            clock: &clock,
-            cancel: &cancel,
-        };
-        let project = ProjectId::from_bytes([1; 16]);
-        let context = ExecutionContext {
-            state_root: roots.state.clone(),
-            project_id: project,
-            actor_id: ActorId::from_bytes([2; 16]),
-            read_prompts: false,
-        };
-        let store = RunStore::open(&context, &call)?;
-        let mut request: CanonicalRequest = serde_json::from_value(json!({"schema_version":1,
-            "task":{"title":"Board fixture","prompt_digest":CanonicalV1::file_digest(b"private body"),
-            "route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},
-            "authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null},
-            "parent":null,"lane_depth":1}))?;
-        request.chair = Some(provenant_records::custody::Chair {
-            process: crate::fabric::chair_process(),
-            extra: Default::default(),
-            session: None,
-            host: provenant_core::HostId::from_bytes([4; 16]),
-            actor: context.actor_id,
-        });
-        let other_project = ProjectId::from_bytes([9; 16]);
-        let other = RunStore::open(
-            &ExecutionContext {
-                project_id: other_project,
-                ..context.clone()
-            },
-            &call,
-        )?;
-        let prepared = |n: u8| -> Result<PreparedRun, Box<dyn std::error::Error>> {
+    const PAGE: u64 = PAGE_SIZE_LIMIT / 2;
+    const ATTEMPTS: u8 = PAGE_SIZE_LIMIT as u8 + 1;
+
+    struct BoardFixture {
+        _temp: tempfile::TempDir,
+        base: std::path::PathBuf,
+        inputs: RootInputs,
+        roots: Roots,
+        clock: TestClock,
+        cancel: CancelToken,
+        project: ProjectId,
+        other_project: ProjectId,
+        request: CanonicalRequest,
+        attempts: u8,
+        store: RunStore,
+        other: RunStore,
+        baseline_changes: Value,
+    }
+
+    impl BoardFixture {
+        fn new() -> Result<Self, Box<dyn std::error::Error>> {
+            Self::with_attempts(ATTEMPTS)
+        }
+
+        fn with_attempts(attempts: u8) -> Result<Self, Box<dyn std::error::Error>> {
+            let temp = tempfile::tempdir()?;
+            let base = temp.path().canonicalize()?;
+            std::fs::create_dir(base.join("home"))?;
+            std::fs::create_dir(base.join("checkout"))?;
+            let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+            inputs.state_dir = Some(base.join("state"));
+            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+            let baseline_changes = super::super::read(
+                &roots,
+                None,
+                &super::super::Console::Changes { since: None },
+            )?;
+            let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+            let cancel = CancelToken::new();
+            let call = provenant_run::Request {
+                clock: &clock,
+                cancel: &cancel,
+            };
+            let project = ProjectId::from_bytes([1; 16]);
+            let context = ExecutionContext {
+                state_root: roots.state.clone(),
+                project_id: project,
+                actor_id: ActorId::from_bytes([2; 16]),
+                read_prompts: false,
+            };
+            let store = RunStore::open(&context, &call)?;
+            let mut request: CanonicalRequest = serde_json::from_value(json!({"schema_version":1,
+                "task":{"title":"Board fixture","prompt_digest":CanonicalV1::file_digest(b"private body"),
+                "route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},
+                "authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null},
+                "parent":null,"lane_depth":1}))?;
+            request.chair = Some(provenant_records::custody::Chair {
+                process: crate::fabric::chair_process(),
+                extra: Default::default(),
+                session: None,
+                host: provenant_core::HostId::from_bytes([4; 16]),
+                actor: context.actor_id,
+            });
+            let other_project = ProjectId::from_bytes([9; 16]);
+            let other = RunStore::open(
+                &ExecutionContext {
+                    project_id: other_project,
+                    ..context
+                },
+                &call,
+            )?;
+            for n in 1..=attempts {
+                let target = if n % 2 == 0 { &other } else { &store };
+                target.create(&Self::prepared(&request, &clock, n)?, &call)?;
+            }
+            Ok(Self {
+                _temp: temp,
+                base,
+                inputs,
+                roots,
+                clock,
+                cancel,
+                project,
+                other_project,
+                request,
+                attempts,
+                store,
+                other,
+                baseline_changes,
+            })
+        }
+
+        fn prepared(
+            request: &CanonicalRequest,
+            clock: &TestClock,
+            n: u8,
+        ) -> Result<PreparedRun, Box<dyn std::error::Error>> {
             let mut request = request.clone();
             request.task.context = Some(provenant_records::run::WorkContext {
                 graph_id: Some(format!("lane-{n}")),
@@ -298,327 +360,476 @@ mod tests {
                 request,
                 prompt: "private body".into(),
             })
-        };
-        let mut since = None;
-        for n in 1..=ATTEMPTS {
-            if n % 2 == 0 { &other } else { &store }.create(&prepared(n)?, &call)?;
-            if n == 1 {
-                let changes = super::super::read(
-                    &roots,
-                    None,
-                    &super::super::Console::Changes { since: None },
-                )?;
-                assert!(changes["generations"]["board"].as_u64().is_some());
-                since = Some(changes["generations"].to_string());
+        }
+
+        fn call(&self) -> provenant_run::Request<'_> {
+            provenant_run::Request {
+                clock: &self.clock,
+                cancel: &self.cancel,
             }
         }
-        let changes = super::super::read(&roots, None, &super::super::Console::Changes { since })?;
-        assert_eq!(changes["changed"]["board"], true);
-        assert_eq!(changes["changed"]["runs"], true);
-        let unchanged = super::super::read(
-            &roots,
-            None,
-            &super::super::Console::Changes {
-                since: Some(changes["generations"].to_string()),
-            },
-        )?;
-        assert_eq!(unchanged["changed"]["runs"], false);
-        let mut v1 = changes["generations"].clone();
-        v1.as_object_mut()
-            .ok_or("generations object")?
-            .remove("runs");
-        let upgraded = super::super::read(
-            &roots,
-            None,
-            &super::super::Console::Changes {
-                since: Some(v1.to_string()),
-            },
-        )?;
-        assert!(upgraded["changed"]["runs"].is_null());
-        super::super::write_fixture("changes-after-run-write", "console changes", changes, &base)?;
-        let first = read(&roots, None, false, PAGE, None)?;
-        assert_eq!(first["schema_version"], BOARD_SCHEMA_VERSION);
-        assert!(first["lanes"][0]["lane_id"]["key"].is_object());
-        assert!(first["lanes"][0]["lane_id"].get("run_id").is_none());
-        assert!(first["lanes"][0]["lane_id"].get("task_id").is_none());
-        assert!(first["lanes"][0].get("estimated_cost").is_none());
-        assert!(first["lanes"][0].get("verified_links").is_none());
-        super::super::write_fixture(
-            "board",
-            "console board",
-            read(&roots, None, false, 1, None)?,
-            &base,
-        )?;
-        let detail =
-            super::super::detail::read(&roots, &AttemptId::from_bytes([ATTEMPTS; 16]).to_string())?;
-        assert!(detail["lane_id"]["key"].is_object());
-        assert!(detail["lane_id"].get("run_id").is_none());
-        assert!(detail["lane_id"].get("task_id").is_none());
-        super::super::write_fixture("detail", "console detail", detail, &base)?;
-        assert_eq!(first["coverage"]["chairs"], "unavailable");
-        assert_eq!(first["lanes"].as_array().unwrap().len(), PAGE);
-        assert_eq!(
-            first["lanes"][0]["metadata"]["attempt"]["usage"]["uncached_input"],
-            Value::Null
-        );
-        assert_eq!(
-            first["lanes"][0]["usage_coverage"]["missing"]
-                .as_array()
-                .unwrap()
-                .len(),
-            5
-        );
-        assert!(!serde_json::to_string(&first)?.contains("private body"));
-        assert!(!roots.state.as_path().join("fabric").exists());
-        assert_eq!(
-            first["lanes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|r| r["metadata"]["attempt"]["project_id"].as_str().unwrap())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            2
-        );
-        assert!(
-            first["lanes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|r| r["wait"]["waiting_for"].is_string())
-        );
-        let selected = read(&roots, Some(project), false, PAGE_SIZE_LIMIT, None)?;
-        let selected_page = read(&roots, Some(project), false, PAGE, None)?;
-        let selected_cursor = selected_page["next_cursor"]
-            .as_str()
-            .ok_or("selected cursor")?;
-        assert_eq!(
-            selected["lanes"].as_array().unwrap().len(),
-            SELECTED_ATTEMPTS as usize
-        );
-        assert!(
-            selected["lanes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|r| r["metadata"]["attempt"]["project_id"] == json!(project))
-        );
-        use std::os::unix::fs::PermissionsExt;
-        let id = AttemptId::from_bytes([ATTEMPTS; 16]);
-        let checkpoint = roots
-            .state
-            .as_path()
-            .join(format!("attempts/{id}/process.json"));
-        let observed_at = clock.wall_now()?;
-        std::fs::write(
-            &checkpoint,
-            serde_json::to_vec(
-                &json!({"schema_version":1,"scope":{"attempt":id,"generation":0},"last_output_at":observed_at,"priority":15}),
-            )?,
-        )?;
-        std::fs::set_permissions(&checkpoint, std::fs::Permissions::from_mode(0o600))?;
-        let observed = read(&roots, None, false, PAGE, None)?;
-        assert_eq!(observed["lanes"][0]["metadata"]["attempt"]["priority"], 15);
-        assert_eq!(
-            observed["lanes"][0]["metadata"]["attempt"]["last_output_at"],
-            json!(observed_at)
-        );
-        assert_eq!(observed["snapshot"], first["snapshot"]);
-        let checkpoint_bytes = std::fs::read(&checkpoint)?;
-        for bytes in [
-            b"{".to_vec(),
-            serde_json::to_vec(
-                &json!({"schema_version":1,"scope":{"attempt":id,"generation":999}}),
-            )?,
-        ] {
-            std::fs::write(&checkpoint, bytes)?;
-            let partial = read(&roots, None, false, PAGE, None)?;
-            assert_eq!(partial["lanes"].as_array().unwrap().len(), PAGE);
-            assert_eq!(partial["coverage"]["observations"], "partial");
-            assert_eq!(partial["lanes"][0]["observation_coverage"], "unavailable");
-            assert_eq!(
-                read(&roots, None, false, 1, None)?["coverage"]["observations"],
-                "unavailable"
-            );
-            assert!(partial["lanes"][0]["metadata"]["attempt"]["priority"].is_null());
-            assert!(partial["lanes"][0]["metadata"]["attempt"]["last_output_at"].is_null());
+
+        fn chair_call(&self) -> ChairRequest<'_> {
+            ChairRequest {
+                clock: &self.clock,
+                cancel: &self.cancel,
+            }
         }
-        std::fs::write(&checkpoint, checkpoint_bytes)?;
-        std::fs::set_permissions(&checkpoint, std::fs::Permissions::from_mode(0o644))?;
-        assert_eq!(
-            read(&roots, None, false, PAGE, None)?["coverage"]["observations"],
-            "partial"
-        );
-        std::fs::set_permissions(&checkpoint, std::fs::Permissions::from_mode(0o600))?;
-        let chair_call = ChairRequest {
+
+        fn page(
+            &self,
+            selected: Option<ProjectId>,
+            all: bool,
+            limit: u64,
+            cursor: Option<&str>,
+        ) -> Result<Value, Error> {
+            let request = self.call();
+            read_with_request(&self.roots, selected, all, limit, cursor, &request)
+        }
+
+        fn prepared_attempt(&self, n: u8) -> Result<PreparedRun, Box<dyn std::error::Error>> {
+            Self::prepared(&self.request, &self.clock, n)
+        }
+
+        fn id(n: u8) -> AttemptId {
+            AttemptId::from_bytes([n; 16])
+        }
+
+        fn last_attempt(&self) -> AttemptId {
+            Self::id(self.attempts)
+        }
+    }
+
+    #[test]
+    fn empty_board_read_does_not_create_the_run_store() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        std::fs::create_dir(base.join("home"))?;
+        std::fs::create_dir(base.join("checkout"))?;
+        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(base.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let request = provenant_run::Request {
             clock: &clock,
             cancel: &cancel,
         };
-        let selected: AttemptId =
-            serde_json::from_value(first["lanes"][0]["lane_id"]["attempt_id"].clone())?;
-        let selected_request = store.request(selected, &call)?;
-        ChairIndex::open(&roots.state, &chair_call)?.submit(
-            project,
-            first["lanes"][0]["lane_id"]["key"]["graph"]
-                .as_str()
-                .ok_or("missing graph")?,
-            &selected_request,
-            &chair_call,
+        assert_eq!(
+            read_with_request(&roots, None, false, PAGE, None, &request)?["lanes"],
+            json!([])
+        );
+        assert!(!roots.state.as_path().join("run.sqlite3").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn board_changes_advance_after_run_creation() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = BoardFixture::with_attempts(2)?;
+        let changed = super::super::read(
+            &fixture.roots,
+            None,
+            &super::super::Console::Changes {
+                since: Some(fixture.baseline_changes["generations"].to_string()),
+            },
         )?;
+        assert_eq!(changed["changed"]["board"], true);
+        assert_eq!(changed["changed"]["runs"], true);
+        let stable = super::super::read(
+            &fixture.roots,
+            None,
+            &super::super::Console::Changes {
+                since: Some(changed["generations"].to_string()),
+            },
+        )?;
+        assert_eq!(stable["changed"]["board"], false);
+        Ok(())
+    }
+
+    #[test]
+    fn board_projection_has_declared_shape_and_omits_private_prompt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = BoardFixture::new()?;
+        let page = fixture.page(None, false, PAGE, None)?;
+        assert_eq!(page["schema_version"], BOARD_SCHEMA_VERSION);
         assert_eq!(
-            read(&roots, None, false, PAGE, None)?["coverage"]["chairs"],
-            "complete"
+            page["lanes"].as_array().ok_or("lanes")?.len(),
+            PAGE as usize
         );
+        let lane = &page["lanes"][0];
+        assert!(lane["lane_id"]["key"].is_object());
+        assert!(lane["lane_id"].get("run_id").is_none());
+        assert!(lane["lane_id"].get("task_id").is_none());
+        assert!(lane.get("estimated_cost").is_none());
+        assert!(lane.get("verified_links").is_none());
+        assert_eq!(page["coverage"]["chairs"], "unavailable");
         assert_eq!(
-            read(&roots, None, false, PAGE, None)?["lanes"][0]["chair"],
-            json!(request.chair)
-        );
-        let chair_for = |board: &Value, graph: &str| {
-            board["lanes"]
+            lane["usage_coverage"]["missing"]
                 .as_array()
-                .unwrap()
+                .ok_or("usage coverage")?
+                .len(),
+            provenant_telemetry::ingest::BUCKETS.len()
+        );
+        assert!(!serde_json::to_string(&page)?.contains("private body"));
+        assert!(!fixture.roots.state.as_path().join("fabric").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn board_detail_uses_the_declared_work_identity() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = BoardFixture::with_attempts(1)?;
+        let detail =
+            super::super::detail::read(&fixture.roots, &fixture.last_attempt().to_string())?;
+        assert_eq!(detail["status"], "found");
+        assert!(detail["lane_id"]["key"].is_object());
+        assert!(detail["lane_id"].get("run_id").is_none());
+        assert!(detail["lane_id"].get("task_id").is_none());
+        assert_eq!(detail["artifacts"][0]["bytes"], "private body".len());
+        assert_eq!(detail["artifacts"][0]["present"], true);
+        Ok(())
+    }
+
+    #[test]
+    fn board_selection_returns_only_the_selected_project() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fixture = BoardFixture::with_attempts(5)?;
+        for (project, odd_attempts) in [(fixture.project, true), (fixture.other_project, false)] {
+            let page = fixture.page(Some(project), false, PAGE_SIZE_LIMIT, None)?;
+            let actual: BTreeSet<_> = page["lanes"]
+                .as_array()
+                .ok_or("lanes")?
                 .iter()
-                .find(|lane| lane["lane_id"]["key"]["graph"].as_str() == Some(graph))
-                .unwrap()["chair"]
-                .clone()
-        };
-        // Project scope and provenance determine whether an unmatched chair
-        // row is invisible or leaves coverage partial.
-        for (row_project, proposal, expected_coverage) in [
-            (project, "foreign-project-proposal", "complete"),
-            (other_project, "mismatched-project-proposal", "partial"),
-        ] {
-            let mut candidate = request.clone();
-            candidate.fresh_continuation = Some(proposal.into());
-            ChairIndex::open(&roots.state, &chair_call)?.submit(
-                row_project,
-                "lane-100",
-                &candidate,
-                &chair_call,
-            )?;
-            let board = read(&roots, None, false, PAGE, None)?;
-            assert_eq!(chair_for(&board, &format!("lane-{ATTEMPTS}")), Value::Null);
-            assert_eq!(board["coverage"]["chairs"], expected_coverage);
+                .map(|lane| {
+                    lane["lane_id"]["attempt_id"]
+                        .as_str()
+                        .ok_or("attempt id")
+                        .map(str::to_owned)
+                })
+                .collect::<Result<_, _>>()?;
+            let expected: BTreeSet<_> = (1..=fixture.attempts)
+                .filter(|n| (n % 2 == 1) == odd_attempts)
+                .map(|n| BoardFixture::id(n).to_string())
+                .collect();
+            assert_eq!(actual, expected);
+            assert!(
+                page["lanes"]
+                    .as_array()
+                    .ok_or("lanes")?
+                    .iter()
+                    .all(|lane| { lane["metadata"]["attempt"]["project_id"] == json!(project) })
+            );
         }
-        let cursor = first["next_cursor"].as_str().ok_or("missing cursor")?;
-        for malformed in ["", "junk", "g:0", "g:-1", "g:18446744073709551615"] {
-            let error = read(&roots, None, false, PAGE, Some(malformed)).unwrap_err();
-            assert!(matches!(error, Error::BoardCursor));
+        let empty = fixture.page(
+            Some(ProjectId::from_bytes([8; 16])),
+            false,
+            PAGE_SIZE_LIMIT,
+            None,
+        )?;
+        assert_eq!(empty["lanes"], json!([]));
+        Ok(())
+    }
+
+    #[test]
+    fn board_pages_follow_cursors_without_gaps_or_duplicates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = BoardFixture::new()?;
+        let first = fixture.page(None, true, PAGE, None)?;
+        let snapshot = first["snapshot"].clone();
+        let high_water = first["high_water"].clone();
+        let generation = first["generation"].clone();
+        let mut seen = BTreeSet::new();
+        let mut page = first;
+        loop {
+            let lanes = page["lanes"].as_array().ok_or("lanes")?;
+            assert!(lanes.len() <= PAGE as usize);
+            for lane in lanes {
+                let id = lane["lane_id"]["attempt_id"]
+                    .as_str()
+                    .ok_or("attempt id")?
+                    .to_owned();
+                assert!(seen.insert(id));
+            }
+            assert_eq!(page["snapshot"], snapshot);
+            assert_eq!(page["high_water"], high_water);
+            assert_eq!(page["generation"], generation);
+            let Some(cursor) = page["next_cursor"].as_str() else {
+                break;
+            };
+            page = fixture.page(None, true, PAGE, Some(cursor))?;
         }
-        let second = read(&roots, None, false, PAGE, Some(cursor))?;
-        assert_ne!(first["lanes"][0]["lane_id"], second["lanes"][0]["lane_id"]);
+        let expected: BTreeSet<_> = (1..=fixture.attempts)
+            .map(|n| BoardFixture::id(n).to_string())
+            .collect();
+        assert_eq!(seen, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn board_cursors_are_bound_to_filters_and_state_root() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fixture = BoardFixture::new()?;
+        let first = fixture.page(None, false, PAGE, None)?;
+        let cursor = first["next_cursor"].as_str().ok_or("cursor")?;
         for (selected, all, limit) in [
             (None, true, PAGE),
-            (Some(project), false, PAGE),
+            (Some(fixture.project), false, PAGE),
             (None, false, PAGE_SIZE_LIMIT),
         ] {
             assert!(matches!(
-                read(&roots, selected, all, limit, Some(cursor)),
+                fixture.page(selected, all, limit, Some(cursor)),
                 Err(Error::BoardCursor)
             ));
         }
-        let mut other_inputs = inputs.clone();
-        other_inputs.state_dir = Some(base.join("other-state"));
+        let mut other_inputs = fixture.inputs.clone();
+        other_inputs.state_dir = Some(fixture.base.join("other-state"));
         let other_roots = other_inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let filters = json!({"state_root":CanonicalV1::file_digest(other_roots.state.as_path().as_os_str().as_bytes()),"host":null,"project_id":null,"all":false,"limit":PAGE});
+        let request = fixture.call();
         assert!(matches!(
-            cursor_position(cursor, &filters),
+            read_with_request(&other_roots, None, false, PAGE, Some(cursor), &request),
             Err(Error::BoardCursor)
         ));
-        let invalid_position = token(&binding(0, &filters)?, 0, 0)?;
-        assert_ne!(invalid_position, cursor);
+        Ok(())
+    }
+
+    #[test]
+    fn board_cursors_reject_invalid_positions() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = BoardFixture::with_attempts(1)?;
+        let first = fixture.page(None, false, PAGE, None)?;
+        let snapshot = first["snapshot"].as_str().ok_or("snapshot")?;
+        let high_water = first["high_water"].as_u64().ok_or("high water")?;
+        let zero_position = token(snapshot, high_water, 0)?;
+        let future_position = token(snapshot, high_water, high_water + 1)?;
+        for invalid in ["", "not-a-cursor", &zero_position, &future_position] {
+            assert!(matches!(
+                fixture.page(None, false, PAGE, Some(invalid)),
+                Err(Error::BoardCursor)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn board_cursors_reject_unavailable_snapshot_high_water()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = BoardFixture::with_attempts(1)?;
+        let first = fixture.page(None, false, PAGE, None)?;
+        let high_water = first["high_water"].as_u64().ok_or("high water")? + 1;
+        let filters = &first["filters"];
+        let snapshot = binding(high_water, filters)?;
+        let unavailable = token(&snapshot, high_water, 1)?;
         assert!(matches!(
-            read(&roots, None, false, PAGE, Some(&invalid_position)),
+            fixture.page(None, false, PAGE, Some(&unavailable)),
             Err(Error::BoardCursor)
         ));
-        let page = read(&roots, None, false, PAGE_SIZE_LIMIT, None)?;
+        Ok(())
+    }
+
+    #[test]
+    fn board_page_bounds_follow_the_declared_limit() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = BoardFixture::new()?;
+        for limit in [0, PAGE_SIZE_LIMIT + 1] {
+            assert!(matches!(
+                fixture.page(None, false, limit, None),
+                Err(Error::Run(provenant_run::RunError::Validation(_)))
+            ));
+        }
+        let one = fixture.page(None, false, 1, None)?;
+        assert_eq!(one["lanes"].as_array().ok_or("lanes")?.len(), 1);
+        let maximum = fixture.page(None, false, PAGE_SIZE_LIMIT, None)?;
         assert_eq!(
-            page["lanes"].as_array().unwrap().len(),
+            maximum["lanes"].as_array().ok_or("lanes")?.len(),
             PAGE_SIZE_LIMIT as usize
         );
-        assert!(serde_json::to_vec(&page)?.len() < crate::MAX_RESULT_BYTES);
-        let walk = read(&roots, None, true, PAGE, None)?;
-        other.create(&prepared(ATTEMPTS + 1)?, &call)?;
-        let before_terminal = super::super::read(
-            &roots,
-            None,
-            &super::super::Console::Changes { since: None },
-        )?;
-        store.withdraw(
-            AttemptId::from_bytes([1; 16]),
+        assert!(serde_json::to_vec(&maximum)?.len() < crate::MAX_RESULT_BYTES);
+        Ok(())
+    }
+
+    #[test]
+    fn board_cursor_remains_usable_after_generation_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = BoardFixture::new()?;
+        let first = fixture.page(None, true, PAGE, None)?;
+        let cursor = first["next_cursor"].as_str().ok_or("cursor")?.to_owned();
+        let snapshot = first["snapshot"].clone();
+        let high_water = first["high_water"].clone();
+        fixture
+            .other
+            .create(&fixture.prepared_attempt(ATTEMPTS + 1)?, &fixture.call())?;
+        fixture.store.withdraw(
+            BoardFixture::id(1),
             AttemptState::Queued {
                 extra: Default::default(),
             },
             Outcome::Cancelled,
-            "test",
-            clock.wall_now()?,
-            &call,
+            "fixture",
+            fixture.clock.wall_now()?,
+            &fixture.call(),
         )?;
-        let terminal_changes = super::super::read(
-            &roots,
-            None,
-            &super::super::Console::Changes {
-                since: Some(before_terminal["generations"].to_string()),
-            },
-        )?;
-        assert_eq!(terminal_changes["changed"]["board"], true);
-        let resumed = read(&roots, None, false, PAGE, Some(cursor))?;
+        let resumed = fixture.page(None, true, PAGE, Some(&cursor))?;
+        assert_eq!(resumed["snapshot"], snapshot);
+        assert_eq!(resumed["high_water"], high_water);
         assert_ne!(resumed["generation"], first["generation"]);
-        assert_eq!(resumed["snapshot"], first["snapshot"]);
-        let empty = read(&roots, Some(project), false, PAGE, Some(selected_cursor))?;
-        assert_eq!(empty["lanes"], json!([]));
-        assert!(empty["next_cursor"].is_null());
-        assert_eq!(empty["coverage"]["observations"], "complete");
-        other.withdraw(
-            AttemptId::from_bytes([2; 16]),
+        let mut seen = BTreeSet::new();
+        for lane in first["lanes"].as_array().ok_or("lanes")? {
+            let id = lane["lane_id"]["attempt_id"]
+                .as_str()
+                .ok_or("attempt id")?
+                .to_owned();
+            assert!(seen.insert(id));
+        }
+        let mut page = resumed;
+        let mut terminal_parent_seen = false;
+        loop {
+            for lane in page["lanes"].as_array().ok_or("lanes")? {
+                let id = lane["lane_id"]["attempt_id"]
+                    .as_str()
+                    .ok_or("attempt id")?
+                    .to_owned();
+                assert!(seen.insert(id.clone()));
+                assert_ne!(id, BoardFixture::id(ATTEMPTS + 1).to_string());
+                terminal_parent_seen |= id == BoardFixture::id(1).to_string();
+            }
+            let Some(next) = page["next_cursor"].as_str() else {
+                break;
+            };
+            page = fixture.page(None, true, PAGE, Some(next))?;
+            assert_eq!(page["snapshot"], snapshot);
+            assert_eq!(page["high_water"], high_water);
+        }
+        let expected: BTreeSet<_> = (1..=fixture.attempts)
+            .map(|n| BoardFixture::id(n).to_string())
+            .collect();
+        assert_eq!(seen, expected);
+        assert!(terminal_parent_seen);
+        Ok(())
+    }
+
+    #[test]
+    fn board_all_filter_includes_terminal_attempts() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = BoardFixture::with_attempts(3)?;
+        fixture.store.withdraw(
+            BoardFixture::id(1),
             AttemptState::Queued {
                 extra: Default::default(),
             },
-            Outcome::Rejected,
-            "review",
-            clock.wall_now()?,
-            &call,
+            Outcome::Cancelled,
+            "fixture",
+            fixture.clock.wall_now()?,
+            &fixture.call(),
         )?;
-        let mut seen = std::collections::BTreeSet::new();
-        let mut page = walk.clone();
-        loop {
-            for row in page["lanes"].as_array().unwrap() {
-                let id = row["lane_id"]["attempt_id"].as_str().unwrap().to_owned();
-                assert!(seen.insert(id.clone()), "duplicate {id}");
-                if id == AttemptId::from_bytes([2; 16]).to_string() {
-                    assert_eq!(row["attention"], true);
-                }
-                if id == AttemptId::from_bytes([1; 16]).to_string() {
-                    assert_eq!(row["attention"], false);
-                }
-            }
-            let Some(cursor) = page["next_cursor"].as_str() else {
-                break;
-            };
-            let next = read(&roots, None, true, PAGE, Some(cursor))?;
-            assert_eq!(next["snapshot"], walk["snapshot"]);
-            assert_eq!(next["high_water"], walk["high_water"]);
-            assert_ne!(next["generation"], walk["generation"]);
-            page = next;
-        }
-        assert_eq!(
-            seen,
-            (1..=ATTEMPTS)
-                .map(|n| AttemptId::from_bytes([n; 16]).to_string())
-                .collect()
-        );
-        let active = read(&roots, None, false, PAGE_SIZE_LIMIT, None)?;
-        assert_eq!(
-            active["lanes"].as_array().unwrap().len(),
-            PAGE_SIZE_LIMIT as usize
-        );
-        assert!(
-            active["lanes"]
+        let active = fixture.page(Some(fixture.project), false, PAGE_SIZE_LIMIT, None)?;
+        let all = fixture.page(Some(fixture.project), true, PAGE_SIZE_LIMIT, None)?;
+        let id = BoardFixture::id(1).to_string();
+        let contains = |page: &Value| {
+            page["lanes"]
                 .as_array()
-                .unwrap()
+                .is_some_and(|lanes| lanes.iter().any(|lane| lane["lane_id"]["attempt_id"] == id))
+        };
+        assert!(!contains(&active));
+        assert!(contains(&all));
+        Ok(())
+    }
+
+    #[test]
+    fn board_observation_coverage_tracks_checkpoint_validity_and_mode()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = BoardFixture::with_attempts(1)?;
+        let id = fixture.last_attempt();
+        let checkpoint = fixture
+            .roots
+            .state
+            .as_path()
+            .join(format!("attempts/{id}/process.json"));
+        let observed_at = fixture.clock.wall_now()?;
+        let valid = serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "scope": { "attempt": id, "generation": 0 },
+            "last_output_at": observed_at,
+            "priority": 15
+        }))?;
+        let wrong_scope = serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "scope": { "attempt": id, "generation": u64::MAX },
+            "last_output_at": observed_at,
+            "priority": 15
+        }))?;
+        let cases = [
+            (valid.clone(), 0o600, "complete", true),
+            (b"{".to_vec(), 0o600, "partial", false),
+            (wrong_scope, 0o600, "partial", false),
+            (valid, 0o644, "partial", false),
+        ];
+        for (bytes, mode, coverage, row_is_observed) in cases {
+            std::fs::write(&checkpoint, bytes)?;
+            std::fs::set_permissions(&checkpoint, std::fs::Permissions::from_mode(mode))?;
+            let page = fixture.page(None, false, PAGE, None)?;
+            let row = page["lanes"]
+                .as_array()
+                .ok_or("lanes")?
                 .iter()
-                .all(|r| r["metadata"]["attempt"]["state"] == json!("queued"))
+                .find(|lane| lane["lane_id"]["attempt_id"] == json!(id))
+                .ok_or("observed row")?;
+            assert_eq!(page["coverage"]["observations"], coverage);
+            assert_eq!(row["observation_coverage"] == "complete", row_is_observed);
+            if row_is_observed {
+                assert_eq!(row["metadata"]["attempt"]["priority"], 15);
+                assert_eq!(
+                    row["metadata"]["attempt"]["last_output_at"],
+                    json!(observed_at)
+                );
+            } else {
+                assert!(row["metadata"]["attempt"]["priority"].is_null());
+                assert!(row["metadata"]["attempt"]["last_output_at"].is_null());
+                assert_eq!(
+                    fixture.page(None, false, 1, None)?["coverage"]["observations"],
+                    "unavailable"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn board_chair_lookup_uses_attempt_project_and_request_provenance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = BoardFixture::with_attempts(1)?;
+        let call = fixture.call();
+        let chair_call = fixture.chair_call();
+        let id = fixture.last_attempt();
+        let row = fixture.page(Some(fixture.project), false, PAGE_SIZE_LIMIT, None)?["lanes"]
+            .as_array()
+            .ok_or("lanes")?
+            .iter()
+            .find(|lane| lane["lane_id"]["attempt_id"] == json!(id))
+            .cloned()
+            .ok_or("selected row")?;
+        let graph = row["lane_id"]["key"]["graph"].as_str().ok_or("graph")?;
+        let request = fixture.store.request(id, &call)?;
+        let index = ChairIndex::open(&fixture.roots.state, &chair_call)?;
+        index.submit(fixture.other_project, graph, &request, &chair_call)?;
+        let unbound = fixture.page(Some(fixture.project), false, PAGE_SIZE_LIMIT, None)?;
+        assert_eq!(unbound["coverage"]["chairs"], "complete");
+        assert!(
+            unbound["lanes"]
+                .as_array()
+                .ok_or("lanes")?
+                .iter()
+                .find(|lane| { lane["lane_id"]["attempt_id"] == json!(id) })
+                .ok_or("selected row")?["chair"]
+                .is_null()
         );
+
+        index.submit(fixture.project, graph, &request, &chair_call)?;
+        let bound = fixture.page(Some(fixture.project), false, PAGE_SIZE_LIMIT, None)?;
+        assert_eq!(bound["coverage"]["chairs"], "complete");
+        let bound_row = bound["lanes"]
+            .as_array()
+            .ok_or("lanes")?
+            .iter()
+            .find(|lane| lane["lane_id"]["attempt_id"] == json!(id))
+            .ok_or("selected row")?;
+        assert_eq!(bound_row["chair"], json!(fixture.request.chair));
         Ok(())
     }
 }

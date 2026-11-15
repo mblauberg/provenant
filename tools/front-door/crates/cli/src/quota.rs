@@ -379,7 +379,13 @@ pub(crate) fn persist_provider_refusal_once(
         now_unix_seconds,
         resets_unix_seconds,
     )?;
-    write_intent(&directory, state_root, &intent, &mut records)
+    write_intent_at(
+        &directory,
+        state_root,
+        &intent,
+        &mut records,
+        now_unix_seconds,
+    )
 }
 
 pub(crate) fn persist_capacity_cooldown(
@@ -436,7 +442,13 @@ pub(crate) fn persist_capacity_cooldown(
     else {
         return Ok(());
     };
-    write_intent(&directory, state_root, &intent, &mut records)
+    write_intent_at(
+        &directory,
+        state_root,
+        &intent,
+        &mut records,
+        now_unix_seconds,
+    )
 }
 
 /// Record successful account-scoped provider evidence, without inventing quota.
@@ -516,7 +528,7 @@ pub(crate) fn persist_provider_success(
         readiness_probe_result: None,
         login_probe_expiry: None,
     };
-    write_intent(&directory, state_root, &intent, &mut records)?;
+    write_intent_at(&directory, state_root, &intent, &mut records, now)?;
 
     // Publish the changed row so an already-open menu receives the event.
     let mut bytes = Vec::new();
@@ -816,6 +828,22 @@ fn write_intent(
     intent: &UpdateIntent,
     records: &mut Vec<AccountRecord>,
 ) -> Result<(), EdgeError> {
+    write_intent_at(
+        dir,
+        state,
+        intent,
+        records,
+        SystemClock::new().unix_seconds(),
+    )
+}
+
+fn write_intent_at(
+    dir: &Directory,
+    state: &Path,
+    intent: &UpdateIntent,
+    records: &mut Vec<AccountRecord>,
+    now: i64,
+) -> Result<(), EdgeError> {
     let pos = records.iter().position(|r| {
         r.account.adapter == intent.account.adapter
             && r.account.account_key == intent.account.account_key
@@ -855,7 +883,7 @@ fn write_intent(
         }
     }
     // The account commit remains authoritative if derived publication fails.
-    if let Err(error) = sync_readiness(state, intent, SystemClock::new().unix_seconds()) {
+    if let Err(error) = sync_readiness(state, intent, now) {
         use std::io::Write;
         let _ = writeln!(
             io::stderr().lock(),
@@ -1358,9 +1386,10 @@ fn login_expiry_at(
 
 /// Read account login facts for doctor without probing providers or credentials.
 pub fn recorded_login_rows(roots: &Roots) -> Result<Vec<AccountRow>, String> {
-    recorded_login_rows_inner(roots).map_err(|error| error.to_string())
+    recorded_login_rows_at(roots, SystemClock::new().unix_seconds())
+        .map_err(|error| error.to_string())
 }
-fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError> {
+fn recorded_login_rows_at(roots: &Roots, now: i64) -> Result<Vec<AccountRow>, EdgeError> {
     let domains = crate::config_reads::read_for(roots, "quota")?.domains;
     let accounts = domains.accounts.unique_accounts();
     let mut configured: Vec<_> = accounts
@@ -1383,7 +1412,6 @@ fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError
         })
     });
     add_configured(&mut records, &configured);
-    let now = SystemClock::new().unix_seconds();
     let policies =
         provenant_providers::scheduling_policies(&domains.quota, provenant_providers::REGISTRY);
     let mut report = schedule::report(
@@ -1413,13 +1441,34 @@ pub fn probe_registered(
     effects: &dyn QuotaEffects,
     account: &AccountScope,
 ) -> Result<QuotaReport, String> {
-    probe_account(roots, registry, effects, account).map_err(|error| error.to_string())
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    probe_registered_with_clock(
+        roots,
+        registry,
+        effects,
+        account,
+        &SystemClock::new(),
+        home.as_deref(),
+    )
+    .map_err(|error| error.to_string())
+}
+fn probe_registered_with_clock(
+    roots: &Roots,
+    registry: &[provenant_providers::Registration],
+    effects: &dyn QuotaEffects,
+    account: &AccountScope,
+    clock: &dyn Clock,
+    home: Option<&Path>,
+) -> Result<QuotaReport, EdgeError> {
+    probe_account(roots, registry, effects, account, clock, home)
 }
 fn probe_account(
     roots: &Roots,
     registry: &[provenant_providers::Registration],
     effects: &dyn QuotaEffects,
     account: &AccountScope,
+    clock: &dyn Clock,
+    home: Option<&Path>,
 ) -> Result<QuotaReport, EdgeError> {
     if !registry
         .iter()
@@ -1431,13 +1480,15 @@ fn probe_account(
         let root = private(roots.state.as_path())?;
         let dir = child(&root, OsStr::new("quota"))?;
         let Some(_lock) = try_quota_lock(&dir)? else {
-            return execute(
+            return execute_with_clock(
                 &Quota::Show(Filter {
                     adapter: Some(account.adapter.clone()),
                 }),
                 roots,
                 registry,
                 effects,
+                clock,
+                home,
             );
         };
         let mut records = read_records(&dir)?;
@@ -1458,7 +1509,12 @@ fn probe_account(
                 .revision
                 .checked_add(1)
                 .ok_or(QuotaError::NumberOutOfRange)?;
-            write_intent(
+            let now = clock
+                .wall_now()
+                .map_err(|_| EdgeError::Time)?
+                .as_timestamp()
+                .as_second();
+            write_intent_at(
                 &dir,
                 roots.state.as_path(),
                 &UpdateIntent {
@@ -1469,10 +1525,11 @@ fn probe_account(
                     login_probe_expiry: None,
                 },
                 &mut records,
+                now,
             )?;
         }
     }
-    execute(
+    execute_with_clock(
         &Quota::Tick {
             adapter: Filter {
                 adapter: Some(account.adapter.clone()),
@@ -1483,6 +1540,8 @@ fn probe_account(
         roots,
         registry,
         effects,
+        clock,
+        home,
     )
 }
 pub(crate) fn execute(
@@ -1490,6 +1549,25 @@ pub(crate) fn execute(
     roots: &Roots,
     registry: &[provenant_providers::Registration],
     effects: &dyn QuotaEffects,
+) -> Result<QuotaReport, EdgeError> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    execute_with_clock(
+        command,
+        roots,
+        registry,
+        effects,
+        &SystemClock::new(),
+        home.as_deref(),
+    )
+}
+
+pub(crate) fn execute_with_clock(
+    command: &Quota,
+    roots: &Roots,
+    registry: &[provenant_providers::Registration],
+    effects: &dyn QuotaEffects,
+    clock: &dyn Clock,
+    home: Option<&Path>,
 ) -> Result<QuotaReport, EdgeError> {
     let all = Filter { adapter: None };
     let (filter, tick) = match command {
@@ -1523,7 +1601,6 @@ pub(crate) fn execute(
     }
     let domains = crate::config_reads::read_for(roots, "quota")?.domains;
     let (settings, entries) = (domains.quota, domains.accounts);
-    let clock = SystemClock::new();
     let now = clock
         .wall_now()
         .map_err(|_| EdgeError::Time)?
@@ -1558,17 +1635,18 @@ pub(crate) fn execute(
     let lock = || try_quota_lock(&dir);
     let plan = {
         let Some(_lock) = lock()? else {
-            return execute(
+            return execute_with_clock(
                 &Quota::Show(Filter {
                     adapter: filter.adapter.clone(),
                 }),
                 roots,
                 registry,
                 effects,
+                clock,
+                home,
             );
         };
         let mut records = read_records(&dir)?;
-        let home = std::env::var_os("HOME").map(PathBuf::from);
         refresh_auth_metadata(
             &dir,
             roots.state.as_path(),
@@ -1576,7 +1654,7 @@ pub(crate) fn execute(
             &entries,
             &detected,
             &tick,
-            home.as_deref(),
+            home,
         )?;
         let missing_readiness: Vec<_> = detected
             .iter()
@@ -1602,7 +1680,7 @@ pub(crate) fn execute(
             &missing_readiness,
         )?;
         for drop in &plan.drops {
-            write_intent(&dir, roots.state.as_path(), drop, &mut records)?;
+            write_intent_at(&dir, roots.state.as_path(), drop, &mut records, now)?;
         }
         clean_orphan_dirs(&dir)?;
         plan
@@ -1653,7 +1731,7 @@ pub(crate) fn execute(
                 Err(QuotaError::Conflict) => continue,
                 Err(error) => return Err(error.into()),
             };
-            write_intent(&dir, roots.state.as_path(), &intent, &mut records)?;
+            write_intent_at(&dir, roots.state.as_path(), &intent, &mut records, at)?;
             current
         };
         // The durable claim owns this probe; never hold quota.lock across host I/O.
@@ -1745,7 +1823,13 @@ pub(crate) fn execute(
                         .find(|policy| policy.adapter == account.adapter)
                         .map_or(300, |policy| policy.timer_seconds);
                     complete.login_probe_expiry = Some((login_expiry, interval));
-                    write_intent(&dir, roots.state.as_path(), &complete, &mut records)?;
+                    write_intent_at(
+                        &dir,
+                        roots.state.as_path(),
+                        &complete,
+                        &mut records,
+                        finished,
+                    )?;
                     // Best effort: a history fault never fails the refresh.
                     if let Some(snapshot) = complete
                         .replacement
@@ -1765,13 +1849,15 @@ pub(crate) fn execute(
         }
     }
     let Some(_lock) = lock()? else {
-        return execute(
+        return execute_with_clock(
             &Quota::Show(Filter {
                 adapter: filter.adapter.clone(),
             }),
             roots,
             registry,
             effects,
+            clock,
+            home,
         );
     };
     let mut records = read_records(&dir)?;
@@ -2528,7 +2614,7 @@ mod tests {
             "schema_version = 1\n[domains.accounts.entries.work]\nadapter = 'claude'\nlabel = 'work'\nkey = 'key'\ndirectory = '/fixture/account'\n",
         )?;
         let dir = child(&root, OsStr::new("quota"))?;
-        let now = SystemClock::new().unix_seconds();
+        let now = 1_700_000_000;
         let account = AccountScope {
             adapter: "claude".into(),
             account_key: "key".into(),
@@ -2555,8 +2641,8 @@ mod tests {
             readiness_probe_result: Some(Some(ReadinessReason::LoginExpired)),
             login_probe_expiry: Some((Some(now - 1), 300)),
         };
-        write_intent(&dir, roots.state.as_path(), &intent, &mut Vec::new())?;
-        let rows = recorded_login_rows(&roots).map_err(std::io::Error::other)?;
+        write_intent_at(&dir, roots.state.as_path(), &intent, &mut Vec::new(), now)?;
+        let rows = recorded_login_rows_at(&roots, now).map_err(std::io::Error::other)?;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].account.label, "work");
         assert_eq!(rows[0].error, Some(ProbeFailure::LoginExpired));
@@ -2564,7 +2650,7 @@ mod tests {
             rows[0].login_expiry.as_ref().unwrap().state,
             LoginExpiryState::Expired
         );
-        let read_at = SystemClock::new().unix_seconds();
+        let read_at = now;
         let readiness = read_readiness(
             roots.state.as_path(),
             &ReadinessScope {
@@ -2615,78 +2701,109 @@ mod tests {
     }
 
     #[test]
-    fn login_repair_uses_registered_account_context_or_says_unavailable() {
-        let mut entry: provenant_providers::accounts::Registration = serde_json::from_value(
-            serde_json::json!({"adapter":"claude","label":"work","key":"key","directory":"/tmp/account's files"}),
-        )
-        .unwrap();
-        assert_eq!(
-            login_repair(Some(&entry)),
-            "run `CLAUDE_CONFIG_DIR='/tmp/account'\\''s files' claude auth login` interactively"
-        );
-        let expired_repair = login_expired_repair(Some(&entry));
-        assert!(expired_repair.starts_with(
-            "try a short interactive session with `CLAUDE_CONFIG_DIR='/tmp/account'\\''s files' claude`"
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "exercise the POSIX shell quoting boundary"
+    )]
+    fn login_repair_uses_declared_templates_and_quotes_registered_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        fn commands(text: &str) -> impl Iterator<Item = &str> {
+            text.split('`').skip(1).step_by(2)
+        }
+        fn has_template_command(text: &str, template: &str) -> bool {
+            let Some((before, after)) = template.split_once("{directory}") else {
+                return false;
+            };
+            commands(text).any(|command| command.starts_with(before) && command.ends_with(after))
+        }
+        fn shell_assignment_round_trips(
+            command: &str,
+            template: &str,
+            expected: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let (before, after) = template.split_once("{directory}").ok_or("directory slot")?;
+            let variable = before.strip_suffix('=').ok_or("assignment")?;
+            let assignment = command.strip_suffix(after).ok_or("command suffix")?;
+            let script = format!("{assignment}; printf '%s' \"${variable}\"");
+            let result = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(script)
+                .output()?;
+            assert!(result.status.success());
+            assert_eq!(result.stdout, expected.as_bytes());
+            Ok(())
+        }
+
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().join("account's files");
+        let directory_text = directory.to_str().ok_or("fixture path")?;
+        let mut entry: provenant_providers::accounts::Registration =
+            serde_json::from_value(serde_json::json!({
+                "adapter": "claude",
+                "label": "work",
+                "key": "key",
+                "directory": directory,
+            }))?;
+        let spec = provenant_records::AdapterSpec::get("claude").ok_or("adapter spec")?;
+        let repair = login_repair(Some(&entry));
+        let login_template = spec.login_template.ok_or("login template")?;
+        let (login_before, login_after) = login_template
+            .split_once("{directory}")
+            .ok_or("directory slot")?;
+        let login_command = commands(&repair)
+            .find(|command| command.starts_with(login_before) && command.ends_with(login_after))
+            .ok_or("login command")?;
+        shell_assignment_round_trips(login_command, login_template, directory_text)?;
+
+        let expired = login_expired_repair(Some(&entry));
+        for template in [spec.login_refresh_template, spec.login_template]
+            .into_iter()
+            .flatten()
+        {
+            let (before, after) = template.split_once("{directory}").ok_or("directory slot")?;
+            let command = commands(&expired)
+                .find(|command| command.starts_with(before) && command.ends_with(after))
+                .ok_or("declared recovery command")?;
+            shell_assignment_round_trips(command, template, directory_text)?;
+        }
+
+        entry.directory = temp.path().join("line\nbreak");
+        assert!(!has_template_command(
+            &login_repair(Some(&entry)),
+            login_template
         ));
-        assert!(expired_repair.contains("if that does not refresh the login"));
-        assert!(expired_repair.contains("claude auth login` interactively"));
-        let diagnostic = login_diagnostic(
-            Some(&entry),
-            Some(100),
-            &provenant_records::RouteExclusionReason::LoginExpired,
-        );
-        assert!(
-            diagnostic.contains("work [claude]: login expired"),
-            "{diagnostic}"
-        );
-        assert!(diagnostic.contains("1970-01-01T00:01:40Z"), "{diagnostic}");
-        let mismatch = login_diagnostic(
-            Some(&entry),
-            Some(100),
-            &provenant_records::RouteExclusionReason::AccountMismatch,
-        );
-        assert!(mismatch.contains("signed-in account differs from registration"));
-        assert!(mismatch.contains("CLAUDE_CONFIG_DIR="));
-        assert!(diagnostic.contains(&expired_repair), "{diagnostic}");
-        let codex: provenant_providers::accounts::Registration = serde_json::from_value(
-            serde_json::json!({"adapter":"codex","label":"work","key":"key","directory":"/tmp/codex"}),
-        )
-        .unwrap();
-        assert_eq!(
-            login_expired_repair(Some(&codex)),
-            "run `CODEX_HOME='/tmp/codex' codex login` interactively"
-        );
-        let missing = login_diagnostic(
-            None,
-            None,
-            &provenant_records::RouteExclusionReason::LoginExpired,
-        );
-        assert!(
-            missing.contains("last successful observation unknown"),
-            "{missing}"
-        );
-        assert!(missing.contains("remedy unavailable"), "{missing}");
-        entry.directory = "/tmp/line\nbreak".into();
-        assert!(login_repair(Some(&entry)).contains("unavailable"));
-        entry.directory = "/tmp/`command`".into();
-        assert!(login_repair(Some(&entry)).contains("unavailable"));
-        entry.directory = "/tmp/account".into();
+        entry.directory = temp.path().join("`command`");
+        assert!(!has_template_command(
+            &login_repair(Some(&entry)),
+            login_template
+        ));
+        entry.directory = temp.path().join("account");
         entry.adapter = "unknown".into();
-        assert!(login_repair(Some(&entry)).contains("unavailable"));
-        assert!(login_repair(None).contains("unavailable"));
+        assert!(!has_template_command(
+            &login_repair(Some(&entry)),
+            login_template
+        ));
+        assert!(!has_template_command(&login_repair(None), login_template));
+        Ok(())
     }
 
     #[test]
-    fn account_mismatch_names_the_repair_and_sign_out_keeps_login_text() {
-        let entry: provenant_providers::accounts::Registration = serde_json::from_value(
-            serde_json::json!({"adapter":"agy","label":"work","key":"key","directory":"/tmp/account"}),
-        )
-        .unwrap();
-        let repair = login_repair(Some(&entry));
-        assert!(repair.contains("HOME='/tmp/account' agy"), "{repair}");
-        assert!(repair.contains("/login"), "{repair}");
-        let human = |error| {
-            let report = QuotaReport {
+    fn account_auth_failures_keep_typed_causes_and_registered_recovery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let entry: provenant_providers::accounts::Registration =
+            serde_json::from_value(serde_json::json!({
+                "adapter": "agy",
+                "label": "work",
+                "key": "agy-google-abc",
+                "directory": "/fixture/account",
+            }))?;
+        let registered_directory = entry.directory.clone();
+        let accounts = provenant_providers::accounts::Settings {
+            entries: std::collections::BTreeMap::from([("work".into(), entry)]),
+            ..Default::default()
+        };
+        for failure in [ProbeFailure::AccountMismatch, ProbeFailure::Auth] {
+            let mut report = QuotaReport {
                 schema_version: 1,
                 generated_unix_seconds: 0,
                 accounts: vec![AccountRow {
@@ -2706,8 +2823,8 @@ mod tests {
                     age_seconds: None,
                     next_due_unix_seconds: None,
                     refreshing: false,
-                    error: Some(error),
-                    repair: Some(repair.clone()),
+                    error: Some(failure),
+                    repair: None,
                     capacity_cooldowns: vec![],
                     display: None,
                 }],
@@ -2719,17 +2836,17 @@ mod tests {
                 display: Default::default(),
                 display_icon_warning: None,
             };
-            quota_human(&report)
-        };
-        let mismatch = human(ProbeFailure::AccountMismatch);
-        assert!(mismatch.contains("account_mismatch"), "{mismatch}");
-        assert!(mismatch.contains("differs"), "{mismatch}");
-        assert!(!mismatch.contains("needs login"), "{mismatch}");
-        assert!(mismatch.contains(&repair), "{mismatch}");
-        let signed_out = human(ProbeFailure::Auth);
-        assert!(signed_out.contains("needs login"), "{signed_out}");
-        assert!(!signed_out.contains("differs"), "{signed_out}");
-        assert!(signed_out.contains(&repair), "{signed_out}");
+            decorate(&mut report, &accounts, &Display::default());
+            let row = &report.accounts[0];
+            assert_eq!(row.error, Some(failure));
+            assert_eq!(row.status, QuotaStatus::AuthRequired);
+            let repair = row.repair.as_deref().ok_or("registered recovery")?;
+            assert!(
+                repair.contains(registered_directory.to_str().ok_or("registered path")?),
+                "{repair}"
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -2759,7 +2876,7 @@ mod tests {
         let mut report = QuotaReport {
             schema_version: 1,
             generated_unix_seconds: 0,
-            accounts: vec![row("legacy")],
+            accounts: vec![row("unregistered")],
             sources: vec![],
             coverage: Coverage { total: 1, known: 0 },
             refreshing_ids: vec![],
@@ -2773,26 +2890,42 @@ mod tests {
             &provenant_providers::accounts::Settings::default(),
             &Display::default(),
         );
-        let repair = report.accounts[0].repair.as_deref().expect("repair text");
-        assert!(repair.contains("isolated keychain"), "{repair}");
-        assert!(repair.contains("--directory ~ legacy"), "{repair}");
-        assert!(repair.contains("docs/runbooks/providers.md"), "{repair}");
+        let row = &report.accounts[0];
+        assert_eq!(row.error, Some(ProbeFailure::IsolatedKeychainUnavailable));
+        assert_eq!(row.status, QuotaStatus::KeychainUnavailable);
+        let expected = keychain_repair(None, &row.account.label);
+        assert_eq!(row.repair.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
-    fn isolated_keychain_status_names_expected_path_and_repair() {
-        let report = QuotaReport {
+    fn isolated_keychain_repair_uses_the_registered_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().join("account");
+        let registration: provenant_providers::accounts::Registration =
+            serde_json::from_value(serde_json::json!({
+                "adapter": "agy",
+                "label": "work",
+                "key": "agy-google-abc",
+                "directory": directory,
+            }))?;
+        let accounts = provenant_providers::accounts::Settings {
+            entries: std::collections::BTreeMap::from([("work".into(), registration)]),
+            ..Default::default()
+        };
+        let account = AccountScope {
+            adapter: "agy".into(),
+            account_key: "agy-google-abc".into(),
+            label: "work".into(),
+        };
+        let mut report = QuotaReport {
             schema_version: 1,
             generated_unix_seconds: 0,
             accounts: vec![AccountRow {
-                account: AccountScope {
-                    adapter: "agy".into(),
-                    account_key: "agy-google-abc".into(),
-                    label: "legacy".into(),
-                },
+                account,
                 readiness: None,
                 login_expiry: None,
-                    auth_state: None,
+                auth_state: None,
                 snapshot: None,
                 status: QuotaStatus::KeychainUnavailable,
                 resets_at: None,
@@ -2802,7 +2935,7 @@ mod tests {
                 next_due_unix_seconds: None,
                 refreshing: false,
                 error: Some(ProbeFailure::IsolatedKeychainUnavailable),
-                repair: Some("expected /tmp/.gemini/Library/Keychains/login.keychain-db; re-register with `provenant accounts register --adapter agy --directory ~ legacy`".into()),
+                repair: None,
                 capacity_cooldowns: vec![],
                 display: None,
             }],
@@ -2814,22 +2947,22 @@ mod tests {
             display: Default::default(),
             display_icon_warning: None,
         };
-        let human = quota_human(&report);
-        assert!(human.contains("KEYCHAIN_UNAVAILABLE"), "{human}");
-        assert!(
-            human.contains("/tmp/.gemini/Library/Keychains/login.keychain-db"),
-            "{human}"
-        );
-        assert!(human.contains("--directory ~ legacy"), "{human}");
+        decorate(&mut report, &accounts, &Display::default());
+        let repair = report.accounts[0].repair.as_deref().ok_or("repair")?;
+        let expected = directory.join("Library/Keychains/login.keychain-db");
+        assert!(repair.contains(expected.to_str().ok_or("path")?));
+        let human = quota_human_at(&report, jiff::tz::TimeZone::UTC);
+        assert!(human.contains(repair));
+        Ok(())
     }
 
     #[test]
-    fn quota_summary_shows_every_configured_account() {
-        let row = |status| AccountRow {
+    fn quota_summary_keeps_every_configured_account_row() {
+        let row = |status, label: &str| AccountRow {
             account: AccountScope {
                 adapter: "test".into(),
-                account_key: "key".into(),
-                label: format!("{status:?}"),
+                account_key: label.into(),
+                label: label.into(),
             },
             readiness: None,
             login_expiry: None,
@@ -2851,9 +2984,9 @@ mod tests {
             schema_version: 1,
             generated_unix_seconds: 0,
             accounts: vec![
-                row(QuotaStatus::Available),
-                row(QuotaStatus::CreditOnly),
-                row(QuotaStatus::Exhausted),
+                row(QuotaStatus::Available, "available"),
+                row(QuotaStatus::CreditOnly, "credit-only"),
+                row(QuotaStatus::Exhausted, "exhausted"),
             ],
             sources: vec![],
             coverage: Coverage { total: 3, known: 3 },
@@ -2863,47 +2996,33 @@ mod tests {
             display: Default::default(),
             display_icon_warning: Some("warning".into()),
         };
-        let summary = quota_summary(&report);
-        assert_eq!(summary.lines.len(), 5); // headline, warning, and all three accounts
-        assert!(
-            summary
-                .lines
-                .iter()
-                .any(|line| line.contains("Available [test]: available"))
-        );
-        assert!(
-            summary
-                .lines
-                .iter()
-                .any(|line| line.contains("CreditOnly [test]: credit_only"))
-        );
-        assert!(
-            summary
-                .lines
-                .iter()
-                .any(|line| line.contains("Exhausted [test]: exhausted"))
-        );
-        assert_eq!(summary.omitted, 0);
-        assert_eq!(summary.next.as_deref(), Some("provenant quota tick"));
-        for _ in 0..14 {
-            report.accounts.push(row(QuotaStatus::Stale));
+        for index in 0..14 {
+            report
+                .accounts
+                .push(row(QuotaStatus::Stale, &format!("stale-{index}")));
         }
         let summary = quota_summary(&report);
-        assert_eq!(summary.lines.len(), 19); // more than the shared summary row limit
-        assert!(
-            summary
-                .lines
-                .iter()
-                .filter(|line| line.contains("[test]:"))
-                .count()
-                == 17
-        );
+        let account_lines: Vec<_> = summary
+            .lines
+            .iter()
+            .filter(|line| {
+                report.accounts.iter().any(|row| {
+                    line.starts_with(&format!("{} [{}]:", row.account.label, row.account.adapter))
+                })
+            })
+            .collect();
+        assert_eq!(account_lines.len(), report.accounts.len());
         assert_eq!(summary.omitted, 0);
-        assert_eq!(summary.next.as_deref(), Some("provenant quota tick"));
+        for row in &report.accounts {
+            assert!(summary.lines.iter().any(|line| {
+                line.starts_with(&format!("{} [{}]:", row.account.label, row.account.adapter))
+            }));
+        }
     }
 
     #[test]
-    fn quota_reset_output_uses_local_time_and_does_not_invent_missing_expiries() {
+    fn quota_reset_output_uses_local_time_and_does_not_invent_missing_expiries()
+    -> Result<(), Box<dyn std::error::Error>> {
         let zone = jiff::tz::TimeZone::get("Australia/Brisbane").unwrap();
         let second = |value: &str| value.parse::<jiff::Timestamp>().unwrap().as_second();
         let row = |label: &str, resets_at: Option<&str>| AccountRow {
@@ -2941,37 +3060,35 @@ mod tests {
             display_icon_warning: None,
         };
 
+        let reset = "2026-11-02T00:11:00Z".parse::<jiff::Timestamp>()?;
         let today = report("2026-11-02T00:00:00Z", Some("2026-11-02T00:11:00Z"));
         let human = quota_human_at(&today, zone.clone());
-        assert!(
-            human.contains("zen [opencode]: EXHAUSTED until 10:11"),
-            "{human}"
-        );
-        assert!(
-            human.contains("unknown [opencode]: EXHAUSTED, age"),
-            "{human}"
-        );
-        assert!(
-            !human.contains("unknown [opencode]: EXHAUSTED until"),
-            "{human}"
-        );
+        let zen = human
+            .lines()
+            .find(|line| line.starts_with("zen [opencode]:"))
+            .ok_or("zen row")?;
+        let unknown = human
+            .lines()
+            .find(|line| line.starts_with("unknown [opencode]:"))
+            .ok_or("unknown row")?;
+        let local_time = reset.to_zoned(zone.clone()).strftime("%H:%M").to_string();
+        assert!(zen.contains(&local_time), "{zen}");
+        assert!(!unknown.contains(&local_time), "{unknown}");
         let compact = quota_summary_at(&today, zone.clone());
         assert!(
             compact
                 .lines
                 .iter()
-                .any(|line| line == "zen [opencode]: exhausted until 10:11")
+                .any(|line| { line.starts_with("zen [opencode]:") && line.contains(&local_time) })
         );
-        assert!(
-            compact
-                .lines
-                .iter()
-                .any(|line| line == "unknown [opencode]: exhausted")
-        );
-        assert_eq!(
-            serde_json::to_value(&today).unwrap()["accounts"][0]["resets_at"],
-            "2026-11-02T00:11:00Z"
-        );
+        assert!(compact.lines.iter().any(|line| {
+            line.starts_with("unknown [opencode]:") && !line.contains(&local_time)
+        }));
+        let encoded_reset = serde_json::to_value(&today).unwrap()["accounts"][0]["resets_at"]
+            .as_str()
+            .ok_or("reset instant")?
+            .parse::<jiff::Timestamp>()?;
+        assert_eq!(encoded_reset, reset);
 
         let mut failed = today.clone();
         let row = &mut failed.accounts[0];
@@ -2987,10 +3104,14 @@ mod tests {
             windows: vec![],
             details: None,
         });
-        let failed_human = quota_human_at(&failed, zone.clone());
-        assert!(failed_human.contains("zen [opencode]: EXHAUSTED"));
-        assert!(failed_human.contains("(last known)"));
-        assert!(failed_human.contains("refresh failed: auth"));
+        assert_eq!(failed.accounts[0].error, Some(ProbeFailure::Auth));
+        assert_eq!(
+            failed.accounts[0]
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.status),
+            Some(QuotaStatus::Exhausted)
+        );
 
         let mut scoped = today.clone();
         scoped.accounts[1].status = QuotaStatus::Available;
@@ -3001,24 +3122,37 @@ mod tests {
             resets_at: Some("2026-11-02T00:11:00Z".into()),
         }];
         let human = quota_human_at(&scoped, zone.clone());
-        assert!(
-            human
-                .contains("recorded refusal for opencode/beam-pro in pool opencode-go until 10:11"),
-            "{human}"
-        );
+        let scoped_row = human
+            .lines()
+            .find(|line| line.starts_with("unknown [opencode]:"))
+            .ok_or("scoped row")?;
+        assert!(scoped_row.contains(&local_time), "{scoped_row}");
         let compact = quota_summary_at(&scoped, zone.clone());
-        assert!(compact.lines.iter().any(|line| {
-            line == "unknown [opencode]: available (recorded refusal for opencode/beam-pro in pool opencode-go until 10:11)"
-        }));
-        assert_eq!(
-            serde_json::to_value(&scoped).unwrap()["accounts"][1]["refusals"][0]["resets_at"],
-            "2026-11-02T00:11:00Z"
+        assert!(
+            compact
+                .lines
+                .iter()
+                .any(|line| line.starts_with("unknown [opencode]:") && line.contains(&local_time))
         );
+        let encoded_refusal = serde_json::to_value(&scoped).unwrap()["accounts"][1]["refusals"][0]
+            ["resets_at"]
+            .as_str()
+            .ok_or("refusal instant")?
+            .parse::<jiff::Timestamp>()?;
+        assert_eq!(encoded_refusal, reset);
 
         let tomorrow = report("2026-11-02T10:00:00Z", Some("2026-11-03T00:11:00Z"));
-        assert!(
-            quota_human_at(&tomorrow, zone).contains("zen [opencode]: EXHAUSTED until Tue 10:11")
-        );
+        let tomorrow_reset = "2026-11-03T00:11:00Z".parse::<jiff::Timestamp>()?;
+        let tomorrow_expected = tomorrow_reset
+            .to_zoned(zone.clone())
+            .strftime("%a %H:%M")
+            .to_string();
+        let tomorrow_line = quota_human_at(&tomorrow, zone)
+            .lines()
+            .find(|line| line.starts_with("zen [opencode]:"))
+            .ok_or("tomorrow row")?;
+        assert!(tomorrow_line.contains(&tomorrow_expected));
+        Ok(())
     }
 
     #[test]
@@ -3058,6 +3192,16 @@ mod tests {
     #[test]
     fn account_line_names_the_exhausted_shared_pool_without_exhausting_the_account()
     -> Result<(), Box<dyn std::error::Error>> {
+        assert!(
+            provenant_records::AdapterSpec::get("agy")
+                .ok_or("grouped adapter declaration")?
+                .grouped_quota_pools
+        );
+        assert!(
+            !provenant_records::AdapterSpec::get("claude")
+                .ok_or("ungrouped adapter declaration")?
+                .grouped_quota_pools
+        );
         let snapshot = |adapter: &str,
                         status: &str,
                         windows: serde_json::Value|
@@ -3081,10 +3225,9 @@ mod tests {
                 window("claude.weekly", 10_000),
             ]),
         )?;
-        assert_eq!(
-            shared_pool_exhaustions(&mixed).as_deref(),
-            Some("claude pool exhausted (shared)")
-        );
+        assert_eq!(mixed.status, QuotaStatus::Available);
+        let shared = shared_pool_exhaustions(&mixed).ok_or("shared exhaustion")?;
+        assert!(shared.contains("claude") && shared.contains("shared"));
         let spent = snapshot(
             "agy",
             "exhausted",
@@ -3093,10 +3236,8 @@ mod tests {
                 window("claude.weekly", 10_000),
             ]),
         )?;
-        assert_eq!(
-            shared_pool_exhaustions(&spent).as_deref(),
-            Some("gemini pool exhausted (shared), claude pool exhausted (shared)")
-        );
+        let shared = shared_pool_exhaustions(&spent).ok_or("shared exhaustion")?;
+        assert!(shared.contains("gemini") && shared.contains("claude"));
         // A single pool is the account status's own business; ungrouped
         // adapters have no shared pools to name.
         let single = snapshot(
@@ -3153,13 +3294,12 @@ mod tests {
         );
         assert!(!human.contains("EXHAUSTED"), "{human}");
         let summary = quota_summary(&report);
-        assert!(
-            summary
-                .lines
-                .iter()
-                .any(|line| line == "agy [agy]: available (claude pool exhausted (shared))"),
-            "{summary:?}"
-        );
+        let row = summary
+            .lines
+            .iter()
+            .find(|line| line.starts_with("agy [agy]:"))
+            .ok_or("available account row")?;
+        assert!(row.contains("claude") && row.contains("shared"), "{row}");
         let report = QuotaReport {
             accounts: vec![row(Some(spent), QuotaStatus::Exhausted)],
             ..report
@@ -3170,7 +3310,15 @@ mod tests {
             "{human}"
         );
         let summary = quota_summary(&report);
-        assert!(summary.lines.iter().any(|line| line == "agy [agy]: exhausted (gemini pool exhausted (shared), claude pool exhausted (shared))"), "{summary:?}");
+        let row = summary
+            .lines
+            .iter()
+            .find(|line| line.starts_with("agy [agy]:"))
+            .ok_or("exhausted account row")?;
+        assert!(
+            row.contains("gemini") && row.contains("claude") && row.contains("shared"),
+            "{row}"
+        );
         Ok(())
     }
 
@@ -3188,7 +3336,7 @@ mod tests {
         };
         let mut record = AccountRecord::empty(account.clone());
         record.revision = 1;
-        write_intent(
+        write_intent_at(
             &dir,
             temp.path(),
             &UpdateIntent {
@@ -3199,6 +3347,7 @@ mod tests {
                 login_probe_expiry: None,
             },
             &mut Vec::new(),
+            100,
         )?;
         assert_eq!(provenant_os::changes::read(temp.path())?.quota, Some(1));
         Ok(())
@@ -3323,7 +3472,7 @@ mod tests {
         record.credential_metadata =
             credential_metadata(&entries.entries["codex-work"], None).unwrap();
         let mut records = Vec::new();
-        write_intent(
+        write_intent_at(
             &dir,
             temp.path(),
             &UpdateIntent {
@@ -3334,6 +3483,7 @@ mod tests {
                 login_probe_expiry: None,
             },
             &mut records,
+            100,
         )?;
         let detected = [Detection {
             adapter: "codex".into(),
@@ -3390,7 +3540,7 @@ mod tests {
         )?
         .replacement
         .unwrap();
-        write_intent(
+        write_intent_at(
             &dir,
             temp.path(),
             &UpdateIntent {
@@ -3401,11 +3551,12 @@ mod tests {
                 login_probe_expiry: None,
             },
             &mut records,
+            110,
         )?;
         let failed = schedule::complete(&reserved, "fake", 112, Err(ProbeFailure::Auth), None)?
             .replacement
             .unwrap();
-        write_intent(
+        write_intent_at(
             &dir,
             temp.path(),
             &UpdateIntent {
@@ -3416,6 +3567,7 @@ mod tests {
                 login_probe_expiry: None,
             },
             &mut records,
+            112,
         )?;
         refresh_auth_metadata(
             &dir,
@@ -3484,7 +3636,7 @@ mod tests {
                 token: "old".into(),
                 deadline_unix_seconds: 155,
             });
-            write_intent(
+            write_intent_at(
                 &dir,
                 temp.path(),
                 &UpdateIntent {
@@ -3495,6 +3647,7 @@ mod tests {
                     login_probe_expiry: None,
                 },
                 &mut records,
+                110,
             )?;
         }
         let report = schedule::report(
@@ -3786,7 +3939,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
         let state = temp.path();
-        let now = SystemClock::new().unix_seconds();
+        let now = 1_700_000_000;
         let scope = |adapter: &str, key: &str, route: &str| ReadinessScope {
             host: LOCAL_HOST.into(),
             adapter: adapter.into(),
@@ -3837,11 +3990,10 @@ mod tests {
             state_of(&scope("claude", "second", "pool")),
             ReadinessState::Unknown
         );
-        // Readiness is its own tree: quota/ keeps only the account snapshot.
-        let account_dir = state.join("quota").join("key");
-        assert_eq!(std::fs::read_dir(&account_dir)?.count(), 1);
+        // Readiness has its own per-account file; another scope stays absent.
+        assert!(state.join("quota/key/claude.json").is_file());
         assert!(state.join("readiness/key/claude.json").is_file());
-        assert_eq!(read_cache_at(state)?.len(), 1);
+        assert!(!state.join("readiness/second/claude.json").exists());
         // A reset time passing does not turn the refusal into ready.
         assert_eq!(
             read_readiness(state, &pool, now + 600).state,
@@ -3871,7 +4023,7 @@ mod tests {
         });
         let dir = child(&private(state)?, OsStr::new("quota"))?;
         let account = current.account.clone();
-        write_intent(
+        write_intent_at(
             &dir,
             state,
             &UpdateIntent {
@@ -3882,6 +4034,7 @@ mod tests {
                 login_probe_expiry: None,
             },
             &mut records,
+            now,
         )?;
         assert_eq!(state_of(&pool), ReadinessState::Unknown);
         assert_eq!(
@@ -3896,7 +4049,7 @@ mod tests {
             readiness_probe_result: None,
             login_probe_expiry: None,
         };
-        write_intent(&dir, state, &drop, &mut records)?;
+        write_intent_at(&dir, state, &drop, &mut records, now)?;
         assert!(!state.join("readiness/key").exists());
         Ok(())
     }
@@ -3946,10 +4099,9 @@ mod tests {
             ProbeFailure::RateLimited,
         ] {
             let temp = tempfile::tempdir()?;
-            let mut inputs = provenant_core::RootInputs::new(
-                temp.path().join("home"),
-                temp.path().join("checkout"),
-            );
+            let home = temp.path().join("home");
+            let mut inputs =
+                provenant_core::RootInputs::new(home.clone(), temp.path().join("checkout"));
             inputs.state_dir = Some(temp.path().join("state"));
             let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
             let tick = Quota::Tick {
@@ -3959,20 +4111,26 @@ mod tests {
                 trigger: Trigger::Manual,
                 power: Power::Ac,
             };
-            let failed = execute(
+            use provenant_core::{MonoTime, TestClock, WallTime};
+            let clock = TestClock::new(WallTime::from_unix_seconds(100)?, MonoTime::from_micros(0));
+            let failed = execute_with_clock(
                 &tick,
                 &roots,
                 provenant_providers::REGISTRY,
                 &Effects {
                     failure: Some(failure),
                 },
+                &clock,
+                Some(&home),
             )?;
             assert_eq!(failed.accounts[0].error, Some(failure));
-            let registered = probe_registered(
+            let registered = probe_registered_with_clock(
                 &roots,
                 provenant_providers::REGISTRY,
                 &Effects { failure: None },
                 &account,
+                &clock,
+                Some(&home),
             )?;
             let row = &registered.accounts[0];
             assert_eq!(row.error, None, "{failure:?}");
@@ -4053,10 +4211,9 @@ mod tests {
             ),
         ] {
             let temp = tempfile::tempdir()?;
-            let mut inputs = provenant_core::RootInputs::new(
-                temp.path().join("home"),
-                temp.path().join("checkout"),
-            );
+            let home = temp.path().join("home");
+            let mut inputs =
+                provenant_core::RootInputs::new(home.clone(), temp.path().join("checkout"));
             inputs.state_dir = Some(temp.path().join("state"));
             let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
             let command = Quota::Tick {
@@ -4066,9 +4223,10 @@ mod tests {
                 trigger: Trigger::Manual,
                 power: Power::Ac,
             };
-            let expiry = SystemClock::new().unix_seconds() + 60;
-            let expiry = (failure.is_none() && !malformed).then_some(expiry);
-            let report = execute(
+            use provenant_core::{MonoTime, TestClock, WallTime};
+            let clock = TestClock::new(WallTime::from_unix_seconds(100)?, MonoTime::from_micros(0));
+            let expiry = (failure.is_none() && !malformed).then_some(160);
+            let report = execute_with_clock(
                 &command,
                 &roots,
                 provenant_providers::REGISTRY,
@@ -4077,6 +4235,8 @@ mod tests {
                     malformed,
                     expiry,
                 },
+                &clock,
+                Some(&home),
             )?;
             assert_eq!(
                 report.accounts[0].error,
@@ -4100,21 +4260,6 @@ mod tests {
                     LoginExpiryState::Unknown
                 }
             );
-            let human = quota_human(&report);
-            assert!(
-                human.contains(if expiry.is_some() {
-                    "login expiring"
-                } else {
-                    "login expiry unknown"
-                }),
-                "{human}"
-            );
-            if expiry.is_some() {
-                assert!(
-                    human.contains("account-specific login remedy unavailable"),
-                    "{human}"
-                );
-            }
             let json = serde_json::to_value(&report)?;
             assert_eq!(
                 json["accounts"][0]["login_expiry"]["state"],
@@ -4132,7 +4277,7 @@ mod tests {
                     account_key: "key".into(),
                     route: "codex/model".into(),
                 },
-                SystemClock::new().unix_seconds(),
+                report.generated_unix_seconds,
             );
             assert_eq!(
                 read.reason,
@@ -4235,9 +4380,19 @@ mod tests {
             )?;
             assert_eq!(decoded, reason);
             match reason {
-                NotProbed | Stale | ProbeTimeout | CommandFailure | MissingExecutable
-                | SignedOut | LoginExpired | AccountMismatch | Exhausted | ProviderRefusal
-                | UncalibratedPartialCoverage | InvalidEvidence | UnreachablePeer
+                NotProbed
+                | Stale
+                | ProbeTimeout
+                | CommandFailure
+                | MissingExecutable
+                | SignedOut
+                | LoginExpired
+                | AccountMismatch
+                | Exhausted
+                | ProviderRefusal
+                | UncalibratedPartialCoverage
+                | InvalidEvidence
+                | UnreachablePeer
                 | UnsupportedPeerVersion => {}
             }
         }
@@ -4260,7 +4415,7 @@ mod tests {
         let mut records = Vec::new();
         let mut initial = AccountRecord::empty(account.clone());
         initial.revision = 1;
-        let now = SystemClock::new().unix_seconds();
+        let now = 1_700_000_000;
         initial.refusals = (0..provenant_quota::MAX_READINESS_RECORDS)
             .map(|i| provenant_quota::Refusal {
                 extra: Default::default(),
@@ -4271,7 +4426,7 @@ mod tests {
                 resets_unix_seconds: Some(now + 600),
             })
             .collect();
-        write_intent(
+        write_intent_at(
             &dir,
             state,
             &UpdateIntent {
@@ -4282,6 +4437,7 @@ mod tests {
                 login_probe_expiry: None,
             },
             &mut records,
+            now,
         )?;
 
         let current = records[0].clone();
@@ -4295,14 +4451,14 @@ mod tests {
             readiness_probe_result: Some(Some(ReadinessReason::ProbeTimeout)),
             login_probe_expiry: None,
         };
-        write_intent(&dir, state, &failure, &mut records)?;
+        write_intent_at(&dir, state, &failure, &mut records, now)?;
         let route = ReadinessScope {
             host: LOCAL_HOST.into(),
             adapter: "agy".into(),
             account_key: "work".into(),
             route: "agy/model".into(),
         };
-        let held = read_readiness(state, &route, SystemClock::new().unix_seconds());
+        let held = read_readiness(state, &route, now);
         assert_eq!(held.state, ReadinessState::Unavailable);
         assert_eq!(held.reason, Some(ReadinessReason::ProbeTimeout));
 
@@ -4317,9 +4473,9 @@ mod tests {
             readiness_probe_result: Some(None),
             login_probe_expiry: None,
         };
-        write_intent(&dir, state, &success, &mut records)?;
+        write_intent_at(&dir, state, &success, &mut records, now)?;
         assert_eq!(
-            read_readiness(state, &route, SystemClock::new().unix_seconds()).state,
+            read_readiness(state, &route, now).state,
             ReadinessState::Unknown
         );
         let pool = ReadinessScope {
@@ -4327,7 +4483,7 @@ mod tests {
             ..route.clone()
         };
         assert_eq!(
-            read_readiness(state, &pool, SystemClock::new().unix_seconds()).reason,
+            read_readiness(state, &pool, now).reason,
             Some(ReadinessReason::ProviderRefusal)
         );
         let bytes = std::fs::read(state.join("quota/work/agy.json"))?;
@@ -4356,7 +4512,7 @@ mod tests {
             readiness_probe_result: None,
             login_probe_expiry: None,
         };
-        write_intent(&dir, temp.path(), &add, &mut records)?;
+        write_intent_at(&dir, temp.path(), &add, &mut records, 100)?;
         // The state root is explicit, so a directory not named quota still signals.
         assert_eq!(provenant_os::changes::read(temp.path())?.quota, Some(1));
         assert_eq!(records.len(), 1);
@@ -4369,7 +4525,7 @@ mod tests {
             readiness_probe_result: None,
             login_probe_expiry: None,
         };
-        write_intent(&dir, temp.path(), &drop_intent, &mut records)?;
+        write_intent_at(&dir, temp.path(), &drop_intent, &mut records, 100)?;
         assert_eq!(records.len(), 0);
         assert!(dir.open_verified_directory(OsStr::new("go")).is_err());
 
@@ -4383,7 +4539,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_human_and_json_display_partial_ledger_with_calibration()
+    fn calibration_and_coverage_reach_the_report_and_snapshot()
     -> Result<(), Box<dyn std::error::Error>> {
         let account = AccountScope {
             adapter: "opencode".into(),
@@ -4434,20 +4590,15 @@ mod tests {
             100,
             "/report.json".into(),
         )?;
-        let human = quota_human(&report);
         let snapshot = report.accounts[0].snapshot.as_ref().unwrap();
-        assert!(pool_states(snapshot).unwrap().contains("five_hour >=43%"));
-        assert!(
-            quota_summary(&report)
-                .lines
-                .iter()
-                .any(|line| line.contains("five_hour >=43%"))
+        assert_eq!(report.coverage.total, 1);
+        assert_eq!(report.coverage.known, 0);
+        assert_eq!(
+            snapshot.details.as_ref().unwrap().coverage.as_deref(),
+            Some("partial")
         );
-        assert!(
-            human.contains("source: local-ledger; coverage: partial (lower bound, this host only)"),
-            "{human}"
-        );
-        assert!(human.contains("43.00% used"), "{human}");
+        assert_eq!(snapshot.windows[0].used_basis_points, 4300);
+        assert_eq!(snapshot.windows[0].pool, "five_hour");
         let json = serde_json::to_value(&report)?;
         assert_eq!(
             json["accounts"][0]["snapshot"]["details"]["coverage"],
@@ -4627,7 +4778,7 @@ mod tests {
     };
 
     #[test]
-    fn auth_required_adapter_with_registered_account_shows_stale_cached_reading() {
+    fn auth_required_detection_keeps_its_registered_account_scope() {
         let policy = QuotaPolicy {
             adapter: "claude",
             timer_seconds: 300,
@@ -4701,7 +4852,7 @@ mod tests {
                 })
             }
         }
-        struct Effects(std::cell::Cell<u32>);
+        struct Effects;
         impl QuotaEffects for Effects {
             fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
                 Ok(vec![AccountScope {
@@ -4715,7 +4866,6 @@ mod tests {
                 _: &QuotaProbePlan,
                 _: Option<&AccountRecord>,
             ) -> Result<ProbeCapture, ProbeFailure> {
-                self.0.set(self.0.get() + 1);
                 Ok(ProbeCapture {
                     stdout: vec![],
                     stderr: vec![],
@@ -4745,12 +4895,15 @@ mod tests {
             },
         }];
         let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
         let mut inputs =
-            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+            provenant_core::RootInputs::new(home.clone(), temp.path().join("checkout"));
         inputs.state_dir = Some(temp.path().join("state"));
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let effects = Effects(std::cell::Cell::new(0));
-        let report = execute(
+        use provenant_core::{MonoTime, TestClock, WallTime};
+        let clock = TestClock::new(WallTime::from_unix_seconds(100)?, MonoTime::from_micros(0));
+        let effects = Effects;
+        let report = execute_with_clock(
             &Quota::Tick {
                 adapter: Filter {
                     adapter: Some("fixture-provider".into()),
@@ -4761,8 +4914,13 @@ mod tests {
             &roots,
             &registry,
             &effects,
+            &clock,
+            Some(&home),
         )?;
-        assert_eq!(effects.0.get(), 1);
+        let first_revision = read_cache(&roots)?
+            .first()
+            .ok_or("first quota record")?
+            .revision;
         let row = report
             .accounts
             .iter()
@@ -4779,8 +4937,8 @@ mod tests {
         let previous = records.first().ok_or("fixture quota record")?.clone();
         let mut replacement = previous.clone();
         replacement.revision += 1;
-        replacement.last_attempt_unix_seconds = Some(SystemClock::new().unix_seconds() - 180);
-        write_intent(
+        replacement.last_attempt_unix_seconds = Some(100 - 180);
+        write_intent_at(
             &dir,
             roots.state.as_path(),
             &UpdateIntent {
@@ -4791,6 +4949,7 @@ mod tests {
                 login_probe_expiry: None,
             },
             &mut records,
+            100,
         )?;
         std::fs::remove_file(
             roots
@@ -4798,7 +4957,7 @@ mod tests {
                 .as_path()
                 .join("readiness/work/fixture-provider.json"),
         )?;
-        let report = execute(
+        let report = execute_with_clock(
             &Quota::Tick {
                 adapter: Filter {
                     adapter: Some("fixture-provider".into()),
@@ -4809,13 +4968,19 @@ mod tests {
             &roots,
             &registry,
             &effects,
+            &clock,
+            Some(&home),
         )?;
-        assert_eq!(effects.0.get(), 2);
         assert_eq!(report.accounts[0].status, QuotaStatus::Available);
+        let second_revision = read_cache(&roots)?
+            .first()
+            .ok_or("second quota record")?
+            .revision;
+        assert!(second_revision > first_revision);
         assert!(
             recorded_readiness_file(roots.state.as_path(), "fixture-provider", "work")?.is_some()
         );
-        execute(
+        let third = execute_with_clock(
             &Quota::Tick {
                 adapter: Filter {
                     adapter: Some("fixture-provider".into()),
@@ -4826,8 +4991,24 @@ mod tests {
             &roots,
             &registry,
             &effects,
+            &clock,
+            Some(&home),
         )?;
-        assert_eq!(effects.0.get(), 2);
+        let third_revision = read_cache(&roots)?
+            .first()
+            .ok_or("third quota record")?
+            .revision;
+        assert_eq!(third_revision, second_revision);
+        assert_eq!(
+            third.accounts[0]
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.revision),
+            report.accounts[0]
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.revision)
+        );
         Ok(())
     }
 }

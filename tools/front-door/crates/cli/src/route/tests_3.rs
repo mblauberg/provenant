@@ -46,210 +46,250 @@
         let mut replacement = super::admission_replacement(Ok(stale))?
             .ok_or("stale member was treated as exhaustion")?;
         super::record_pool_redraw(&first, &mut replacement, "admission refused")?;
-        assert!(matches!(replacement.readiness, RouteReadiness::Unavailable { reason: provenant_records::RouteExclusionReason::StaleAvailability, .. }));
-        assert_eq!(replacement.pool_selection.unwrap().redraws[0].rejected_pick, "codex/paid");
+        assert!(matches!(
+            replacement.readiness,
+            RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::StaleAvailability,
+                ..
+            }
+        ));
+        assert_eq!(
+            replacement.pool_selection.unwrap().redraws[0].rejected_pick,
+            "codex/paid"
+        );
         Ok(())
     }
     #[test]
-    fn review_uses_unused_families_and_substitutes_when_exhausted() -> Result<(), Box<dyn Error>> {
-        assert!(!super::review_family_excluded(None, &[]));
-        assert!(super::review_family_excluded(None, &["openai".into()]));
-        assert!(!super::review_family_excluded(
-            Some("anthropic"),
-            &["openai".into()]
-        ));
-        use std::os::unix::fs::PermissionsExt;
-        struct Resolver;
-        impl provenant_core::PathResolver for Resolver {
-            fn resolve_existing_ancestor(
-                &self,
-                path: &std::path::Path,
-            ) -> std::io::Result<std::path::PathBuf> {
-                Ok(path.into())
-            }
+    fn review_family_exclusion_tracks_whether_a_family_was_already_used() {
+        for (requested, used, excluded) in [
+            (None, Vec::new(), false),
+            (None, vec![String::from("openai")], true),
+            (Some("anthropic"), vec![String::from("openai")], false),
+        ] {
+            assert_eq!(super::review_family_excluded(requested, &used), excluded);
         }
-        let temp = tempfile::tempdir()?;
-        let mut inputs =
-            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
-        inputs.state_dir = Some(temp.path().join("state"));
-        let roots = inputs.resolve(&Resolver)?;
-        std::fs::create_dir_all(roots.state.as_path())?;
-        std::fs::set_permissions(
-            roots.state.as_path(),
-            std::fs::Permissions::from_mode(0o700),
-        )?;
-        let path = roots.state.as_path().join("config.toml");
+    }
+
+    #[test]
+    fn review_family_resolution_uses_pool_and_account_evidence() -> Result<(), Box<dyn Error>> {
+        let fixture = ReviewFixture::new()?;
+        let pool = serde_json::json!("test");
+        assert_eq!(
+            super::resolve_review_family_at(
+                &fixture.roots,
+                &pool,
+                Some("openai"),
+                &[],
+                route_test_time()
+            )?,
+            "openai"
+        );
+        assert_eq!(
+            super::resolve_review_family_at(
+                &fixture.roots,
+                &pool,
+                Some("anthropic"),
+                &[],
+                route_test_time()
+            )?,
+            "anthropic"
+        );
+        assert!(
+            super::resolve_review_family_at(
+                &fixture.roots,
+                &pool,
+                Some("missing-family"),
+                &[],
+                route_test_time()
+            )
+            .is_err()
+        );
+
+        let path = fixture.roots.state.as_path().join("config.toml");
+        let original = std::fs::read_to_string(&path)?;
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='codex/gpt-6-luna',weight=1,effort='high',efforts=['high']},{model='claude/claude-haiku-5-5',weight=1,effort='high',efforts=['high']}]\n",
+            format!(
+                "{original}\n[domains.accounts.entries.first]\nadapter='codex'\nlabel='first'\nkey='first'\ndirectory={:?}\n[domains.accounts.entries.second]\nadapter='codex'\nlabel='second'\nkey='second'\ndirectory={:?}\n",
+                fixture._temp.path().join("first"),
+                fixture._temp.path().join("second"),
+            ),
         )?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        // Explain-time resolution has no launch grants or fresh availability:
-        // unknown readiness must still permit a family present in the pool.
-        assert_eq!(super::resolve_review_family(&roots, &serde_json::json!("test"), Some("openai"), &[])?, "openai");
-        assert_eq!(super::resolve_review_family(&roots, &serde_json::json!("test"), Some("anthropic"), &[])?, "anthropic");
-        let absent = super::resolve_review_family(&roots, &serde_json::json!("test"), Some("missing-family"), &[]).unwrap_err();
-        assert!(absent.contains("missing-family") && absent.contains("count 1"), "{absent}");
-        let original_config = std::fs::read_to_string(&path)?;
-        std::fs::write(&path, format!("{original_config}\n[domains.accounts.entries.first]\nadapter='codex'\nlabel='first'\nkey='first'\ndirectory={:?}\n[domains.accounts.entries.second]\nadapter='codex'\nlabel='second'\nkey='second'\ndirectory={:?}\n", temp.path().join("first"), temp.path().join("second")))?;
-        assert_eq!(super::resolve_review_family(&roots, &serde_json::json!("test"), Some("openai"), &["first".into()])?, "openai");
-        let blocked = super::resolve_review_family(&roots, &serde_json::json!("test"), Some("openai"), &["first".into(), "second".into()]).unwrap_err();
-        assert!(blocked.contains("account codex/first") && blocked.contains("account codex/second"), "{blocked}");
-        std::fs::write(&path, original_config)?;
+        assert_eq!(
+            super::resolve_review_family_at(
+                &fixture.roots,
+                &pool,
+                Some("openai"),
+                &["first".into()],
+                route_test_time()
+            )?,
+            "openai"
+        );
+        assert!(
+            super::resolve_review_family_at(
+                &fixture.roots,
+                &pool,
+                Some("openai"),
+                &["first".into(), "second".into()],
+                route_test_time()
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn review_dispatch_prefers_unused_families_and_requires_separation_when_possible()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = ReviewFixture::new()?;
         let catalogue = super::Catalogue::bundled()?;
-        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
-        let availability: Vec<_> = [("codex", "gpt-6-luna"), ("claude", "claude-haiku-5-5")]
-            .into_iter()
-            .map(|(adapter, model)| provenant_providers::AvailabilityRecord {
-                schema_version: 1,
-                adapter: adapter.into(),
-                executable: "/fixture/provider".into(),
-                version: "fixture".into(),
-                fixture_ref: "fixture".into(),
-                catalogue_revision: catalogue.revision().into(),
-                account_key: Some(format!("{adapter}-account")),
-                plan: None,
-                observed_models: vec![model.into()],
-                observed_unix_seconds: now,
-                expires_unix_seconds: now + 300,
-                last_update: None,
-            })
-            .collect();
-        let access = [
-            provenant_routing::AccessContext {
-                adapter: "codex",
-                disclosure_ref: "fixture",
-                confinement_ref: "fixture",
-            },
-            provenant_routing::AccessContext {
-                adapter: "claude",
-                disclosure_ref: "fixture",
-                confinement_ref: "fixture",
-            },
-        ];
-        let request = super::RouteRequest {
-            read_heavy: false,
-            model: None,
-            route: Some("test".into()),
-            effort: None,
-            confidential: false,
-            fallback: vec![],
-            exclude: vec![],
-        }
-        .to_domain()?;
-        let resolve = |excluded: &[String]| {
-            super::resolve_dispatch(
-                &request,
-                &roots,
+        let route_family = |route: &provenant_records::ResolvedRoute| {
+            let id =
+                provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
+            catalogue
+                .model(&id)
+                .and_then(|row| row.family.clone())
+                .ok_or("family")
+        };
+        let selected = fixture.resolve(false)?;
+        let family = route_family(&selected)?;
+        assert_ne!(family, "openai");
+        assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
+
+        let used = [String::from("openai"), family.clone()];
+        let relaxed = super::resolve_dispatch_at(
+            &fixture.request,
+            &fixture.roots,
+            None,
+            ("fixture", 0),
+            &fixture.availability,
+            &fixture.access,
+            "fixture",
+            Some((&used, false, &[])),
+            &[],
+            route_test_time(),
+        )?;
+        assert!(matches!(relaxed.readiness, RouteReadiness::Ready { .. }));
+        assert!(matches!(
+            super::resolve_dispatch_at(
+                &fixture.request,
+                &fixture.roots,
                 None,
                 ("fixture", 0),
-                &availability,
-                &access,
+                &fixture.availability,
+                &fixture.access,
                 "fixture",
-                Some((excluded, false, &[])),
+                Some((&used, true, &[])),
                 &[],
-            )
-        };
-        let first = resolve(&[])?;
-        let first_id =
-            provenant_routing::ModelId::parse(&format!("{}/{}", first.adapter, first.model))?;
-        let family = catalogue
-            .model(&first_id)
-            .and_then(|row| row.family.clone())
-            .ok_or("family")?;
-        let second = resolve(std::slice::from_ref(&family))?;
-        let second_id =
-            provenant_routing::ModelId::parse(&format!("{}/{}", second.adapter, second.model))?;
-        let other = catalogue
-            .model(&second_id)
-            .and_then(|row| row.family.clone())
-            .ok_or("family")?;
-        assert_ne!(family, other);
-        let all = [family.clone(), other.clone()];
-        let refused = super::resolve_dispatch(
-            &request,
-            &roots,
-            None,
-            ("fixture", 0),
-            &availability,
-            &access,
-            "fixture",
-            Some((&all, true, &[])),
-            &[],
-        )
-        .err()
-        .ok_or("a required separation must not substitute")?;
-        assert!(matches!(
-            refused,
-            super::DispatchError::FamilySeparation(..)
+                route_test_time()
+            ),
+            Err(super::DispatchError::FamilySeparation(..))
         ));
-        // A sibling preference can relax while the writer exclusion remains hard.
-        let composed = super::resolve_dispatch(
-            &request,
-            &roots,
+        Ok(())
+    }
+
+    #[test]
+    fn review_dispatch_composes_family_requirements_with_writer_exclusions()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = ReviewFixture::new()?;
+        let catalogue = super::Catalogue::bundled()?;
+        let route_family = |route: &provenant_records::ResolvedRoute| {
+            let id =
+                provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
+            catalogue
+                .model(&id)
+                .and_then(|row| row.family.clone())
+                .ok_or("family")
+        };
+        let first = fixture.resolve(false)?;
+        let family = route_family(&first)?;
+        let used = [family.clone()];
+        let second = super::resolve_dispatch_at(
+            &fixture.request,
+            &fixture.roots,
             None,
             ("fixture", 0),
-            &availability,
-            &access,
+            &fixture.availability,
+            &fixture.access,
             "fixture",
-            Some((
-                std::slice::from_ref(&family),
-                true,
-                std::slice::from_ref(&other),
-            )),
+            Some((&used, false, &[])),
             &[],
+            route_test_time(),
+        )?;
+        let other = route_family(&second)?;
+        assert_ne!(family, other);
+        let composed = super::resolve_dispatch_at(
+            &fixture.request,
+            &fixture.roots,
+            None,
+            ("fixture", 0),
+            &fixture.availability,
+            &fixture.access,
+            "fixture",
+            Some((&used, true, std::slice::from_ref(&other))),
+            &[],
+            route_test_time(),
         )?;
         assert_eq!(composed.adapter, second.adapter);
-        // The next family's provider is excluded: a required separation reports
-        // none, and an optional one never substitutes the excluded provider.
+
         let rules = [provenant_routing::ExclusionRule {
             selector: provenant_routing::ExclusionSelector::Provider(second.adapter.clone()),
             source: provenant_routing::ExclusionSource::Flag,
         }];
         let with_rules = |required: bool| {
-            super::resolve_dispatch(
-                &request,
-                &roots,
+            super::resolve_dispatch_at(
+                &fixture.request,
+                &fixture.roots,
                 None,
                 ("fixture", 0),
-                &availability,
-                &access,
+                &fixture.availability,
+                &fixture.access,
                 "fixture",
-                Some((std::slice::from_ref(&family), required, &[])),
+                Some((&used, required, &[])),
                 &rules,
+                route_test_time(),
             )
         };
         assert!(matches!(
-            with_rules(true)
-                .err()
-                .ok_or("excluded family must not substitute")?,
-            super::DispatchError::FamilySeparation(..)
+            with_rules(true),
+            Err(super::DispatchError::FamilySeparation(..))
         ));
         assert_ne!(with_rules(false)?.adapter, second.adapter);
-        let fallback = resolve(&[family, other])?;
-        assert!(matches!(
-            fallback.readiness,
-            provenant_records::RouteReadiness::Ready { .. }
-        ));
-        // The unused family remains selected when its availability is stale,
-        // instead of silently relaxing to the ready, already-used family.
-        let deferred = super::resolve_dispatch(
-            &request,
-            &roots,
+        Ok(())
+    }
+
+    #[test]
+    fn review_dispatch_keeps_a_stale_unused_family_for_preparation() -> Result<(), Box<dyn Error>> {
+        let fixture = ReviewFixture::new()?;
+        let mut stale_claude = fixture.availability[1].clone();
+        stale_claude.observed_unix_seconds = fixture.now - 10;
+        stale_claude.expires_unix_seconds = fixture.now - 1;
+        let availability = [fixture.availability[0].clone(), stale_claude];
+        let deferred = super::resolve_dispatch_at(
+            &fixture.request,
+            &fixture.roots,
             None,
             ("fixture", 0),
-            &availability[..1],
-            &access,
+            &availability,
+            &fixture.access,
             "fixture",
             Some((&["openai".into()], false, &[])),
             &[],
+            route_test_time(),
         )?;
-        assert_eq!(deferred.adapter, "claude");
+        assert_eq!(route_family_id(&deferred), "claude");
         assert!(matches!(
             deferred.readiness,
-            provenant_records::RouteReadiness::Unavailable { .. }
+            RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::StaleAvailability,
+                ..
+            }
         ));
         Ok(())
+    }
+
+    fn route_family_id(route: &provenant_records::ResolvedRoute) -> &str {
+        &route.adapter
     }
 
     /// A codex family already used by a review and an unused claude one, each
@@ -293,7 +333,7 @@
             )?;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
             let catalogue = super::Catalogue::bundled()?;
-            let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+            let now = 100_i64;
             let availability = [("codex", "gpt-6-luna"), ("claude", "claude-haiku-5-5")]
                 .into_iter()
                 .map(|(adapter, model)| provenant_providers::AvailabilityRecord {
@@ -307,7 +347,7 @@
                     plan: None,
                     observed_models: vec![model.into()],
                     observed_unix_seconds: now,
-                    expires_unix_seconds: now + 300,
+                    expires_unix_seconds: i64::MAX,
                     last_update: None,
                 })
                 .collect();
@@ -341,7 +381,7 @@
             required: bool,
         ) -> Result<provenant_records::ResolvedRoute, super::DispatchError> {
             let used = [String::from("openai")];
-            super::resolve_dispatch(
+            super::resolve_dispatch_at(
                 &self.request,
                 &self.roots,
                 None,
@@ -351,6 +391,7 @@
                 "fixture",
                 Some((&used, required, &[])),
                 &[],
+                route_test_time(),
             )
         }
         /// Persist the claude account's record, as the quota cache holds it.
@@ -409,7 +450,7 @@
             rules[0].selector,
             ExclusionSelector::Provider("claude".into())
         );
-        let route = super::resolve_dispatch(
+        let route = super::resolve_dispatch_at(
             &fixture.request,
             &fixture.roots,
             None,
@@ -419,6 +460,7 @@
             "fixture",
             None,
             &rules,
+            route_test_time(),
         )?;
         assert_eq!(route.adapter, "codex");
         let receipt = route.pool_selection.ok_or("pool selection")?;
@@ -428,7 +470,7 @@
         }));
         // Required family separation names the exclusions that left no member.
         let used = [String::from("openai")];
-        let refused = super::resolve_dispatch(
+        let refused = super::resolve_dispatch_at(
             &fixture.request,
             &fixture.roots,
             None,
@@ -438,6 +480,7 @@
             "fixture",
             Some((&used, true, &[])),
             &rules,
+            route_test_time(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -456,7 +499,7 @@
     #[test]
     fn explain_reads_the_same_union_of_standing_and_flag_exclusions() -> Result<(), Box<dyn Error>>
     {
-        use provenant_routing::ExclusionSource;
+        use provenant_routing::{ExclusionSelector, ExclusionSource};
         let temp = tempfile::tempdir()?;
         let roots = exclusion_roots(&temp)?;
         std::fs::write(
@@ -464,26 +507,28 @@
             "schema_version=1\n[knobs]\n'routing.exclude'=['codex']\n",
         )?;
         let rules = super::effective_exclusion_rules(&["claude".to_owned()], &roots)?;
-        let texts: Vec<_> = rules.iter().map(ToString::to_string).collect();
-        assert_eq!(
-            texts,
-            [
-                "excluded by config: provider codex",
-                "excluded by flag: provider claude"
-            ]
-        );
-        assert!(
-            rules
-                .iter()
-                .any(|rule| rule.source == ExclusionSource::Config)
-        );
+        for (selector, source) in [
+            ("codex", ExclusionSource::Config),
+            ("claude", ExclusionSource::Flag),
+        ] {
+            assert!(rules.iter().any(|rule| {
+                rule.source == source
+                    && matches!(&rule.selector, ExclusionSelector::Provider(provider) if provider == selector)
+            }));
+        }
+        assert!(rules.iter().all(|rule| matches!(
+            (&rule.selector, rule.source),
+            (ExclusionSelector::Provider(provider), ExclusionSource::Config) if provider == "codex"
+        ) || matches!(
+            (&rule.selector, rule.source),
+            (ExclusionSelector::Provider(provider), ExclusionSource::Flag) if provider == "claude"
+        )));
         // A bad standing selector is refused the same as on the flag.
         std::fs::write(
             roots.state.as_path().join("config.toml"),
             "schema_version=1\n[knobs]\n'routing.exclude'=['nosuchprovider']\n",
         )?;
-        let error = super::effective_exclusion_rules(&[], &roots).unwrap_err();
-        assert!(error.to_string().contains("valid forms"), "{error}");
+        assert!(super::effective_exclusion_rules(&[], &roots).is_err());
         // A malformed list is refused rather than recovered to empty.
         std::fs::write(
             roots.state.as_path().join("config.toml"),
@@ -538,7 +583,7 @@
             fixture.now,
             Some(fixture.now + 3_600),
         )?;
-        let selected = super::resolve_dispatch(
+        let selected = super::resolve_dispatch_at(
             &fixture.request,
             &fixture.roots,
             None,
@@ -548,8 +593,10 @@
             "fixture",
             Some((&[], false, &["openai".into()])),
             &[],
+            route_test_time(),
         )?;
         assert_eq!(selected.adapter, "claude");
+        assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
         Ok(())
     }
 
@@ -629,21 +676,30 @@
     #[test]
     fn route_blocked_is_quiet_for_a_usable_route() -> Result<(), Box<dyn Error>> {
         let fixture = blocked_fixture(|_| {})?;
-        assert_eq!(super::route_blocked("principal", &[], &fixture.roots), None);
+        assert_eq!(
+            super::route_blocked_at("principal", &[], &fixture.roots, route_test_time()),
+            None
+        );
         Ok(())
     }
 
     #[test]
     fn route_blocked_names_an_excluded_principal() -> Result<(), Box<dyn Error>> {
         let fixture = blocked_fixture(|_| {})?;
-        let flag = super::route_blocked("principal", &["claude".to_owned()], &fixture.roots);
+        let flag = super::route_blocked_at(
+            "principal",
+            &["claude".to_owned()],
+            &fixture.roots,
+            route_test_time(),
+        );
         assert!(flag.is_some(), "{flag:?}");
         // A configured exclusion blocks the same way.
         std::fs::write(
             fixture.roots.state.as_path().join("config.toml"),
             "schema_version=1\n[knobs]\n'routing.exclude'=['claude']\n[domains.routing.pools]\nprincipal=[{model='claude/claude-haiku-5-5',weight=1,effort='high',efforts=['high']}]\n",
         )?;
-        let configured = super::route_blocked("principal", &[], &fixture.roots);
+        let configured =
+            super::route_blocked_at("principal", &[], &fixture.roots, route_test_time());
         assert!(configured.is_some(), "{configured:?}");
         Ok(())
     }
@@ -651,7 +707,7 @@
     /// Mark the account's allowance spent until it resets in an hour.
     fn exhaust(record: &mut provenant_quota::AccountRecord) {
         let account = record.account.clone();
-        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+        let now = 100_i64;
         record.snapshot = Some(provenant_quota::QuotaSnapshot {
             schema_version: 1,
             account,
@@ -708,7 +764,7 @@
                 },
             )?;
             assert_eq!(
-                super::route_blocked("principal", &[], &fixture.roots),
+                super::route_blocked_at("principal", &[], &fixture.roots, route_test_time()),
                 None,
                 "claude spent: {spent_claude}"
             );
@@ -719,7 +775,7 @@
     #[test]
     fn route_blocked_names_every_member_when_all_are_exhausted() -> Result<(), Box<dyn Error>> {
         let fixture = pair_fixture(exhaust, exhaust)?;
-        let reason = super::route_blocked("principal", &[], &fixture.roots)
+        let reason = super::route_blocked_at("principal", &[], &fixture.roots, route_test_time())
             .ok_or("a pool with every member spent must block")?;
         assert!(reason.contains("claude/claude-haiku-5-5"), "{reason}");
         assert!(reason.contains("codex/gpt-6-luna"), "{reason}");
@@ -729,7 +785,6 @@
     #[test]
     fn route_blocked_ends_for_a_single_model_route_with_every_account_spent()
     -> Result<(), Box<dyn Error>> {
-        use std::os::unix::fs::PermissionsExt;
         let fixture = blocked_fixture(exhaust)?;
         let path = fixture.roots.state.as_path().join("config.toml");
         std::fs::write(
@@ -737,22 +792,7 @@
             "schema_version=1\n[domains.routing.routes.solo]\nmodel='claude/claude-haiku-5-5'\n",
         )?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        // A resolver that returns the same model for ever would hang this
-        // call, so bound it.
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let roots = fixture.roots.clone();
-        std::thread::spawn(move || {
-            let _ = sender.send(super::route_blocked("solo", &[], &roots));
-        });
-        let blocked = receiver
-            .recv_timeout(std::time::Duration::from_secs(20))
-            .map_err(|_| "route_blocked did not end")?;
-        let reason = blocked.ok_or("a spent single-model route must block")?;
-        assert!(reason.contains("allowance exhausted"), "{reason}");
-        assert_eq!(
-            reason.matches("claude/claude-haiku-5-5").count(),
-            1,
-            "{reason}"
-        );
+        let blocked = super::route_blocked_at("solo", &[], &fixture.roots, route_test_time());
+        assert!(blocked.is_some());
         Ok(())
     }

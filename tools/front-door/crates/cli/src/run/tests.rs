@@ -2,39 +2,8 @@ use super::*;
 use crate::Mode;
 use provenant_records::CanonicalV1;
 
-pub(super) fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
-    if !crate::fabric::in_lane() {
-        return Ok(false);
-    }
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-    use std::ffi::OsStr;
-
-    let argv = vec![
-        std::env::current_exe()?.into_os_string(),
-        "--exact".into(),
-        name.into(),
-    ];
-    let removed = [
-        OsStr::new(provenant_core::RUN_STATE_DIRECTORY_ENV),
-        OsStr::new(provenant_core::consumer_env::LANE_DEPTH),
-        OsStr::new(provenant_core::consumer_env::PARENT_ATTEMPT_ID),
-    ];
-    let env: Vec<_> = std::env::vars_os()
-        .filter(|(key, _)| !removed.contains(&key.as_os_str()))
-        .collect();
-    let cwd = std::env::current_dir()?;
-    let timeout = match name {
-        "run::tests::wait_handles_a_stale_default_cursor" => 300,
-        "run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree" => 90,
-        _ => 30,
-    };
-    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(timeout));
-    options.env = Some(&env);
-    options.stdout = StreamPolicy::Capture { limit: 65_536 };
-    options.stderr = StreamPolicy::Capture { limit: 65_536 };
-    let out = SystemExecutor::new(1)?.execute(options)?;
-    assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
-    Ok(true)
+pub(super) fn capacity_reason() -> &'static str {
+    provenant_records::diagnostic::ProviderFailureFact::Capacity.reason()
 }
 
 /// A project with a linked worktree `writer` and a `nested` directory in it.
@@ -265,26 +234,20 @@ fn opencode_decode_holder_context(
 
 #[test]
 fn invalid_sealed_root_never_writes_to_registry_root() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-    use std::ffi::OsString;
     const MARKER: &str = "PROVENANT_TEST_INVALID_CAPACITY_ROOT";
     if std::env::var_os(MARKER).is_none() {
-        let argv = vec![
-            std::env::current_exe()?.into_os_string(),
-            "--exact".into(),
-            "run::tests::invalid_sealed_root_never_writes_to_registry_root".into(),
-        ];
-        let mut env: Vec<_> = std::env::vars_os()
-            .filter(|(key, _)| key != MARKER && key != provenant_core::RUN_STATE_DIRECTORY_ENV)
-            .collect();
-        env.push((OsString::from(MARKER), OsString::from("1")));
-        let cwd = std::env::current_dir()?;
-        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
-        options.env = Some(&env);
-        options.stdout = StreamPolicy::Capture { limit: 65_536 };
-        options.stderr = StreamPolicy::Capture { limit: 65_536 };
-        let out = SystemExecutor::new(1)?.execute(options)?;
-        assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+        let out = crate::test_support::rerun_test(
+            module_path!(),
+            "invalid_sealed_root_never_writes_to_registry_root",
+            &[(MARKER.into(), "1".into())],
+            &[MARKER, provenant_core::RUN_STATE_DIRECTORY_ENV],
+            Duration::from_secs(30),
+        )?;
+        assert_eq!(
+            out.termination,
+            provenant_os::exec::Termination::Exit(0),
+            "{out:?}"
+        );
         assert!(!out.timed_out, "{out:?}");
         return Ok(());
     }
@@ -338,9 +301,24 @@ fn invalid_sealed_root_never_writes_to_registry_root() -> Result<(), Box<dyn std
 #[test]
 fn lane_gitdir_resolves_the_registered_project_without_querying_primary()
 -> Result<(), Box<dyn std::error::Error>> {
-    if reexec_test_in_lane(
-        "run::tests::lane_gitdir_resolves_the_registered_project_without_querying_primary",
-    )? {
+    if crate::fabric::in_lane() {
+        let out = crate::test_support::rerun_test(
+            module_path!(),
+            "lane_gitdir_resolves_the_registered_project_without_querying_primary",
+            &[],
+            &[
+                provenant_core::RUN_STATE_DIRECTORY_ENV,
+                provenant_core::consumer_env::LANE_DEPTH,
+                provenant_core::consumer_env::PARENT_ATTEMPT_ID,
+            ],
+            Duration::from_secs(30),
+        )?;
+        assert_eq!(
+            out.termination,
+            provenant_os::exec::Termination::Exit(0),
+            "{out:?}"
+        );
+        assert!(!out.timed_out, "{out:?}");
         return Ok(());
     }
     let fixture = linked_fixture()?;
@@ -380,31 +358,26 @@ fn lane_gitdir_resolves_the_registered_project_without_querying_primary()
 #[test]
 fn nested_capacity_settlement_does_not_write_shared_cooldown()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-    use std::ffi::OsString;
     const MARKER: &str = "PROVENANT_TEST_NESTED_CAPACITY_CHILD";
     if std::env::var_os(MARKER).is_none() {
-        let argv = vec![
-            std::env::current_exe()?.into_os_string(),
-            "--exact".into(),
-            "run::tests::nested_capacity_settlement_does_not_write_shared_cooldown".into(),
-            "--nocapture".into(),
-        ];
-        let mut env: Vec<_> = std::env::vars_os()
-            .filter(|(key, _)| key != MARKER && key != provenant_core::RUN_STATE_DIRECTORY_ENV)
-            .collect();
-        env.push((OsString::from(MARKER), OsString::from("1")));
-        env.push((
-            OsString::from(provenant_core::RUN_STATE_DIRECTORY_ENV),
-            OsString::from("nested"),
-        ));
-        let cwd = std::env::current_dir()?;
-        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
-        options.env = Some(&env);
-        options.stdout = StreamPolicy::Capture { limit: 65_536 };
-        options.stderr = StreamPolicy::Capture { limit: 65_536 };
-        let out = SystemExecutor::new(1)?.execute(options)?;
-        assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+        let out = crate::test_support::rerun_test(
+            module_path!(),
+            "nested_capacity_settlement_does_not_write_shared_cooldown",
+            &[
+                (MARKER.into(), "1".into()),
+                (
+                    provenant_core::RUN_STATE_DIRECTORY_ENV.into(),
+                    "nested".into(),
+                ),
+            ],
+            &[MARKER, provenant_core::RUN_STATE_DIRECTORY_ENV],
+            Duration::from_secs(30),
+        )?;
+        assert_eq!(
+            out.termination,
+            provenant_os::exec::Termination::Exit(0),
+            "{out:?}"
+        );
         assert!(!out.timed_out, "{out:?}");
         return Ok(());
     }
@@ -430,118 +403,206 @@ fn nested_capacity_settlement_does_not_write_shared_cooldown()
     exit.termination = Some(Termination::Exit(1));
     let decoded = registry.decode(&route, stream, &exit, Path::new("/nonexistent"))?;
     assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
-    assert_eq!(
-        decoded.reason.as_deref(),
-        Some(
-            "provider capacity: the selected model is overloaded; wait or choose an eligible route"
-        )
-    );
+    assert_eq!(decoded.reason.as_deref(), Some(capacity_reason()));
     assert!(!roots.state.as_path().join("quota").exists());
     Ok(())
 }
-#[test]
-fn operation_replays_after_its_context_ref_moves_or_is_deleted()
--> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{ActorId, RootInputs};
-    use provenant_os::exec::ExecOptions;
-    use provenant_os::exec::Executor;
-    use provenant_os::exec::StreamPolicy;
-    use provenant_os::exec::SystemExecutor;
-    use provenant_os::exec::Termination;
-
-    use std::ffi::{OsStr, OsString};
-    let executor = SystemExecutor::new(1)?;
-    // The regression exercises a top-level submission, even when the
-    // contributor running it is itself inside a nested lane.
-    if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some()
-        || std::env::var_os(provenant_core::consumer_env::LANE_DEPTH).is_some()
-        || std::env::var_os(provenant_core::consumer_env::PARENT_ATTEMPT_ID).is_some()
+fn reexec_operation_test(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_none()
+        && std::env::var_os(provenant_core::consumer_env::LANE_DEPTH).is_none()
+        && std::env::var_os(provenant_core::consumer_env::PARENT_ATTEMPT_ID).is_none()
     {
-        let argv = vec![
-            std::env::current_exe()?.into_os_string(),
-            "--exact".into(),
-            "run::tests::operation_replays_after_its_context_ref_moves_or_is_deleted".into(),
-            "--nocapture".into(),
-        ];
-        let removed = [
-            OsStr::new(provenant_core::RUN_STATE_DIRECTORY_ENV),
-            OsStr::new(provenant_core::consumer_env::LANE_DEPTH),
-            OsStr::new(provenant_core::consumer_env::PARENT_ATTEMPT_ID),
-        ];
-        let env: Vec<_> = std::env::vars_os()
-            .filter(|(key, _)| !removed.contains(&key.as_os_str()))
-            .collect();
-        let cwd = std::env::current_dir()?;
-        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
-        options.env = Some(&env);
-        options.stdout = StreamPolicy::Capture { limit: 65536 };
-        options.stderr = StreamPolicy::Capture { limit: 65536 };
-        let out = executor.execute(options)?;
-        assert!(
-            out.termination == Termination::Exit(0) && !out.timed_out,
-            "{out:?}"
-        );
-        return Ok(());
+        return Ok(false);
     }
-    let temp = tempfile::tempdir()?;
-    let root = std::fs::canonicalize(temp.path())?;
-    let home = root.join("home");
-    let cwd = root.join("checkout");
-    std::fs::create_dir_all(&home)?;
-    std::fs::create_dir_all(&cwd)?;
-    let mut inputs = RootInputs::new(home.clone(), cwd.clone());
-    inputs.state_dir = Some(root.join("state"));
-    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let command = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
-        let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+    let out = crate::test_support::rerun_test(
+        module_path!(),
+        name,
+        &[],
+        &[
+            provenant_core::RUN_STATE_DIRECTORY_ENV,
+            provenant_core::consumer_env::LANE_DEPTH,
+            provenant_core::consumer_env::PARENT_ATTEMPT_ID,
+        ],
+        Duration::from_secs(90),
+    )?;
+    assert_eq!(
+        out.termination,
+        provenant_os::exec::Termination::Exit(0),
+        "{out:?}"
+    );
+    assert!(!out.timed_out, "{out:?}");
+    Ok(true)
+}
+
+struct OperationReplayFixture {
+    _temp: tempfile::TempDir,
+    roots: provenant_core::Roots,
+    home: PathBuf,
+    cwd: PathBuf,
+    executor: provenant_os::exec::SystemExecutor,
+    git: PathBuf,
+    clock: provenant_core::TestClock,
+    cancel: CancelToken,
+    session: Session,
+    chair: provenant_records::custody::Chair,
+    original_base: String,
+    first_attempt: AttemptId,
+    graph: String,
+    operation_id: OperationId,
+}
+
+impl OperationReplayFixture {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        use provenant_core::RootInputs;
+        use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+        use std::ffi::OsString;
+
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        let cwd = root.join("checkout");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&cwd)?;
+        let mut inputs = RootInputs::new(home.clone(), cwd.clone());
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let executor = provenant_os::exec::SystemExecutor::new(1)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let command = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+            let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+                .chain(args.iter().map(OsString::from))
+                .collect();
+            let env = provenant_os::fixture::fixture_git_settings();
+            let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(10));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 65536 };
+            options.stderr = StreamPolicy::Capture { limit: 65536 };
+            let out = executor.execute(options)?;
+            assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+            assert!(!out.timed_out, "{out:?}");
+            Ok(String::from_utf8(out.stdout.bytes)?.trim().to_owned())
+        };
+        command(&["init", "-q"])?;
+        command(&["commit", "--allow-empty", "-qm", "initial"])?;
+        command(&["branch", "context-base"])?;
+        let original_base = command(&["rev-parse", "context-base"])?;
+        let clock = provenant_core::TestClock::new(
+            provenant_core::WallTime::from_micros(0)?,
+            provenant_core::MonoTime::from_micros(0),
+        );
+        let cancel = CancelToken::new();
+        let call = run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let context = run::ExecutionContext {
+            state_root: roots.state.clone(),
+            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+            actor_id: ActorId::from_bytes([2; 16]),
+            read_prompts: true,
+        };
+        let session = Session {
+            store: run::RunStore::open(&context, &call)?,
+            context,
+        };
+        let edge = Edge {
+            roots: &roots,
+            home: &home,
+            assets: &cwd,
+            cwd: &cwd,
+        };
+        let chair = provenant_records::custody::Chair {
+            process: None,
+            extra: Default::default(),
+            session: None,
+            host: provenant_core::HostId::from_bytes([4; 16]),
+            actor: ActorId::from_bytes([5; 16]),
+        };
+        let operation_id = OperationId::parse("context-ref-replay")?;
+        let initial = submit(
+            &session,
+            &edge,
+            operation_replay_submission(operation_id.clone(), Some(chair.clone()), &original_base),
+            &call,
+        )
+        .err()
+        .ok_or("unknown fixture adapter must refuse its initial launch")?;
+        assert_eq!(initial.status, Status::Refused);
+        assert_eq!(initial.kind, ErrorKind::Refused);
+        let first_attempt = session.store.operation_attempt(&operation_id, &call)?;
+        let graph = session
+            .store
+            .work_key(first_attempt, &call)?
+            .graph()
+            .to_owned();
+        Ok(Self {
+            _temp: temp,
+            roots,
+            home,
+            cwd,
+            executor,
+            git,
+            clock,
+            cancel,
+            session,
+            chair,
+            original_base,
+            first_attempt,
+            graph,
+            operation_id,
+        })
+    }
+
+    fn call(&self) -> run::Request<'_> {
+        run::Request {
+            clock: &self.clock,
+            cancel: &self.cancel,
+        }
+    }
+
+    fn edge(&self) -> Edge<'_> {
+        Edge {
+            roots: &self.roots,
+            home: &self.home,
+            assets: &self.cwd,
+            cwd: &self.cwd,
+        }
+    }
+
+    fn command(&self, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+        use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+        use std::ffi::OsString;
+        let argv: Vec<OsString> = std::iter::once(self.git.as_os_str().to_owned())
             .chain(args.iter().map(OsString::from))
             .collect();
         let env = provenant_os::fixture::fixture_git_settings();
-        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(10));
+        let mut options = ExecOptions::new(&argv, &self.cwd, Duration::from_secs(10));
         options.env = Some(&env);
         options.stdout = StreamPolicy::Capture { limit: 65536 };
         options.stderr = StreamPolicy::Capture { limit: 65536 };
-        let out = executor.execute(options)?;
-        assert!(
-            out.termination == Termination::Exit(0) && !out.timed_out,
-            "{out:?}"
-        );
+        let out = self.executor.execute(options)?;
+        assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+        assert!(!out.timed_out, "{out:?}");
         Ok(String::from_utf8(out.stdout.bytes)?.trim().to_owned())
-    };
-    command(&["init", "-q"])?;
-    command(&["commit", "--allow-empty", "-qm", "initial"])?;
-    command(&["branch", "context-base"])?;
-    let original_base = command(&["rev-parse", "context-base"])?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = request(&clock, &cancel).map_err(|f| f.message)?;
-    let context = run::ExecutionContext {
-        state_root: roots.state.clone(),
-        project_id: provenant_core::ProjectId::from_bytes([1; 16]),
-        actor_id: ActorId::from_bytes([2; 16]),
-        read_prompts: true,
-    };
-    let session = Session {
-        store: run::RunStore::open(&context, &call)?,
-        context,
-    };
-    let edge = Edge {
-        roots: &roots,
-        home: &home,
-        assets: &cwd,
-        cwd: &cwd,
-    };
-    let chair = Some(provenant_records::custody::Chair {
-        process: None,
-        extra: Default::default(),
-        session: None,
-        host: provenant_core::HostId::from_bytes([4; 16]),
-        actor: ActorId::from_bytes([5; 16]),
-    });
-    let submission = |base: &str| Submission {
-        chair: chair.clone(),
-        operation_id: OperationId::parse("context-ref-replay").unwrap(),
+    }
+
+    fn submission(
+        &self,
+        base: &str,
+        chair: Option<provenant_records::custody::Chair>,
+    ) -> Submission {
+        operation_replay_submission(self.operation_id.clone(), chair, base)
+    }
+}
+
+fn operation_replay_submission(
+    operation_id: OperationId,
+    chair: Option<provenant_records::custody::Chair>,
+    base: &str,
+) -> Submission {
+    Submission {
+        chair,
+        operation_id,
         task: Submitted {
             attempt: Default::default(),
             require_skill_location: true,
@@ -571,110 +632,174 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
             access: Default::default(),
         },
         knobs: vec![],
-    };
-    // The fake adapter refuses preparation after admission. Keep the durable
-    // operation as the replay subject even though the initial launch fails.
-    let initial = submit(&session, &edge, submission("context-base"), &call)
-        .err()
-        .ok_or("unknown fixture adapter must refuse its initial launch")?;
-    assert_eq!(initial.status, Status::Refused, "{initial:?}");
-    assert_eq!(initial.kind, ErrorKind::Refused, "{initial:?}");
-    let operation = session
+    }
+}
+
+#[test]
+fn operation_replay_keeps_original_context_when_base_ref_moves_or_disappears()
+-> Result<(), Box<dyn std::error::Error>> {
+    if reexec_operation_test(
+        "operation_replay_keeps_original_context_when_base_ref_moves_or_disappears",
+    )? {
+        return Ok(());
+    }
+    let fixture = OperationReplayFixture::new()?;
+    fixture.command(&["commit", "--allow-empty", "-qm", "moved"])?;
+    fixture.command(&["branch", "-f", "context-base", "HEAD"])?;
+    for deleted in [false, true] {
+        if deleted {
+            fixture.command(&["branch", "-D", "context-base"])?;
+        }
+        let call = fixture.call();
+        let (replayed, _) = submit(
+            &fixture.session,
+            &fixture.edge(),
+            fixture.submission("context-base", Some(fixture.chair.clone())),
+            &call,
+        )
+        .map_err(|fail| fail.message)?;
+        assert_eq!(replayed.attempt_id, fixture.first_attempt);
+        assert_eq!(
+            fixture
+                .session
+                .store
+                .request(fixture.first_attempt, &call)?
+                .task
+                .base
+                .as_deref(),
+            Some(fixture.original_base.as_str())
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn operation_replay_preserves_custody_identity_when_host_index_is_unavailable()
+-> Result<(), Box<dyn std::error::Error>> {
+    if reexec_operation_test(
+        "operation_replay_preserves_custody_identity_when_host_index_is_unavailable",
+    )? {
+        return Ok(());
+    }
+    use provenant_records::custody::Chair;
+    let fixture = OperationReplayFixture::new()?;
+    let call = fixture.call();
+    let operation = fixture
+        .session
         .store
-        .operation(&OperationId::parse("context-ref-replay")?, &call)?
+        .operation(&fixture.operation_id, &call)?
         .ok_or("refused launch lost its admitted operation")?;
     assert_eq!(operation.state, run::OperationState::Terminal);
-    let first = session
+    let request = fixture
+        .session
         .store
-        .operation_attempt(&OperationId::parse("context-ref-replay")?, &call)?;
-    let graph = session.store.work_key(first, &call)?.graph().to_owned();
-    assert_eq!(graph, "context-ref");
-    assert!(
-        session
-            .store
-            .request(first, &call)?
-            .task
-            .profile
-            .require_skill_location
-    );
-    with_chair_index(&roots, &call, |index, index_call| {
+        .request(fixture.first_attempt, &call)?;
+    assert!(request.task.profile.require_skill_location);
+    with_chair_index(&fixture.roots, &call, |index, index_call| {
         let binding = index
-            .read(session.context.project_id, &graph, index_call)?
-            .unwrap();
-        assert_eq!(binding.holder.chair().cloned(), chair);
-        assert_eq!(
-            binding.provenance,
-            Some(
-                session
-                    .store
-                    .request(first, &call)
-                    .unwrap()
-                    .digest()
-                    .unwrap()
-            )
-        );
+            .read(
+                fixture.session.context.project_id,
+                &fixture.graph,
+                index_call,
+            )?
+            .ok_or_else(|| {
+                Fail::new(Status::Error, ErrorKind::Identity, "missing chair binding")
+            })?;
+        assert_eq!(binding.holder.chair(), Some(&fixture.chair));
+        assert_eq!(binding.provenance, Some(request.digest().unwrap()));
         Ok(())
     })
-    .map_err(|f| f.message)?;
+    .map_err(|fail| fail.message)?;
+
     std::fs::rename(
-        roots.state.as_path().join("fabric/host.sqlite3"),
-        roots.state.as_path().join("fabric/interrupted.sqlite3"),
+        fixture.roots.state.as_path().join("fabric/host.sqlite3"),
+        fixture
+            .roots
+            .state
+            .as_path()
+            .join("fabric/interrupted.sqlite3"),
     )?;
-    // Reusing an operation from another chair cannot rebind even a missing
-    // host index row. Repair must use the immutable original request.
-    let mut replay = submission("context-base");
-    replay.chair = Some(provenant_records::custody::Chair {
+    let other_chair = Chair {
         process: None,
         extra: Default::default(),
         session: None,
         host: provenant_core::HostId::from_bytes([6; 16]),
         actor: ActorId::from_bytes([7; 16]),
-    });
-    let (replayed, _) = submit(&session, &edge, replay, &call).map_err(|f| f.message)?;
-    assert_eq!(replayed.attempt_id, first);
+    };
+    let call = fixture.call();
+    let (replayed, _) = submit(
+        &fixture.session,
+        &fixture.edge(),
+        fixture.submission("context-base", Some(other_chair)),
+        &call,
+    )
+    .map_err(|fail| fail.message)?;
+    assert_eq!(replayed.attempt_id, fixture.first_attempt);
+
     let stopped = CancelToken::new();
     stopped.cancel();
     let cancelled = run::Request {
+        clock: &fixture.clock,
         cancel: &stopped,
-        ..call
     };
-    let failure = with_chair_index(&roots, &cancelled, |_, _| Ok(())).unwrap_err();
+    let failure = with_chair_index(&fixture.roots, &cancelled, |_, _| Ok(())).unwrap_err();
     assert_eq!(failure.status, Status::Error);
-    with_chair_index(&roots, &call, |index, call| {
-        assert_eq!(
-            index
-                .read(session.context.project_id, &graph, call)?
-                .unwrap()
-                .holder
-                .chair()
-                .cloned(),
-            chair
-        );
+    with_chair_index(&fixture.roots, &call, |index, index_call| {
+        let binding = index
+            .read(
+                fixture.session.context.project_id,
+                &fixture.graph,
+                index_call,
+            )?
+            .ok_or_else(|| {
+                Fail::new(Status::Error, ErrorKind::Identity, "missing chair binding")
+            })?;
+        assert_eq!(binding.holder.chair(), Some(&fixture.chair));
         Ok(())
     })
-    .map_err(|f| f.message)?;
-    command(&["commit", "--allow-empty", "-qm", "moved"])?;
-    command(&["branch", "-f", "context-base", "HEAD"])?;
-    for deleted in [false, true] {
-        if deleted {
-            command(&["branch", "-D", "context-base"])?;
-        }
-        let (replayed, _) =
-            submit(&session, &edge, submission("context-base"), &call).map_err(|f| f.message)?;
-        assert_eq!(replayed.attempt_id, first);
-        assert_eq!(
-            session.store.request(first, &call)?.task.base.as_deref(),
-            Some(original_base.as_str())
-        );
+    .map_err(|fail| fail.message)?;
+    Ok(())
+}
+
+#[test]
+fn operation_id_conflicts_when_replayed_with_a_different_base()
+-> Result<(), Box<dyn std::error::Error>> {
+    if reexec_operation_test("operation_id_conflicts_when_replayed_with_a_different_base")? {
+        return Ok(());
     }
-    assert!(
-        matches!(submit(&session, &edge, submission("HEAD"), &call), Err(fail) if fail.kind == ErrorKind::OperationConflict)
-    );
+    let fixture = OperationReplayFixture::new()?;
+    let call = fixture.call();
+    assert!(matches!(
+        submit(
+            &fixture.session,
+            &fixture.edge(),
+            fixture.submission("HEAD", Some(fixture.chair.clone())),
+            &call
+        ),
+        Err(failure) if failure.kind == ErrorKind::OperationConflict
+    ));
     Ok(())
 }
 #[test]
 fn reconcile_reports_orphan_reservation_issues() -> Result<(), Box<dyn std::error::Error>> {
-    if reexec_test_in_lane("run::tests::reconcile_reports_orphan_reservation_issues")? {
+    if crate::fabric::in_lane() {
+        let out = crate::test_support::rerun_test(
+            module_path!(),
+            "reconcile_reports_orphan_reservation_issues",
+            &[],
+            &[
+                provenant_core::RUN_STATE_DIRECTORY_ENV,
+                provenant_core::consumer_env::LANE_DEPTH,
+                provenant_core::consumer_env::PARENT_ATTEMPT_ID,
+            ],
+            Duration::from_secs(30),
+        )?;
+        assert_eq!(
+            out.termination,
+            provenant_os::exec::Termination::Exit(0),
+            "{out:?}"
+        );
+        assert!(!out.timed_out, "{out:?}");
         return Ok(());
     }
     let fixture = linked_fixture()?;
@@ -749,7 +874,10 @@ fn keyed(
         provenant_core::HostId::from_bytes([1; 16]),
         prepared.attempt_id
     );
-    let clock = SystemClock::new();
+    let clock = provenant_core::TestClock::new(
+        WallTime::from_micros(0)?,
+        provenant_core::MonoTime::from_micros(0),
+    );
     let cancel = CancelToken::new();
     let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5)?;
     let mut journal =
@@ -768,7 +896,7 @@ fn keyed(
         document,
     })?;
     let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-        "schema_version":1, "graph_id":graph, "plan_digest":"fixture",
+        "schema_version":2, "graph_id":graph, "plan_digest":"fixture",
         "nodes":[{"id":node, "state":"running", "attempts":[{
             "launched":true, "key":{"graph_id":graph, "node_id":node, "route_index":0, "attempt": 1},
             "route":{"alias":"senior"}, "state":"running", "attempt_ref":reference,
@@ -779,442 +907,563 @@ fn keyed(
     Ok(())
 }
 #[cfg(feature = "fixture")]
-#[test]
-fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
--> Result<(), Box<dyn std::error::Error>> {
-    if reexec_test_in_lane(
-        "run::tests::reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence",
-    )? {
-        return Ok(());
-    }
-    use provenant_os::fs::{Directory, LockMode, PublishMode};
-    use provenant_records::custody::Scope;
-    use provenant_supervisor::custody::{self};
-    use std::ffi::OsStr;
-    for (import_done, settle_failed) in [(false, true), (false, false), (true, false)] {
-        let reason = if import_done {
-            "r".repeat(4096)
-        } else {
-            "worktree rebuilt by chair".into()
+struct ReconcileFixture {
+    _linked: LinkedFixture,
+    roots: provenant_core::Roots,
+    home: PathBuf,
+    clock: provenant_core::TestClock,
+    cancel: CancelToken,
+    session: Session,
+    id: AttemptId,
+    scope: Scope,
+    attempt_path: PathBuf,
+    recovery: Option<provenant_supervisor::custody::Recovery>,
+    import: run::EffectDisposition,
+    phase: &'static str,
+    blocker: &'static str,
+}
+
+#[cfg(feature = "fixture")]
+impl ReconcileFixture {
+    fn new(import_done: bool, settle_failed: bool) -> Result<Self, Box<dyn std::error::Error>> {
+        use provenant_core::RootInputs;
+        use provenant_os::fs::{Directory, PublishMode};
+        use provenant_records::custody::Scope;
+        use provenant_supervisor::custody::{self};
+        use std::ffi::OsStr;
+
+        let linked = linked_fixture()?;
+        let home = linked.root.join("home");
+        std::fs::create_dir_all(&home)?;
+        let mut inputs = RootInputs::new(home.clone(), linked.project.clone());
+        inputs.state_dir = Some(linked.root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let clock = provenant_core::TestClock::new(
+            WallTime::from_micros(0)?,
+            provenant_core::MonoTime::from_micros(0),
+        );
+        let cancel = CancelToken::new();
+        let call = run::Request {
+            clock: &clock,
+            cancel: &cancel,
         };
-        let phase = if import_done { "release" } else { "publish" };
+        let edge = Edge {
+            roots: &roots,
+            home: &home,
+            assets: &linked.project,
+            cwd: &linked.project,
+        };
+        let mut session = open(&edge, &call).map_err(|fail| fail.message)?;
+        let mut input = trace_run(30, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
+        input.request.parent_attempt = None;
+        input.request.lane_depth = None;
+        input.request.task.writer = Some(run::WriterRequest {
+            extra: Default::default(),
+            custody_project: Some(session.context.project_id),
+            project: linked.project.clone(),
+            worktree: linked.tree.clone(),
+        });
+        keyed(
+            &edge,
+            session.context.project_id,
+            &mut input,
+            ("fence", "writer"),
+        )?;
+        session.store.create(&input, &call)?;
+        let id = input.attempt_id;
+        let record =
+            session
+                .store
+                .mark_starting_for_fixture(id, &run::RouteRecord::default(), &call)?;
+        let scope = Scope {
+            attempt: id,
+            generation: record.generation,
+        };
+        let attempt_path = roots.state.as_path().join(format!("attempts/{id}"));
+        let attempt = Directory::open_anchor(&attempt_path)?;
+        let slot_path = roots.state.as_path().join(format!(
+            "worktrees/{}/abandon-fixture",
+            session.context.project_id
+        ));
+        provenant_os::fixture::private_state_dir(&slot_path)?;
+        let lease = provenant_supervisor::fixture::acquire_writer(
+            Directory::open_anchor(&slot_path)?,
+            scope,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        let recovery =
+            provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?.into_recovery()?;
+        let fence = session
+            .store
+            .writer_fences()?
+            .into_iter()
+            .find(|fence| fence.scope == scope)
+            .ok_or("fence")?;
+        let evidence =
+            Directory::open_anchor(fence.reservation.parent().ok_or("reservation parent")?)?;
+        evidence
+            .atomic_write(
+                OsStr::new("import-retained.json"),
+                ".test-",
+                &serde_json::to_vec(&json!({"schema_version":1,"scope":scope}))?,
+                PublishMode::NoReplace,
+            )?
+            .require_durable()?;
+        let exit = ExitObservation {
+            scope,
+            terminal_observed: true,
+            settlement_evidence: custody::SettlementEvidence::DarwinCensusAndCustodyLease,
+            ..clean_exit()
+        };
+        let mut exit_json = serde_json::to_value(&exit)?;
+        exit_json["schema_version"] = 1.into();
+        attempt
+            .atomic_write(
+                OsStr::new("process-exit.json"),
+                ".test-",
+                &serde_json::to_vec(&exit_json)?,
+                PublishMode::NoReplace,
+            )?
+            .require_durable()?;
+        session.store.publish_terminal(
+            id,
+            session.store.record(id, &call)?.revision,
+            &run::TerminalPublication {
+                handoff: Ok(None),
+                terminal_cause: None,
+                terminal_note: None,
+                outcome: run::Outcome::Unsettled,
+                finished_at: clock.wall_now()?,
+                started_at: None,
+                provider_ms: None,
+                reason: Some("publish refused".into()),
+                result: "retained provider evidence",
+                complete: true,
+                redacted: false,
+                resolved_route: None,
+                applied_route: None,
+                observed_route: None,
+                usage: Default::default(),
+                session: None,
+                partial_signals: vec![],
+            },
+            &exit,
+            &call,
+        )?;
         let blocker = if import_done {
             "release evidence missing"
         } else {
             "lane Git import failed"
         };
-        let fixture = linked_fixture()?;
-        with_edge(
-            &fixture.root,
-            &fixture.project,
-            |edge| -> Result<(), Box<dyn std::error::Error>> {
-                let clock = SystemClock::new();
-                let cancel = CancelToken::new();
-                let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
-                let session = open(edge, &call).map_err(|fail| fail.message)?;
-                let mut input = trace_run(30, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
-                input.request.parent_attempt = None;
-                input.request.lane_depth = None;
-                input.request.task.writer = Some(run::WriterRequest {
-                    extra: Default::default(),
-                    custody_project: Some(session.context.project_id),
-                    project: fixture.project.clone(),
-                    worktree: fixture.tree.clone(),
-                });
-                keyed(
-                    edge,
-                    session.context.project_id,
-                    &mut input,
-                    ("fence", "writer"),
-                )?;
-                session.store.create(&input, &call)?;
-                let id = input.attempt_id;
-                let record = session.store.mark_starting_for_fixture(
-                    id,
-                    &run::RouteRecord::default(),
-                    &call,
-                )?;
-                let scope = Scope {
-                    attempt: id,
-                    generation: record.generation,
-                };
-                let attempt_path = edge.roots.state.as_path().join(format!("attempts/{id}"));
-                let attempt = Directory::open_anchor(&attempt_path)?;
-                let slot_path = edge.roots.state.as_path().join(format!(
-                    "worktrees/{}/abandon-fixture",
-                    session.context.project_id
-                ));
-                provenant_os::fixture::private_state_dir(&slot_path)?;
-                let lease = provenant_supervisor::fixture::acquire_writer(
-                    Directory::open_anchor(&slot_path)?,
-                    scope,
-                    call.lock_budget(),
-                    &cancel,
-                    &clock,
-                )?;
-                let recovery = provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?
-                    .into_recovery()?;
-                let fence = session
-                    .store
-                    .writer_fences()?
-                    .into_iter()
-                    .find(|f| f.scope == scope)
-                    .ok_or("fence")?;
-                let evidence = Directory::open_anchor(
-                    fence.reservation.parent().ok_or("reservation parent")?,
-                )?;
-                evidence
-                    .atomic_write(
-                        OsStr::new("import-retained.json"),
-                        ".test-",
-                        &serde_json::to_vec(&json!({"schema_version":1,"scope":scope}))?,
-                        PublishMode::NoReplace,
-                    )?
-                    .require_durable()?;
-                let exit = ExitObservation {
-                    scope,
-                    terminal_observed: true,
-                    settlement_evidence: custody::SettlementEvidence::DarwinCensusAndCustodyLease,
-                    ..clean_exit()
-                };
-                let mut exit_json = serde_json::to_value(&exit)?;
-                exit_json["schema_version"] = 1.into();
-                attempt
-                    .atomic_write(
-                        OsStr::new("process-exit.json"),
-                        ".test-",
-                        &serde_json::to_vec(&exit_json)?,
-                        PublishMode::NoReplace,
-                    )?
-                    .require_durable()?;
-                session.store.publish_terminal(
-                    id,
-                    session.store.record(id, &call)?.revision,
-                    &run::TerminalPublication {
-                        handoff: Ok(None),
-                        terminal_cause: None,
-                        terminal_note: None,
-                        outcome: run::Outcome::Unsettled,
-                        finished_at: clock.wall_now()?,
-                        started_at: None,
-                        provider_ms: None,
-                        reason: Some("publish refused".into()),
-                        result: "retained provider evidence",
-                        complete: true,
-                        redacted: false,
-                        resolved_route: None,
-                        applied_route: None,
-                        observed_route: None,
-                        usage: Default::default(),
-                        session: None,
-                        partial_signals: vec![],
-                    },
-                    &exit,
-                    &call,
-                )?;
-                let import = if import_done {
-                    run::EffectDisposition::Done
-                } else {
-                    run::EffectDisposition::Failed {
-                        reason: blocker.into(),
-                        retryable: true,
-                    }
-                };
-                session.store.record_effect(
-                    id,
-                    scope.generation,
-                    run::SettlementEffect::GitImport,
-                    import.clone(),
-                    &call,
-                )?;
-                attempt
-                    .atomic_write(
-                        OsStr::new("settlement-progress.json"),
-                        ".test-",
-                        &serde_json::to_vec(&json!({
-                            "schema_version":1, "scope":scope, "phase":phase, "attempts":1,
-                            "head": if settle_failed { Some("a".repeat(40)) } else { None }, "base":null, "owner":null, "blocking_reason":blocker
-                        }))?,
-                        PublishMode::Replace,
-                    )?
-                    .require_durable()?;
-                std::fs::create_dir_all(attempt_path.join("tmp/candidate-0/git-common"))?;
-                std::fs::write(
-                    attempt_path.join("tmp/candidate-0/git-common/evidence"),
-                    "private objects",
-                )?;
-                let parse = |args: &[&str]| -> Result<Reconcile, Box<dyn std::error::Error>> {
-                    let crate::ParseOutcome::Invocation(inv) =
-                        crate::parse(args.iter().map(std::ffi::OsString::from))
-                    else {
-                        return Err("parse reconcile".into());
-                    };
-                    let crate::Command::Reconcile(command) = inv.command else {
-                        return Err("reconcile command".into());
-                    };
-                    Ok(command)
-                };
-                if settle_failed {
-                    attempt.atomic_write(OsStr::new("launch.json"), ".test-",
-                        &serde_json::to_vec(&json!({"schema_version":1,"scope":scope,"requester":session.context.actor_id}))?,
-                        PublishMode::NoReplace)?.require_durable()?;
-                    std::fs::create_dir_all(attempt_path.join("tmp/candidate-0/git-objects"))?;
-                    std::fs::write(
-                        attempt_path.join("tmp/candidate-0/git-objects/evidence"),
-                        b"retained objects",
-                    )?;
-                    attempt
-                        .atomic_write(
-                            OsStr::new("writer-objects.json"),
-                            ".test-",
-                            &serde_json::to_vec(
-                                &json!({"schema_version":1,"candidate":"candidate-0"}),
-                            )?,
-                            PublishMode::NoReplace,
-                        )?
-                        .require_durable()?;
-                    drop(recovery);
-                    let found =
-                        session
-                            .store
-                            .reconcile_for_fixture(id, &Registry::default(), &call)?;
-                    let record = session.store.record(id, &call)?;
-                    // Settlement appends the work-location note to the blocker. This
-                    // fixture's private Git holds no refs, so the note says the files
-                    // were not restored, and why.
-                    let expected_reason =
-                        match record.settlement_receipts.as_ref().and_then(|receipts| {
-                            match &receipts.git_import {
-                                run::EffectDisposition::Failed {
-                                    retryable: false,
-                                    reason,
-                                } => Some(reason.clone()),
-                                _ => None,
-                            }
-                        }) {
-                            Some(reason) => {
-                                assert!(
-                                    reason.strip_prefix(blocker).is_some_and(|note| {
-                                        note.strip_prefix("; worktree files not restored: ")
-                                            .is_some_and(|why| !why.is_empty())
-                                    }),
-                                    "{found:?}"
-                                );
-                                reason
-                            }
-                            None => panic!("unexpected git_import disposition: {record:?}"),
-                        };
-                    {
-                        let crate::ParseOutcome::Invocation(inv) = crate::parse(
-                            ["output", "fence/writer", "--full"]
-                                .into_iter()
-                                .map(std::ffi::OsString::from),
-                        ) else {
-                            return Err("parse output".into());
-                        };
-                        let crate::Command::Output(command) = inv.command else {
-                            return Err("output command".into());
-                        };
-                        let reply = output_from_session(command, edge, &session, id, &call);
-                        assert_eq!(reply.result.status, Status::Ok, "{}", reply.human);
-                        let row = &reply.result.data;
-                        assert_eq!(row["state"], "failed");
-                        assert_eq!(row["git_import_failure"]["reason"], expected_reason);
-                        assert_eq!(row["git_import_failure"]["head"], "a".repeat(40));
-                        assert_eq!(
-                            row["git_import_failure"]["retained_objects"],
-                            json!(provenant_records::StructuredPathWire::from_path(
-                                &attempt_path.join("tmp/candidate-0/git-objects")
-                            )?)
-                        );
-                        let summary = reply
-                            .summary
-                            .as_ref()
-                            .map(|summary| summary.lines.join("\n"))
-                            .unwrap_or_default();
-                        let mut rendered = Vec::new();
-                        crate::render(
-                            &reply.result,
-                            inv.globals.render_mode(
-                                &reply.human,
-                                reply.read_only,
-                                reply.summary.as_ref(),
-                            ),
-                            &mut rendered,
-                        )?;
-                        let rendered = String::from_utf8(rendered)?;
-                        assert_eq!(
-                            reply.result.data["bytes"]["data"],
-                            "retained provider evidence"
-                        );
-                        for text in [&reply.human, &summary, &rendered] {
-                            assert!(
-                                text.contains("commits may not have reached its branch"),
-                                "{text}"
-                            );
-                            assert!(text.contains(&"a".repeat(40)), "{text}");
-                            assert!(text.contains("git-objects"), "{text}");
-                        }
-                    }
-                    assert_eq!(
-                        std::fs::read(attempt_path.join("tmp/candidate-0/git-objects/evidence"))?,
-                        b"retained objects"
-                    );
-                    assert_eq!(
-                        std::fs::read(attempt_path.join("tmp/candidate-0/git-common/evidence"))?,
-                        b"private objects"
-                    );
-                    session
-                        .store
-                        .drain_reactions(id, &clock, &cancel, &mut |receipt, _| {
-                            receipt.graph_done = true;
-                            receipt.notice_done = true;
-                            receipt.log_done = true;
-                            receipt.ledger_done = true;
-                            Ok(())
-                        })?;
-                    let reported = reconcile(parse(&["reconcile", "fence", "--json"])?, edge);
-                    assert_eq!(reported.result.status, Status::Ok, "{}", reported.human);
-                    assert!(
-                        reported.result.data["runs"][0]["attempts"]
-                            .as_array()
-                            .is_none_or(Vec::is_empty)
-                    );
-                    return Ok(());
-                }
-                let driver =
-                    attempt.try_lock(OsStr::new("settlement-driver.lock"), LockMode::Exclusive)?;
-                let reported = reconcile(parse(&["reconcile", "fence", "--json"])?, edge);
-                let json = serde_json::to_value(&reported.result)?;
-                if !import_done {
-                    assert_eq!(
-                        json["data"]["runs"][0]["attempts"][0]["found"]["phase"],
-                        "publish"
-                    );
-                    assert_eq!(
-                        json["data"]["runs"][0]["attempts"][0]["found"]["blocking_reason"],
-                        "lane Git import failed"
-                    );
-                    assert!(reported.human.contains("lane Git import failed"));
-                }
-                let selection = "fence/writer#1";
-                assert!(parse(&["reconcile", "--abandon", selection]).is_err());
-                assert!(parse(&["reconcile", "--reason", "missing attempt"]).is_err());
-                assert!(
-                    parse(&[
-                        "reconcile",
-                        "fence",
-                        "--abandon",
-                        selection,
-                        "--reason",
-                        "ambiguous action"
-                    ])
-                    .is_err()
-                );
-                let args = [
-                    "reconcile",
-                    "--abandon",
-                    selection,
-                    "--reason",
-                    reason.as_str(),
-                    "--json",
-                ];
-                assert_ne!(
-                    reconcile(parse(&args)?, edge).result.status,
-                    Status::Ok,
-                    "live driver excludes abandonment"
-                );
-                drop(driver);
-                assert_ne!(
-                    reconcile(parse(&args)?, edge).result.status,
-                    Status::Ok,
-                    "held writer lock excludes abandonment"
-                );
-                drop(recovery);
-                let abandoned = reconcile(parse(&args)?, edge);
-                assert_eq!(
-                    abandoned.result.status,
-                    Status::Ok,
-                    "{:?}",
-                    abandoned.result.error
-                );
-                assert_eq!(abandoned.result.data["found"]["state"], "abandoned");
-                assert_eq!(abandoned.result.data["found"]["reason"], reason);
-                assert!(session.store.writer_fences()?.is_empty());
-                session
-                    .store
-                    .reconcile_for_fixture(id, &Registry::default(), &call)?;
-                assert_eq!(
-                    session
-                        .store
-                        .record(id, &call)?
-                        .settlement_receipts
-                        .unwrap()
-                        .git_import,
-                    import
-                );
-                let journal: Value = serde_json::from_slice(&std::fs::read(
-                    attempt_path.join("settlement-progress.json"),
-                )?)?;
-                assert_eq!(
-                    journal["abandonment"]["actor"],
-                    session.context.actor_id.to_string()
-                );
-                assert_eq!(journal["abandonment"]["phase"], phase);
-                assert_eq!(journal["blocking_reason"], blocker);
-                assert_eq!(
-                    reconcile(parse(&args)?, edge).result.status,
-                    Status::Ok,
-                    "same reason is idempotent"
-                );
-                reconcile(parse(&["reconcile", "fence", "--json"])?, edge);
-                assert!(
-                    attempt_path
-                        .join("tmp/candidate-0/git-common/evidence")
-                        .is_file()
-                );
-                let different = [
-                    "reconcile",
-                    "--abandon",
-                    selection,
-                    "--reason",
-                    "different explanation",
-                    "--json",
-                ];
-                assert_ne!(
-                    reconcile(parse(&different)?, edge).result.status,
-                    Status::Ok,
-                    "recorded reason cannot be replaced"
-                );
-                let state = Directory::open_anchor(edge.roots.state.as_path())?;
-                let later =
-                    WallTime::from_micros(clock.wall_now()?.as_micros() + 90 * 86_400_000_000)?;
-                let collected = session
-                    .store
-                    .gc_provider_state(&state, 7, later, false, &call)?;
-                assert!(collected.attempt_tmp.is_empty());
-                assert!(
-                    attempt_path
-                        .join("tmp/candidate-0/git-common/evidence")
-                        .is_file()
-                );
-                assert_eq!(
-                    std::fs::read_to_string(attempt_path.join("result.md"))?,
-                    "retained provider evidence"
-                );
-                Ok(())
-            },
-        )??;
+        let phase = if import_done { "release" } else { "publish" };
+        let import = if import_done {
+            run::EffectDisposition::Done
+        } else {
+            run::EffectDisposition::Failed {
+                reason: blocker.into(),
+                retryable: true,
+            }
+        };
+        session.store.record_effect(
+            id,
+            scope.generation,
+            run::SettlementEffect::GitImport,
+            import.clone(),
+            &call,
+        )?;
+        attempt
+            .atomic_write(
+                OsStr::new("settlement-progress.json"),
+                ".test-",
+                &serde_json::to_vec(&json!({
+                    "schema_version":1,
+                    "scope":scope,
+                    "phase":phase,
+                    "attempts":1,
+                    "head": if settle_failed { Some("a".repeat(40)) } else { None },
+                    "base":null,
+                    "owner":null,
+                    "blocking_reason":blocker
+                }))?,
+                PublishMode::Replace,
+            )?
+            .require_durable()?;
+        std::fs::create_dir_all(attempt_path.join("tmp/candidate-0/git-common"))?;
+        std::fs::write(
+            attempt_path.join("tmp/candidate-0/git-common/evidence"),
+            "private objects",
+        )?;
+
+        Ok(Self {
+            _linked: linked,
+            roots,
+            home,
+            clock,
+            cancel,
+            session,
+            id,
+            scope,
+            attempt_path,
+            recovery: Some(recovery),
+            import,
+            phase,
+            blocker,
+        })
     }
+
+    fn edge(&self) -> Edge<'_> {
+        Edge {
+            roots: &self.roots,
+            home: &self.home,
+            assets: &self._linked.project,
+            cwd: &self._linked.project,
+        }
+    }
+
+    fn request(&self) -> run::Request<'_> {
+        run::Request {
+            clock: &self.clock,
+            cancel: &self.cancel,
+        }
+    }
+}
+
+#[cfg(feature = "fixture")]
+fn rerun_reconcile_test(module: &str, name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    if !crate::fabric::in_lane() {
+        return Ok(false);
+    }
+    let out = crate::test_support::rerun_test(
+        module,
+        name,
+        &[],
+        &[
+            provenant_core::RUN_STATE_DIRECTORY_ENV,
+            provenant_core::consumer_env::LANE_DEPTH,
+            provenant_core::consumer_env::PARENT_ATTEMPT_ID,
+        ],
+        Duration::from_secs(30),
+    )?;
+    assert_eq!(
+        out.termination,
+        provenant_os::exec::Termination::Exit(0),
+        "{out:?}"
+    );
+    assert!(!out.timed_out, "{out:?}");
+    Ok(true)
+}
+
+#[cfg(feature = "fixture")]
+fn parse_reconcile(args: &[&str]) -> Result<Reconcile, Box<dyn std::error::Error>> {
+    let crate::ParseOutcome::Invocation(inv) =
+        crate::parse(args.iter().map(std::ffi::OsString::from))
+    else {
+        return Err("parse reconcile".into());
+    };
+    let crate::Command::Reconcile(command) = inv.command else {
+        return Err("reconcile command".into());
+    };
+    Ok(command)
+}
+
+#[cfg(feature = "fixture")]
+fn assert_reconcile_abandonment(
+    import_done: bool,
+    reason: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::fs::{Directory, LockMode};
+
+    let mut fixture = ReconcileFixture::new(import_done, false)?;
+    let edge = fixture.edge();
+    let call = fixture.request();
+    let attempt = Directory::open_anchor(&fixture.attempt_path)?;
+    let selection = "fence/writer#1";
+    assert!(parse_reconcile(&["reconcile", "--abandon", selection]).is_err());
+    assert!(parse_reconcile(&["reconcile", "--reason", "missing attempt"]).is_err());
+    assert!(
+        parse_reconcile(&[
+            "reconcile",
+            "fence",
+            "--abandon",
+            selection,
+            "--reason",
+            "ambiguous action"
+        ])
+        .is_err()
+    );
+
+    let driver = attempt.try_lock(
+        std::ffi::OsStr::new("settlement-driver.lock"),
+        LockMode::Exclusive,
+    )?;
+    let found = reconcile(parse_reconcile(&["reconcile", "fence", "--json"])?, &edge);
+    let found_data = serde_json::to_value(&found.result)?;
+    assert_eq!(
+        found_data["data"]["runs"][0]["attempts"][0]["found"]["phase"],
+        fixture.phase
+    );
+    assert_eq!(
+        found_data["data"]["runs"][0]["attempts"][0]["found"]["blocking_reason"],
+        fixture.blocker
+    );
+
+    let args = [
+        "reconcile",
+        "--abandon",
+        selection,
+        "--reason",
+        reason,
+        "--json",
+    ];
+    let while_driving = reconcile(parse_reconcile(&args)?, &edge);
+    assert_ne!(while_driving.result.status, Status::Ok);
+    drop(driver);
+    let while_recovery_owned = reconcile(parse_reconcile(&args)?, &edge);
+    assert_ne!(while_recovery_owned.result.status, Status::Ok);
+    drop(fixture.recovery.take());
+
+    let abandoned = reconcile(parse_reconcile(&args)?, &edge);
+    assert_eq!(abandoned.result.status, Status::Ok);
+    assert_eq!(abandoned.result.data["found"]["state"], "abandoned");
+    assert_eq!(abandoned.result.data["found"]["reason"], reason);
+    assert!(fixture.session.store.writer_fences()?.is_empty());
+    fixture
+        .session
+        .store
+        .reconcile_for_fixture(fixture.id, &Registry::default(), &call)?;
+    assert_eq!(
+        fixture
+            .session
+            .store
+            .record(fixture.id, &call)?
+            .settlement_receipts
+            .ok_or("settlement receipts")?
+            .git_import,
+        fixture.import
+    );
+
+    let journal: Value = serde_json::from_slice(&std::fs::read(
+        fixture.attempt_path.join("settlement-progress.json"),
+    )?)?;
+    assert_eq!(
+        journal["abandonment"]["actor"],
+        fixture.session.context.actor_id.to_string()
+    );
+    assert_eq!(journal["abandonment"]["phase"], fixture.phase);
+    assert_eq!(journal["blocking_reason"], fixture.blocker);
+    assert_eq!(
+        reconcile(parse_reconcile(&args)?, &edge).result.status,
+        Status::Ok
+    );
+    reconcile(parse_reconcile(&["reconcile", "fence", "--json"])?, &edge);
+    assert!(
+        fixture
+            .attempt_path
+            .join("tmp/candidate-0/git-common/evidence")
+            .is_file()
+    );
+
+    let different = [
+        "reconcile",
+        "--abandon",
+        selection,
+        "--reason",
+        "different explanation",
+        "--json",
+    ];
+    assert_ne!(
+        reconcile(parse_reconcile(&different)?, &edge).result.status,
+        Status::Ok
+    );
+
+    let state = Directory::open_anchor(fixture.roots.state.as_path())?;
+    let later = WallTime::from_micros(fixture.clock.wall_now()?.as_micros() + 90 * 86_400_000_000)?;
+    let collected = fixture
+        .session
+        .store
+        .gc_provider_state(&state, 7, later, false, &call)?;
+    assert!(collected.attempt_tmp.is_empty());
+    assert!(
+        fixture
+            .attempt_path
+            .join("tmp/candidate-0/git-common/evidence")
+            .is_file()
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.attempt_path.join("result.md"))?,
+        "retained provider evidence"
+    );
     Ok(())
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn reconcile_failed_settlement_keeps_import_failure_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    if rerun_reconcile_test(
+        module_path!(),
+        "reconcile_failed_settlement_keeps_import_failure_evidence",
+    )? {
+        return Ok(());
+    }
+    use provenant_os::fs::{Directory, PublishMode};
+    use std::ffi::OsStr;
+
+    let mut fixture = ReconcileFixture::new(false, true)?;
+    let edge = fixture.edge();
+    let call = fixture.request();
+    let attempt = Directory::open_anchor(&fixture.attempt_path)?;
+    attempt
+        .atomic_write(
+            OsStr::new("launch.json"),
+            ".test-",
+            &serde_json::to_vec(&json!({
+                "schema_version":1,
+                "scope":fixture.scope,
+                "requester":fixture.session.context.actor_id
+            }))?,
+            PublishMode::NoReplace,
+        )?
+        .require_durable()?;
+    std::fs::create_dir_all(fixture.attempt_path.join("tmp/candidate-0/git-objects"))?;
+    std::fs::write(
+        fixture
+            .attempt_path
+            .join("tmp/candidate-0/git-objects/evidence"),
+        b"retained objects",
+    )?;
+    attempt
+        .atomic_write(
+            OsStr::new("writer-objects.json"),
+            ".test-",
+            &serde_json::to_vec(&json!({
+                "schema_version":1,
+                "candidate":"candidate-0"
+            }))?,
+            PublishMode::NoReplace,
+        )?
+        .require_durable()?;
+    drop(fixture.recovery.take());
+
+    fixture
+        .session
+        .store
+        .reconcile_for_fixture(fixture.id, &Registry::default(), &call)?;
+    let record = fixture.session.store.record(fixture.id, &call)?;
+    let expected_reason = match record
+        .settlement_receipts
+        .as_ref()
+        .map(|receipts| &receipts.git_import)
+    {
+        Some(run::EffectDisposition::Failed {
+            retryable: false,
+            reason,
+        }) => reason,
+        _ => return Err("unexpected git import disposition".into()),
+    };
+    assert!(
+        expected_reason
+            .strip_prefix(fixture.blocker)
+            .is_some_and(|note| !note.is_empty())
+    );
+
+    let crate::ParseOutcome::Invocation(inv) = crate::parse(
+        ["output", "fence/writer", "--full"]
+            .into_iter()
+            .map(std::ffi::OsString::from),
+    ) else {
+        return Err("parse output".into());
+    };
+    let crate::Command::Output(command) = inv.command else {
+        return Err("output command".into());
+    };
+    let reply = output_from_session(command, &edge, &fixture.session, fixture.id, &call);
+    assert_eq!(reply.result.status, Status::Ok);
+    let row = &reply.result.data;
+    assert_eq!(row["state"], "failed");
+    assert_eq!(
+        row["git_import_failure"]["reason"].as_str(),
+        Some(expected_reason.as_str())
+    );
+    assert_eq!(row["git_import_failure"]["head"], "a".repeat(40));
+    assert_eq!(
+        row["git_import_failure"]["retained_objects"],
+        json!(provenant_records::StructuredPathWire::from_path(
+            &fixture.attempt_path.join("tmp/candidate-0/git-objects")
+        )?)
+    );
+    assert_eq!(row["bytes"]["data"], "retained provider evidence");
+    assert_eq!(
+        std::fs::read(
+            fixture
+                .attempt_path
+                .join("tmp/candidate-0/git-objects/evidence")
+        )?,
+        b"retained objects"
+    );
+    assert_eq!(
+        std::fs::read(
+            fixture
+                .attempt_path
+                .join("tmp/candidate-0/git-common/evidence")
+        )?,
+        b"private objects"
+    );
+
+    fixture.session.store.drain_reactions(
+        fixture.id,
+        &fixture.clock,
+        &fixture.cancel,
+        &mut |receipt, _| {
+            receipt.graph_done = true;
+            receipt.notice_done = true;
+            receipt.log_done = true;
+            receipt.ledger_done = true;
+            Ok(())
+        },
+    )?;
+    let reported = reconcile(parse_reconcile(&["reconcile", "fence", "--json"])?, &edge);
+    assert_eq!(reported.result.status, Status::Ok);
+    assert!(
+        reported.result.data["runs"][0]["attempts"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn reconcile_publish_blocker_requires_explicit_abandonment()
+-> Result<(), Box<dyn std::error::Error>> {
+    if rerun_reconcile_test(
+        module_path!(),
+        "reconcile_publish_blocker_requires_explicit_abandonment",
+    )? {
+        return Ok(());
+    }
+    assert_reconcile_abandonment(false, "worktree rebuilt by chair")
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn reconcile_release_blocker_records_completed_import_phase()
+-> Result<(), Box<dyn std::error::Error>> {
+    if rerun_reconcile_test(
+        module_path!(),
+        "reconcile_release_blocker_records_completed_import_phase",
+    )? {
+        return Ok(());
+    }
+    assert_reconcile_abandonment(true, &"r".repeat(4096))
 }
 
 #[path = "tests_access.rs"]
 mod access_tests;
 #[path = "tests_graph.rs"]
 mod graph_tests;
-#[path = "tests_lanes.rs"]
-mod lanes_tests;
 #[path = "tests_provider.rs"]
 mod provider_tests;
 #[path = "tests_reporting.rs"]

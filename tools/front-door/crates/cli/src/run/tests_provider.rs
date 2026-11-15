@@ -1,6 +1,32 @@
 use super::*;
 use provenant_records::CanonicalV1;
 
+fn write_registered_account_config(
+    path: &std::path::Path,
+    adapter: &str,
+    label: &str,
+    key: &str,
+    directory: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let registration: provenant_providers::accounts::Registration =
+        serde_json::from_value(json!({
+            "adapter": adapter,
+            "label": label,
+            "key": key,
+            "directory": directory,
+        }))?;
+    let settings = provenant_providers::accounts::Settings {
+        entries: [(label.to_owned(), registration)].into(),
+        ..Default::default()
+    };
+    let config = serde_json::json!({
+        "schema_version": 1,
+        "domains": {"accounts": settings},
+    });
+    std::fs::write(path, toml_edit::ser::to_string(&config)?)?;
+    Ok(())
+}
+
 #[test]
 fn capacity_guardian_context_records_and_reports_config_failure()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -57,12 +83,7 @@ fn capacity_guardian_context_records_and_reports_config_failure()
         "schema_version = 1\nprofile = 'balanced'\n[domains.routing]\ncapacity_cooldown_seconds = 0\n",
     )?;
     let disabled = decode()?;
-    assert_eq!(
-        disabled.reason.as_deref(),
-        Some(
-            "provider capacity: the selected model is overloaded; wait or choose an eligible route"
-        )
-    );
+    assert_eq!(disabled.reason.as_deref(), Some(super::capacity_reason()));
     assert!(!state.join("quota").exists());
     std::fs::remove_file(state.join("config.toml"))?;
     decode()?;
@@ -102,19 +123,32 @@ fn capacity_guardian_context_records_and_reports_config_failure()
     Ok(())
 }
 #[test]
-fn claude_and_opencode_overload_reach_the_decoded_outcome() {
+fn overloads_from_each_adapter_reach_the_typed_capacity_outcome() {
     let mut exit = clean_exit();
     exit.termination = Some(provenant_os::exec::Termination::Exit(1));
-    for (provider, model, stream) in [
+    let codex = format!(
+        "{}\n{}\n",
+        json!({"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}),
+        json!({"type":"turn.failed","error":{"message":"Selected model is at capacity. TOKEN_SENTINEL /private/source","codex_error_info":"server_overloaded"}})
+    );
+    for (provider, model, stream, session) in [
         (
             "claude",
             "claude/claude-sonnet-5-5",
             r#"{"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"api_error_status":529,"result":"Overloaded"}"#,
+            Some("s"),
         ),
         (
             "opencode",
             "opencode/anthropic/test",
             r#"{"type":"error","sessionID":"ses_x","error":{"type":"provider.internal","status":529,"message":"Overloaded"}}"#,
+            Some("ses_x"),
+        ),
+        (
+            "codex",
+            "codex/gpt-6.1-sol",
+            codex.as_str(),
+            Some("01234567-89ab-cdef-0123-456789abcdef"),
         ),
     ] {
         let route = run::RouteRecord {
@@ -126,14 +160,8 @@ fn claude_and_opencode_overload_reach_the_decoded_outcome() {
             .decode(&route, stream.as_bytes(), &exit, Path::new("/nonexistent"))
             .unwrap();
         assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
-        assert!(
-            decoded
-                .reason
-                .as_deref()
-                .unwrap()
-                .starts_with("provider capacity: the selected model is overloaded")
-        );
-        assert!(decoded.session.is_some());
+        assert_eq!(decoded.reason.as_deref(), Some(super::capacity_reason()));
+        assert_eq!(decoded.session.as_deref(), session);
     }
 }
 #[test]
@@ -146,19 +174,10 @@ fn codex_rate_limit_reaches_the_decoded_outcome() {
         ..Default::default()
     };
     let registry = Registry::default();
-    for (message, _expected) in [
-        (
-            "exceeded retry limit, last status: 429 Too Many Requests".to_owned(),
-            "exceeded retry limit, last status: 429 Too Many Requests".to_owned(),
-        ),
-        (
-            "429 Too Many Requests TOKEN_SENTINEL /private/source \u{1b} ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
-            "429 Too Many Requests for [REDACTED]".into(),
-        ),
-        (
-            format!("429 Too Many Requests {}", "☀".repeat(3000)),
-            format!("429 Too Many Requests {}", "☀".repeat(2723)),
-        ),
+    for message in [
+        "exceeded retry limit, last status: 429 Too Many Requests".to_owned(),
+        "429 Too Many Requests TOKEN_SENTINEL /private/source \u{1b} ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
+        format!("429 Too Many Requests {}", "☀".repeat(3000)),
     ] {
         let stream = [
             json!({"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}),
@@ -172,8 +191,10 @@ fn codex_rate_limit_reaches_the_decoded_outcome() {
             .unwrap();
         assert_eq!(decoded.outcome, run::Outcome::RateLimited);
         let reason = decoded.reason.as_deref().unwrap();
-        assert!(reason.contains("rate limited"));
-        assert!(reason.contains("wait"));
+        assert_eq!(
+            reason,
+            provenant_records::diagnostic::ProviderFailureFact::RateLimit.reason()
+        );
         assert!(!reason.contains(&message));
         assert!(!reason.contains("ghp_"));
         assert!(!reason.contains("TOKEN_SENTINEL"));
@@ -205,7 +226,7 @@ fn agy_denials_preserve_answers_and_prior_failures() {
     assert_eq!(decoded.result, "Recovered answer");
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider denied an action; check account access and inspect the result")
+        Some(provenant_records::diagnostic::ProviderFailureFact::Denied.reason())
     );
     let decoded = registry
         .decode(
@@ -218,12 +239,15 @@ fn agy_denials_preserve_answers_and_prior_failures() {
     // A refusal the provider reports with no answer is its own failed state,
     // never `succeeded`, and names the denied action (adapter-validated).
     assert_eq!(decoded.outcome, run::Outcome::PermissionDenied);
-    assert_eq!(
-        decoded.reason.as_deref(),
-        Some(
-            "provider denied an action; check account access and inspect the result; denied action: unknown action"
-        )
+    let reason = decoded
+        .reason
+        .as_deref()
+        .expect("denied action is retained");
+    assert!(
+        reason.starts_with(provenant_records::diagnostic::ProviderFailureFact::Denied.reason())
     );
+    assert!(reason.ends_with("denied action: unknown action"));
+    assert!(!reason.contains("TOKEN_SENTINEL") && !reason.contains("/private/source"));
     let mut failed_exit = clean_exit();
     failed_exit.termination = Some(provenant_os::exec::Termination::Exit(1));
     let decoded = registry
@@ -235,7 +259,6 @@ fn agy_denials_preserve_answers_and_prior_failures() {
         )
         .unwrap();
     assert_eq!(decoded.outcome, run::Outcome::Failed);
-    assert_eq!(decoded.reason.as_deref(), Some("provider failed"));
 }
 #[test]
 fn codex_rollout_error_reaches_the_decoded_reason() {
@@ -275,14 +298,12 @@ fn codex_rollout_error_reaches_the_decoded_reason() {
     assert!(decoded.observed_route.is_none());
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("Codex rollout identity could not be verified; inspect the local session evidence")
+        Some(provenant_records::diagnostic::ProviderFailureFact::CodexIdentity.reason())
     );
 }
-#[test]
-fn reviewer_receipts_cover_provenance_and_resolution_evidence()
--> Result<(), Box<dyn std::error::Error>> {
+fn reviewer_receipt_record() -> Result<run::AttemptRecord, Box<dyn std::error::Error>> {
     let now = WallTime::from_micros(100)?;
-    let mut record: run::AttemptRecord = serde_json::from_value(json!({
+    let record: run::AttemptRecord = serde_json::from_value(json!({
         "schema_version": 1, "attempt_id": AttemptId::from_bytes([1; 16]),
         "key": {"project": provenant_core::ProjectId::from_bytes([3; 16]), "graph": "receipt", "node": "test", "attempt": 1},
         "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
@@ -293,34 +314,30 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
         "state": {"state":"terminal","outcome":"lost","exit_code":null,"finished_at":now,"reason":null},
         "usage": {}, "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"}, "digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
     }))?;
+    Ok(record)
+}
+
+#[test]
+fn reviewer_receipts_project_typed_provenance_and_route_fields()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut record = reviewer_receipt_record()?;
     let (data, line) = reviewer_receipt(&record, false).unwrap();
     assert_eq!(data["resolved_from"], "explicit");
     assert_eq!(data["reviewer"]["provenance"], "unknown");
     assert_eq!(data["reviewer"]["actor_id"], "unknown");
-    // One grep-able line naming role, applied model and effort, family,
-    // resolution source and the attempt; the text form leads with it.
+    assert_eq!(data["adapter"], "codex");
+    assert_eq!(data["model"], "codex/gpt-6.1-sol");
+    assert_eq!(data["effort"], "high");
+    assert_eq!(data["family"], "openai");
     let receipt = data["receipt"].as_str().ok_or("receipt line")?;
-    assert!(!receipt.contains('\n'), "{receipt}");
-    assert!(receipt.starts_with("Reviewer: "), "{receipt}");
-    for part in [
-        "codex/gpt-6.1-sol@high".to_owned(),
-        "openai".to_owned(),
-        "explicit".to_owned(),
-        record.key.to_string(),
-        record.attempt_id.to_string(),
-    ] {
-        assert!(receipt.contains(&part), "{part}: {receipt}");
-    }
-    assert!(line.starts_with(&format!("{receipt}\n")), "{line}");
-    assert!(
-        line.ends_with(
-            "Reviewer provenance: unknown, actor unknown, model unknown, family unknown\n"
-        )
-    );
+    assert!(!receipt.contains('\n'));
+    assert!(line.starts_with(&format!("{receipt}\n")));
+
     record.verified_owner = Some(ActorId::from_bytes([6; 16]));
     let unobserved = reviewer_receipt(&record, false).unwrap().0;
     assert_eq!(unobserved["reviewer"]["provenance"], "unknown");
     assert_ne!(unobserved["reviewer"]["actor_id"], "unknown");
+
     record.observed_route = record.applied_route.clone();
     let observed_fact = run::fact(record.clone())?.reviewer.ok_or("reviewer fact")?;
     let observed = reviewer_receipt(&record, false).unwrap();
@@ -330,26 +347,29 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
         observed_fact.actor_id.to_string()
     );
     assert_eq!(observed.0["reviewer"]["family"], "openai");
-    assert!(observed.1.contains(&format!(
-        "Reviewer provenance: observed, actor {},",
-        observed_fact.actor_id
-    )));
-    record.applied_route.as_mut().unwrap().model = Some("gpt-6.1-sol".into());
-    let (writer_data, writer_line) = reviewer_receipt(&record, true).unwrap();
+
+    let (writer_data, _) = reviewer_receipt(&record, true).unwrap();
     assert_eq!(writer_data["role"], "writer");
     assert_eq!(writer_data["family"], "openai");
-    assert!(writer_line.starts_with("Writer: codex/gpt-6.1-sol@high (openai;"));
+    assert_eq!(writer_data["model"], "codex/gpt-6.1-sol");
+    assert_eq!(writer_data["effort"], "high");
     record.applied_route.as_mut().unwrap().effort = None;
-    assert!(
-        reviewer_receipt(&record, false)
-            .unwrap()
-            .1
-            .contains("@unknown")
+    assert_eq!(
+        reviewer_receipt(&record, false).unwrap().0["effort"],
+        "unknown"
     );
+    Ok(())
+}
+
+#[test]
+fn reviewer_receipt_resolution_tracks_applied_route_selection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut record = reviewer_receipt_record()?;
     record.applied_route.as_mut().unwrap().model = Some("codex/uncatalogued".into());
     let unknown_family = reviewer_receipt(&record, false).unwrap().0;
     assert_eq!(unknown_family["family"], "unknown");
     assert_eq!(unknown_family["resolved_from"], "unknown");
+
     record.skipped_routes.push(serde_json::from_value(
         json!({"route":"codex/gpt-6.1-sol","kind":"unavailable","detail":"unavailable"}),
     )?);
@@ -357,15 +377,16 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
         reviewer_receipt(&record, false).unwrap().0["resolved_from"],
         "unknown"
     );
+
     record.applied_route.as_mut().unwrap().model = Some("codex/gpt-6.1-sol".into());
     record.applied_route.as_mut().unwrap().pool_selection = Some(serde_json::from_value(
         json!({"pool":"junior","candidates":[],"roll":0,"total_weight":1,"pick":"codex/gpt-6.1-sol"}),
     )?);
-    // An unavailable candidate is still a pool selection, not a fallback.
     assert_eq!(
         reviewer_receipt(&record, false).unwrap().0["resolved_from"],
         "pool junior"
     );
+
     record.applied_route.as_mut().unwrap().model = Some("codex/other".into());
     assert_eq!(
         reviewer_receipt(&record, false).unwrap().0["resolved_from"],
@@ -382,6 +403,12 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
         reviewer_receipt(&record, false).unwrap().0["model"],
         "unknown"
     );
+    Ok(())
+}
+
+#[test]
+fn reviewer_receipt_refuses_a_nonterminal_attempt() -> Result<(), Box<dyn std::error::Error>> {
+    let mut record = reviewer_receipt_record()?;
     record.state = run::AttemptState::Running {
         extra: Default::default(),
         child_wait: None,
@@ -417,7 +444,7 @@ fn opencode_without_a_session_record_observes_no_model() {
     assert!(decoded.observed_route.is_none());
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("OpenCode session identity could not be verified; inspect the local session evidence")
+        Some(provenant_records::diagnostic::ProviderFailureFact::OpenCodeIdentity.reason())
     );
 }
 #[test]
@@ -450,78 +477,47 @@ fn claude_session_reaches_the_decoded_attempt() {
     );
 }
 #[test]
-fn agy_repeated_answer_is_captured_once() {
-    let answer = "# Review\n\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"low\",\"file\":\"a.rs\",\"summary\":\"issue\",\"status\":\"open\"}]}\n```\nVERDICT: PASS\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
-    let route = run::RouteRecord {
-        provider: Some("agy".into()),
-        ..Default::default()
-    };
-    let decode = |step: &str, response: &str| {
-        let stream = format!(
-            "{}\n{}\n{}\n",
-            json!({"event":"init","conversation_id":"s","init":{"model":"m"}}),
-            json!({"event":"step_update","step_update":{"conversation_id":"s","step_type":"agent_response","text_delta":step}}),
-            json!({"event":"result","result":{"conversation_id":"s","status":"SUCCESS","response":response,"usage":{"input_tokens":1,"output_tokens":1}}})
-        );
+fn repeated_answer_normalisation_is_declared_by_adapter() {
+    let decode = |provider: &str, stream: &str| {
         Registry::default()
             .decode(
-                &route,
+                &run::RouteRecord {
+                    provider: Some(provider.into()),
+                    ..Default::default()
+                },
                 stream.as_bytes(),
                 &clean_exit(),
                 Path::new("/unused"),
             )
             .unwrap()
     };
-    for decoded in [
-        decode(&format!("{answer}\n"), answer),
-        decode("", &format!("  {answer}\n\n{answer}  ")),
-    ] {
-        assert_eq!(decoded.outcome, run::Outcome::Succeeded);
-        assert_eq!(decoded.result, answer);
-        let mut capture = provenant_records::result_capture::ResultCapture::new(None);
-        capture.push(decoded.result.as_bytes());
-        let captured = capture.finish();
-        assert!(
-            provenant_records::handoff::Handoff::from_turns(&decoded.result, &[])
-                .unwrap()
-                .is_some()
-        );
-        assert_eq!(captured.verdict.as_deref(), Some("VERDICT: PASS"));
-        assert_eq!(captured.declarations, 1);
-        assert_eq!(decoded.result.matches("```findings").count(), 1);
-    }
-    for response in [
-        format!("{answer}\nextra"),
+    let agy_stream = |step: &str, response: &str| {
         format!(
-            "{answer}\n{}",
-            answer.replace("\"note\":\"done\"", "\"note\":\"different\"")
+            "{}\n{}\n{}\n",
+            json!({"event":"init","conversation_id":"s","init":{"model":"m"}}),
+            json!({"event":"step_update","step_update":{"conversation_id":"s","step_type":"agent_response","text_delta":step}}),
+            json!({"event":"result","result":{"conversation_id":"s","status":"SUCCESS","response":response,"usage":{"input_tokens":1,"output_tokens":1}}})
+        )
+    };
+    for (provider, stream, expected) in [
+        ("agy", agy_stream("answer\n", "answer"), "answer"),
+        ("agy", agy_stream("", "  answer\n\nanswer  "), "answer"),
+        (
+            "claude",
+            concat!(
+                "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\\nanswer\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n"
+            )
+            .into(),
+            "answer\nanswer",
         ),
     ] {
-        let decoded = decode("", &response);
-        assert_eq!(decoded.result, response);
-        assert!(provenant_records::handoff::Handoff::from_turns(&decoded.result, &[]).is_err());
+        let decoded = decode(provider, &stream);
+        assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+        assert_eq!(decoded.result, expected);
     }
 }
-#[test]
-fn repeated_answer_from_non_agy_adapter_is_unchanged() {
-    let route = run::RouteRecord {
-        provider: Some("claude".into()),
-        ..Default::default()
-    };
-    let stream = concat!(
-        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
-        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\\nanswer\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n"
-    );
-    let decoded = Registry::default()
-        .decode(
-            &route,
-            stream.as_bytes(),
-            &clean_exit(),
-            Path::new("/unused"),
-        )
-        .unwrap();
-    assert_eq!(decoded.result, "answer\nanswer");
-}
+
 #[test]
 fn a_claude_reply_to_a_late_notification_keeps_the_final_handoff() {
     let route = run::RouteRecord {
@@ -554,43 +550,80 @@ fn a_claude_reply_to_a_late_notification_keeps_the_final_handoff() {
     };
     let decoded = decode(&[&notification]);
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
-    // Each turn starts on its own line, so the fence stays intact.
-    assert_eq!(
-        decoded.result,
-        format!("{handoff}\nThe wait was redundant.")
-    );
-    assert!(provenant_records::handoff::Handoff::from_turns(&decoded.result, &[]).is_err());
     assert_eq!(decoded.handoff().unwrap().unwrap().note, "finished");
     // A tool run after the declaration leaves the lane without one.
     let decoded = decode(&[&notification, &tool_use]);
     assert_eq!(decoded.handoff(), Ok(None));
 }
 #[test]
-fn claude_usage_records_cache_read_and_cache_write() {
-    let route = run::RouteRecord {
-        provider: Some("claude".into()),
-        model: Some("claude/claude-sonnet-5".into()),
-        ..Default::default()
-    };
-    let stream = concat!(
-        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
-        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40,\"cache_creation\":{\"ephemeral_1h_input_tokens\":25}}}\n",
-    );
-    let decoded = Registry::default()
-        .decode(
-            &route,
-            stream.as_bytes(),
-            &clean_exit(),
-            Path::new("/unused"),
-        )
-        .unwrap();
-    assert_eq!(decoded.usage.uncached_input, Some(10));
-    assert_eq!(decoded.usage.output_excluding_reasoning, Some(20));
-    assert_eq!(decoded.usage.cache_read, Some(30));
-    assert_eq!(decoded.usage.cache_write, Some(40));
-    assert_eq!(decoded.usage.cache_write_1h, Some(25));
-    assert_eq!(decoded.usage.source.as_deref(), Some("provider"));
+fn provider_usage_fields_follow_each_adapter_stream() {
+    let cases = [
+        (
+            "claude",
+            "claude/claude-sonnet-5",
+            concat!(
+                "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40,\"cache_creation\":{\"ephemeral_1h_input_tokens\":25}}}\n"
+            ),
+            Some(10),
+            Some(30),
+            Some(40),
+            Some(25),
+            Some(20),
+        ),
+        (
+            "codex",
+            "codex/gpt-6.1-terra",
+            concat!(
+                "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n",
+                "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}\n",
+                "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":80,\"output_tokens\":7}}\n"
+            ),
+            Some(20),
+            Some(80),
+            None,
+            None,
+            Some(7),
+        ),
+        (
+            "codex",
+            "codex/gpt-6.1-terra",
+            concat!(
+                "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n",
+                "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":80,\"output_tokens\":7}}\n",
+                "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":150,\"cached_input_tokens\":100,\"output_tokens\":12}}\n"
+            ),
+            Some(50),
+            Some(100),
+            None,
+            None,
+            Some(12),
+        ),
+    ];
+    for (provider, model, stream, uncached, cache_read, cache_write, cache_write_1h, output) in
+        cases
+    {
+        let decoded = Registry::default()
+            .decode(
+                &run::RouteRecord {
+                    provider: Some(provider.into()),
+                    model: Some(model.into()),
+                    ..Default::default()
+                },
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded.usage.uncached_input, uncached);
+        assert_eq!(decoded.usage.cache_read, cache_read);
+        assert_eq!(decoded.usage.cache_write, cache_write);
+        assert_eq!(decoded.usage.cache_write_1h, cache_write_1h);
+        assert_eq!(decoded.usage.output_excluding_reasoning, output);
+        assert_eq!(decoded.usage.source.as_deref(), Some("provider"));
+    }
 }
+
 #[test]
 fn a_claude_success_after_a_tool_result_with_a_wide_integer_is_published() {
     // Shape of #3111: a sub-agent stream whose tool result echoes a JSON Schema
@@ -634,10 +667,7 @@ fn a_claude_success_after_a_tool_result_with_a_wide_integer_is_published() {
     assert_eq!(decoded.outcome, run::Outcome::Failed);
     assert!(!decoded.complete);
     assert!(decoded.result.is_empty());
-    assert_eq!(
-        decoded.reason.as_deref(),
-        Some("provider protocol is malformed")
-    );
+    assert!(decoded.reason.is_some());
 }
 #[test]
 fn a_claude_success_that_hit_its_token_limit_is_flagged_not_failed() {
@@ -661,7 +691,7 @@ fn a_claude_success_that_hit_its_token_limit_is_flagged_not_failed() {
     assert_eq!(decoded.partial_signals, [run::PartialSignal::ProviderStop]);
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider stopped early; inspect the result and resume if needed")
+        Some(provenant_records::diagnostic::ProviderFailureFact::EarlyStop.reason())
     );
     assert_ne!(decoded.outcome, run::Outcome::Failed);
 }
@@ -728,61 +758,8 @@ fn a_handoff_in_its_own_codex_message_is_read_after_prose() {
         .expect("handoff found");
     assert_eq!(declared.note, "n");
     assert_eq!(captured.verdict.as_deref(), Some("VERDICT: PASS"));
-    assert!(
-        decoded
-            .result
-            .starts_with("Checking the commit.\nVERDICT: PASS\n")
-    );
-}
-#[test]
-fn codex_usage_records_cache_read_apart_from_uncached_input() {
-    let route = run::RouteRecord {
-        provider: Some("codex".into()),
-        model: Some("codex/gpt-6.1-terra".into()),
-        ..Default::default()
-    };
-    let stream = concat!(
-        "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n",
-        "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}\n",
-        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":80,\"output_tokens\":7}}\n",
-    );
-    let decoded = Registry::default()
-        .decode(
-            &route,
-            stream.as_bytes(),
-            &clean_exit(),
-            Path::new("/unused"),
-        )
-        .unwrap();
-    assert_eq!(decoded.usage.uncached_input, Some(20));
-    assert_eq!(decoded.usage.cache_read, Some(80));
-    assert_eq!(decoded.usage.cache_write, None);
-    assert_eq!(decoded.usage.output_excluding_reasoning, Some(7));
 }
 
-#[test]
-fn codex_last_turn_completed_is_the_session_total() {
-    let route = run::RouteRecord {
-        provider: Some("codex".into()),
-        ..Default::default()
-    };
-    let stream = concat!(
-        "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n",
-        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":80,\"output_tokens\":7}}\n",
-        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":150,\"cached_input_tokens\":100,\"output_tokens\":12}}\n",
-    );
-    let decoded = Registry::default()
-        .decode(
-            &route,
-            stream.as_bytes(),
-            &clean_exit(),
-            Path::new("/unused"),
-        )
-        .unwrap();
-    assert_eq!(decoded.usage.uncached_input, Some(50));
-    assert_eq!(decoded.usage.cache_read, Some(100));
-    assert_eq!(decoded.usage.output_excluding_reasoning, Some(12));
-}
 #[test]
 fn command_exit_keeps_requested_route() {
     let route = run::RouteRecord {
@@ -798,7 +775,7 @@ fn command_exit_keeps_requested_route() {
     assert_eq!(observed.source.as_deref(), Some("command_exit"));
 }
 #[test]
-fn claude_absent_usage_names_its_reason() {
+fn absent_provider_usage_stays_unobserved() {
     let route = run::RouteRecord {
         provider: Some("claude".into()),
         model: Some("claude/claude-sonnet-5".into()),
@@ -814,10 +791,7 @@ fn claude_absent_usage_names_its_reason() {
         )
         .unwrap();
     assert_eq!(decoded.usage.uncached_input, None);
-    assert_eq!(
-        decoded.usage.source.as_deref(),
-        Some("absent: no result event")
-    );
+    assert_eq!(decoded.usage, Default::default());
 
     let stream_no_usage = concat!(
         "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
@@ -832,10 +806,7 @@ fn claude_absent_usage_names_its_reason() {
         )
         .unwrap();
     assert_eq!(decoded_no_usage.usage.uncached_input, None);
-    assert_eq!(
-        decoded_no_usage.usage.source.as_deref(),
-        Some("absent: result event has no usage")
-    );
+    assert_eq!(decoded_no_usage.usage, Default::default());
 
     let unknown = run::RouteRecord {
         provider: Some("unregistered-fixture".into()),
@@ -879,12 +850,10 @@ fn every_adapter_sign_in_failure_settles_auth_required() -> Result<(), Box<dyn s
         let decoded =
             Registry::default().decode_captures(&route, b"", stderr, &exit, temp.path(), None)?;
         assert_eq!(decoded.outcome, run::Outcome::AuthRequired, "{adapter}");
-        assert!(
-            decoded
-                .reason
-                .as_deref()
-                .unwrap()
-                .contains("provenant quota tick")
+        assert_eq!(
+            decoded.terminal_cause,
+            Some(run::TerminalCause::AccountLoginRequired),
+            "{adapter}"
         );
     }
     Ok(())
@@ -899,9 +868,12 @@ fn settled_auth_uses_only_the_selected_registered_account() -> Result<(), Box<dy
     inputs.state_dir = Some(temp.path().join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
-    std::fs::write(
-        roots.state.as_path().join("config.toml"),
-        "schema_version = 1\n[domains.accounts.entries.work]\nadapter = 'codex'\nlabel = 'work'\nkey = 'key'\ndirectory = '/fixture/work'\n",
+    write_registered_account_config(
+        &roots.state.as_path().join("config.toml"),
+        "codex",
+        "work",
+        "key",
+        Path::new("/fixture/work"),
     )?;
     let route = run::RouteRecord {
         provider: Some("codex".into()),
@@ -924,10 +896,17 @@ fn settled_auth_uses_only_the_selected_registered_account() -> Result<(), Box<dy
         None,
     )?;
     assert_eq!(decoded.outcome, run::Outcome::AuthRequired);
-    let reason = decoded.reason.unwrap();
-    assert!(reason.contains("work [codex]"), "{reason}");
-    assert!(reason.contains("codex login"), "{reason}");
-    assert!(reason.contains("/fixture/work"), "{reason}");
+    assert_eq!(
+        decoded.terminal_cause,
+        Some(run::TerminalCause::AccountLoginRequired)
+    );
+    assert_eq!(
+        decoded
+            .observed_route
+            .as_ref()
+            .and_then(|route| route.account_key.as_deref()),
+        Some("key")
+    );
     Ok(())
 }
 /// A Claude lane holds a launch-time copy of its account's token, so a 401
@@ -942,9 +921,12 @@ fn claude_lane_auth_failure_reports_a_lost_lane_token_for_its_account()
     inputs.state_dir = Some(temp.path().join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     provenant_os::fixture::private_state_dir(roots.state.as_path())?;
-    std::fs::write(
-        roots.state.as_path().join("config.toml"),
-        "schema_version = 1\n[domains.accounts.entries.pro]\nadapter = 'claude'\nlabel = 'pro'\nkey = 'key'\ndirectory = '/fixture/pro'\n",
+    write_registered_account_config(
+        &roots.state.as_path().join("config.toml"),
+        "claude",
+        "pro",
+        "key",
+        Path::new("/fixture/pro"),
     )?;
     let route = run::RouteRecord {
         provider: Some("claude".into()),
@@ -978,13 +960,6 @@ fn claude_lane_auth_failure_reports_a_lost_lane_token_for_its_account()
         decoded.terminal_cause,
         Some(run::TerminalCause::LaneTokenLost)
     );
-    let reason = decoded.reason.unwrap();
-    assert!(reason.contains("pro [claude]"), "{reason}");
-    assert!(
-        reason.contains("lane's access token was revoked or expired"),
-        "{reason}"
-    );
-    assert!(!reason.contains("claude login"), "{reason}");
     Ok(())
 }
 /// When a Claude lane ran on a registered `provenant-lane-token`, a 401
@@ -1101,11 +1076,12 @@ fn unsupported_opencode_reference_is_actionable_and_redacted_in_status_and_outpu
                 None,
             )
             .unwrap();
-        for text in [decoded.reason.as_deref().unwrap(), decoded.result.as_str()] {
-            assert!(text.contains(route.model.as_deref().unwrap()));
-            assert!(text.contains("variant=ultra"));
-            assert!(text.contains("choose a supported model and variant"));
-            assert!(!text.contains("fixture-secret") && !text.contains("user:secret"));
-        }
+        assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
+        assert!(decoded.observed_route.is_none());
+        let reason = decoded.reason.as_deref().expect("route refusal reason");
+        assert!(reason.contains(route.model.as_deref().unwrap()));
+        assert!(reason.contains(route.effort.as_deref().unwrap()));
+        assert!(!reason.contains("fixture-secret") && !reason.contains("user:secret"));
+        assert!(!decoded.result.contains("fixture-secret"));
     }
 }

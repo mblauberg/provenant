@@ -120,7 +120,11 @@
             .iter()
             .find(|row| row["provider"] == "codex")
             .ok_or("codex")?;
-        assert_eq!(codex["schedule"]["expires"], "1970-01-01T01:00:02.000000Z"); // timebomb: fixed fixture instant
+        let expires = codex["schedule"]["expires"]
+            .as_str()
+            .ok_or("expiry")?
+            .parse::<provenant_core::WallTime>()?;
+        assert_eq!(expires, provenant_core::WallTime::from_unix_seconds(3_602)?);
         assert_eq!(codex["schedule"]["tz"], "Australia/Sydney");
         assert_eq!(
             codex["schedule"]["windows"],
@@ -182,11 +186,19 @@
             super::resolve_account_reference("zen", "test", &settings).unwrap(),
             "opencode/work"
         );
-        assert!(matches!(super::resolve_account_reference("opencode/zen", "test", &settings),
-            Err(super::EdgeError::AccountProfile { kind: super::AccountProfileError::Unknown, .. })));
+        assert!(matches!(
+            super::resolve_account_reference("opencode/zen", "test", &settings),
+            Err(super::EdgeError::AccountProfile {
+                kind: super::AccountProfileError::Unknown,
+                ..
+            })
+        ));
         for entry in settings.entries.values() {
             let reference = format!("{}/{}", entry.adapter, entry.key);
-            assert_eq!(super::resolve_account_reference(&reference, "test", &settings).unwrap(), reference);
+            assert_eq!(
+                super::resolve_account_reference(&reference, "test", &settings).unwrap(),
+                reference
+            );
         }
         assert!(matches!(
             super::resolve_account_reference("shared", "test", &settings),
@@ -290,7 +302,7 @@
         )?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let catalogue = super::Catalogue::bundled()?;
-        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+        let now = 100_i64;
         let availability = [provenant_providers::AvailabilityRecord {
             schema_version: 1,
             adapter: "opencode".into(),
@@ -326,7 +338,7 @@
             .to_domain()
         };
         let resolve = |request: &provenant_routing::RouteRequest| {
-            super::resolve_dispatch(
+            super::resolve_dispatch_at(
                 request,
                 &roots,
                 None,
@@ -336,6 +348,7 @@
                 "fixture",
                 None,
                 &[],
+                route_test_time(),
             )
         };
         for floor in [61, 1_000] {
@@ -351,117 +364,30 @@
             ] {
                 let selected = resolve(&query)?;
                 assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
-                assert!(super::check_dispatch_candidate(&roots, &selected, super::REGISTRY).is_ok());
-                let warnings = &selected.diagnostics.account_load.as_ref().ok_or("load")?.warnings;
+                assert!(
+                    super::check_dispatch_candidate_at(&roots, &selected, super::REGISTRY, 100)
+                        .is_ok()
+                );
+                let warnings = &selected
+                    .diagnostics
+                    .account_load
+                    .as_ref()
+                    .ok_or("load")?
+                    .warnings;
                 assert!(!warnings.is_empty());
-                assert!(warnings.iter().any(|warning| warning.contains("source=config")));
+                assert!(
+                    warnings
+                        .iter()
+                        .any(|warning| warning.contains("source=config"))
+                );
             }
         }
         Ok(())
     }
 
     #[test]
-    fn spent_account_yields_to_a_ready_account_for_the_same_model() -> Result<(), Box<dyn Error>> {
-        use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus};
-        use std::os::unix::fs::PermissionsExt;
-
-        struct Resolver;
-        impl provenant_core::PathResolver for Resolver {
-            fn resolve_existing_ancestor(
-                &self,
-                path: &std::path::Path,
-            ) -> std::io::Result<std::path::PathBuf> {
-                Ok(path.into())
-            }
-        }
-        let temp = tempfile::tempdir()?;
-        let mut inputs =
-            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
-        inputs.state_dir = Some(temp.path().join("state"));
-        let roots = inputs.resolve(&Resolver)?;
-        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
-        let catalogue = super::Catalogue::bundled()?;
-        let mut availability = Vec::new();
-        for (key, status) in [
-            ("fresh", QuotaStatus::Available),
-            ("exhausted", QuotaStatus::Exhausted),
-        ] {
-            let account = AccountScope {
-                adapter: "codex".into(),
-                account_key: key.into(),
-                label: key.into(),
-            };
-            let mut record = AccountRecord::empty(account.clone());
-            record.snapshot = Some(QuotaSnapshot {
-                schema_version: 1,
-                account,
-                revision: 0,
-                status,
-                observed_unix_seconds: now,
-                source_ref: "fixture".into(),
-                authority_ref: None,
-                details: None,
-                windows: Vec::new(),
-            });
-            let quota = roots.state.as_path().join("quota");
-            let directory = quota.join(key);
-            std::fs::create_dir_all(&directory)?;
-            for directory in [roots.state.as_path(), quota.as_path(), directory.as_path()] {
-                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
-            }
-            let path = directory.join("codex.json");
-            std::fs::write(&path, serde_json::to_vec(&record)?)?;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-            availability.push(provenant_providers::AvailabilityRecord {
-                schema_version: 1,
-                adapter: "codex".into(),
-                executable: "/fixture/codex".into(),
-                version: "fixture".into(),
-                last_update: None,
-                fixture_ref: "fixture".into(),
-                catalogue_revision: catalogue.revision().into(),
-                account_key: Some(key.into()),
-                plan: None,
-                observed_models: Vec::new(),
-                observed_unix_seconds: now,
-                expires_unix_seconds: now + 300,
-            });
-        }
-        let request = super::RouteRequest {
-            read_heavy: false,
-            model: Some(super::Model("codex/gpt-6-luna".into())),
-            route: None,
-            effort: None,
-            confidential: false,
-            fallback: vec![],
-            exclude: vec![],
-        }
-        .to_domain()?;
-        let access = [provenant_routing::AccessContext {
-            adapter: "codex",
-            disclosure_ref: "fixture",
-            confinement_ref: "fixture",
-        }];
-        // The spent account is listed first: it must not be drawn.
-        let resolved = super::resolve_dispatch(
-            &request,
-            &roots,
-            None,
-            ("fixture", 0),
-            &availability,
-            &access,
-            "fixture",
-            None,
-            &[],
-        )?;
-        assert!(matches!(&resolved.readiness, RouteReadiness::Ready { .. }));
-        assert_eq!(resolved.account_key.as_deref(), Some("fresh"));
-        Ok(())
-    }
-
-
-    #[test]
-    fn unlisted_exact_models_keep_account_quota_gates() -> Result<(), Box<dyn Error>> {
+    fn quota_gates_cover_listed_and_unlisted_models_in_each_account_order()
+    -> Result<(), Box<dyn Error>> {
         use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus};
         use provenant_records::RouteExclusionReason;
         use std::os::unix::fs::PermissionsExt;
@@ -480,7 +406,7 @@
             provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
         inputs.state_dir = Some(temp.path().join("state"));
         let roots = inputs.resolve(&Resolver)?;
-        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+        let now = 100_i64;
         let catalogue = super::Catalogue::bundled()?;
         let mut availability = Vec::new();
         for (key, status) in [
@@ -525,66 +451,89 @@
                 plan: None,
                 observed_models: Vec::new(),
                 observed_unix_seconds: now,
-                expires_unix_seconds: now + 300,
+                expires_unix_seconds: i64::MAX,
             });
         }
-        let request = super::RouteRequest {
-            read_heavy: false,
-            model: Some(super::Model("codex/unlisted-exact".into())),
-            route: None,
-            effort: None,
-            confidential: false,
-            fallback: vec![super::Model("codex/unlisted-fallback".into())],
-            exclude: vec![],
-        }
-        .to_domain()?;
         let access = [provenant_routing::AccessContext {
             adapter: "codex",
             disclosure_ref: "fixture",
             confinement_ref: "fixture",
         }];
-        let exhausted = super::resolve_dispatch(
-            &request,
-            &roots,
-            None,
-            ("fixture", 0),
-            &availability[..1],
-            &access,
-            "fixture",
-            None,
-            &[],
-        )?;
-        assert!(matches!(
-            &exhausted.readiness,
-            RouteReadiness::Unavailable {
-                reason: RouteExclusionReason::Exhausted,
-                ..
+        let exhausted_only = [availability[0].clone()];
+        for (model, fallback, has_alternative) in [
+            ("codex/gpt-6-luna", Vec::new(), false),
+            (
+                "codex/unlisted-exact",
+                vec![super::Model("codex/unlisted-fallback".into())],
+                true,
+            ),
+        ] {
+            let request = super::RouteRequest {
+                read_heavy: false,
+                model: Some(super::Model(model.into())),
+                route: None,
+                effort: None,
+                confidential: false,
+                fallback,
+                exclude: vec![],
             }
-        ));
-        assert!(matches!(
-            &exhausted.alternatives.as_slice()[0].readiness,
-            RouteReadiness::Unavailable {
-                reason: RouteExclusionReason::Exhausted,
-                ..
+            .to_domain()?;
+            for accounts in [
+                vec![availability[0].clone(), availability[1].clone()],
+                vec![availability[1].clone(), availability[0].clone()],
+            ] {
+                let spent_only = super::resolve_dispatch_at(
+                    &request,
+                    &roots,
+                    None,
+                    ("fixture", 0),
+                    &exhausted_only,
+                    &access,
+                    "fixture",
+                    None,
+                    &[],
+                    route_test_time(),
+                )?;
+                assert!(matches!(
+                    spent_only.readiness,
+                    RouteReadiness::Unavailable {
+                        reason: RouteExclusionReason::Exhausted,
+                        ..
+                    }
+                ));
+                if has_alternative {
+                    assert!(matches!(
+                        &spent_only
+                            .alternatives
+                            .first()
+                            .ok_or("exhausted alternative")?
+                            .readiness,
+                        RouteReadiness::Unavailable {
+                            reason: RouteExclusionReason::Exhausted,
+                            ..
+                        }
+                    ));
+                }
+
+                let resolved = super::resolve_dispatch_at(
+                    &request,
+                    &roots,
+                    None,
+                    ("fixture", 0),
+                    &accounts,
+                    &access,
+                    "fixture",
+                    None,
+                    &[],
+                    route_test_time(),
+                )?;
+                assert!(matches!(resolved.readiness, RouteReadiness::Ready { .. }));
+                assert_eq!(resolved.account_key.as_deref(), Some("fresh"));
+                for alternative in resolved.alternatives.as_slice() {
+                    assert_eq!(alternative.account_key.as_deref(), Some("fresh"));
+                }
             }
-        ));
-        let fresh = super::resolve_dispatch(
-            &request,
-            &roots,
-            None,
-            ("fixture", 0),
-            &availability,
-            &access,
-            "fixture",
-            None,
-            &[],
-        )?;
-        assert!(matches!(fresh.readiness, RouteReadiness::Ready { .. }));
-        assert_eq!(fresh.account_key.as_deref(), Some("fresh"));
-        assert_eq!(
-            fresh.alternatives.as_slice()[0].account_key.as_deref(),
-            Some("fresh")
-        );
+        }
         Ok(())
     }
 
@@ -610,7 +559,7 @@
             roots.state.as_path(),
             std::fs::Permissions::from_mode(0o700),
         )?;
-        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+        let now = 100_i64;
         let catalogue = super::Catalogue::bundled()?;
         let availability: Vec<_> = ["first", "second"]
             .into_iter()
@@ -645,7 +594,7 @@
         }
         .to_domain()?;
         let resolve = |account: Option<&str>| {
-            super::resolve_dispatch(
+            super::resolve_dispatch_at(
                 &request,
                 &roots,
                 account,
@@ -655,11 +604,12 @@
                 "fixture",
                 None,
                 &[],
+                route_test_time(),
             )
         };
         let drawn = resolve(None)?;
         let spent = drawn.account_key.clone().ok_or("account")?;
-        assert!(super::check_dispatch_candidate(&roots, &drawn, super::REGISTRY).is_ok());
+        assert!(super::check_dispatch_candidate_at(&roots, &drawn, super::REGISTRY, 100).is_ok());
         // The provider refused the drawn account: the next dispatch keeps the
         // model and takes the other account instead of failing.
         crate::quota::persist_provider_refusal(
@@ -693,12 +643,23 @@
         let super::Data::Resolved(preview) = super::execute(&preview, &roots, now_wall)? else {
             return Err("expected route preview".into());
         };
-        assert!(preview.provider_refusals.iter().any(|reason| reason.contains(&spent) && reason.contains("scoped provider refusal")), "{:?}", preview.provider_refusals);
+        assert!(
+            preview
+                .provider_refusals
+                .iter()
+                .any(|reason| reason.contains(&spent) && reason.contains("scoped provider refusal")),
+            "{:?}",
+            preview.provider_refusals
+        );
         // A refusal written after resolution still stops the launch.
-        let error = super::check_dispatch_candidate(&roots, &drawn, super::REGISTRY).unwrap_err();
-        assert!(matches!(error, super::EdgeError::Quota(provenant_quota::QuotaError::Refused(_))));
+        let error =
+            super::check_dispatch_candidate_at(&roots, &drawn, super::REGISTRY, 100).unwrap_err();
+        assert!(matches!(
+            error,
+            super::EdgeError::Quota(provenant_quota::QuotaError::Refused(_))
+        ));
         let redrawn = resolve(None)?;
-        assert!(super::check_dispatch_candidate(&roots, &redrawn, super::REGISTRY).is_ok());
+        assert!(super::check_dispatch_candidate_at(&roots, &redrawn, super::REGISTRY, 100).is_ok());
         assert_eq!(redrawn.model, "gpt-6-luna");
         assert!(matches!(redrawn.readiness, RouteReadiness::Ready { .. }));
         assert_ne!(redrawn.account_key.as_deref(), Some(spent.as_str()));
@@ -737,7 +698,10 @@
             observed_unix_seconds: 100,
             source_ref: "fixture".into(),
             authority_ref: None,
-            details: Some(provenant_quota::QuotaDetails { plan: Some("go".into()), ..Default::default() }),
+            details: Some(provenant_quota::QuotaDetails {
+                plan: Some("go".into()),
+                ..Default::default()
+            }),
             windows: Vec::new(),
         });
         let availability = [provenant_providers::AvailabilityRecord {
@@ -793,7 +757,10 @@
             observed_unix_seconds: 100,
             source_ref: "fixture".into(),
             authority_ref: None,
-            details: Some(provenant_quota::QuotaDetails { plan: Some("go".into()), ..Default::default() }),
+            details: Some(provenant_quota::QuotaDetails {
+                plan: Some("go".into()),
+                ..Default::default()
+            }),
             windows: Vec::new(),
         });
         let availability = [provenant_providers::AvailabilityRecord {
@@ -806,7 +773,10 @@
             catalogue_revision: "fixture".into(),
             account_key: Some("go".into()),
             plan: Some("go".into()),
-            observed_models: vec!["opencode-go/glm-5.1".into(), "opencode-go/GPT-OSS 120B (Medium)".into()],
+            observed_models: vec![
+                "opencode-go/glm-5.1".into(),
+                "opencode-go/GPT-OSS 120B (Medium)".into(),
+            ],
             observed_unix_seconds: 100,
             expires_unix_seconds: 200,
         }];
@@ -850,7 +820,12 @@
                 selection_rule: provenant_records::route_selection::SelectionRule::WeightedDraw,
                 considered_exclusions: Vec::new(),
                 exploration: provenant_records::route_selection::Exploration {
-    extra: Default::default(), selected: false, percent: 0, enabled: false, source: "fixture".into() },
+                    extra: Default::default(),
+                    selected: false,
+                    percent: 0,
+                    enabled: false,
+                    source: "fixture".into(),
+                },
                 weight_source: provenant_records::route_selection::WeightSource::Catalogue,
                 account_load: None,
                 extra: Default::default(),

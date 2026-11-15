@@ -1,6 +1,6 @@
 //! Bounded host-local composition of indexed run stores.
 use super::{Error, PAGE_SIZE_LIMIT};
-use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, Roots};
+use provenant_core::{ActorId, AttemptId, CancelToken, ProjectId, Roots};
 use provenant_os::clock::SystemClock;
 use provenant_run::{ExecutionContext, RunStore};
 use serde_json::{Value, json};
@@ -24,11 +24,35 @@ pub(super) fn read_inner(
     detail: bool,
     include_store_path: bool,
 ) -> Result<Value, Error> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let request = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    read_inner_with_request(
+        roots,
+        selected,
+        max_depth,
+        max_nodes,
+        detail,
+        include_store_path,
+        &request,
+    )
+}
+
+fn read_inner_with_request(
+    roots: &Roots,
+    selected: Option<ProjectId>,
+    max_depth: u64,
+    max_nodes: u64,
+    detail: bool,
+    include_store_path: bool,
+    call: &provenant_run::Request<'_>,
+) -> Result<Value, Error> {
     if !(1..=16).contains(&max_depth) || !(1..=PAGE_SIZE_LIMIT).contains(&max_nodes) {
         return Err(provenant_run::RunError::Validation("tree bounds").into());
     }
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
     let host = match provenant_config::lookup_host(roots) {
         Err(provenant_config::ConfigError::ProjectBindingFilesystem(error))
             if error.is_not_found() =>
@@ -67,10 +91,6 @@ pub(super) fn read_inner(
     .map(|key| (key, (0, 0)))
     .collect();
     while let Some((state, depth, owner)) = stores.pop_front() {
-        let call = provenant_run::Request {
-            clock: &clock,
-            cancel: &cancel,
-        };
         let (owner_project, owner_attempt) = owner
             .map_or((selected, None), |(project, attempt)| {
                 (Some(project), Some(attempt))
@@ -86,7 +106,7 @@ pub(super) fn read_inner(
             actor_id: ActorId::from_bytes([0; 16]),
             read_prompts: false,
         };
-        let store = match RunStore::open_read_only(&context, &call) {
+        let store = match RunStore::open_read_only(&context, call) {
             Ok(Some(store)) => store,
             Ok(None) => {
                 if owner.is_some() {
@@ -119,7 +139,7 @@ pub(super) fn read_inner(
                 remaining.min(100),
                 after,
                 through,
-                &call,
+                call,
             ) {
                 Ok(page) => page,
                 Err(error) if owner.is_some() => {
@@ -161,7 +181,7 @@ pub(super) fn read_inner(
                     attempt,
                     &[],
                     state.as_path(),
-                    clock.wall_now().ok(),
+                    call.clock.wall_now().ok(),
                     false,
                 );
                 nodes.push(json!({"lane_id":{"host":host,"project_id":attempt.project_id,"key":work_key,"attempt_id":projected.attempt_id},"depth":depth,"store_parent_attempt":owner_attempt,"store_path":store_path,"usage":usage,"parents":{"dispatch":parents.0,"continuation":parents.1},"metadata":{"operation":lane.operation,"attempt":projected}}));
@@ -229,9 +249,17 @@ pub(super) fn read_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{Digest, MonoTime, OperationId, RootInputs, TestClock, WallTime};
-    use provenant_records::CanonicalV1;
-    use provenant_run::{CanonicalRequest, PreparedRun};
+    use provenant_core::{Clock, Digest, MonoTime, OperationId, RootInputs, TestClock, WallTime};
+    use provenant_os::exec::Termination;
+    use provenant_records::{
+        CanonicalV1,
+        custody::Scope,
+        run::{RouteRecord, UsageRecord},
+    };
+    use provenant_run::{CanonicalRequest, Outcome, PreparedRun, RunStore, TerminalPublication};
+    use provenant_supervisor::custody::{
+        CaptureTotals, ExitObservation, PublicationState, SettlementEvidence,
+    };
 
     #[test]
     fn old_child_stores_are_not_read() -> Result<(), Box<dyn std::error::Error>> {
@@ -251,7 +279,14 @@ mod tests {
             roots.state.as_path().join("children/old/run.sqlite3"),
             b"invalid database",
         )?;
-        let tree = read(&roots, None, 3, PAGE_SIZE_LIMIT, false)?;
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let request = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let tree =
+            read_inner_with_request(&roots, None, 3, PAGE_SIZE_LIMIT, false, false, &request)?;
         assert_eq!(tree["nodes"], json!([]));
         assert_eq!(tree["unfetched_children"], json!([]));
         Ok(())
@@ -262,6 +297,35 @@ mod tests {
         other_project: ProjectId,
         other_attempt: AttemptId,
         expected_attempts: usize,
+        store: RunStore,
+        clock: TestClock,
+        cancel: CancelToken,
+        codex_attempt: AttemptId,
+    }
+
+    impl TreeFixture {
+        fn read(
+            &self,
+            selected: Option<ProjectId>,
+            max_depth: u64,
+            max_nodes: u64,
+            detail: bool,
+            include_store_path: bool,
+        ) -> Result<Value, Error> {
+            let request = provenant_run::Request {
+                clock: &self.clock,
+                cancel: &self.cancel,
+            };
+            read_inner_with_request(
+                &self.roots,
+                selected,
+                max_depth,
+                max_nodes,
+                detail,
+                include_store_path,
+                &request,
+            )
+        }
     }
 
     fn fixture() -> Result<TreeFixture, Box<dyn std::error::Error>> {
@@ -308,11 +372,73 @@ mod tests {
             })
         };
         store.create(&prepared(1, request.clone())?, &call)?;
+        let codex_attempt = AttemptId::from_bytes([1; 16]);
+        let route = RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/model".into()),
+            ..Default::default()
+        };
+        let starting = store.mark_starting_for_fixture(codex_attempt, &route, &call)?;
+        let usage = UsageRecord {
+            uncached_input: Some(42),
+            ..Default::default()
+        };
         request.parent_attempt = Some(AttemptId::from_bytes([1; 16]));
         store.create(&prepared(2, request.clone())?, &call)?;
         request.parent = Some(AttemptId::from_bytes([2; 16]));
         request.parent_attempt = Some(AttemptId::from_bytes([9; 16]));
         store.create(&prepared(3, request.clone())?, &call)?;
+        let finished_at = clock.wall_now()?;
+        let exit = ExitObservation {
+            publication: PublicationState::Durable,
+            scope: Scope {
+                attempt: codex_attempt,
+                generation: starting.generation,
+            },
+            termination: Some(Termination::Exit(0)),
+            never_spawned: false,
+            stop_reason: None,
+            cancel_delivered_before_exit: None,
+            delivered_signals: vec![],
+            reaped: vec![],
+            omitted_reaped: 0,
+            spared: vec![],
+            omitted_spared: 0,
+            launch_refusal: None,
+            warnings: vec![],
+            omitted_warnings: 0,
+            terminal_observed: false,
+            unresolved_cleanup: false,
+            unresolved_pids: vec![],
+            settlement_evidence: SettlementEvidence::DarwinCensusAndCustodyLease,
+            stdout: CaptureTotals::default(),
+            stderr: CaptureTotals::default(),
+        };
+        store.publish_terminal(
+            codex_attempt,
+            starting.revision,
+            &TerminalPublication {
+                handoff: Ok(None),
+                terminal_cause: None,
+                terminal_note: None,
+                outcome: Outcome::Succeeded,
+                finished_at,
+                started_at: Some(finished_at),
+                provider_ms: Some(1),
+                reason: None,
+                result: "complete fixture result",
+                complete: true,
+                redacted: false,
+                resolved_route: Some(route.clone()),
+                applied_route: Some(route.clone()),
+                observed_route: Some(route),
+                usage,
+                session: None,
+                partial_signals: vec![],
+            },
+            &exit,
+            &call,
+        )?;
         let other_project = ProjectId::from_bytes([7; 16]);
         let other_store = RunStore::open(
             &ExecutionContext {
@@ -331,6 +457,10 @@ mod tests {
             other_project,
             other_attempt,
             expected_attempts: 4,
+            store,
+            clock,
+            cancel,
+            codex_attempt,
         })
     }
 
@@ -343,8 +473,14 @@ mod tests {
         let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
         inputs.state_dir = Some(base.join("state"));
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let request = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
         assert_eq!(
-            read(&roots, None, 3, PAGE_SIZE_LIMIT, false)?["nodes"],
+            read_inner_with_request(&roots, None, 3, PAGE_SIZE_LIMIT, false, false, &request)?["nodes"],
             json!([])
         );
         assert!(!roots.state.as_path().exists());
@@ -352,10 +488,18 @@ mod tests {
     }
 
     #[test]
-    fn host_tree_preserves_lineage_and_missing_usage() -> Result<(), Box<dyn std::error::Error>> {
+    fn host_tree_preserves_lineage_and_excludes_unmarked_codex_usage()
+    -> Result<(), Box<dyn std::error::Error>> {
         let fixture = fixture()?;
         let roots = &fixture.roots;
-        let tree = read(roots, None, 3, PAGE_SIZE_LIMIT, false)?;
+        let call = provenant_run::Request {
+            clock: &fixture.clock,
+            cancel: &fixture.cancel,
+        };
+        let record = fixture.store.record(fixture.codex_attempt, &call)?;
+        assert_eq!(record.usage.uncached_input, Some(42));
+        assert_eq!(record.effective_usage().uncached_input, None);
+        let tree = fixture.read(None, 3, PAGE_SIZE_LIMIT, false, false)?;
         assert!(tree["nodes"][0]["lane_id"]["key"].is_object());
         assert!(tree["nodes"][0]["lane_id"].get("run_id").is_none());
         assert!(tree["nodes"][0]["lane_id"].get("task_id").is_none());
@@ -406,8 +550,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = fixture()?;
         let roots = &fixture.roots;
-        let tree = read(roots, None, 3, PAGE_SIZE_LIMIT, false)?;
-        let detailed = read(roots, None, 3, PAGE_SIZE_LIMIT, true)?;
+        let tree = fixture.read(None, 3, PAGE_SIZE_LIMIT, false, false)?;
+        let detailed = fixture.read(None, 3, PAGE_SIZE_LIMIT, true, false)?;
         assert!(detailed["nodes"][0]["metadata"]["operation"].is_object());
         assert!(serde_json::to_vec(&tree)?.len() < serde_json::to_vec(&detailed)?.len());
         let detail =
@@ -416,11 +560,11 @@ mod tests {
         assert_eq!(detail["artifacts"][0]["bytes"], "body".len());
         assert_eq!(detail["artifacts"][0]["present"], true);
         assert_eq!(detail["usage"]["reasoning"], Value::Null);
-        let selected = read(
-            roots,
+        let selected = fixture.read(
             Some(fixture.other_project),
             3,
             PAGE_SIZE_LIMIT,
+            false,
             false,
         )?;
         assert_eq!(selected["totals"]["attempts"], 1);
@@ -438,7 +582,7 @@ mod tests {
                 .iter()
                 .any(|node| { node["lane_id"]["attempt_id"] == json!(fixture.other_attempt) })
         );
-        let limited = read(roots, None, 3, 1, false)?;
+        let limited = fixture.read(None, 3, 1, false, false)?;
         assert_eq!(limited["truncated"], true);
         Ok(())
     }

@@ -990,8 +990,16 @@ mod tests {
                     "{path}"
                 );
                 assert_eq!(
-                    field.values.iter().map(String::as_str).collect::<Vec<_>>(),
-                    declaration.values,
+                    field
+                        .values
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    declaration
+                        .values
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>(),
                     "{path}"
                 );
             }

@@ -941,6 +941,10 @@ mod route_tests {
     };
     use std::error::Error;
 
+    fn route_test_time() -> super::WallTime {
+        super::WallTime::from_unix_seconds(100).expect("fixture instant is representable")
+    }
+
     include!("route/tests_1.rs");
     include!("route/tests_2.rs");
     include!("route/tests_3.rs");

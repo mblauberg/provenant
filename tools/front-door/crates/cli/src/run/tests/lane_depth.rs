@@ -1,64 +1,90 @@
 use super::*;
 
 #[test]
-fn shared_submit_context_refuses_depth_above_the_limit() {
-    let parent = AttemptId::from_bytes([7; 16]).to_string();
+fn shared_submit_context_uses_depth_lineage_and_state_as_one_contract() {
+    enum Expected {
+        Success(u64, Option<AttemptId>),
+        Failure(Status, ErrorKind),
+    }
     let state = Path::new("/state");
-    let result = lane_dispatch_values(Some("2"), Some(&parent), 2, state, Some(state));
-    let Err(failure) = result else {
-        panic!("depth above the configured maximum must be refused");
-    };
-    assert_eq!(failure.status, Status::Refused);
-    assert_eq!(failure.kind.code(), "LANE_DEPTH");
-}
-
-#[test]
-fn shared_submit_context_assigns_root_depth_and_parent() {
-    let parent = AttemptId::from_bytes([8; 16]);
+    let child_state = Path::new("/state/children/parent");
+    let parent = AttemptId::from_bytes([7; 16]);
     let parent_text = parent.to_string();
-    let state = Path::new("/state");
-    let result = lane_dispatch_values(Some("1"), Some(&parent_text), 2, state, Some(state));
-    assert!(matches!(result, Ok((2, Some(found))) if found == parent));
-}
-
-#[test]
-fn shared_submit_context_refuses_incomplete_or_zero_nested_context() {
-    let parent = AttemptId::from_bytes([9; 16]).to_string();
-    let state = Path::new("/state");
-    let failure = lane_dispatch_values(
-        Some("1"),
-        Some(&parent),
-        3,
-        state,
-        Some(Path::new("/state/children/old")),
-    )
-    .expect_err("a retired child-store marker must be refused");
-    assert_eq!(failure.kind.code(), "LANE_CONTEXT");
-    for (depth, parent_attempt) in [
-        (None, None),
-        (Some("1"), None),
-        (None, Some(parent.as_str())),
-    ] {
-        let failure = lane_dispatch_values(depth, parent_attempt, 3, state, Some(state))
-            .expect_err("stripped or forged lineage must be refused");
-        assert_eq!(failure.kind.code(), "LANE_CONTEXT");
+    let cases = [
+        (None, None, 2, None, Expected::Success(1, None)),
+        (
+            Some("1"),
+            Some(parent_text.as_str()),
+            2,
+            None,
+            Expected::Success(2, Some(parent)),
+        ),
+        (
+            Some("2"),
+            Some(parent_text.as_str()),
+            2,
+            Some(state),
+            Expected::Failure(Status::Refused, ErrorKind::LaneDepth),
+        ),
+        (
+            None,
+            None,
+            2,
+            Some(state),
+            Expected::Failure(Status::Refused, ErrorKind::LaneContext),
+        ),
+        (
+            Some("1"),
+            None,
+            2,
+            Some(state),
+            Expected::Failure(Status::Refused, ErrorKind::LaneContext),
+        ),
+        (
+            None,
+            Some(parent_text.as_str()),
+            2,
+            Some(state),
+            Expected::Failure(Status::Refused, ErrorKind::LaneContext),
+        ),
+        (
+            Some("1"),
+            Some(parent_text.as_str()),
+            2,
+            Some(child_state),
+            Expected::Failure(Status::Refused, ErrorKind::LaneContext),
+        ),
+        (
+            Some("0"),
+            Some(parent_text.as_str()),
+            2,
+            None,
+            Expected::Failure(Status::Refused, ErrorKind::LaneContext),
+        ),
+        (
+            Some("invalid"),
+            Some(parent_text.as_str()),
+            3,
+            None,
+            Expected::Failure(Status::Invalid, ErrorKind::LaneContext),
+        ),
+        (
+            None,
+            Some("invalid"),
+            3,
+            None,
+            Expected::Failure(Status::Invalid, ErrorKind::ParentAttempt),
+        ),
+    ];
+    for (depth, parent_attempt, max_depth, run_state, expected) in cases {
+        let actual = lane_dispatch_values(depth, parent_attempt, max_depth, state, run_state);
+        match expected {
+            Expected::Success(depth, parent) => assert_eq!(actual.unwrap(), (depth, parent)),
+            Expected::Failure(status, kind) => {
+                let failure = actual.expect_err("invalid lane context must be refused");
+                assert_eq!(failure.status, status);
+                assert_eq!(failure.kind, kind);
+            }
+        }
     }
-    for (depth, parent_attempt) in [
-        (Some("1"), None),
-        (None, Some(parent.as_str())),
-        (Some("0"), Some(parent.as_str())),
-    ] {
-        let failure = lane_dispatch_values(depth, parent_attempt, 2, Path::new("/state"), None)
-            .expect_err("incomplete or zero nested context must be refused");
-        assert_eq!(failure.status, Status::Refused);
-        assert_eq!(failure.kind.code(), "LANE_CONTEXT");
-    }
-}
-
-#[test]
-fn shared_submit_context_assigns_root_depth_without_parent() {
-    assert!(matches!(
-        lane_dispatch_values(None, None, 2, Path::new("/state"), None),
-        Ok((1, None))
-    ));
 }

@@ -15,6 +15,25 @@ pub(super) fn spent(record: &provenant_quota::AccountRecord, now: i64) -> bool {
 }
 
 pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<String> {
+    route_blocked_with_time(alias, exclude, roots, None)
+}
+
+#[cfg(test)]
+pub(super) fn route_blocked_at(
+    alias: &str,
+    exclude: &[String],
+    roots: &Roots,
+    now: WallTime,
+) -> Option<String> {
+    route_blocked_with_time(alias, exclude, roots, Some(now))
+}
+
+fn route_blocked_with_time(
+    alias: &str,
+    exclude: &[String],
+    roots: &Roots,
+    now: Option<WallTime>,
+) -> Option<String> {
     let query = RouteResolve {
         writes: false,
         account: None,
@@ -29,7 +48,7 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
             exclude: exclude.to_vec(),
         },
     };
-    let blocked = with_context(
+    let blocked = with_context_with_time(
         roots,
         REGISTRY,
         &[],
@@ -38,6 +57,7 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
         &[],
         false,
         None,
+        now,
         |context, records, policies, _| {
             let request = resolve_request(&query, context)?;
             let rules = effective_exclusion_rules(exclude, roots)?;
@@ -150,17 +170,38 @@ pub(super) fn readiness_text(readiness: &RouteReadiness) -> String {
     }
 }
 
-pub(super) fn unobserved_model(model: &ModelId, list: &RouteListDisplay) -> &'static str {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UnobservedReadiness {
+    NotRecorded,
+    DisplayTruncated,
+}
+
+pub(super) fn unobserved_readiness(
+    model: &ModelId,
+    list: &RouteListDisplay,
+) -> Option<UnobservedReadiness> {
     if list
         .recorded_readiness
         .iter()
         .any(|record| record.model == model.as_str())
     {
-        ""
+        None
     } else if list.readiness_truncated {
-        "; readiness not shown (display limit reached)"
+        Some(UnobservedReadiness::DisplayTruncated)
     } else {
-        "; readiness unknown (not probed; run `provenant quota tick` to refresh quota)"
+        Some(UnobservedReadiness::NotRecorded)
+    }
+}
+
+pub(super) fn unobserved_model(model: &ModelId, list: &RouteListDisplay) -> &'static str {
+    match unobserved_readiness(model, list) {
+        None => "",
+        Some(UnobservedReadiness::DisplayTruncated) => {
+            "; readiness not shown (display limit reached)"
+        }
+        Some(UnobservedReadiness::NotRecorded) => {
+            "; readiness unknown (not probed; run `provenant quota tick` to refresh quota)"
+        }
     }
 }
 

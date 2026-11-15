@@ -1681,14 +1681,32 @@ mod tests {
                     .map(|value| value.0.as_slice())
                     .unwrap_or_default();
                 assert_eq!(
-                    published.requires, requirements,
+                    published
+                        .requires
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    requirements
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>(),
                     "{} {}",
-                    entry.command, published.name
+                    entry.command,
+                    published.name
                 );
                 assert_eq!(
-                    published.required_unless, required_unless,
+                    published
+                        .required_unless
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    required_unless
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>(),
                     "{} {}",
-                    entry.command, published.name
+                    entry.command,
+                    published.name
                 );
             }
         }

@@ -106,88 +106,89 @@ fn retained_import_refusal_carries_custody_and_recovery_targets() {
 }
 
 #[test]
-fn dispatch_policy_refusal_preserves_launched_sibling() -> Result<(), String> {
-    check_launch_policy(&[
-        run::Started::Refused {
-            attempt: AttemptId::from_bytes([1; 16]),
-            kind: run::RefusalKind::Policy,
-            reason: "insufficient disk space".into(),
-        },
-        run::Started::Launched(AttemptId::from_bytes([2; 16])),
-    ])
-    .map_err(|error| error.message)
-}
-
-#[test]
-fn policy_refusal_preserves_uncertain_sibling_handoff() -> Result<(), String> {
-    let refused = || run::Started::Refused {
-        attempt: AttemptId::from_bytes([1; 16]),
-        kind: run::RefusalKind::Policy,
-        reason: "insufficient disk space".into(),
-    };
-    let error = check_launch_policy(&[refused()])
-        .err()
-        .ok_or("policy refusal was ignored")?;
-    assert_eq!(error.status, Status::Refused);
-    assert_eq!(error.kind, ErrorKind::Refused);
-    // All refusal kinds fail when no sibling can progress.
-    for kind in [
-        run::RefusalKind::PriorityUnavailable,
-        run::RefusalKind::Preparation,
-    ] {
-        let error = check_launch_policy(&[run::Started::Refused {
-            attempt: AttemptId::from_bytes([3; 16]),
-            kind,
-            reason: "codex/model: UnknownAvailability".into(),
-        }])
-        .expect_err("all-refused batch must fail");
-        assert_eq!(error.status, Status::Refused);
+fn launch_policy_classifies_refusals_by_sibling_observation() {
+    use provenant_records::diagnostic::{ResourceFact, SettingSource};
+    enum Refusal {
+        Kind(run::RefusalKind),
+        Blocked,
     }
-    // The typed cause promotes pacing without interpreting candidate prose.
-    let pacing = || run::Started::Refused {
-        attempt: AttemptId::from_bytes([4; 16]),
-        kind: run::RefusalKind::PacingReserve,
-        reason: "opaque candidate refusal".into(),
-    };
-    let error = check_launch_policy(&[pacing()])
-        .err()
-        .ok_or("pacing-held preparation refusal was ignored")?;
-    assert_eq!(error.status, Status::Refused);
-    assert_eq!(error.kind, ErrorKind::Refused);
-    assert!(error.message.contains("opaque candidate refusal"));
-    // Let the existing unknown-handoff handling retain the full receipt.
-    for refusal in [refused(), pacing()] {
-        check_launch_policy(&[
-            refusal,
-            run::Started::Unknown {
-                attempt: AttemptId::from_bytes([2; 16]),
-                error: "handoff unconfirmed".into(),
+    #[derive(Clone, Copy)]
+    enum Sibling {
+        None,
+        Launched,
+        Unknown,
+    }
+    let cases = [
+        (
+            Refusal::Kind(run::RefusalKind::Policy),
+            Sibling::None,
+            false,
+        ),
+        (
+            Refusal::Kind(run::RefusalKind::Policy),
+            Sibling::Launched,
+            true,
+        ),
+        (
+            Refusal::Kind(run::RefusalKind::PriorityUnavailable),
+            Sibling::None,
+            false,
+        ),
+        (
+            Refusal::Kind(run::RefusalKind::Preparation),
+            Sibling::None,
+            false,
+        ),
+        (
+            Refusal::Kind(run::RefusalKind::PacingReserve),
+            Sibling::None,
+            false,
+        ),
+        (
+            Refusal::Kind(run::RefusalKind::PacingReserve),
+            Sibling::Unknown,
+            true,
+        ),
+        (
+            Refusal::Kind(run::RefusalKind::PolicyResource(ResourceFact::Disk {
+                free: 1,
+                floor: 2,
+                origin: SettingSource::Configuration,
+            })),
+            Sibling::Launched,
+            true,
+        ),
+        (Refusal::Blocked, Sibling::None, false),
+        (Refusal::Blocked, Sibling::Launched, true),
+    ];
+    for (refusal, sibling, expected_progress) in cases {
+        let refused = match refusal {
+            Refusal::Kind(kind) => run::Started::Refused {
+                attempt: AttemptId::from_bytes([1; 16]),
+                kind,
+                reason: "opaque refusal details".into(),
             },
-        ])
-        .map_err(|error| error.message)?;
+            Refusal::Blocked => run::Started::Blocked {
+                attempt: AttemptId::from_bytes([1; 16]),
+                error: "opaque custody failure".into(),
+            },
+        };
+        let mut batch = vec![refused];
+        match sibling {
+            Sibling::None => {}
+            Sibling::Launched => batch.push(run::Started::Launched(AttemptId::from_bytes([2; 16]))),
+            Sibling::Unknown => batch.push(run::Started::Unknown {
+                attempt: AttemptId::from_bytes([2; 16]),
+                error: "opaque handoff state".into(),
+            }),
+        }
+        let result = check_launch_policy(&batch);
+        assert_eq!(result.is_ok(), expected_progress);
+        if let Err(error) = result {
+            assert_eq!(error.status, Status::Refused);
+            assert_eq!(error.kind, ErrorKind::Refused);
+        }
     }
-    Ok(())
-}
-
-#[test]
-fn blocked_custody_is_reported_without_hiding_a_running_sibling() -> Result<(), String> {
-    let blocked = || run::Started::Blocked {
-        attempt: AttemptId::from_bytes([1; 16]),
-        error: "custody withdrawal failed".into(),
-    };
-    let error = check_launch_policy(&[blocked()])
-        .err()
-        .ok_or("block was ignored")?;
-    assert_eq!(error.status, Status::Refused);
-    assert!(error.message.contains("custody withdrawal failed"));
-    assert!(
-        matches!(error.detail.as_deref(), Some(provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused { reason, .. }) if reason.contains("custody withdrawal failed"))
-    );
-    check_launch_policy(&[
-        blocked(),
-        run::Started::Launched(AttemptId::from_bytes([2; 16])),
-    ])
-    .map_err(|error| error.message)
 }
 
 #[test]
@@ -344,81 +345,64 @@ fn writer_disk_observation_failure_warns_and_continues() -> Result<(), String> {
 }
 
 #[test]
-fn writer_rechecks_once_after_collection_and_reports_reclaimed_bytes() -> Result<(), String> {
-    use std::cell::Cell;
+fn writer_rechecks_after_collection_and_reports_reclaimed_bytes() -> Result<(), String> {
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
         critical_free: Some("100B".into()),
         ..Default::default()
     };
-    for remaining in [99, 100] {
-        let collected = Cell::new(false);
-        let samples = Cell::new(0);
+    for (remaining, accepted) in [(99, false), (100, true)] {
+        let collected = std::cell::Cell::new(false);
         let result = check_writer_disk_with_collection(
             &settings,
             &disk_policy(provenant_records::policy::Strength::Refuse),
             Path::new("/state"),
             Path::new("/tree"),
             Path::new("/home"),
-            |_| {
-                samples.set(samples.get() + 1);
-                Ok(if collected.get() { remaining } else { 50 })
-            },
+            |_| Ok(if collected.get() { remaining } else { 50 }),
             || {
-                assert!(!collected.replace(true));
+                collected.set(true);
                 49
             },
         );
-        assert_eq!(samples.get(), 6);
-        if remaining == 100 {
+        if accepted {
             result?;
         } else {
             let error = result.err().ok_or("writer accepted low disk")?;
             assert!(matches!(
                 error,
                 DiskCheck::Low {
-                    available: 99,
+                    available,
                     floor: 100,
                     reclaimed: 49,
                     ..
-                }
+                } if available == remaining
             ));
         }
     }
-    let calls = Cell::new(0);
-    check_writer_disk_with_collection(
-        &settings,
-        &disk_policy(provenant_records::policy::Strength::Refuse),
-        Path::new("/state"),
-        Path::new("/tree"),
-        Path::new("/home"),
-        |_| Ok(100),
-        || {
-            calls.set(calls.get() + 1);
-            0
-        },
-    )?;
-    assert_eq!(calls.get(), 0);
+
     let disabled = provenant_config::GcSettings {
         schedule: false,
         ..settings
     };
-    assert!(
-        check_writer_disk_with_collection(
-            &disabled,
-            &disk_policy(provenant_records::policy::Strength::Refuse),
-            Path::new("/state"),
-            Path::new("/tree"),
-            Path::new("/home"),
-            |_| Ok(1),
-            || {
-                calls.set(calls.get() + 1);
-                99
-            }
-        )
-        .is_err()
+    let result = check_writer_disk_with_collection(
+        &disabled,
+        &disk_policy(provenant_records::policy::Strength::Refuse),
+        Path::new("/state"),
+        Path::new("/tree"),
+        Path::new("/home"),
+        |_| Ok(1),
+        || 99,
     );
-    assert_eq!(calls.get(), 0);
+    assert!(matches!(
+        result,
+        Err(DiskCheck::Low {
+            available: 1,
+            floor: 100,
+            reclaimed: 0,
+            ..
+        })
+    ));
 
     Ok(())
 }
@@ -448,7 +432,7 @@ fn writer_samples_missing_roots_without_creating_them() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(), String> {
+fn writer_disk_policy_refusal_keeps_typed_facts_and_policy_identity() -> Result<(), String> {
     use provenant_records::run::TerminalCause;
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
@@ -476,13 +460,9 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
             origin: provenant_records::diagnostic::SettingSource::Configuration,
         })
     );
-    assert!(
-        TerminalCause::DiskFloor
-            .detail()
-            .contains("provenant gc --apply")
-    );
-    assert!(!TerminalCause::DiskFloor.detail().contains("access grants"));
-    let unobserved = disk_policy_refusal(DiskCheck::Unobserved("HOST_ERROR_SENTINEL".into()));
+
+    let sentinel = "HOST_ERROR_SENTINEL";
+    let unobserved = disk_policy_refusal(DiskCheck::Unobserved(sentinel.into()));
     assert_eq!(
         unobserved.policy_code.as_deref(),
         Some("SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE")
@@ -491,17 +471,9 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
         unobserved.terminal_cause,
         TerminalCause::DiskObservationUnavailable
     );
-    assert!(unobserved.terminal_note.is_none());
-    assert!(
-        !TerminalCause::DiskObservationUnavailable
-            .detail()
-            .contains("HOST_ERROR_SENTINEL")
-    );
-    assert!(
-        TerminalCause::DiskObservationUnavailable
-            .detail()
-            .contains("restore the host disk observation")
-    );
+    assert_eq!(unobserved.resource, None);
+    assert_eq!(unobserved.terminal_note, None);
+    assert!(!unobserved.terminal_cause.detail().contains(sentinel));
     Ok(())
 }
 

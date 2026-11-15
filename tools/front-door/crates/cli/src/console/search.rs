@@ -24,6 +24,24 @@ pub(super) fn read(
     limit: u64,
     cursor: Option<&str>,
 ) -> Result<Value, Error> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let request = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    read_with_request(roots, query, part, session, limit, cursor, &request)
+}
+
+fn read_with_request(
+    roots: &Roots,
+    query: &str,
+    part: &str,
+    session: Option<&str>,
+    limit: u64,
+    cursor: Option<&str>,
+    call: &provenant_run::Request<'_>,
+) -> Result<Value, Error> {
     if query.is_empty() || query.len() > 1_024 || !(1..=PAGE_SIZE_LIMIT).contains(&limit) {
         return Err(provenant_run::RunError::Validation("search bounds").into());
     }
@@ -33,12 +51,6 @@ pub(super) fn read(
         _ => return Err(provenant_run::RunError::Validation("search part").into()),
     };
     let query_folded = query.to_lowercase();
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = provenant_run::Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
     let projects = provenant_config::registered_projects(roots)?;
     let mut matches = Vec::new();
     let mut scan_bytes = 0u64;
@@ -54,7 +66,7 @@ pub(super) fn read(
             actor_id: ActorId::from_bytes([0; 16]),
             read_prompts: false,
         };
-        let Some(store) = RunStore::open_read_only(&context, &call)? else {
+        let Some(store) = RunStore::open_read_only(&context, call)? else {
             continue;
         };
         let mut after = 0;
@@ -71,7 +83,7 @@ pub(super) fn read(
                 remaining as u64,
                 after,
                 through,
-                &call,
+                call,
             )?;
             through = Some(page.high_water);
             after = page.next.unwrap_or(0);
@@ -102,21 +114,18 @@ pub(super) fn read(
                     continue;
                 }
                 scan_bytes += expected_bytes;
-                let bytes = match store.console_text_artifact(
-                    attempt,
-                    artifact_part,
-                    ARTIFACT_BYTES,
-                    &call,
-                ) {
-                    Ok(Some(bytes)) => bytes,
-                    Ok(None) => continue,
-                    Err(error) => {
-                        artifact_errors.push(
-                            json!({"attempt_id":attempt.attempt_id,"reason":error.to_string()}),
-                        );
-                        continue;
-                    }
-                };
+                let bytes =
+                    match store.console_text_artifact(attempt, artifact_part, ARTIFACT_BYTES, call)
+                    {
+                        Ok(Some(bytes)) => bytes,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            artifact_errors.push(
+                                json!({"attempt_id":attempt.attempt_id,"reason":error.to_string()}),
+                            );
+                            continue;
+                        }
+                    };
                 let text = String::from_utf8_lossy(&bytes);
                 let chars: Vec<char> = text.chars().collect();
                 let mut folded = Vec::new();
@@ -200,6 +209,8 @@ mod tests {
         base: std::path::PathBuf,
         roots: Roots,
         ids: Vec<AttemptId>,
+        clock: TestClock,
+        cancel: CancelToken,
     }
 
     fn fixture(oversized: bool) -> Result<SearchFixture, Box<dyn std::error::Error>> {
@@ -290,48 +301,58 @@ mod tests {
             base,
             roots,
             ids,
+            clock,
+            cancel,
         })
+    }
+
+    impl SearchFixture {
+        fn read(
+            &self,
+            query: &str,
+            part: &str,
+            session: Option<&str>,
+            limit: u64,
+            cursor: Option<&str>,
+        ) -> Result<Value, Error> {
+            let request = provenant_run::Request {
+                clock: &self.clock,
+                cancel: &self.cancel,
+            };
+            read_with_request(&self.roots, query, part, session, limit, cursor, &request)
+        }
     }
 
     #[test]
     fn search_pages_bind_the_query_and_respect_declared_bounds()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = fixture(false)?;
-        let roots = &fixture.roots;
-        let page = read(&roots, "searchable", "prompt", None, 1, None)?;
+        let page = fixture.read("searchable", "prompt", None, 1, None)?;
         let matches = page["matches"].as_array().ok_or("matches")?;
         assert_eq!(matches.len(), 1);
         assert!(page["coverage"]["files_scanned"].as_u64().unwrap() > 0);
         assert_eq!(page["coverage"]["peers"], "not_searched");
         assert_eq!(page["truncated"], true);
         let cursor = page["next_cursor"].as_str().ok_or("cursor")?;
-        assert!(read(&roots, "different", "prompt", None, 1, Some(cursor)).is_err());
-        let second = read(&roots, "searchable", "prompt", None, 1, Some(cursor))?;
+        assert!(
+            fixture
+                .read("different", "prompt", None, 1, Some(cursor))
+                .is_err()
+        );
+        let second = fixture.read("searchable", "prompt", None, 1, Some(cursor))?;
         assert_ne!(
             page["matches"][0]["lane_id"]["attempt_id"],
             second["matches"][0]["lane_id"]["attempt_id"]
         );
         assert!(
-            read(
-                &roots,
-                "searchable",
-                "prompt",
-                None,
-                PAGE_SIZE_LIMIT + 1,
-                None
-            )
-            .is_err()
+            fixture
+                .read("searchable", "prompt", None, PAGE_SIZE_LIMIT + 1, None)
+                .is_err()
         );
         assert!(
-            read(
-                &roots,
-                "searchable",
-                "transcript",
-                None,
-                PAGE_SIZE_LIMIT,
-                None
-            )
-            .is_err()
+            fixture
+                .read("searchable", "transcript", None, PAGE_SIZE_LIMIT, None)
+                .is_err()
         );
         Ok(())
     }
@@ -340,29 +361,31 @@ mod tests {
     fn search_reads_owned_artifacts_and_refuses_symlink_targets()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = fixture(false)?;
-        let roots = &fixture.roots;
         let id = fixture.ids.first().ok_or("missing search fixture")?;
         assert_eq!(
-            super::super::detail::read(&roots, &id.to_string())?["status"],
+            super::super::detail::read(&fixture.roots, &id.to_string())?["status"],
             "found"
         );
-        let result = read(&roots, "searchable", "prompt", None, PAGE_SIZE_LIMIT, None)?;
+        let result = fixture.read("searchable", "prompt", None, PAGE_SIZE_LIMIT, None)?;
         assert!(result["coverage"]["files_scanned"].as_u64().unwrap() > 0);
         assert!(result["matches"][0]["lane_id"]["key"].is_object());
         assert!(result["matches"][0]["lane_id"].get("run_id").is_none());
         assert!(result["matches"][0]["lane_id"].get("task_id").is_none());
-        let credential = base.join("credential");
+        let credential = fixture.base.join("credential");
         std::fs::write(&credential, "searchable fixture")?;
-        let last_attempt = ids.last().ok_or("missing last search fixture")?;
-        let prompt = state
+        let last_attempt = fixture.ids.last().ok_or("missing last search fixture")?;
+        let prompt = fixture
+            .roots
+            .state
+            .as_path()
             .join("attempts")
             .join(last_attempt.to_string())
             .join("prompt.txt");
         std::fs::remove_file(&prompt)?;
-        let absent = super::super::detail::read(&roots, &last_attempt.to_string())?;
+        let absent = super::super::detail::read(&fixture.roots, &last_attempt.to_string())?;
         assert_eq!(absent["artifacts"][0]["present"], false);
         std::os::unix::fs::symlink(&credential, &prompt)?;
-        let guarded = read(&roots, "searchable", "prompt", None, PAGE_SIZE_LIMIT, None)?;
+        let guarded = fixture.read("searchable", "prompt", None, PAGE_SIZE_LIMIT, None)?;
         assert!(
             guarded["coverage"]["artifact_errors"]
                 .as_array()
@@ -384,14 +407,8 @@ mod tests {
     fn search_byte_budget_truncates_an_oversized_artifact() -> Result<(), Box<dyn std::error::Error>>
     {
         let fixture = fixture(true)?;
-        let byte_limited = read(
-            &fixture.roots,
-            "oversizedmarker",
-            "prompt",
-            None,
-            PAGE_SIZE_LIMIT,
-            None,
-        )?;
+        let byte_limited =
+            fixture.read("oversizedmarker", "prompt", None, PAGE_SIZE_LIMIT, None)?;
         assert!(
             byte_limited["matches"]
                 .as_array()
