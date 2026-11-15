@@ -20,8 +20,7 @@ pub(super) fn branch_name(
         Ok(state) => state,
         Err(error) => return fallback(format!("could not read host state: {error}")),
     };
-    let ports = match provenant_config::PortTable::read_for(Some(context.repo.root_path()), &state)
-    {
+    let ports = match provenant_config::PortTable::read_for(context.layout.project(), &state) {
         Ok(ports) => ports,
         Err(error) => return fallback(format!("could not read port declaration: {error}")),
     };
@@ -123,7 +122,7 @@ pub(super) fn run(
         let settings = provenant_config::WorktreeSettings::read(&state)
             .map_err(|error| format!("could not read post-create settings: {error}"))?
             .for_project(context.binding.project_id());
-        let ports = provenant_config::PortTable::read_for(Some(context.repo.root_path()), &state)
+        let ports = provenant_config::PortTable::read_for(context.layout.project(), &state)
             .map_err(|error| format!("could not read ports: {error}"))?;
         let command = provenant_config::dispatch_port_backend(
             &ports.post_create.backend,

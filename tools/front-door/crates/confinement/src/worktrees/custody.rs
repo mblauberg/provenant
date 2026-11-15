@@ -786,6 +786,23 @@ pub(super) fn validate_binding(context: &WorktreeContext<'_>) -> Result<(), Work
     if context.binding.common_dir() != context.repo.common_git_dir() {
         return Err(RepoError::InvalidRegistration.into());
     }
+    let layout_identity = context.layout.directory().metadata()?;
+    if let Some(project) = context.layout.project() {
+        let owner = VerifiedRepo::open_structure_only(project)?;
+        if owner.private_git_dir() != context.binding.common_dir()
+            || owner.common_git_dir() != context.binding.common_dir()
+            || !owner
+                .common_identity()
+                .same_identity(&context.repo.common_identity())
+            || !owner.root_identity().same_identity(&layout_identity)
+        {
+            return Err(RepoError::InvalidRegistration.into());
+        }
+    } else if context.layout.root() != context.binding.common_dir()
+        || !layout_identity.same_identity(&context.repo.common_identity())
+    {
+        return Err(RepoError::InvalidRegistration.into());
+    }
     Ok(())
 }
 

@@ -39,7 +39,8 @@ fn source_fast_forward_refuses_dirty_diverged_or_leased_tree() -> Result<(), Box
             .into_iter()
             .find(|entry| entry.path == info.path)
             .ok_or("missing writer")?
-            .head;
+            .head
+            .ok_or(WorktreeError::InvalidOutput)?;
         let error = fast_forward(&context, &info.path, target, &cancel())
             .err()
             .ok_or_else(|| format!("{scenario} source writer advanced"))?;
@@ -59,7 +60,8 @@ fn source_fast_forward_refuses_dirty_diverged_or_leased_tree() -> Result<(), Box
             .into_iter()
             .find(|entry| entry.path == info.path)
             .ok_or("missing writer")?
-            .head;
+            .head
+            .ok_or(WorktreeError::InvalidOutput)?;
         assert_eq!(after, before, "{scenario}");
         if scenario == "dirty" {
             assert_eq!(fs::read_to_string(info.path.join("keep"))?, "uncommitted");
@@ -100,7 +102,8 @@ fn source_fast_forward_preserves_ignored_files_that_become_tracked() -> Result<(
         .into_iter()
         .find(|entry| entry.path == info.path)
         .ok_or("missing writer")?
-        .head;
+        .head
+        .ok_or(WorktreeError::InvalidOutput)?;
     assert_eq!(after, info.head);
     assert_eq!(
         fs::read_to_string(info.path.join("cache"))?,

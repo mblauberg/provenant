@@ -1,6 +1,88 @@
 use super::*;
 
 #[test]
+fn bare_common_layout_creates_writer_from_linked_executor_checkout() -> Result<(), Box<dyn Error>> {
+    let mut fixture = Fixture::new()?;
+    fixture.run(&["branch", "-M", "main"])?;
+    let common = fixture._temp.path().join("bare-common");
+    let source = fixture.root.to_str().ok_or("source path")?;
+    let common_text = common.to_str().ok_or("common path")?;
+    let env = fixture_env(&fixture.home, fixture._temp.path());
+    run_fixture_git(
+        &fixture.executor,
+        &fixture.git,
+        fixture._temp.path(),
+        &env,
+        &["clone", "--bare", source, common_text],
+    )?;
+    let linked = fixture._temp.path().join("bare-linked");
+    let linked_text = linked.to_str().ok_or("linked path")?;
+    run_fixture_git(
+        &fixture.executor,
+        &fixture.git,
+        fixture._temp.path(),
+        &env,
+        &[
+            "--git-dir",
+            common_text,
+            "worktree",
+            "add",
+            "--detach",
+            linked_text,
+            "HEAD",
+        ],
+    )?;
+    fixture.root = linked;
+    fixture.repo = fixture.runtime.open_repo(
+        &fixture.executor,
+        &fixture.root,
+        fixture.budget()?,
+        &cancel(),
+    )?;
+    fs::create_dir(fixture.root.join(".provenant"))?;
+    fs::write(
+        fixture.root.join(".provenant/ports.json"),
+        serde_json::json!({
+            "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
+            "worktree_layout": {
+                "roots": ["project-writers"],
+                "default": "project-writers/<branch>"
+            }
+        })
+        .to_string(),
+    )?;
+    fs::write(
+        fixture._temp.path().join("ports.json"),
+        serde_json::json!({
+            "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
+            "worktree_layout": {
+                "roots": ["host-writers"],
+                "default": "host-writers/<branch>"
+            }
+        })
+        .to_string(),
+    )?;
+
+    let test = TestContext::new(&fixture)
+        .map_err(|error| std::io::Error::other(format!("context setup: {error}")))?;
+    assert_eq!(test.layout.root(), common.canonicalize()?);
+    assert_eq!(test.layout.project(), None);
+    let info = create(
+        &test.context(),
+        WorktreeCreate {
+            branch: "bare-layout-writer".into(),
+            base: Some(fixture.head()?.to_string()),
+        },
+        &cancel(),
+    )
+    .map_err(|error| std::io::Error::other(format!("writer creation: {error}")))?;
+
+    assert_eq!(info.path, common.join("host-writers/bare-layout-writer"));
+    assert!(info.path.is_dir());
+    Ok(())
+}
+
+#[test]
 fn remote_only_writer_branch_is_fetched_even_outside_fetch_refspec() -> Result<(), Box<dyn Error>> {
     let source = Fixture::new()?;
     source.run(&["branch", "remote-only"])?;

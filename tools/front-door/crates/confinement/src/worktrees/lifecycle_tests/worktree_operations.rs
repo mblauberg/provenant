@@ -195,14 +195,14 @@ fn prune_treats_a_prunable_branch_as_not_checked_out() -> Result<(), Box<dyn Err
     fs::remove_dir_all(&stale.path)?;
     let entries = context.facts.read_inventory(&context, &cancel())?;
     let branch = GitRefName::branch("scratch/stale")?;
-    assert!(matching_worktree(&entries, &branch, &fixture.root)?.is_none());
+    assert!(matching_worktree(&entries, &branch, Some(&fixture.root))?.is_none());
     assert!(!checked_out_elsewhere(&entries, &branch, None)?);
     assert!(!checked_out_elsewhere(
         &entries,
         &branch,
         Some(&fixture.root)
     )?);
-    let integration = primary_integration(&context, &cancel())?.0;
+    let integration = common_integration(&context, &cancel())?.0;
     let result = remove_with_port(
         &test_context,
         &context,

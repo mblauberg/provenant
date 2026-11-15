@@ -1009,7 +1009,8 @@ fn fallback_writer_after_a_partial_commit_continues_past_the_pin() -> Result<(),
         .into_iter()
         .find(|entry| entry.path == info.path)
         .ok_or("missing writer")?
-        .head;
+        .head
+        .ok_or(WorktreeError::InvalidOutput)?;
     assert_ne!(ahead, pin);
     fast_forward(&context, &info.path, pin, &cancel())?;
     let after = context
@@ -1018,7 +1019,8 @@ fn fallback_writer_after_a_partial_commit_continues_past_the_pin() -> Result<(),
         .into_iter()
         .find(|entry| entry.path == info.path)
         .ok_or("missing writer")?
-        .head;
+        .head
+        .ok_or(WorktreeError::InvalidOutput)?;
     assert_eq!(after, ahead);
     Ok(())
 }

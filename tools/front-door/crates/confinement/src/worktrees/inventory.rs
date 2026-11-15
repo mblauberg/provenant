@@ -837,7 +837,8 @@ impl Executor for FactExecutor<'_> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GitWorktree {
     pub(crate) path: PathBuf,
-    pub(crate) head: GitOid,
+    /// Bare registrations have no checkout HEAD field in Git's porcelain.
+    pub(crate) head: Option<GitOid>,
     pub(crate) branch: Option<GitRefName>,
     pub(super) locked: bool,
     pub(super) prunable: bool,
@@ -946,7 +947,9 @@ pub(super) fn parse_worktree_record(fields: &[Vec<u8>]) -> Result<GitWorktree, W
         }
     }
     let path = path.ok_or(WorktreeError::InvalidOutput)?;
-    let head = head.ok_or(WorktreeError::InvalidOutput)?;
+    if (bare && (head.is_some() || branch.is_some() || detached)) || (!bare && head.is_none()) {
+        return Err(WorktreeError::InvalidOutput);
+    }
     if !detached && !bare && branch.is_none() {
         return Err(WorktreeError::InvalidOutput);
     }
@@ -1281,5 +1284,13 @@ mod path_tests {
         assert!(inventory_paths(b"worktree /truncated\0").is_err());
         assert!(inventory_paths(b"worktree relative\0bare\0\0").is_err());
         assert!(inventory_paths(b"\0\0").is_err());
+    }
+
+    #[test]
+    fn bare_registration_has_no_checkout_head() {
+        let trees = parse_worktree_list(b"worktree /bare\0bare\0\0").expect("bare inventory");
+        assert_eq!(trees.len(), 1);
+        assert!(trees[0].bare);
+        assert_eq!(trees[0].head, None);
     }
 }
