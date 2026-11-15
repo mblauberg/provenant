@@ -56,9 +56,9 @@ pub enum Command {
     Root,
     /// Read a fresh resident-memory sample of an owned lane process tree
     ProcessTree {
-        /// PID of the supervised command inside this lane
+        /// PID inside this lane's sampled tree (defaults to the supervised command)
         #[arg(long, catalog_u32_range = 1..=i32::MAX as i64)]
-        root: u32,
+        root: Option<u32>,
     },
     /// Post a human decision, assumption or question
     Ask(crate::inbox::Ask),
