@@ -631,7 +631,6 @@ mod tests {
                 continue;
             };
             for support in [
-                install.mcp,
                 install.instructions,
                 install.answer_delivery,
                 install.precompact_context,

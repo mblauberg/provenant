@@ -956,7 +956,6 @@ pub(crate) fn capability_findings(
         };
         let path = target.hook_file.as_deref().unwrap_or(&target.config_file);
         for (name, support) in [
-            ("MCP", install.mcp),
             ("instructions", install.instructions),
             ("answer delivery", install.answer_delivery),
         ] {

@@ -226,15 +226,10 @@ pub struct HarnessInstall {
     pub answer_delivery: CapabilitySupport,
     /// Whether a pre-compaction response reaches the model's context.
     pub precompact_context: CapabilitySupport,
-    pub mcp: CapabilitySupport,
     pub instructions: CapabilitySupport,
     pub source: &'static str,
 }
 
-const MCP_UNAVAILABLE: CapabilitySupport = CapabilitySupport::Unsupported {
-    reason: "Provenant has no MCP server entrypoint; installing a registration would invoke a removed command",
-    source: "crates/cli/src/fabric.rs; crates/config/src/install_artifacts.rs",
-};
 const CHAIR_HOOKS_NOT_APPLICABLE: &str =
     "Provenant chair switching is enabled only for adapters declaring chair_switch";
 const CHAIR_HOOKS_SOURCE: &str = "AdapterSpec.chair_switch in crates/records/src/adapters.rs";
@@ -820,7 +815,6 @@ adapter_specs! { $;
             hook_events: CLAUDE_HOOK_EVENTS,
             answer_delivery: CapabilitySupport::Supported,
             precompact_context: CapabilitySupport::Supported,
-            mcp: MCP_UNAVAILABLE,
             instructions: CapabilitySupport::Supported,
             source: "https://docs.anthropic.com/en/docs/claude-code/settings; https://docs.anthropic.com/en/docs/claude-code/hooks",
         }),
@@ -922,7 +916,6 @@ adapter_specs! { $;
                 reason: "Codex PreCompact accepts only a systemMessage UI notice, not model context",
                 source: "https://developers.openai.com/codex/hooks",
             },
-            mcp: MCP_UNAVAILABLE,
             instructions: CapabilitySupport::Supported,
             source: "https://learn.chatgpt.com/docs/hooks; https://developers.openai.com/codex/guides/agents-md",
         }),
@@ -1031,7 +1024,6 @@ adapter_specs! { $;
                 reason: "Cursor preCompact accepts only user_message output shown to the user, not model context",
                 source: "https://cursor.com/docs/hooks#precompact",
             },
-            mcp: MCP_UNAVAILABLE,
             instructions: CapabilitySupport::Unsupported {
                 reason: "Cursor global instructions are settings-managed; AGENTS.md is project-root scoped",
                 source: "https://docs.cursor.com/context/rules-for-ai",
@@ -1142,7 +1134,6 @@ adapter_specs! { $;
                 reason: "Antigravity exposes no PreCompact event",
                 source: "https://antigravity.google/docs/hooks#supported-events",
             },
-            mcp: MCP_UNAVAILABLE,
             instructions: CapabilitySupport::Supported,
             source: "https://antigravity.google/docs/hooks; https://antigravity.google/docs/customization-discovery",
         }),
@@ -1251,7 +1242,6 @@ adapter_specs! { $;
                 source: "https://opencode.ai/docs/build/plugins/server#tool-execution",
             },
             precompact_context: CapabilitySupport::Supported,
-            mcp: MCP_UNAVAILABLE,
             instructions: CapabilitySupport::Supported,
             source: "https://opencode.ai/docs/build/plugins/; https://opencode.ai/docs/instructions",
         }),
@@ -1721,7 +1711,6 @@ mod tests {
             );
             for support in [
                 install.hooks,
-                install.mcp,
                 install.instructions,
                 install.answer_delivery,
                 install.precompact_context,

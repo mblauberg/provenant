@@ -121,8 +121,7 @@ needs registered accounts, and `quota tick` initialises quota state.
   managed hook is preserved; follow the reported recovery before replacing it.
 - Supported global instruction files link the same release instruction asset.
   Install findings name the reason and source for unavailable native
-  integrations. No MCP server is registered: the old Fabric MCP command has
-  been removed.
+  integrations. Provenant registers no MCP server; agents use the CLI.
 - Occupied or foreign entries are refused. If the preview shows an exact match
   you accept, rerun with `--adopt-existing`.
 - A directory that is not a registered account needs `install --harness claude`
