@@ -5030,10 +5030,9 @@ mod tests {
             exit.terminal_observed = true;
             exit.settlement_evidence = custody::SettlementEvidence::DarwinCensusAndCustodyLease;
             crate::dispatch_tests::seal_exit(&store, &exit)?;
-            let fake = crate::dispatch_tests::Fake {
-                session: Some("live-session".into()),
-                ..crate::dispatch_tests::Fake::with_observed(Some(route), Some(Outcome::Succeeded))
-            };
+            let mut fake =
+                crate::dispatch_tests::Fake::with_observed(Some(route), Some(Outcome::Succeeded));
+            fake.session = Some("live-session".into());
             let finished = store.finish(id, &attempt, &exit, &fake, &call)?;
             assert!(matches!(
                 finished.state,

@@ -1295,7 +1295,11 @@ mod tests {
         provenant_config::bind_project(roots, location).unwrap();
     }
 
-    fn bind_separate_git_dir(roots: &provenant_core::Roots, root: &Path, common: &Path) {
+    fn bind_separate_git_dir(
+        roots: &provenant_core::Roots,
+        root: &std::path::Path,
+        common: &std::path::Path,
+    ) {
         use super::*;
         fs::create_dir_all(root).unwrap();
         fs::create_dir_all(common.parent().unwrap()).unwrap();
