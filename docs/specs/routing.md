@@ -134,7 +134,11 @@ preserves its selected identity and controls.
 ## Accounts and credentials
 
 Account identity is detected, not guessed; a changed identity around a probe is
-refused. Credential roots must not be HOME or an ancestor of HOME.
+refused. A continuation retains the applied provider and optional account key
+as a pair. A missing provider, or a retained key without an account for that
+provider, is refused; a same-key account from another provider is never
+substituted. An absent applied account key remains absent. Credential roots
+must not be HOME or an ancestor of HOME.
 Additional directories within one account entry are aliases and may overlap.
 Distinct isolated registered-account directories must not overlap;
 `accounts register` refuses these and `check config` reports them. An adapter

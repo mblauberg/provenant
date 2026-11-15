@@ -13,8 +13,14 @@ fn include_local_login(
     spec: &AdapterSpec,
     entries: &[provenant_providers::accounts::Registration],
     selected: Option<&str>,
+    selected_adapter: Option<&str>,
+    retained_identity: Option<RetainedIdentity<'_>>,
 ) -> bool {
-    if !spec.local_login {
+    if !spec.local_login
+        || selected_adapter.is_some_and(|adapter| adapter != spec.name)
+        || retained_identity
+            .is_some_and(|identity| identity.account_key != Some(spec.local_account.1))
+    {
         return false;
     }
     let has_entry = entries.iter().any(|entry| entry.adapter == spec.name);
@@ -77,6 +83,24 @@ fn select_account<'a>(
         ));
     }
     Ok(entry)
+}
+
+fn select_retained_account<'a>(
+    entries: &'a [provenant_providers::accounts::Registration],
+    identity: RetainedIdentity<'_>,
+) -> Result<Option<&'a provenant_providers::accounts::Registration>, PrepareError> {
+    let Some(key) = identity.account_key else {
+        return Ok(None);
+    };
+    entries
+        .iter()
+        .find(|entry| entry.adapter == identity.provider && entry.key == key)
+        .map(Some)
+        .ok_or_else(|| PrepareError::Refusal {
+            message: "the prior attempt's account is not registered for its applied provider; cannot continue it".into(),
+            cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+            note: None,
+        })
 }
 
 const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
@@ -1052,6 +1076,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     for error in [
         ContinuationRequestError::MissingRoute,
         ContinuationRequestError::MissingModel,
+        ContinuationRequestError::MissingProvider,
         ContinuationRequestError::InvalidModel("invalid".into()),
         ContinuationRequestError::ProviderMismatch,
     ] {
@@ -2565,13 +2590,33 @@ pub(super) fn prepare_candidates(
     config.domains.routing.launch_policy = launch_policy.clone();
     // Continue the applied decision rather than redrawing the named pool
     // using the new operation seed.
-    let mut request = match resume {
-        Some(prior) => continuation_request(prior, &launch_policy)?,
-        None => route_request(task)?,
+    let (mut request, retained_identity) = match resume {
+        Some(prior) => {
+            let (request, identity) = continuation_request(prior, &launch_policy)?;
+            (request, Some(identity))
+        }
+        None => (route_request(task)?, None),
     };
     let task_request = route_request(task)?;
     request.intent = task_request.intent;
     request.confidential = task_request.confidential;
+    let requested_adapter = match &task.route {
+        run::RequestedRoute::Adapter { provider, .. } => Some(provider.as_str()),
+        run::RequestedRoute::Model { model, .. } => {
+            model.split_once('/').map(|(adapter, _)| adapter)
+        }
+        run::RequestedRoute::Named { .. } | run::RequestedRoute::Review { .. } => None,
+    };
+    let selection_adapter = retained_identity
+        .map(|identity| identity.provider)
+        .or(requested_adapter);
+    // Continue with the applied identity as a provider/key pair. In particular,
+    // a local key such as `local` is not unique across adapters.
+    let effective_account_selector = effective_account_selector(
+        task.account.as_deref(),
+        retained_identity.and_then(|identity| identity.account_key),
+        resume.is_some(),
+    );
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
     let mut eligible = provenant_routing::probe_adapters(
         &request,
@@ -2580,6 +2625,9 @@ pub(super) fn prepare_candidates(
         provider_registry,
     )
     .map_err(|e| e.to_string())?;
+    if let Some(identity) = retained_identity {
+        eligible.retain(|adapter| *adapter == identity.provider);
+    }
     if resume.is_none()
         && let Some(context) = task.context.as_ref()
         && let (Some(risk), Some(kind)) =
@@ -2609,20 +2657,6 @@ pub(super) fn prepare_candidates(
     let protected_worktrees = protected_worktrees(registry, &source, &git)?;
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
-    let requested_adapter = match &task.route {
-        run::RequestedRoute::Adapter { provider, .. } => Some(provider.as_str()),
-        run::RequestedRoute::Model { model, .. } => {
-            model.split_once('/').map(|(adapter, _)| adapter)
-        }
-        run::RequestedRoute::Named { .. } | run::RequestedRoute::Review { .. } => None,
-    };
-    // Resolve the prior identity before account discovery so its local login
-    // can be synthesized even when registered accounts now exist.
-    let prior_account = resume
-        .and_then(|prior| prior.applied_route.as_ref())
-        .and_then(|route| route.account_key.as_deref());
-    let effective_account_selector =
-        effective_account_selector(task.account.as_deref(), prior_account, resume.is_some());
     let mut default_failures = std::collections::BTreeMap::new();
     for spec in ADAPTER_SPECS.iter().filter(|spec| eligible(spec.name)) {
         let Some((environment, fallback)) = spec.default_account_directory else {
@@ -2685,8 +2719,13 @@ pub(super) fn prepare_candidates(
         .filter(|spec| spec.local_login && eligible(spec.name))
     {
         let adapter = spec.name;
-        if include_local_login(spec, &entries, effective_account_selector)
-            && locate(adapter).is_ok()
+        if include_local_login(
+            spec,
+            &entries,
+            effective_account_selector,
+            selection_adapter,
+            retained_identity,
+        ) && locate(adapter).is_ok()
             && !entries
                 .iter()
                 .any(|entry| entry.adapter == adapter && entry.key == spec.local_account.1)
@@ -2722,6 +2761,27 @@ pub(super) fn prepare_candidates(
     }
     .unique_accounts();
     let entries: Vec<_> = settings.entries.into_values().collect();
+    // Resolve the exact continuation identity before observing account state.
+    let selected_entry = match retained_identity {
+        Some(identity) => select_retained_account(&entries, identity)?,
+        None => effective_account_selector
+            .map(|selector| select_account(&entries, selector, requested_adapter))
+            .transpose()?,
+    };
+    let selected = selected_entry.map(|entry| entry.key.as_str());
+    let selected_adapter = retained_identity
+        .map(|identity| identity.provider)
+        .or_else(|| {
+            selected.and_then(|key| {
+                entries
+                    .iter()
+                    .find(|entry| {
+                        entry.key == key
+                            && requested_adapter.is_none_or(|adapter| entry.adapter == adapter)
+                    })
+                    .map(|entry| entry.adapter.as_str())
+            })
+        });
     let timestamp = clock.unix_seconds();
     let diagnostic_records = crate::quota::read_cache(roots).unwrap_or_default();
     let mut availability = Vec::new();
@@ -2901,26 +2961,6 @@ pub(super) fn prepare_candidates(
             }
         }
     }
-    // A continuation keeps the prior attempt's account, never a fresh pick.
-    let selected = effective_account_selector
-        .map(|selector| {
-            select_account(&entries, selector, requested_adapter).map(|entry| entry.key.as_str())
-        })
-        .transpose()?;
-    let selected_adapter = resume
-        .and_then(|prior| prior.applied_route.as_ref())
-        .and_then(|route| route.provider.as_deref())
-        .or_else(|| {
-            selected.and_then(|key| {
-                entries
-                    .iter()
-                    .find(|entry| {
-                        entry.key == key
-                            && requested_adapter.is_none_or(|adapter| entry.adapter == adapter)
-                    })
-                    .map(|entry| entry.adapter.as_str())
-            })
-        });
     let host = provenant_config::bind_host(roots)
         .map_err(|e| e.to_string())?
         .to_string();
@@ -5334,17 +5374,45 @@ mod route_launch_boundary_regressions {
         assert!(!include_local_login(
             spec,
             std::slice::from_ref(&registered),
+            None,
+            Some("agy"),
             None
         ));
         assert!(include_local_login(
             spec,
             std::slice::from_ref(&registered),
-            Some(spec.local_account.1)
+            Some(spec.local_account.1),
+            Some("agy"),
+            None
         ));
         assert!(include_local_login(
             spec,
             std::slice::from_ref(&registered),
-            Some(spec.local_account.0)
+            Some(spec.local_account.0),
+            Some("agy"),
+            None
+        ));
+        assert!(!include_local_login(
+            spec,
+            std::slice::from_ref(&registered),
+            Some(spec.local_account.1),
+            Some("cursor"),
+            None
+        ));
+        let cursor = AdapterSpec::get("cursor").ok_or("cursor adapter missing")?;
+        assert!(include_local_login(
+            cursor,
+            &[],
+            Some(cursor.local_account.1),
+            Some("cursor"),
+            None
+        ));
+        assert!(!include_local_login(
+            cursor,
+            &[],
+            Some(cursor.local_account.1),
+            Some("agy"),
+            None
         ));
         let resumed_local =
             effective_account_selector(Some("agy-registered"), Some(spec.local_account.1), true);
@@ -5352,11 +5420,30 @@ mod route_launch_boundary_regressions {
         assert!(include_local_login(
             spec,
             std::slice::from_ref(&registered),
-            resumed_local
+            resumed_local,
+            Some("agy"),
+            Some(RetainedIdentity {
+                provider: "agy",
+                account_key: Some(spec.local_account.1),
+            })
+        ));
+        assert!(!include_local_login(
+            spec,
+            &[],
+            None,
+            Some("agy"),
+            Some(RetainedIdentity {
+                provider: "agy",
+                account_key: None,
+            })
         ));
         assert_eq!(
             effective_account_selector(Some("agy-registered"), Some(spec.local_account.1), false),
             Some("agy-registered")
+        );
+        assert_eq!(
+            effective_account_selector(Some("agy-registered"), None, true),
+            None
         );
 
         let mut settings = provenant_providers::accounts::Settings::default();
@@ -5403,6 +5490,72 @@ mod route_launch_boundary_regressions {
             spec.local_account.1
         );
         Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    #[test]
+    fn continuation_account_selection_uses_the_retained_provider_key_pair() {
+        let home = PathBuf::from("/fixture/home");
+        let agy_local = agy_entry("default", "local", &home);
+        let mut cursor_local = agy_entry("default", "local", &home);
+        cursor_local.adapter = "cursor".into();
+        let entries = [cursor_local, agy_local];
+        let selected = select_retained_account(
+            &entries,
+            RetainedIdentity {
+                provider: "agy",
+                account_key: Some("local"),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.adapter, "agy");
+
+        let no_account = select_retained_account(
+            &entries,
+            RetainedIdentity {
+                provider: "agy",
+                account_key: None,
+            },
+        )
+        .unwrap();
+        assert!(no_account.is_none());
+
+        let mut cursor_only = agy_entry("local", "cursor-only", &home);
+        cursor_only.adapter = "cursor".into();
+        let mismatch_entries = [agy_local, cursor_only];
+        let mismatch = select_retained_account(
+            &mismatch_entries,
+            RetainedIdentity {
+                provider: "agy",
+                account_key: Some("cursor-only"),
+            },
+        );
+        assert!(matches!(
+            mismatch,
+            Err(PrepareError::Refusal {
+                cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+                ..
+            })
+        ));
+
+        let mut same_provider_label = agy_entry("cursor-only", "agy-other-key", &home);
+        same_provider_label.label = "cursor-only".into();
+        let mismatch_entries = [agy_local, same_provider_label];
+        let mismatch = select_retained_account(
+            &mismatch_entries,
+            RetainedIdentity {
+                provider: "agy",
+                account_key: Some("cursor-only"),
+            },
+        );
+        assert!(matches!(
+            mismatch,
+            Err(PrepareError::Refusal {
+                cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+                ..
+            })
+        ));
     }
 
     // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
