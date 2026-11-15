@@ -638,8 +638,10 @@ impl run::Providers for Registry<'_> {
             stderr,
             exit,
             provider_state,
-            context,
-            None,
+            run::ContinuationDecodeContext {
+                context,
+                expectation: None,
+            },
         )
     }
 
@@ -650,19 +652,22 @@ impl run::Providers for Registry<'_> {
         stderr: &[u8],
         exit: &ExitObservation,
         provider_state: &Path,
-        context: Option<&run::HolderContext>,
-        continuation: Option<&run::ContinuationExpectation>,
+        continuation: run::ContinuationDecodeContext<'_>,
     ) -> Result<run::Decoded, String> {
-        let continuation_session = continuation.map(|expectation| expectation.session.as_str());
-        let Some(context) = context else {
+        let continuation_session = continuation
+            .expectation
+            .map(|expectation| expectation.session.as_str());
+        let Some(context) = continuation.context else {
             return self.decode_inner_expected(
                 route,
                 stdout,
                 stderr,
                 exit,
                 provider_state,
-                false,
-                continuation_session,
+                DecodeOptions {
+                    host_settlement: false,
+                    expected_session: continuation_session,
+                },
             );
         };
         let (configuration_root, _) = context.disk_roots();
@@ -682,8 +687,10 @@ impl run::Providers for Registry<'_> {
                 stderr,
                 exit,
                 provider_state,
-                false,
-                continuation_session,
+                DecodeOptions {
+                    host_settlement: false,
+                    expected_session: continuation_session,
+                },
             );
         }
         let mut inputs = provenant_core::RootInputs::new(
@@ -706,8 +713,10 @@ impl run::Providers for Registry<'_> {
                     stderr,
                     exit,
                     provider_state,
-                    false,
-                    continuation_session,
+                    DecodeOptions {
+                        host_settlement: false,
+                        expected_session: continuation_session,
+                    },
                 )?;
                 if decoded.reason.as_deref().is_some_and(capacity_reason) {
                     let reason = decoded.reason.get_or_insert_with(String::new);
@@ -735,8 +744,10 @@ impl run::Providers for Registry<'_> {
             stderr,
             exit,
             provider_state,
-            true,
-            continuation_session,
+            DecodeOptions {
+                host_settlement: true,
+                expected_session: continuation_session,
+            },
         )
     }
     fn prepare(
@@ -767,6 +778,12 @@ fn strip_final_eof_fragment(stdout: &[u8]) -> &[u8] {
         .map_or(&[], |newline| &stdout[..=newline])
 }
 
+#[derive(Clone, Copy)]
+struct DecodeOptions<'a> {
+    host_settlement: bool,
+    expected_session: Option<&'a str>,
+}
+
 impl Registry<'_> {
     fn decode_inner(
         &self,
@@ -783,8 +800,10 @@ impl Registry<'_> {
             stderr,
             exit,
             provider_state,
-            host_settlement,
-            None,
+            DecodeOptions {
+                host_settlement,
+                expected_session: None,
+            },
         )
     }
 
@@ -795,9 +814,12 @@ impl Registry<'_> {
         stderr: &[u8],
         exit: &ExitObservation,
         provider_state: &Path,
-        host_settlement: bool,
-        expected_session: Option<&str>,
+        options: DecodeOptions<'_>,
     ) -> Result<run::Decoded, String> {
+        let DecodeOptions {
+            host_settlement,
+            expected_session,
+        } = options;
         let captured_stdout_len = stdout.len();
         let confirmed_intentional_stop = exit.cancel_delivered_before_exit == Some(true)
             && matches!(

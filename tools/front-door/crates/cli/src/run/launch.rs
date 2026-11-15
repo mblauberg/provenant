@@ -424,8 +424,7 @@ impl run::Providers for PreparedProvider<'_> {
         stderr: &[u8],
         exit: &ExitObservation,
         provider_state: &Path,
-        context: Option<&run::HolderContext>,
-        continuation: Option<&run::ContinuationExpectation>,
+        continuation: run::ContinuationDecodeContext<'_>,
     ) -> Result<run::Decoded, String> {
         self.fallback.decode_captures_with_continuation(
             route,
@@ -433,7 +432,6 @@ impl run::Providers for PreparedProvider<'_> {
             stderr,
             exit,
             provider_state,
-            context,
             continuation,
         )
     }
