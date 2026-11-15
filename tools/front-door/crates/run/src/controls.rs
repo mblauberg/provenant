@@ -3477,7 +3477,7 @@ impl RunStore {
     /// retried within the call budget.
     // Cancellation coordinates with a real guardian handoff under a hard cap.
     pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
-        self.cancel_inner(id, reason, call, &SystemProcessObserver, false)
+        self.cancel_inner(id, reason, call, false)
             .map(|(_, receipt)| receipt)
     }
     /// Cancel the current host-owned continuation of a graph target. The
@@ -3488,63 +3488,49 @@ impl RunStore {
         reason: &str,
         call: &Request<'_>,
     ) -> Result<(AttemptId, CancelReceipt)> {
-        self.cancel_inner(id, reason, call, &SystemProcessObserver, true)
-    }
-    pub(crate) fn cancel_with_observer(
-        &self,
-        id: AttemptId,
-        reason: &str,
-        call: &Request<'_>,
-        observer: &dyn ProcessObserver,
-    ) -> Result<CancelReceipt> {
-        self.cancel_inner(id, reason, call, observer, false)
-            .map(|(_, receipt)| receipt)
+        self.cancel_inner(id, reason, call, true)
     }
     fn cancel_inner(
         &self,
         mut id: AttemptId,
         reason: &str,
         call: &Request<'_>,
-        _observer: &dyn ProcessObserver,
         follow_graph_successors: bool,
     ) -> Result<(AttemptId, CancelReceipt)> {
         let mut pending_steer_parent = None;
         loop {
             let record = self.record(id, call)?;
-            match record.state {
-                AttemptState::Queued { .. } => {
-                    let now = call
-                        .clock
-                        .wall_now()
-                        .map_err(|_| RunError::Validation("wall clock"))?;
-                    match self.withdraw(
-                        id,
-                        AttemptState::Queued {
-                            extra: Default::default(),
-                        },
-                        Outcome::Cancelled,
-                        reason,
-                        now,
-                        call,
-                    ) {
-                        Ok(Some(_)) => {
-                            return self.finish_graph_cancel(
-                                id,
-                                pending_steer_parent,
-                                CancelReceipt::Cancelled,
-                                call,
-                            );
-                        }
-                        // The expected queued state lost. Re-read under the
-                        // publication fence so a terminal steer cannot accept
-                        // this cancel without preserving its continuation veto.
-                        Ok(None) => continue,
-                        // A concurrent start took it; it is no longer queued.
-                        Err(RunError::Conflict) => continue,
-                        Err(error) => return Err(error),
+            if let AttemptState::Queued { .. } = record.state {
+                let now = call
+                    .clock
+                    .wall_now()
+                    .map_err(|_| RunError::Validation("wall clock"))?;
+                match self.withdraw(
+                    id,
+                    AttemptState::Queued {
+                        extra: Default::default(),
+                    },
+                    Outcome::Cancelled,
+                    reason,
+                    now,
+                    call,
+                ) {
+                    Ok(Some(_)) => {
+                        return self.finish_graph_cancel(
+                            id,
+                            pending_steer_parent,
+                            CancelReceipt::Cancelled,
+                            call,
+                        );
                     }
+                    // The expected queued state lost. Re-read under the
+                    // publication fence so a terminal steer cannot accept
+                    // this cancel without preserving its continuation veto.
+                    Ok(None) => continue,
+                    // A concurrent start took it; it is no longer queued.
+                    Err(RunError::Conflict) => continue,
+                    Err(error) => return Err(error),
                 }
-                _ => {}
             }
             let dir = self.attempt_dir(id, false)?;
             // Terminal publication, continuation admission, and every started
@@ -3581,21 +3567,20 @@ impl RunStore {
                     && current.steering.as_ref().is_some_and(|steering| {
                         steering.state == provenant_records::run::SteeringState::Queued
                     })
-                {
-                    if let Err(error) = custody::request_stop(
+                    && let Err(error) = custody::request_stop(
                         dir.try_clone()?,
                         Self::scope(&current),
                         current.verified_owner.unwrap_or(self.context.actor_id),
                         StopReason::ExplicitCancellation,
-                    ) {
-                        drop(publication);
-                        return Ok((
-                            id,
-                            CancelReceipt::Unobservable {
-                                reason: error.to_string(),
-                            },
-                        ));
-                    }
+                    )
+                {
+                    drop(publication);
+                    return Ok((
+                        id,
+                        CancelReceipt::Unobservable {
+                            reason: error.to_string(),
+                        },
+                    ));
                 }
                 self.record_cancellation(
                     id,

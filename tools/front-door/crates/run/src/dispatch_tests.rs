@@ -1031,10 +1031,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
         );
     if matches!(operation, RecoveryOperation::CancelThenReconcile) {
         let before = std::fs::read(&reservation).ok();
-        assert_eq!(
-            store.cancel_with_observer(id, "stop", &call, observer)?,
-            CancelReceipt::Requested
-        );
+        assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
         let request: serde_json::Value = serde_json::from_slice(
             &artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
                 .ok_or("cancel request missing")?,
@@ -1332,10 +1329,7 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
         // Free exclusion and an absent guardian and provider leave no holder.
         assert_eq!(store.reap_with(&call, |_, _| Ok(()))?, 1);
         if matches!(operation, RecoveryOperation::CancelThenReconcile) {
-            assert_eq!(
-                store.cancel_with_observer(id, "stop", &call, &observer)?,
-                CancelReceipt::Requested
-            );
+            assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
         }
         assert_eq!(
             store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?,
@@ -1378,16 +1372,13 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
             std::ffi::OsStr::new("custody.lock"),
             provenant_os::fs::LockMode::Exclusive,
         )?;
-        assert_eq!(
-            store.cancel_with_observer(id, "stop", &call, &observer)?,
-            CancelReceipt::Requested
-        );
+        assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
         assert_eq!(store.record(id, &call)?, before);
         assert!(reservation.exists());
         drop(custody_lock);
     }
     if matches!(operation, RecoveryOperation::CancelThenReconcile) {
-        let receipt = store.cancel_with_observer(id, "stop", &call, &observer)?;
+        let receipt = store.cancel(id, "stop", &call)?;
         assert!(matches!(
             receipt,
             CancelReceipt::AlreadyTerminal
