@@ -2629,6 +2629,8 @@ mod result_tests {
             attempt_ref: attempt_ref.map(str::to_owned),
             attempt_key: attempt_ref.map(|_| AttemptKey {
                 extra: Default::default(),
+                retry_generation: None,
+                previous_attempt_ref: None,
                 graph_id: "g".into(),
                 node_id: label.into(),
                 route_index: 0,
@@ -2639,6 +2641,8 @@ mod result_tests {
         };
         let key = AttemptKey {
             extra: Default::default(),
+            retry_generation: None,
+            previous_attempt_ref: None,
             graph_id: "g".into(),
             node_id: "consumer".into(),
             route_index: 0,
@@ -3611,6 +3615,8 @@ mod provisioned_writer_submission_tests {
             use graph::AttemptOwner;
             let key = graph::AttemptKey {
                 extra: Default::default(),
+                retry_generation: None,
+                previous_attempt_ref: None,
                 graph_id: "light-reader-source".into(),
                 node_id: "reader".into(),
                 route_index: 0,

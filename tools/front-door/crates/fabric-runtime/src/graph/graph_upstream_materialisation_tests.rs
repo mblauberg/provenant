@@ -11,7 +11,7 @@ fn attempt_manifests_retain_selected_evidence_across_fallback_and_replay() {
     child.source = Some(SourceBinding::Node {
         node: "parent".into(),
     });
-    child.review_base = Some(base);
+    child.review_base = Some(base.clone());
     child.inputs.push(GraphInput {
         extra: Default::default(),
         node: "parent".into(),

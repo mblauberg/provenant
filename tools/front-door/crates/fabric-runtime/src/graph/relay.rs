@@ -317,7 +317,7 @@ pub fn replay_child(
             "stored child receipt does not match its admission".into(),
         ));
     }
-    let mut receipt = stored.receipt;
+    let mut receipt = stored.receipt.clone();
     receipt.replayed = true;
     Ok(Some(receipt))
 }

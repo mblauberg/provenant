@@ -1,15 +1,17 @@
-# Run the Claude Code session and worktree hooks
+# Run native session and worktree hooks
 Owner: provenant
 Anchor: [`hooks_session.rs`](../../tools/front-door/tests/hooks_session.rs)
 
 `provenant install --harness claude --hooks on` registers these hooks in the
-Claude settings (see [install](install.md)). Every handler exits 0 on its own failure, except the
-worktree hooks and the guard's exit-2 denial, and prints only the protocol
-response on stdout.
+Claude settings (see [install](install.md)). Other harnesses use their native
+hook events declared in [`AdapterSpec`](../../tools/front-door/crates/records/src/adapters.rs). Unrecognised or unusable advisory input
+abstains with exit 0 and a diagnostic. Worktree ownership, writer isolation,
+data integrity and authority checks can refuse with exit 2. Stdout contains
+only the native protocol response.
 
 | Event | Handler | What it does |
 |---|---|---|
-| `PreToolUse` (`Bash`) | `hook claude pre-tool-use` | Enforces the guard, then optionally offers human answers |
+| `PreToolUse` (`Bash`) | `hook claude pre-tool-use` | Leaves tool policy to confinement, then optionally offers human answers |
 | `SessionStart` (`startup`, `resume`, `clear`) | `hook claude session-start` | Reports checkpoint status, then the state digest |
 | `SessionStart` (`compact`) | `hook claude compact` | The same report after compaction |
 | `PreCompact` | `hook claude pre-compact` | Writes derived state to `autosave.md` and prints the summary instruction below |
@@ -18,11 +20,9 @@ response on stdout.
 | `WorktreeRemove` | `hook claude worktree-remove` | Runs `provenant worktree remove <name>` |
 | chair prompt, start, stop | `hook claude chair-prompt`, `chair-start`, `chair-stop` | Account switching; see [configuration](configuration.md#chair-account-switching) |
 
-If every Bash call is denied with `guard policy unavailable`, policy root
-resolution failed: from a terminal outside Claude, check that `HOME` resolves
-and that `PROVENANT_STATE_DIR` or the hook's `--state-dir` names the intended
-state root. The [human inbox](human-inbox.md#delivery-service) owns how the hook
-offers answers.
+The guard leaves shell and tool permissions to the lane's confinement policy.
+Unavailable hook state is diagnostic, and does not deny the tool. The
+[human inbox](human-inbox.md#delivery-service) owns how the hook offers answers.
 
 ## SessionStart output
 
@@ -45,10 +45,10 @@ find them.
   outcome, reason, rejected alternatives, open disagreement and uncertain
   readings, and quote only authority grants or corrections. The hook only asks;
   without a compliant summary, intent survives only if the chair saved it (see the
-  [session skill](../../skills/session/SKILL.md)). Codex shares only the
-  SessionStart rendering and has no `PreCompact` hook.
+  [session skill](../../skills/session/SKILL.md)). Each harness's native
+  compaction events and unavailable mappings are recorded in `AdapterSpec`.
 
-## Worktree hooks
+## Claude worktree hooks
 
 Claude Code replaces its own `git worktree` handling with these hooks, so each
 prints the new worktree's absolute path and nothing else on stdout.
@@ -59,7 +59,8 @@ prints the new worktree's absolute path and nothing else on stdout.
   when it is clean, has no live writer, is on that branch at the recorded HEAD
   and both creation records agree (one in the Git admin directory, one in
   `<state>/hooks/claude-worktrees/`). The primary checkout, hand-made trees and
-  dirty trees are never reused: exit 2 with the reason.
+  dirty trees are never reused: exit 2 with the reason. Invalid event input
+  abstains without creating or removing anything.
 - `worktree-remove` removes only a linked worktree this hook created, through
   `provenant worktree remove <name>` without `--discard`. Dirty trees, live
   writers, the primary checkout and unmerged branches (`not_merged`) refuse with

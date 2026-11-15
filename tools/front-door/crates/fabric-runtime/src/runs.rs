@@ -60,10 +60,7 @@ impl From<AttemptRecord> for AttemptSummary {
             }
             _ => None,
         };
-        let mut extra = record.extra;
-        for field in provenant_records::run::PRIVATE_ATTEMPT_EXTRA_FIELDS {
-            extra.remove(*field);
-        }
+        let extra = record.extra;
         Self {
             extra,
             key: record.key,

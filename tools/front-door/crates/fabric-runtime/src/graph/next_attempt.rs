@@ -431,7 +431,7 @@ pub(super) fn quota_redraw_budget(progress: &NodeProgress) -> bool {
                     .last()
                     .is_some_and(|attempt| !attempt.launched),
             );
-        archived.saturating_add(current) <= limit
+        archived.saturating_add(current) <= u64::from(allowance.retries)
     })
 }
 

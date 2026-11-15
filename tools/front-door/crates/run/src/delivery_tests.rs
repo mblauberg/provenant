@@ -64,10 +64,6 @@ pub(super) fn registered_writer_project_id(
     )
 }
 
-pub(super) fn writer_custody_project(project_id: ProjectId) -> ProjectId {
-    project_id
-}
-
 // Medium: real filesystem locking with the remote process edge supplied as a callback.
 
 // Medium: a real contended fetch lock with an exhausted wait budget.

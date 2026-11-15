@@ -2023,7 +2023,6 @@ impl Factory {
                 network: None,
                 capability: Vec::new(),
                 no_capability: Vec::new(),
-                provenance: None,
             };
             if let Err(error) = provenant_cli::run::lane_access(
                 &access,

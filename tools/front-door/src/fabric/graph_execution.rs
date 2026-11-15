@@ -648,6 +648,7 @@ impl Factory {
                 outcome: None,
                 checkpoint: GraphCheckpoint {
                     cancellation_request_receipt: None,
+                    pending_writer_provisioning: Default::default(),
 
                     bases: None,
                     extra: Default::default(),

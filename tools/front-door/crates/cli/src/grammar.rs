@@ -1048,45 +1048,12 @@ pub enum Rules {
 pub use crate::check::Check;
 #[derive(Debug, Subcommand)]
 pub enum Hook {
-    /// Handle Claude Code hook events
-    #[command(subcommand)]
-    Claude(ClaudeHook),
     /// Handle git hook events
     #[command(subcommand)]
     Git(GitHook),
-}
-#[derive(Debug, Subcommand)]
-pub enum ClaudeHook {
-    /// Handle the chair user-prompt hook
-    #[command(name = crate::hooks::CHAIR_PROMPT)]
-    ChairPrompt,
-    /// Handle the chair session-start hook
-    #[command(name = crate::hooks::CHAIR_START)]
-    ChairStart,
-    /// Ingest native usage when the chair turn ends
-    #[command(name = crate::hooks::CHAIR_STOP)]
-    ChairStop,
-    /// Check a tool call before it runs
-    #[command(name = crate::hooks::PRE_TOOL_USE)]
-    PreToolUse,
-    /// Save lane, PR and worktree state into the checkpoint before compaction
-    #[command(name = crate::hooks::PRE_COMPACT)]
-    PreCompact,
-    /// Restore the checkpoint and report lanes and pull requests after compaction
-    #[command(name = crate::hooks::COMPACT)]
-    Compact,
-    /// Report the checkpoint, lanes and pull requests when a session starts, resumes or clears
-    #[command(name = crate::hooks::SESSION_START)]
-    SessionStart,
-    /// Refresh an existing checkpoint's lane, PR and worktree state when a turn ends
-    #[command(name = crate::hooks::STOP)]
-    Stop,
-    /// Create a Claude Code worktree through `provenant worktree create`
-    #[command(name = crate::hooks::WORKTREE_CREATE)]
-    WorktreeCreate,
-    /// Remove a Claude Code worktree through `provenant worktree remove`
-    #[command(name = crate::hooks::WORKTREE_REMOVE)]
-    WorktreeRemove,
+    /// Handle a native event for any declared provider adapter
+    #[command(external_subcommand)]
+    Provider(Vec<OsString>),
 }
 #[derive(Debug, Subcommand)]
 pub enum GitHook {

@@ -947,7 +947,7 @@ fn detected_batches(
     let mut batches = Vec::new();
     for spec in provenant_records::ADAPTER_SPECS
         .iter()
-        .filter(|spec| !spec.binary.is_empty())
+        .filter(|spec| spec.install.is_some())
     {
         if std::env::split_paths(&path)
             .any(|dir| provenant_os::sys::is_executable(&dir.join(spec.binary)))
@@ -964,7 +964,7 @@ fn detected_batches(
         let name = entry.file_name();
         for spec in provenant_records::ADAPTER_SPECS
             .iter()
-            .filter(|spec| spec.account_config_dir && !spec.binary.is_empty())
+            .filter(|spec| spec.account_config_dir && spec.install.is_some())
         {
             if spec
                 .account_directory_prefix
@@ -1064,9 +1064,10 @@ struct PreparedInstall {
 
 fn supports_hooks(batch: &Targets) -> bool {
     batch.harnesses.iter().any(|target| {
-        cli::hooks::HOOK_SPECS
+        batch
+            .hook_specs
             .iter()
-            .any(|spec| spec.registration.harness == Some(target.harness))
+            .any(|spec| spec.harness == target.harness)
     })
 }
 

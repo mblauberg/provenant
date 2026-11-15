@@ -1441,7 +1441,13 @@ fn graph_steer_context_round_trips_and_rejects_malformed_values() {
     let context = super::GraphSteerContext {
         launch_actor: ActorId::from_bytes([4; 16]),
         launch_operation: OperationId::parse("graph-steer-op").unwrap(),
-        origin_work_key: "P/G#1".parse().unwrap(),
+        origin_work_key: provenant_records::WorkKey::new(
+            provenant_core::ProjectId::from_bytes([5; 16]),
+            "g-steer",
+            "node",
+            1,
+        )
+        .unwrap(),
     };
     let encoded = serde_json::to_value(&context).unwrap();
     assert_eq!(

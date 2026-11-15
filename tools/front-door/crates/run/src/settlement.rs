@@ -3,10 +3,8 @@ use crate::{AdmissionError, RECORD_LIMIT, Result, RunError, artifacts::read_seal
 use provenant_core::retry::Backoff;
 use provenant_core::{CancelToken, Clock, DurationMicros, GitOid};
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
-use provenant_supervisor::{
-    census::{ProcessIdentity, ProcessObservation, SystemProcessObserver},
-    provenant_records::custody::Scope,
-};
+use provenant_records::custody::Scope;
+use provenant_supervisor::census::{ProcessIdentity, ProcessObservation, SystemProcessObserver};
 use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, sync::mpsc, time::Duration};
 

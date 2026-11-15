@@ -74,6 +74,8 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
     let cancel = CancelToken::new();
     let key = AttemptKey {
         extra: Default::default(),
+        retry_generation: None,
+        previous_attempt_ref: None,
         graph_id: "origin-cancel".into(),
         node_id: "parent".into(),
         route_index: 0,

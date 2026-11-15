@@ -108,7 +108,7 @@ impl LaneRow {
         detail: bool,
     ) -> (String, Option<String>) {
         use crate::run::AttemptState;
-        if let Ok(Some(stop)) = state.stop()
+        if let Some(stop) = state.stop()
             && let Err(error) = stop.handoff_result()
             && let AttemptState::Terminal { outcome, .. } = state
         {
@@ -271,7 +271,7 @@ impl LaneRow {
                 terminal_reason = Some(detail.to_owned());
             }
         }
-        if let Ok(Some(stop)) = lane.state.stop() {
+        if let Some(stop) = lane.state.stop() {
             if let Err(error) = stop.handoff_result() {
                 terminal_reason = Some(crate::diagnostic::safe_text(&error.to_string()));
             }
@@ -471,12 +471,7 @@ impl LaneRow {
                 .map(i64::from),
             provider_seconds: facts.provider_seconds,
             limits: lane.limits.as_ref().map(|limits| json!(limits)),
-            handoff: lane
-                .state
-                .stop()
-                .ok()
-                .flatten()
-                .map(|stop| json!(stop.handoff_result())),
+            handoff: lane.state.stop().map(|stop| json!(stop.handoff_result())),
             provider_error: None,
             capabilities: None,
             payload: facts.payload_evicted.then(|| "evicted".to_owned()),

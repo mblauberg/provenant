@@ -296,11 +296,19 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 yielded_slot: false,
                 stop_fence: false,
                 owner_notified: false,
-                extra: if template::review_behaviour(node) == Some(template::ReviewBehaviour::Lens) {
-                    [(review::CORRECTION_REFUSED.into(), worst(MAX_ADVANCE_ERROR_BYTES).into())].into()
-                } else {
-                    Default::default()
-                },
+                retry: Some(RetryAllowance { retries: u8::MAX, origin: "shipped_default".into() }),
+                quota_redraw_spent: 0,
+                quota_redraw_archived: 0,
+                retry_generation: None,
+                container_retry: false,
+                concurrency_warning: None,
+                repair_growth: None,
+                provisioned_source: None,
+                removed_requirements: node.removed_requirements.clone(),
+                extra: Default::default(),
+                review_verdict_correction_refused: (template::review_behaviour(node)
+                    == Some(template::ReviewBehaviour::Lens))
+                .then(|| worst(MAX_ADVANCE_ERROR_BYTES)),
                 warnings: Vec::new(),
                 children: node.composite_members.clone(),
                 source_binding: node.source.clone(),
@@ -342,7 +350,6 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 round: node.round.clone(),
                 gate: node.condition.as_ref().map(|_| GateResult {
                     extra: Default::default(),
-        cancellation_request_receipt: None,
                     passed: false,
                     reason: Some(worst(OUTPUT_FIELD_BYTES)),
                     on_fail: node.on_fail.clone(),
@@ -462,6 +469,7 @@ host_refused_before_acceptance: false,
     GraphCheckpoint {
         bases,
         extra: Default::default(),
+        cancellation_request_receipt: None,
         pending_writer_provisioning: Default::default(),
         expansions: Vec::new(),
         remaining: Some(RemainingBudgets {
@@ -605,7 +613,7 @@ fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: b
             node.owner_notified = true;
         }
         if let Some(outputs) = &mut node.outputs {
-            outputs.risk_tier = serde_json::from_value(tier).ok();
+            outputs.risk_tier = serde_json::from_value(serde_json::Value::from(tier)).ok();
             if plan.nodes.iter().any(|consumer| {
                 consumer.repair_scope_gate && consumer.depends_on.contains(&planned.id)
             }) {

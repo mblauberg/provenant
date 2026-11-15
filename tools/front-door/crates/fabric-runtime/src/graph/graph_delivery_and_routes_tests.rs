@@ -233,6 +233,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         required_verdict: None,
         require_findings: false,
         skip_without_findings: None,
+        ..Default::default()
     }]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([
@@ -535,6 +536,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             required_verdict: None,
             require_findings: false,
             skip_without_findings: None,
+        ..Default::default()
         }]);
         let mut owner = FakeOwner {
             observations: VecDeque::from([first, terminal(AttemptOutcome::Succeeded)]),

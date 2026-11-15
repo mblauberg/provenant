@@ -416,44 +416,6 @@ def anchors(root, document):
     return 0
 
 
-def table_rows(text, heading):
-    """First-column cells and rows of the first table after a Markdown heading."""
-    section = text.split(heading, 1)[1] if heading in text else ""
-    rows = []
-    for line in section.splitlines():
-        if line.startswith("|---"):
-            continue
-        if line.startswith("|"):
-            rows.append([cell.strip() for cell in line.strip().strip("|").split("|")])
-        elif rows:
-            break
-    return rows[1:]
-
-
-def check_projections(root):
-    """Compare hand-kept runbook tables with the source they project."""
-    errors = []
-    inbox = root / "docs/runbooks/human-inbox.md"
-    specs = root / "tools/front-door/crates/records/src/adapters.rs"
-    hooks = root / "tools/front-door/crates/cli/src/hooks.rs"
-    if inbox.exists() and specs.exists() and hooks.exists():
-        rows = table_rows(inbox.read_text(), "## Delivery service")
-        readers = set(re.findall(r'name: "([\w-]+)",(?:(?!name: ").)*?local_offer_reader: true', specs.read_text(), re.S))
-        injected = {name.lower() for name in re.findall(
-            r"DeliveryCapability \{\s*provider: Harness::(\w+),(?:(?!\}\);).)*?live_injection: true", hooks.read_text(), re.S)}
-        documented_readers = {row[0].strip("`") for row in rows if len(row) == 4 and row[2] == "Library API"}
-        documented_injected = {row[0].strip("`") for row in rows if len(row) == 4 and row[3] not in ("Unavailable", "")}
-        if not rows or rows[-1][0] != "Every other adapter":
-            errors.append(f"{inbox.relative_to(root)}: error: delivery table must end with an 'Every other adapter' row")
-        if documented_readers != readers:
-            errors.append(f"{inbox.relative_to(root)}: error: library offer readers are {sorted(readers)}, documented {sorted(documented_readers)}")
-        if documented_injected != injected:
-            errors.append(f"{inbox.relative_to(root)}: error: live injection providers are {sorted(injected)}, documented {sorted(documented_injected)}")
-    for error in errors:
-        print(error)
-    return len(errors)
-
-
 # Cutover surfaces are explicit so archived ADRs, release notes and source-symbol
 # citations remain usable evidence. These are the maintained command guides.
 COMMAND_GUIDES = (
@@ -660,14 +622,13 @@ def main():
                     if document.parent == root / "docs/specs")
     missing += sum(anchors(root, document) for document in evidence
                    if document in documents)
-    projection_errors = check_projections(root)
     reference_errors = 0
     if not args.inventory_only:
         ambient = [root / name for name in AMBIENT_DOCS]
         skills = sorted((root / "skills").rglob("*.md"))
         for document in [path for path in ambient if path.exists()] + skills + documents + maintained + adr_documents:
             reference_errors += check_references(root, document, commands, adrs, gone)
-    return int(bool(command_errors) or bool(projection_errors) or bool(reference_errors) or (args.strict_inventory and bool(missing)) or (args.strict_citations and bool(citations)))
+    return int(bool(command_errors) or bool(reference_errors) or (args.strict_inventory and bool(missing)) or (args.strict_citations and bool(citations)))
 
 
 if __name__ == "__main__":

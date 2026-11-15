@@ -134,7 +134,6 @@ fn bind_child_directory(
             network,
             capability: Vec::new(),
             no_capability: Vec::new(),
-            provenance: None,
         },
         state,
         credentials,
@@ -3360,7 +3359,6 @@ impl BoundGraphOwner<'_> {
                         network: self.network,
                         capability: capabilities.clone(),
                         no_capability: Vec::new(),
-                        provenance: None,
                     },
                     self.factory.context.roots.state.as_path(),
                     &self.factory.credential_roots()?,
@@ -4330,6 +4328,8 @@ mod journal_error_tests {
         };
         let key = graph::AttemptKey {
             extra: Default::default(),
+            retry_generation: None,
+            previous_attempt_ref: None,
             graph_id: "preflight-replay".into(),
             node_id: "writer".into(),
             route_index: 0,
@@ -4834,7 +4834,7 @@ mod recovery_rebuild_tests {
                                     .insert("lanes.sandbox_floor".into(), "strict".into());
                                 profile.knob_sources.insert(
                                     "lanes.sandbox_floor".into(),
-                                    provenant_records::run::LimitSource::Host,
+                                    provenant_records::LimitSource::Host,
                                 );
                                 if spec.confidential {
                                     profile.confidential = true;

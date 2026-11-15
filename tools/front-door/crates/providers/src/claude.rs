@@ -3,9 +3,7 @@ use crate::launch::{
     uuid_v4,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
-use provenant_confinement::permissions::{
-    NetworkAccess, NetworkEndpoint, ProviderProfile, ProviderProfileSpec,
-};
+use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
 use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
 use provenant_os::clock::SystemClock;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
@@ -724,7 +722,6 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    let mut tool_requirements = crate::launch::ToolRequirements::default();
     // No credential path is granted: the token arrives through a pipe.
     if plan.selected_authentication.is_some() {
         return Err(input.boundary_error(
@@ -774,6 +771,8 @@ fn prepare(
         input.executable.as_os_str(),
         "-p".as_ref(),
         "--strict-mcp-config".as_ref(),
+        "--setting-sources".as_ref(),
+        "".as_ref(),
         "--permission-prompts".as_ref(),
         "none".as_ref(),
         "--output-format".as_ref(),
@@ -787,23 +786,12 @@ fn prepare(
         Session::Resume => "--resume".into(),
     });
     argv.push(session_id.clone().into());
-    let shell = access == Access::WorktreeWrite;
-    let web = plan.network == NetworkAccess::Open;
-    let (mode, tools) = match access {
-        Access::ReadOnly => ("dontAsk", "Read,Grep,Glob,Bash,Skill"),
-        Access::WorktreeWrite => ("bypassPermissions", "default"),
-    };
-    let tools = if web && !shell {
-        format!("{tools},WebFetch,WebSearch")
-    } else {
-        tools.to_owned()
-    };
     argv.extend(
         [
             "--permission-mode",
-            mode,
+            "bypassPermissions",
             "--tools",
-            &tools,
+            "default",
             "--model",
             input.route.model.as_str(),
         ]
@@ -812,21 +800,23 @@ fn prepare(
     if let Some(effort) = &input.route.effort {
         argv.extend(["--effort".into(), effort.into()]);
     }
-    if !shell && let Some(read_only) = &plan.read_only {
+    if access == Access::ReadOnly
+        && let Some(read_only) = &plan.read_only
+    {
         // The flags that follow terminate --add-dir's variadic paths.
         add_git_dirs(&mut argv, read_only.git_read_paths(), input.cwd);
     }
     if access == Access::ReadOnly {
         // The handoff is beside the pinned source view, outside the cwd.
-        // Bash is pre-approved below; native file tools also need this root.
+        // Provider tools need explicit workspace roots even though the outer
+        // filesystem profile remains the authority for reads and writes.
         if let Some(private) = &plan.private_state {
             argv.extend(["--add-dir".into(), private.path.as_os_str().to_owned()]);
         }
-        // dontAsk mode refuses reads outside the working directory and its
-        // added directories, even where the seatbelt profile would allow them.
-        // A root that holds the working directory still reaches beyond it.
+        // Claude's file tools use their workspace context in addition to the
+        // outer filesystem profile. A root holding the cwd reaches beyond it.
         for root in &plan.read_roots {
-            if !root.path.starts_with(input.cwd) && !input.images.contains(&root.path) {
+            if !root.path.starts_with(input.cwd) {
                 argv.extend(["--add-dir".into(), root.path.as_os_str().to_owned()]);
             }
         }
@@ -835,49 +825,11 @@ fn prepare(
     let mut package_omissions = Vec::new();
     let package = package_grant(input.executable, &mut package_omissions, input.policy)?;
     let scratch = &plan.scratch.path;
-    // Filesystem confinement owns writer path access; native permission prompts
-    // would refuse tools that cannot ask for approval in a headless lane.
-    let allowed_tools = if web {
-        "Bash,Skill,WebFetch,WebSearch"
-    } else {
-        "Bash,Skill"
-    };
-    let image_rules = if shell {
-        Vec::new()
-    } else {
-        input
-            .images
-            .iter()
-            .map(|image| {
-                let path = image.to_str().ok_or(ProviderError::InvalidPath)?;
-                if !image.is_absolute() {
-                    return Err(ProviderError::InvalidPath);
-                }
-                // Read rules use gitignore patterns; escape metacharacters in filenames.
-                let escaped: String = path
-                    .chars()
-                    .flat_map(|c| {
-                        if matches!(c, '*' | '?' | '[' | ']' | '\\' | ' ') {
-                            vec!['\\', c]
-                        } else {
-                            vec![c]
-                        }
-                    })
-                    .collect();
-                Ok(format!("Read(/{escaped})"))
-            })
-            .collect::<Result<Vec<_>, ProviderError>>()?
-    };
-    let mut setup = input.provenant.claude(
-        scratch,
-        &mut argv,
-        input.policy,
-        (!shell).then_some(allowed_tools),
-        &image_rules,
-    )?;
+    // All native tools are available; the outer profile supplies the path and
+    // network boundaries for this lane.
+    let mut setup = Vec::new();
 
-    let toolchain = shell || web;
-    let path = crate::launch::tool_search_path(input.home, toolchain, input.policy)?;
+    let path = crate::launch::tool_search_path(input.home, true, input.policy)?;
     let mut env = base_env(input, scratch, path);
     if input.account.is_some() {
         // The selected login takes precedence over ambient provider selectors.
@@ -960,18 +912,6 @@ fn prepare(
     }
     // The git wrapper script remains available to Bash.
     tool_exec_roots.push(subtree(scratch.join("bin")));
-    // Use the same read-only toolchain, public TLS configuration and CLT
-    // selection as Codex. Access still controls private caches and writes.
-    if toolchain && input.sandboxed() {
-        crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
-        crate::launch::node_tools(
-            input.home,
-            access,
-            crate::launch::lane_cache(input),
-            &mut tool_requirements,
-            &mut env,
-        );
-    }
     let mut prompt = input.prompt.text().to_owned();
     if !input.images.is_empty() {
         prompt.push_str("\n\nAttached images:\n");
@@ -991,7 +931,7 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: staged_skills,
-        tool_requirements,
+        tool_requirements: Default::default(),
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),
@@ -1015,9 +955,6 @@ fn prepare(
         stream,
     };
     crate::launch::prepare_tool_requirements(input, &mut spec)?;
-    input
-        .provenant
-        .grant(&mut spec.profile.spec, &mut spec.setup, true);
     Ok(spec)
 }
 

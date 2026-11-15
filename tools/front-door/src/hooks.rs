@@ -7,7 +7,7 @@ use provenant_confinement::{
 use provenant_core::{CancelToken, Clock, GitOid, WaitBudget};
 use provenant_fabric_store::{Page, Store};
 use provenant_os::{clock::SystemClock, exec::SystemExecutor, sys::hook_io};
-use provenant_records::{Harness, inbox::*};
+use provenant_records::{Harness, HookProtocol, inbox::*};
 use provenant_workflow::session::{CommandPrefix, HookEvent, HostSessionId};
 use serde::Deserialize;
 use std::{
@@ -49,14 +49,18 @@ struct GuardInput {
     tool_input: serde_json::Value,
     cwd: serde_json::Value,
     // Delivery metadata is advisory; an unexpected type must not deny a tool.
+    #[serde(alias = "conversation_id")]
     session_id: Option<serde_json::Value>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct AdvisoryInput {
     hook_event_name: String,
+    #[serde(alias = "conversation_id")]
     session_id: String,
     cwd: PathBuf,
     source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transcript_path: Option<String>,
 }
 
 // Hook I/O and local work are constrained by real monotonic deadlines.
@@ -64,8 +68,12 @@ struct AdvisoryInput {
 pub fn run(hook: Hook, globals: &Globals) -> u8 {
     let started = Instant::now();
     let deadline = started + LOCAL_BUDGET;
-    let client = hook.spec().registration.harness;
-    match hook.spec().handler {
+    let Some(spec) = hook.spec() else {
+        diagnostic("hook skipped: adapter or handler was not recognised");
+        return 0;
+    };
+    let client = spec.client;
+    match spec.handler {
         Handler::ChairPrompt => crate::chair::hook(false, globals),
         Handler::ChairStart => {
             let status = crate::chair::hook(true, globals);
@@ -79,16 +87,45 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
             crate::usage::ingest_after_chair_hook(globals);
             0
         }
-        Handler::Guard => guard(globals, deadline, client, hook.spec().registration.event),
-        Handler::PreCompact => advisory(Moment::PreCompact, globals, started, client),
-        Handler::Compact => advisory(Moment::Compact, globals, started, client),
-        Handler::SessionStart => advisory(Moment::Restart, globals, started, client),
-        Handler::Stop => advisory(Moment::Stop, globals, started, client),
+        Handler::Guard => guard(globals, deadline, client, spec.event, spec.protocol),
+        Handler::PreCompact => advisory(
+            Moment::PreCompact,
+            globals,
+            started,
+            client,
+            spec.event,
+            spec.protocol,
+        ),
+        Handler::Compact => advisory(
+            Moment::Compact,
+            globals,
+            started,
+            client,
+            spec.event,
+            spec.protocol,
+        ),
+        Handler::SessionStart => advisory(
+            Moment::Restart,
+            globals,
+            started,
+            client,
+            spec.event,
+            spec.protocol,
+        ),
+        Handler::Stop => advisory(
+            Moment::Stop,
+            globals,
+            started,
+            client,
+            spec.event,
+            spec.protocol,
+        ),
         Handler::WorktreeCreate => crate::hook_worktree::create(globals),
         Handler::WorktreeRemove => crate::hook_worktree::remove(globals),
         Handler::PrePush => {
             let Hook::Git(GitHook::PrePush { remote, .. }) = hook else {
-                return 1;
+                diagnostic("pre-push: skipped: hook invocation was not a Git pre-push event");
+                return 0;
             };
             match pre_push(&remote, globals, deadline) {
                 Ok(()) => 0,
@@ -114,15 +151,23 @@ fn abstain(reason: &str) -> u8 {
     diagnostic(&format!("answer delivery skipped: {reason}"));
     0
 }
-fn guard(globals: &Globals, deadline: Instant, client: Option<Harness>, event_name: &str) -> u8 {
+fn guard(
+    globals: &Globals,
+    deadline: Instant,
+    client: Option<Harness>,
+    event_name: &str,
+    protocol: Option<HookProtocol>,
+) -> u8 {
     let Ok(input) = hook_io::read_stdin(INPUT_CAP, deadline) else {
-        return abstain("hook input unreadable, oversized or timed out");
+        return guard_abstain(
+            "hook input unreadable, oversized or timed out",
+            protocol,
+            deadline,
+        );
     };
-    let parsed = serde_json::from_slice::<GuardInput>(&input)
-        .ok()
-        .filter(|v| v.hook_event_name == event_name);
+    let parsed = normalize_guard_input(&input, event_name, protocol);
     let Some(event) = parsed else {
-        return abstain("hook event not recognised");
+        return guard_abstain("hook event not recognised", protocol, deadline);
     };
     match guard_reply(
         globals,
@@ -131,7 +176,7 @@ fn guard(globals: &Globals, deadline: Instant, client: Option<Harness>, event_na
         provenant_cli::fabric::in_lane(),
         client,
     ) {
-        Err(reason) => abstain(reason),
+        Err(reason) => guard_abstain(reason, protocol, deadline),
         Ok(Some(bytes)) => {
             if hook_io::write_stdout(&bytes, deadline).is_err() {
                 diagnostic(
@@ -140,7 +185,133 @@ fn guard(globals: &Globals, deadline: Instant, client: Option<Harness>, event_na
             }
             0
         }
-        Ok(None) => 0,
+        Ok(None) => {
+            write_provider_allow(protocol, deadline);
+            0
+        }
+    }
+}
+
+fn guard_abstain(reason: &str, protocol: Option<HookProtocol>, deadline: Instant) -> u8 {
+    let status = abstain(reason);
+    write_provider_allow(protocol, deadline);
+    status
+}
+
+fn write_provider_allow(protocol: Option<HookProtocol>, deadline: Instant) {
+    let output = provider_allow_response(protocol);
+    if let Some(output) = output
+        && hook_io::write_stdout(output, deadline).is_err()
+    {
+        diagnostic("hook abstention response could not be written; the provider default applies");
+    }
+}
+
+fn provider_allow_response(protocol: Option<HookProtocol>) -> Option<&'static [u8]> {
+    match protocol {
+        // Antigravity requires an explicit tool decision in PreToolUse output.
+        Some(HookProtocol::NamedGroups { .. }) => Some(b"{\"decision\":\"allow\"}\n"),
+        // Cursor may treat invalid or missing JSON as a denial on permission hooks.
+        Some(HookProtocol::CursorCommands { .. }) => Some(b"{\"permission\":\"allow\"}\n"),
+        _ => None,
+    }
+}
+
+fn normalize_guard_input(
+    bytes: &[u8],
+    event_name: &str,
+    protocol: Option<HookProtocol>,
+) -> Option<GuardInput> {
+    if matches!(protocol, Some(HookProtocol::NamedGroups { .. })) {
+        let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        if value
+            .get("hook_event_name")
+            .map(|event| event.as_str() != Some(event_name))
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        let call = value.get("toolCall")?.as_object()?;
+        let native_tool_name = call.get("name")?.as_str()?;
+        let mut tool_name = native_tool_name.to_owned();
+        let mut tool_input = call.get("args")?.clone();
+        if !tool_input.is_object() {
+            return None;
+        }
+        if native_tool_name == "run_command" {
+            let command = tool_input.get("CommandLine")?.as_str()?.to_owned();
+            let args = tool_input.as_object_mut()?;
+            args.insert("command".into(), command.into());
+            tool_name = "Bash".into();
+        }
+        let cwd = match tool_input.get("Cwd") {
+            Some(value) => value.as_str()?.to_owned(),
+            None => single_workspace_path(&value, "workspacePaths")?,
+        };
+        let session_id = value.get("conversationId")?.clone();
+        return Some(GuardInput {
+            // The event is supplied by the resolved declaration: Antigravity's
+            // documented payload does not include a hook_event_name field.
+            hook_event_name: "PreToolUse".into(),
+            tool_name,
+            tool_input,
+            cwd: cwd.into(),
+            session_id: Some(session_id),
+        });
+    }
+
+    if matches!(protocol, Some(HookProtocol::CursorCommands { .. })) {
+        let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        if value.get("hook_event_name")?.as_str()? != event_name {
+            return None;
+        }
+        let tool_name = value.get("tool_name")?.as_str()?;
+        let tool_name = if tool_name == "Shell" {
+            "Bash"
+        } else {
+            tool_name
+        }
+        .to_owned();
+        let tool_input = value.get("tool_input")?.clone();
+        let cwd = match value.get("cwd") {
+            Some(value) => value.as_str()?.to_owned(),
+            None => single_workspace_path(&value, "workspace_roots")?,
+        };
+        let session_id = value
+            .get("session_id")
+            .or_else(|| value.get("conversation_id"))?
+            .clone();
+        return Some(GuardInput {
+            hook_event_name: "PreToolUse".into(),
+            tool_name,
+            tool_input,
+            cwd: cwd.into(),
+            session_id: Some(session_id),
+        });
+    }
+
+    let mut input: GuardInput = serde_json::from_slice(bytes).ok()?;
+    if input.hook_event_name != event_name {
+        return None;
+    }
+    // The downstream inbox and response use the common semantic event, while
+    // the declaration above validates this provider's native event name.
+    input.hook_event_name = "PreToolUse".into();
+    Some(input)
+}
+
+fn single_workspace_path(value: &serde_json::Value, key: &str) -> Option<String> {
+    let paths = value.get(key)?.as_array()?;
+    let [path] = paths.as_slice() else {
+        return None;
+    };
+    path.as_str().map(str::to_owned)
+}
+
+fn optional_input_string(value: &serde_json::Value, key: &str) -> Option<Option<String>> {
+    match value.get(key) {
+        None | Some(serde_json::Value::Null) => Some(None),
+        Some(value) => Some(Some(value.as_str()?.to_owned())),
     }
 }
 
@@ -173,20 +344,34 @@ fn guard_reply(
         return Err("hook event has an invalid Bash command");
     }
     if in_lane {
+        diagnostic("answer delivery skipped: lane sessions use Fabric mail");
         return Ok(None);
     }
-    let Some(client) = client.filter(|client| client.spec().local_offer_reader) else {
-        diagnostic("answer delivery unavailable: unsupported guard harness");
+    let Some(client) = client else {
+        diagnostic("answer delivery unavailable: hook has no provider adapter");
         return Ok(None);
     };
+    let Some(install) = client.spec().install else {
+        diagnostic("answer delivery unavailable: provider has no native install declaration");
+        return Ok(None);
+    };
+    match install.answer_delivery {
+        provenant_records::CapabilitySupport::Supported => {}
+        provenant_records::CapabilitySupport::Unsupported { reason, source } => {
+            diagnostic(&format!(
+                "answer delivery unavailable: {reason} (source: {source})"
+            ));
+            return Ok(None);
+        }
+    }
     let Some(session) = event
         .session_id
         .and_then(|value| value.as_str().map(str::to_owned))
     else {
-        return Ok(None);
+        return Err("hook event has no session identifier");
     };
     if HostSessionId::parse(&session).is_err() {
-        return Ok(None);
+        return Err("hook event has an invalid session identifier");
     }
     let selected = Globals {
         state_dir: globals.state_dir.clone(),
@@ -211,7 +396,7 @@ fn guard_reply(
             agent_label: label.as_deref(),
             harness: client,
             in_lane: false,
-        }; // The hook refuses lanes before launching this worker.
+        }; // Lane sessions skip local delivery and use Fabric mail.
         let Some(target) = reader.target(&session, deadline)? else {
             return Ok(None);
         };
@@ -440,6 +625,8 @@ fn advisory(
     globals: &Globals,
     started: Instant,
     client: Option<provenant_records::Harness>,
+    event_name: &str,
+    protocol: Option<HookProtocol>,
 ) -> u8 {
     // Reading lane and PR state can take longer than a checkpoint read, so
     // these hooks hold a wider budget; the registered host timeouts are 5s.
@@ -451,14 +638,7 @@ fn advisory(
             return 0;
         }
     };
-    let parsed = serde_json::from_slice::<AdvisoryInput>(&input)
-        .ok()
-        .filter(|host| {
-            host.hook_event_name == moment.event_name()
-                && host.cwd.is_absolute()
-                && HostSessionId::parse(&host.session_id).is_ok()
-                && moment.accepts(host.source.as_deref())
-        });
+    let parsed = normalize_advisory_input(&input, moment, event_name, protocol);
     let Some(host) = parsed else {
         diagnostic("checkpoint unavailable: invalid hook input");
         return 0;
@@ -481,7 +661,7 @@ fn advisory(
                 moment,
                 &selected,
                 &host.cwd,
-                &input,
+                &host,
                 collection_deadline,
                 client,
             )
@@ -496,13 +676,177 @@ fn advisory(
     match rx.recv_timeout(remaining) {
         Ok(Ok(context)) => {
             diagnostic(&context.diagnostic);
-            if context.stdout.len() <= 8192 {
-                let _ = hook_io::write_stdout(&context.stdout, deadline);
+            match provider_advisory_output(&context.stdout, moment, protocol, client) {
+                Some(output) if output.len() > 8192 => {
+                    diagnostic("checkpoint response exceeded the native hook output limit");
+                }
+                Some(output) if !output.is_empty() => {
+                    if hook_io::write_stdout(&output, deadline).is_err() {
+                        diagnostic("checkpoint response could not be written to the native hook");
+                    }
+                }
+                Some(_) => {}
+                None => diagnostic("checkpoint response could not be normalized for this provider"),
             }
         }
         _ => diagnostic("checkpoint unavailable: state unavailable or local deadline exceeded"),
     }
     0
+}
+
+fn provider_advisory_output(
+    output: &[u8],
+    moment: Moment,
+    protocol: Option<HookProtocol>,
+    client: Option<Harness>,
+) -> Option<Vec<u8>> {
+    if moment == Moment::PreCompact {
+        let support = client.and_then(|client| {
+            client
+                .spec()
+                .install
+                .map(|install| install.precompact_context)
+        });
+        return match support {
+            Some(provenant_records::CapabilitySupport::Supported)
+                if matches!(
+                    protocol,
+                    Some(HookProtocol::CommandGroups { .. } | HookProtocol::OpenCodePlugin)
+                ) =>
+            {
+                Some(output.to_vec())
+            }
+            Some(provenant_records::CapabilitySupport::Supported) => {
+                diagnostic(
+                    "checkpoint guidance unavailable: preCompact response format is undeclared",
+                );
+                Some(Vec::new())
+            }
+            Some(provenant_records::CapabilitySupport::Unsupported { reason, source }) => {
+                let message = format!(
+                    "Provenant cannot inject pre-compaction guidance into the model context: {reason} (source: {source})"
+                );
+                diagnostic(&message);
+                let response = match protocol {
+                    Some(HookProtocol::CommandGroups { .. }) => {
+                        serde_json::json!({"systemMessage": message})
+                    }
+                    Some(HookProtocol::CursorCommands { .. }) => {
+                        serde_json::json!({"user_message": message})
+                    }
+                    _ => return Some(Vec::new()),
+                };
+                hook_json_line(&response)
+            }
+            None => {
+                diagnostic(
+                    "checkpoint guidance unavailable: preCompact context capability is undeclared",
+                );
+                Some(Vec::new())
+            }
+        };
+    }
+    if output.is_empty() || moment == Moment::Stop {
+        return Some(Vec::new());
+    }
+    match protocol {
+        Some(HookProtocol::NamedGroups { .. }) => {
+            let context = hook_additional_context(output)?;
+            hook_json_line(&serde_json::json!({
+                "injectSteps": [{"systemMessage": {"systemMessage": context}}]
+            }))
+        }
+        Some(HookProtocol::CursorCommands { .. }) => match moment {
+            Moment::Restart | Moment::Compact => {
+                let context = hook_additional_context(output)?;
+                hook_json_line(&serde_json::json!({
+                    "additional_context": context
+                }))
+            }
+            Moment::PreCompact | Moment::Stop => Some(Vec::new()),
+        },
+        // The OpenCode plugin bridge consumes the common hook response and
+        // maps it to the plugin API's mutable context/compaction event.
+        _ => Some(output.to_vec()),
+    }
+}
+
+fn hook_json_line(value: &serde_json::Value) -> Option<Vec<u8>> {
+    let mut bytes = serde_json::to_vec(value).ok()?;
+    bytes.push(b'\n');
+    Some(bytes)
+}
+
+fn hook_additional_context(output: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(output).ok()?;
+    value
+        .pointer("/hookSpecificOutput/additionalContext")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn normalize_advisory_input(
+    bytes: &[u8],
+    moment: Moment,
+    event_name: &str,
+    protocol: Option<HookProtocol>,
+) -> Option<AdvisoryInput> {
+    let mut host = if matches!(protocol, Some(HookProtocol::NamedGroups { .. })) {
+        let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        if value
+            .get("hook_event_name")
+            .map(|event| event.as_str() != Some(event_name))
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        Some(AdvisoryInput {
+            // Antigravity's documented lifecycle payload has no event field;
+            // the resolved hook declaration supplies the native event.
+            hook_event_name: moment.event_name().into(),
+            session_id: value.get("conversationId")?.as_str()?.to_owned(),
+            cwd: single_workspace_path(&value, "workspacePaths")?.into(),
+            source: optional_input_string(&value, "source")?,
+            transcript_path: optional_input_string(&value, "transcriptPath")?,
+        })
+    } else if matches!(protocol, Some(HookProtocol::CursorCommands { .. })) {
+        let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        if value.get("hook_event_name")?.as_str()? != event_name {
+            return None;
+        }
+        let session_id = value
+            .get("session_id")
+            .or_else(|| value.get("conversation_id"))?
+            .as_str()?
+            .to_owned();
+        let cwd = match value.get("cwd") {
+            Some(cwd) => cwd.as_str()?.to_owned(),
+            None => single_workspace_path(&value, "workspace_roots")?,
+        };
+        Some(AdvisoryInput {
+            hook_event_name: moment.event_name().into(),
+            session_id,
+            cwd: cwd.into(),
+            source: optional_input_string(&value, "source")?,
+            transcript_path: optional_input_string(&value, "transcript_path")?,
+        })
+    } else {
+        let mut host: AdvisoryInput = serde_json::from_slice(bytes).ok()?;
+        if host.hook_event_name != event_name {
+            return None;
+        }
+        host.hook_event_name = moment.event_name().into();
+        Some(host)
+    }?;
+
+    if !host.cwd.is_absolute()
+        || HostSessionId::parse(&host.session_id).is_err()
+        || !moment.accepts(host.source.as_deref())
+    {
+        return None;
+    }
+    host.hook_event_name = moment.event_name().into();
+    Some(host)
 }
 /// What a hook does with the session checkpoint.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -526,8 +870,12 @@ impl Moment {
     }
     fn accepts(self, source: Option<&str>) -> bool {
         match self {
-            Self::Compact => source == Some("compact"),
-            Self::Restart => matches!(source, Some("startup" | "resume" | "clear")),
+            // The resolved command already identifies the semantic action;
+            // source is supplemental metadata and some native protocols omit it.
+            Self::Compact => source.is_none_or(|source| source == "compact"),
+            Self::Restart => source.is_none_or(|source| {
+                matches!(source, "startup" | "resume" | "clear" | "compact" | "fork")
+            }),
             Self::PreCompact | Self::Stop => true,
         }
     }
@@ -580,13 +928,13 @@ fn checkpoint(
     moment: Moment,
     globals: &Globals,
     cwd: &Path,
-    input: &[u8],
+    host: &AdvisoryInput,
     deadline: Instant,
     client: Option<provenant_records::Harness>,
 ) -> Result<provenant_workflow::session::HookContext, Error> {
     use provenant_workflow::session;
     let (roots, home, project) = project_id(globals, cwd)?;
-    let host: AdvisoryInput = serde_json::from_slice(input)?;
+    let input = serde_json::to_vec(host)?;
     let store = session::SessionStore::new(
         roots.state.clone(),
         project,
@@ -667,7 +1015,7 @@ fn checkpoint(
         &roots.state,
         project,
         moment.event(),
-        input,
+        input.as_slice(),
         &clock,
         session::CHECKPOINT_MAX_AGE,
         session::Advice {
@@ -814,9 +1162,30 @@ fn push_conflict_markers(roots: &provenant_core::Roots) -> bool {
         .unwrap_or(true)
 }
 
+fn pre_push_boundary(refusal: &provenant_confinement::push::PushRefusal) -> bool {
+    matches!(
+        refusal,
+        provenant_confinement::push::PushRefusal::DefaultDeletion
+            | provenant_confinement::push::PushRefusal::LinkedWorktree
+            | provenant_confinement::push::PushRefusal::NonFastForward
+    )
+}
+
 fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Error> {
-    let bytes = hook_io::read_stdin(INPUT_CAP, deadline)?;
-    let text = std::str::from_utf8(&bytes)?;
+    let bytes = match hook_io::read_stdin(INPUT_CAP, deadline) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            diagnostic(&format!("pre-push: skipped: unusable hook input: {error}"));
+            return Ok(());
+        }
+    };
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            diagnostic(&format!("pre-push: skipped: unusable hook input: {error}"));
+            return Ok(());
+        }
+    };
     let mut updates = Vec::new();
     for line in text.lines() {
         let fields: Vec<_> = line.split_ascii_whitespace().collect();
@@ -826,12 +1195,19 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
                 .any(|f| f.len() > 1024 || !f.bytes().all(|b| b.is_ascii_graphic()))
             || !fields[2].starts_with("refs/")
         {
-            return Err("invalid push input".into());
+            diagnostic("pre-push: skipped: unrecognised push update");
+            return Ok(());
         }
-        let local = GitOid::parse(fields[1])?;
-        let remote_oid = GitOid::parse(fields[3])?;
+        let (local, remote_oid) = match (GitOid::parse(fields[1]), GitOid::parse(fields[3])) {
+            (Ok(local), Ok(remote_oid)) => (local, remote_oid),
+            _ => {
+                diagnostic("pre-push: skipped: unrecognised object ID in push update");
+                return Ok(());
+            }
+        };
         if std::mem::discriminant(&local) != std::mem::discriminant(&remote_oid) {
-            return Err("mixed push object formats".into());
+            diagnostic("pre-push: skipped: push update uses mixed object formats");
+            return Ok(());
         }
         updates.push(PushUpdate {
             local,
@@ -839,20 +1215,38 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
             remote: remote_oid,
         });
     }
-    let project = crate::roots::selected_project(globals.project.as_deref(), true)?;
-    let resolved = crate::roots::resolve(
+    if updates.is_empty() {
+        diagnostic("pre-push: skipped: no recognised push updates");
+        return Ok(());
+    }
+    let project = match crate::roots::selected_project(globals.project.as_deref(), true) {
+        Ok(project) => project,
+        Err(error) => {
+            diagnostic(&format!("pre-push: warning: project unavailable: {error}"));
+            return Ok(());
+        }
+    };
+    let resolved = match crate::roots::resolve(
         globals,
         crate::roots::Workspace::At(&project),
         crate::roots::Product::Optional,
-    )?;
+    ) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            diagnostic(&format!(
+                "pre-push: warning: project roots unavailable: {error}"
+            ));
+            return Ok(());
+        }
+    };
     let check_conflict_markers = push_conflict_markers(&resolved.roots);
-    with_git(
+    let checked = with_git(
         resolved.roots.state.as_path(),
         |runtime, executor, budget, cancel| {
             let repo = runtime.open_read_repo(executor, &project, budget, cancel)?;
             // The default-branch check contacts the remote and needs a network budget.
             let budget = UtilityBudget::bounded(Duration::from_secs(30))?;
-            PushContext {
+            let result = PushContext {
                 repo: &repo,
                 runtime,
                 executor,
@@ -860,13 +1254,33 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
                 cancel,
                 check_conflict_markers,
             }
-            .check(remote, &updates)
-            .map_err(|error| {
-                diagnostic(&format!("pre-push: refused: {error}"));
-                error.into()
-            })
+            .check(remote, &updates);
+            match result {
+                Ok(()) => Ok(()),
+                Err(refusal) if pre_push_boundary(&refusal) => {
+                    diagnostic(&format!("pre-push: refused: {refusal}"));
+                    Err(refusal.into())
+                }
+                Err(refusal) => {
+                    // Missing evidence and conflict-marker checks are advisory;
+                    // only default-branch authority, isolation and integrity
+                    // holds refuse the Git operation.
+                    diagnostic(&format!("pre-push: warning: {refusal}"));
+                    Ok(())
+                }
+            }
         },
-    )?;
+    );
+    if let Err(error) = checked {
+        let boundary_refusal = error
+            .downcast_ref::<provenant_confinement::push::PushRefusal>()
+            .is_some_and(pre_push_boundary);
+        if boundary_refusal {
+            return Err(error);
+        }
+        diagnostic(&format!("pre-push: warning: check unavailable: {error}"));
+        return Ok(());
+    }
     if let Some(settings) = local_gate_settings(globals, &project)? {
         run_local_gate(&settings, &project)?;
     }
@@ -1320,7 +1734,8 @@ mod answer_delivery_tests {
     }
 
     #[test]
-    fn malformed_cwd_fails_closed_and_session_metadata_is_advisory() -> Result<(), Error> {
+    fn malformed_guard_input_abstains_and_valid_session_metadata_is_advisory() -> Result<(), Error>
+    {
         let temp = tempfile::tempdir()?;
         let globals = Globals {
             state_dir: Some(temp.path().join("state")),
@@ -1352,7 +1767,8 @@ mod answer_delivery_tests {
                         false,
                         Some(Harness::Claude),
                     );
-                    if field == "session_id" || matches!(value.as_str(), Some("/tmp/.." | "/tmp/."))
+                    if (field == "session_id" && value.as_str() == Some("relative"))
+                        || (field == "cwd" && matches!(value.as_str(), Some("/tmp/.." | "/tmp/.")))
                     {
                         assert_eq!(result, Ok(None));
                     } else {
@@ -1368,25 +1784,260 @@ mod answer_delivery_tests {
     }
 
     #[test]
+    fn antigravity_hook_payloads_normalize_from_the_declared_event() -> Result<(), Error> {
+        let temp = tempfile::tempdir()?;
+        let protocol = Some(HookProtocol::NamedGroups {
+            timeout_unit: provenant_records::HookTimeoutUnit::Seconds,
+        });
+        let session = "ec33ebf9-0cba-4100-8142-c61503f6c587";
+        let tool_input = json!({
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": "git status", "Cwd": temp.path()}
+            },
+            "conversationId": session,
+            "workspacePaths": [temp.path()]
+        });
+        let guard =
+            normalize_guard_input(&serde_json::to_vec(&tool_input)?, "PreToolUse", protocol)
+                .ok_or("Antigravity PreToolUse did not normalize")?;
+        assert_eq!(guard.hook_event_name, "PreToolUse");
+        assert_eq!(guard.tool_name, "Bash");
+        assert_eq!(guard.tool_input["command"], "git status");
+        assert_eq!(guard.cwd, json!(temp.path()));
+        assert_eq!(guard.session_id, Some(json!(session)));
+
+        let mut wrong_event = tool_input.clone();
+        wrong_event["hook_event_name"] = "PostToolUse".into();
+        assert!(
+            normalize_guard_input(&serde_json::to_vec(&wrong_event)?, "PreToolUse", protocol,)
+                .is_none()
+        );
+
+        let lifecycle = json!({
+            "conversationId": session,
+            "workspacePaths": [temp.path()],
+            "transcriptPath": "/tmp/transcript.jsonl"
+        });
+        let advisory = normalize_advisory_input(
+            &serde_json::to_vec(&lifecycle)?,
+            Moment::Restart,
+            "SessionStart",
+            protocol,
+        )
+        .ok_or("Antigravity SessionStart did not normalize")?;
+        assert_eq!(advisory.hook_event_name, "SessionStart");
+        assert_eq!(advisory.session_id, session);
+        assert_eq!(advisory.cwd, temp.path().to_path_buf());
+        assert_eq!(
+            advisory.transcript_path.as_deref(),
+            Some("/tmp/transcript.jsonl")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_lifecycle_payload_and_provider_reply_shapes_are_normalized() -> Result<(), Error> {
+        let temp = tempfile::tempdir()?;
+        let protocol = Some(HookProtocol::CursorCommands {
+            timeout_unit: provenant_records::HookTimeoutUnit::Seconds,
+        });
+        let lifecycle = json!({
+            "hook_event_name": "sessionStart",
+            "session_id": "cursor-session",
+            "conversation_id": "cursor-conversation",
+            "workspace_roots": [temp.path()],
+            "transcript_path": null
+        });
+        let advisory = normalize_advisory_input(
+            &serde_json::to_vec(&lifecycle)?,
+            Moment::Restart,
+            "sessionStart",
+            protocol,
+        )
+        .ok_or("Cursor sessionStart did not normalize")?;
+        assert_eq!(advisory.hook_event_name, "SessionStart");
+        assert_eq!(advisory.session_id, "cursor-session");
+        assert_eq!(advisory.cwd, temp.path().to_path_buf());
+        assert_eq!(advisory.transcript_path, None);
+
+        let guard_input = json!({
+            "hook_event_name": "preToolUse",
+            "tool_name": "Shell",
+            "tool_input": {"command": "git status"},
+            "conversation_id": "cursor-conversation",
+            "workspace_roots": [temp.path()]
+        });
+        let guard =
+            normalize_guard_input(&serde_json::to_vec(&guard_input)?, "preToolUse", protocol)
+                .ok_or("Cursor preToolUse did not normalize")?;
+        assert_eq!(guard.hook_event_name, "PreToolUse");
+        assert_eq!(guard.tool_name, "Bash");
+        assert_eq!(guard.cwd, json!(temp.path()));
+        assert_eq!(guard.session_id, Some(json!("cursor-conversation")));
+
+        let common = br#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"checkpoint context"}}"#;
+        let cursor =
+            provider_advisory_output(common, Moment::Restart, protocol, Some(Harness::Cursor))
+                .ok_or("Cursor response did not normalize")?;
+        let cursor: serde_json::Value = serde_json::from_slice(&cursor)?;
+        assert_eq!(cursor["additional_context"], "checkpoint context");
+
+        let agy_protocol = Some(HookProtocol::NamedGroups {
+            timeout_unit: provenant_records::HookTimeoutUnit::Seconds,
+        });
+        let agy =
+            provider_advisory_output(common, Moment::Restart, agy_protocol, Some(Harness::Agy))
+                .ok_or("Antigravity response did not normalize")?;
+        let agy: serde_json::Value = serde_json::from_slice(&agy)?;
+        assert_eq!(
+            agy["injectSteps"][0]["systemMessage"]["systemMessage"],
+            "checkpoint context"
+        );
+
+        for (protocol, field) in [(protocol, "permission"), (agy_protocol, "decision")] {
+            let response: serde_json::Value = serde_json::from_slice(
+                provider_allow_response(protocol).ok_or("native allow response missing")?,
+            )?;
+            assert_eq!(response[field], "allow");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn precompact_guidance_uses_declared_native_context_capability() -> Result<(), Error> {
+        let codex_protocol = Some(HookProtocol::CommandGroups {
+            timeout_unit: provenant_records::HookTimeoutUnit::Seconds,
+        });
+        let codex = provider_advisory_output(
+            b"write the intent section",
+            Moment::PreCompact,
+            codex_protocol,
+            Some(Harness::Codex),
+        )
+        .ok_or("Codex preCompact response did not normalize")?;
+        let codex: serde_json::Value = serde_json::from_slice(&codex)?;
+        let codex_message = codex["systemMessage"].as_str().ok_or("Codex notice")?;
+        let Some(provenant_records::CapabilitySupport::Unsupported { reason, source }) =
+            Harness::Codex
+                .spec()
+                .install
+                .map(|install| install.precompact_context)
+        else {
+            return Err("Codex precompact context capability must be declared unsupported".into());
+        };
+        assert!(codex_message.contains(reason));
+        assert!(codex_message.contains(source));
+        assert!(codex.get("additionalContext").is_none());
+
+        let cursor_protocol = Some(HookProtocol::CursorCommands {
+            timeout_unit: provenant_records::HookTimeoutUnit::Seconds,
+        });
+        let cursor = provider_advisory_output(
+            b"write the intent section",
+            Moment::PreCompact,
+            cursor_protocol,
+            Some(Harness::Cursor),
+        )
+        .ok_or("Cursor preCompact response did not normalize")?;
+        let cursor: serde_json::Value = serde_json::from_slice(&cursor)?;
+        let cursor_message = cursor["user_message"].as_str().ok_or("Cursor notice")?;
+        let Some(provenant_records::CapabilitySupport::Unsupported { reason, source }) =
+            Harness::Cursor
+                .spec()
+                .install
+                .map(|install| install.precompact_context)
+        else {
+            return Err("Cursor precompact context capability must be declared unsupported".into());
+        };
+        assert!(cursor_message.contains(reason));
+        assert!(cursor_message.contains(source));
+        assert!(cursor.get("additional_context").is_none());
+
+        let claude_protocol = Some(HookProtocol::CommandGroups {
+            timeout_unit: provenant_records::HookTimeoutUnit::Seconds,
+        });
+        let claude = provider_advisory_output(
+            b"write the intent section",
+            Moment::PreCompact,
+            claude_protocol,
+            Some(Harness::Claude),
+        )
+        .ok_or("Claude preCompact response did not normalize")?;
+        assert_eq!(claude, b"write the intent section");
+
+        let opencode = provider_advisory_output(
+            b"write the intent section",
+            Moment::PreCompact,
+            Some(HookProtocol::OpenCodePlugin),
+            Some(Harness::Opencode),
+        )
+        .ok_or("OpenCode preCompact response did not normalize")?;
+        assert_eq!(opencode, b"write the intent section");
+        Ok(())
+    }
+
+    #[test]
+    fn codex_session_start_accepts_each_declared_native_source() -> Result<(), Error> {
+        let temp = tempfile::tempdir()?;
+        let protocol = Some(HookProtocol::CommandGroups {
+            timeout_unit: provenant_records::HookTimeoutUnit::Seconds,
+        });
+        for source in ["startup", "resume", "clear", "compact", "fork"] {
+            let input = json!({
+                "hook_event_name": "SessionStart",
+                "session_id": "ec33ebf9-0cba-4100-8142-c61503f6c587",
+                "cwd": temp.path(),
+                "source": source
+            });
+            assert!(
+                normalize_advisory_input(
+                    &serde_json::to_vec(&input)?,
+                    Moment::Restart,
+                    "SessionStart",
+                    protocol,
+                )
+                .is_some(),
+                "documented SessionStart source {source}"
+            );
+        }
+        let unrecognised = json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "ec33ebf9-0cba-4100-8142-c61503f6c587",
+            "cwd": temp.path(),
+            "source": "unknown"
+        });
+        assert!(
+            normalize_advisory_input(
+                &serde_json::to_vec(&unrecognised)?,
+                Moment::Restart,
+                "SessionStart",
+                protocol,
+            )
+            .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn guard_leaves_shell_policy_to_confinement_for_every_harness() -> Result<(), Error> {
         let temp = tempfile::tempdir()?;
         let globals = Globals {
             state_dir: Some(temp.path().join("state")),
             ..Default::default()
         };
-        for client in [None, Some(Harness::Codex), Some(Harness::Claude)] {
+        for client in provenant_records::ADAPTER_SPECS
+            .iter()
+            .map(|spec| Some(spec.id))
+            .chain([None])
+        {
             for command in ["git status", "rm -rf /"] {
                 let event = serde_json::from_value(json!({
                     "hook_event_name":"PreToolUse", "tool_name":"Bash",
-                    "tool_input":{"command":command}, "cwd":temp.path()
+                    "tool_input":{"command":command}, "cwd":temp.path(), "session_id":"chair"
                 }))?;
-                let result = guard_reply(
-                    &globals,
-                    event,
-                    Instant::now() + LOCAL_BUDGET,
-                    false,
-                    client,
-                );
+                let result =
+                    guard_reply(&globals, event, Instant::now() + LOCAL_BUDGET, true, client);
                 assert_eq!(result, Ok(None));
             }
         }

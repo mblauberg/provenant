@@ -8,6 +8,9 @@ use std::{
     fs, io,
     os::unix::fs::{PermissionsExt, symlink},
 };
+fn no_drift(findings: &[InstallFinding]) -> bool {
+    findings.iter().all(InstallFinding::is_advisory)
+}
 struct Resolver;
 impl PathResolver for Resolver {
     fn resolve_existing_ancestor(&self, p: &Path) -> io::Result<PathBuf> {
@@ -433,7 +436,7 @@ fn uninstall_prunes_empty_managed_hook_groups() {
     f.targets.harnesses =
         Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
     f.targets.hooks = true;
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let ctx = context(&clock, &cancel);
@@ -450,7 +453,7 @@ fn uninstall_keeps_hook_siblings_and_groups_with_extra_keys() {
     f.targets.harnesses =
         Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
     f.targets.hooks = true;
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let ctx = context(&clock, &cancel);
@@ -505,7 +508,7 @@ fn install_keeps_the_settings_indent_and_leaves_unchanged_settings_alone() {
     f.targets.harnesses =
         Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
     f.targets.hooks = true;
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     fs::create_dir_all(f.home.join(".claude")).unwrap();
     let path = f.home.join(".claude/settings.json");
     fs::write(&path, "{\n    \"model\": \"opus\"\n}\n").unwrap();
@@ -681,7 +684,7 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
     install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
-    assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
+    assert!(no_drift(&inspection.findings), "{:?}", inspection.findings);
     assert_eq!(fs::read_link(f.link()).unwrap(), original_target);
 }
 
@@ -816,7 +819,7 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
     // its old-home skills destination is forgotten.
     f.targets.harnesses[0].hook_file = Some(f.base.join("claude-settings.json"));
     f.targets.hooks = true;
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let ctx = context(&clock, &cancel);
@@ -849,7 +852,7 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
     );
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
-    assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
+    assert!(no_drift(&inspection.findings), "{:?}", inspection.findings);
 
     // Earlier reinstalls refreshed the binary while carrying old target
     // metadata. Recover that persisted shape too.
@@ -869,7 +872,7 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
     fs::write(&canary, b"AGENT_FABRIC_LABEL\n").unwrap();
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
-    assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
+    assert!(no_drift(&inspection.findings), "{:?}", inspection.findings);
     let release = f.release();
     let snapshots = Snapshots::capture(&release, &targets).unwrap();
     let plan = plan_install(release, targets.clone(), snapshots).unwrap();
@@ -1029,7 +1032,12 @@ fn partial_uninstall_after_home_rename_retains_unselected_stale_entries() {
     assert!(read_receipt(&targets).unwrap().is_some());
     let result = uninstall(&targets, &ctx, &mut Reporter::default()).unwrap();
     assert!(result.actions.is_empty());
-    assert_eq!(result.findings[0].rule, "not_installed");
+    assert!(
+        result
+            .findings
+            .iter()
+            .any(|finding| finding.rule == "not_installed")
+    );
 }
 
 #[test]
@@ -1162,7 +1170,7 @@ fn inherited_hook_refresh_tracks_event_identity_and_removes_the_old_leaf() {
     f.targets.harnesses =
         Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
     f.targets.hooks = true;
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let context = InstallContext {
@@ -1210,7 +1218,7 @@ fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
         f.targets.harnesses =
             Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
         f.targets.hooks = true;
-        f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+        f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let context = InstallContext {
@@ -1287,9 +1295,7 @@ fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
         }
         uninstall(&f.targets, &context, &mut Reporter::default()).unwrap();
         let selector = if edit_command {
-            let (event, matcher, _): (String, Option<String>, String) =
-                serde_json::from_str(entry.selector.strip_prefix("hook:").unwrap()).unwrap();
-            crate::hooks::selector(&event, matcher.as_deref(), "user edited command").unwrap()
+            crate::hooks::selector_with_command(&entry.selector, "user edited command").unwrap()
         } else {
             entry.selector
         };
@@ -2369,7 +2375,7 @@ fn install_links_the_shared_instructions_and_upgrades_refresh_them() {
     );
     let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(
-        inspection.error.is_none() && inspection.findings.is_empty(),
+        inspection.error.is_none() && no_drift(&inspection.findings),
         "{:?}",
         inspection
     );
@@ -2564,7 +2570,7 @@ fn check_install_reports_unmanaged_and_stale_shared_instructions() {
         let inspection =
             inspect_install(&f.targets, None, "fixture-target", &Smoke, cancel).unwrap();
         assert!(inspection.error.is_none(), "{:?}", inspection.error);
-        assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
+        assert!(no_drift(&inspection.findings), "{:?}", inspection.findings);
     };
     ok(&f, &cancel);
 
@@ -3342,16 +3348,12 @@ fn dry_run_install_creates_nothing() {
 }
 
 #[test]
-fn hooks_on_and_symlinked_configs_refuse_before_any_write() {
+fn declared_hooks_render_and_symlinked_configs_refuse_before_any_write() {
     let mut f = Fixture::new();
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
     f.targets.hooks = true;
     let release = f.release();
-    assert_eq!(
-        Snapshots::capture(&release, &f.targets)
-            .unwrap_err()
-            .to_string(),
-        "hook registration refused: no fixture-backed HookSpec is available"
-    );
+    assert!(Snapshots::capture(&release, &f.targets).is_ok());
     assert!(!f.targets.roots.state.as_path().exists());
     f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
     let config = f.targets.harnesses[0].config_file.clone();
@@ -3447,12 +3449,143 @@ fn five_client_install_preserves_foreign_hooks_comments_and_reapplies() {
     assert!(f.plan().actions().is_empty());
     let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
-    assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
+    assert!(no_drift(&inspection.findings), "{:?}", inspection.findings);
     uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
     let after = fs::read_to_string(opencode).unwrap();
     assert!(after.contains("foreign.md"));
     assert!(after.contains("// foreign comment"));
     assert!(!after.contains("instructions/AGENTS.md"));
+}
+
+#[test]
+fn hook_installation_uses_declared_protocols_and_owns_the_plugin_artifact() {
+    let mut f = Fixture::new();
+    let harnesses: Vec<_> = provenant_records::ADAPTER_SPECS
+        .iter()
+        .filter(|spec| spec.install.is_some())
+        .map(|spec| spec.id)
+        .collect();
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &harnesses);
+    f.targets.hooks = true;
+    fs::create_dir_all(f.source.join("instructions")).unwrap();
+    let instruction = f.source.join("instructions/AGENTS.md");
+    fs::write(&instruction, b"shared instruction fixture\n").unwrap();
+    fs::set_permissions(instruction, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+
+    let receipt = read_receipt(&f.targets).unwrap().unwrap();
+    let expected_hook_leaves = f
+        .targets
+        .hook_specs
+        .iter()
+        .filter(|spec| !matches!(spec.protocol, HookProtocol::OpenCodePlugin))
+        .count();
+    assert_eq!(
+        receipt
+            .entries
+            .iter()
+            .filter(|entry| entry.selector.starts_with("hook:"))
+            .count(),
+        expected_hook_leaves
+    );
+
+    for target in &f.targets.harnesses {
+        let hook_file = target.hook_file.as_ref().unwrap();
+        match target
+            .harness
+            .spec()
+            .install
+            .unwrap()
+            .hook_protocol
+            .unwrap()
+        {
+            HookProtocol::OpenCodePlugin => {
+                assert!(receipt.entries.iter().any(|entry| {
+                    entry.harness == Some(target.harness) && entry.selector == "hook-plugin"
+                }));
+                assert_eq!(
+                    fs::read(hook_file).unwrap(),
+                    crate::hooks::hook_plugin_source(
+                        &f.targets.bin_dir.join("provenant"),
+                        f.targets.roots.state.as_path(),
+                    )
+                    .unwrap()
+                );
+            }
+            _ => {
+                let bytes = fs::read(hook_file).unwrap();
+                for spec in crate::hooks::registrations(&[target.harness]) {
+                    let expected = crate::hooks::value(&spec, &f.targets).unwrap();
+                    let command = expected
+                        .get("command")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap();
+                    let selector = crate::hooks::selector(&spec, command).unwrap();
+                    assert_eq!(
+                        crate::hooks::get(&bytes, &selector).unwrap(),
+                        Some(expected)
+                    );
+                }
+            }
+        }
+    }
+
+    uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
+    let opencode_plugin = f.home.join(".config/opencode/plugins/provenant/index.ts");
+    assert!(fs::symlink_metadata(opencode_plugin).is_err());
+    for target in &f.targets.harnesses {
+        if target.harness == Harness::Opencode {
+            continue;
+        }
+        let Some(bytes) = fs::read(target.hook_file.as_ref().unwrap()).ok() else {
+            continue;
+        };
+        for spec in crate::hooks::registrations(&[target.harness]) {
+            let expected = crate::hooks::value(&spec, &f.targets).unwrap();
+            let command = expected
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap();
+            let selector = crate::hooks::selector(&spec, command).unwrap();
+            assert_eq!(crate::hooks::get(&bytes, &selector).unwrap(), None);
+        }
+    }
+}
+
+#[test]
+fn edited_opencode_plugin_is_relinquished_and_preserved() {
+    let mut f = Fixture::new();
+    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
+    f.targets.hooks = true;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+
+    let plugin = f.targets.harnesses[0].hook_file.clone().unwrap();
+    let mut edited = fs::read(&plugin).unwrap();
+    edited.extend_from_slice(b"\n// user-owned extension\n");
+    fs::write(&plugin, &edited).unwrap();
+
+    f.targets.hooks = false;
+    f.targets.remove_hooks = true;
+    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    assert_eq!(fs::read(&plugin).unwrap(), edited);
+
+    f.targets.remove_hooks = false;
+    f.targets.hooks = true;
+    assert!(matches!(
+        Snapshots::capture(&f.release(), &f.targets),
+        Err(InstallError::Conflict(path)) if path == plugin
+    ));
+
+    f.targets.hooks = false;
+    uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
+    assert_eq!(fs::read(plugin).unwrap(), edited);
 }
 
 #[test]
@@ -3556,7 +3689,7 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
     let claude = |dir: Option<&Path>| {
         let mut targets = Targets::new(roots.clone(), &home, &[Harness::Claude]);
         targets.hooks = true;
-        targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+        targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
         targets.apply_environment(dir, None).unwrap();
         targets
     };
@@ -3633,7 +3766,7 @@ fn claude_settings_fixture_is_pretty_and_keeps_existing_key_order() {
     let mut f = Fixture::new();
     f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
     f.targets.hooks = true;
-    f.targets.hook_specs = crate::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let settings = f.home.join(".claude/settings.json");
     fs::create_dir_all(settings.parent().unwrap()).unwrap();
     fs::write(
@@ -3830,7 +3963,12 @@ fn uninstall_without_receipt_reports_nothing_installed() {
     )
     .unwrap();
     assert!(outcome.actions.is_empty());
-    assert_eq!(outcome.findings[0].rule, "not_installed");
+    assert!(
+        outcome
+            .findings
+            .iter()
+            .any(|finding| finding.rule == "not_installed")
+    );
     assert!(!f.targets.roots.state.as_path().exists());
 }
 
@@ -3939,7 +4077,7 @@ fn inspect_install_binds_changed_tampered_bytes_with_restored_metadata_and_findi
     let inspect =
         || inspect_install(&fixture.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     let clean = inspect();
-    assert!(clean.findings.is_empty());
+    assert!(no_drift(&clean.findings));
     let repeated = inspect();
     assert_eq!(clean.findings, repeated.findings);
     assert_eq!(clean.input_digest, repeated.input_digest);
@@ -4012,7 +4150,7 @@ fn claude_fixture() -> Fixture {
     let mut f = Fixture::new();
     f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
     f.targets.hooks = true;
-    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let settings = f.home.join(".claude/settings.json");
     fs::create_dir_all(settings.parent().unwrap()).unwrap();
     fs::write(settings, b"{}").unwrap();
@@ -4280,7 +4418,7 @@ fn shared_instruction_adopts_foreign_link_and_resolves_parent() {
     );
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(
-        inspection.error.is_none() && inspection.findings.is_empty(),
+        inspection.error.is_none() && no_drift(&inspection.findings),
         "{inspection:?}"
     );
     uninstall(

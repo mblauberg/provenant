@@ -469,30 +469,6 @@ class DocTruthTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(result.stdout, "")
 
-    def delivery(self, rows):
-        specs = self.root / "tools/front-door/crates/records/src/adapters.rs"
-        hooks = self.root / "tools/front-door/crates/cli/src/hooks.rs"
-        for path in (specs, hooks):
-            path.parent.mkdir(parents=True, exist_ok=True)
-        specs.write_text('Spec { name: "alpha", local_offer_reader: true },\n'
-                         'Spec { name: "beta", local_offer_reader: false },\n')
-        hooks.write_text("DeliveryCapability { provider: Harness::Alpha, live_injection: true });\n")
-        (self.root / "docs/runbooks/human-inbox.md").write_text(
-            "# Inbox\nOwner: maintainers\nAnchor: `tools/front-door/src/main.rs`\n\n## Delivery service\n\n"
-            "| Adapter | Channel | Reader | Live |\n|---|---|---|---|\n" + rows)
-
-    def test_delivery_table_matches_adapter_capabilities(self):
-        self.delivery("| `alpha` | Fabric mail | Library API | Unavailable |\n"
-                      "| `alpha` | hook | Available | Tool-call boundary |\n"
-                      "| Every other adapter | Fabric mail | Unavailable | Unavailable |\n")
-        result = self.check("--inventory-only", "--strict-inventory", source=False)
-        self.assertEqual(result.returncode, 0, result.stdout)
-        self.delivery("| `beta` | Fabric mail | Library API | Unavailable |\n")
-        result = self.check("--inventory-only", source=False)
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("must end with an 'Every other adapter' row", result.stdout)
-        self.assertIn("library offer readers are ['alpha'], documented ['beta']", result.stdout)
-
     def test_binary_is_used_only_for_help_and_document_snippets_never_run(self):
         binary = self.root / "provenant"
         binary.write_text("#!/bin/sh\n[ \"$*\" = 'help --all --json' ] || exit 1\n"

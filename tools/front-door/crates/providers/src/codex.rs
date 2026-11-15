@@ -82,12 +82,11 @@ const MODEL_ON_WIRE: bool = false;
 /// confinement when requested.
 fn prepare(
     input: &PrepareInput<'_>,
-    access: Access,
+    _access: Access,
     session: Session,
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    let mut tool_requirements = crate::launch::ToolRequirements::default();
     if input.confined.codex_policy() != CodexPolicy::Clean {
         return Err(input.boundary_error(
             "CODEX_PREPARE_AUTHORITY",
@@ -211,15 +210,7 @@ fn prepare(
         false,
         input.policy,
     )?;
-    crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
     if input.sandboxed() {
-        crate::launch::node_tools(
-            input.home,
-            access,
-            crate::launch::lane_cache(input),
-            &mut tool_requirements,
-            &mut env,
-        );
         env.extend([
             ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
@@ -253,7 +244,7 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: staged_skills,
-        tool_requirements,
+        tool_requirements: Default::default(),
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),
@@ -282,9 +273,6 @@ fn prepare(
         stream,
     };
     crate::launch::prepare_tool_requirements(input, &mut spec)?;
-    input
-        .provenant
-        .grant(&mut spec.profile.spec, &mut spec.setup, false);
     Ok(spec)
 }
 

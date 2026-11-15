@@ -32,6 +32,7 @@ fn input() -> std::result::Result<PreparedRun, Box<dyn std::error::Error>> {
             fresh_continuation: None,
             schema_version: 1,
             task: TaskRequest {
+                limit_extensions: Default::default(),
                 context: Some(WorkContext {
                     graph_id: Some("receipt".into()),
                     node_id: Some("node".into()),

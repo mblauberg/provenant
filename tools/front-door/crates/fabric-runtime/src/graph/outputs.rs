@@ -5,12 +5,6 @@ pub(super) const OUTPUT_FIELD_BYTES: usize = 1024;
 pub(super) const SEPARATION_FAMILIES: usize = 8;
 pub(super) const FAMILY_BYTES: usize = 64;
 pub(super) const MAX_FINDINGS: usize = 32;
-/// Checkpoint extension holding the original bounded synthesis block.
-const COMPACT_FINDINGS: &str = "_compact_disposition_findings";
-// Existing content-addressed checkpoint text storage externalises this block;
-// it is rehydrated only for validation and consumers, alongside the original
-// immutable attempt result. The checkpoint's findings list stays a summary.
-const ARTIFACT_FINDINGS: &str = "_artifact_findings";
 
 /// Soft per-node budget for inherited disposition descriptions.
 const DISPOSITION_TEXT_TARGET: usize = 64 * 1024;
@@ -552,7 +546,7 @@ fn parse_findings(
                     && !entry.contains_key("propagates")
                     && let Some(marker) = source.propagates.as_deref()
                 {
-                    entry.insert("propagates".into(), marker.clone());
+                    entry.insert("propagates".into(), marker.into());
                 }
                 let inherited = serde_json::to_value(source)
                     .map_err(|_| fail("id", "cannot encode upstream finding"))?;

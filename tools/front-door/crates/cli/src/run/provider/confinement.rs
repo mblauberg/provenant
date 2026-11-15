@@ -456,7 +456,7 @@ fn sandbox_mode_for_access(
             .knob_sources
             .get("lanes.sandbox_floor")
             .copied()
-            .map(provenant_records::run::LimitSource::as_str)
+            .map(provenant_records::LimitSource::as_str)
             .unwrap_or("default");
         let warning = format!(
             "sandbox admission floor lowered; lanes.sandbox_floor=warn (source: {source}, boundary: none)"
@@ -541,7 +541,7 @@ pub(super) fn apply_sandbox_mode(
             .knob_sources
             .get("lanes.sandbox_floor")
             .copied()
-            .map(provenant_records::run::LimitSource::as_str)
+            .map(provenant_records::LimitSource::as_str)
             .unwrap_or("default"),
     }));
     environment.retain(|(name, _)| name != SANDBOX);

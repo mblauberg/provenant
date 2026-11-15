@@ -869,41 +869,6 @@ impl LaneRuntime<'_> {
         ])
     }
 
-    pub(crate) fn claude(
-        &self,
-        scratch: &Path,
-        argv: &mut Vec<OsString>,
-        policy: &Policy,
-        allowed_tools: Option<&str>,
-        image_rules: &[String],
-    ) -> Result<Vec<SetupStep>, ProviderError> {
-        let mut settings = provenant_config::claude_lane_settings(self.executable, self.state)
-            .map_err(|_| {
-                policy.boundary_error(
-                    "LANE_LANERUNTIME_CLAUDE_AUTHORITY",
-                    Facts::violation(
-                        "Claude's Provenant hook settings cannot represent the selected executable or state path",
-                    ),
-                    ProviderError::InvalidPath,
-                )
-            })?;
-        settings["attribution"] = serde_json::json!({"commit": "", "pr": ""});
-        if !image_rules.is_empty() {
-            settings["permissions"]["allow"] = serde_json::json!(image_rules);
-        }
-        let mut steps = Vec::new();
-        let path = scratch.join("provenant-settings.json");
-        let bytes = serde_json::to_vec(&settings).map_err(|_| ProviderError::Malformed)?;
-        argv.extend(["--settings".into(), path.clone().into_os_string()]);
-        steps.push(SetupStep::WriteFile { path, bytes });
-        // Settings are explicitly sourced from our generated document only.
-        argv.extend(["--setting-sources".into(), "".into()]);
-        if let Some(tools) = allowed_tools {
-            argv.extend(["--allowedTools".into(), tools.into()]);
-        }
-        Ok(steps)
-    }
-
     /// `scrubbed_git_config` is for a provider whose shell subprocesses lose
     /// `GIT_CONFIG_GLOBAL`: `scratch/bin/git` then wraps the selected Git and
     /// sets the variable itself, and restores its configured global file.
@@ -2904,34 +2869,13 @@ mod tests {
     }
 
     #[test]
-    fn unrepresentable_paths_are_refused_and_claude_settings_survive() -> Result<(), ProviderError>
-    {
+    fn unrepresentable_git_paths_are_rejected() -> Result<(), ProviderError> {
         use std::os::unix::ffi::OsStringExt;
         let bad = PathBuf::from(OsString::from_vec(b"/fixture/\xff".to_vec()));
         assert!(matches!(
             fixture_lane(&bad, 1).pinned_environment(),
             Err(ProviderError::InvalidPath)
         ));
-        let lane = fixture_lane(Path::new("/fixture/git"), 1);
-        let mut claude = Vec::new();
-        let setup = lane.claude(
-            Path::new("/fixture/scratch"),
-            &mut claude,
-            crate::tests::fixture_policy(),
-            Some("Bash"),
-            &[],
-        )?;
-        let documents: Vec<serde_json::Value> = setup
-            .iter()
-            .filter_map(|step| match step {
-                SetupStep::WriteFile { bytes, .. } => serde_json::from_slice(bytes).ok(),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(documents.len(), 1);
-        assert!(documents[0]["hooks"].is_object());
-        assert!(claude.iter().any(|arg| arg == "--setting-sources"));
-        assert!(claude.iter().all(|arg| arg != "--mcp-config"));
         Ok(())
     }
 
@@ -2965,10 +2909,7 @@ mod tests {
         };
         let policy = crate::tests::fixture_policy();
 
-        for code in [
-            "LANE_LANERUNTIME_CLAUDE_AUTHORITY",
-            "LANE_LANERUNTIME_ENVIRONMENT_AUTHORITY",
-        ] {
+        for code in ["LANE_LANERUNTIME_ENVIRONMENT_AUTHORITY"] {
             let rule = &policy.rule(code).rule;
             assert_eq!(
                 rule.boundary,
@@ -2978,11 +2919,6 @@ mod tests {
             assert!(rule.knob.is_none());
         }
 
-        let mut argv = Vec::new();
-        assert!(matches!(
-            lane.claude(Path::new("/fixture/scratch"), &mut argv, policy, None, &[],),
-            Err(ProviderError::InvalidPath)
-        ));
         let mut env = Vec::new();
         let mut setup = Vec::new();
         let error = lane

@@ -2562,6 +2562,10 @@ fn container_retry_brief_names_the_field_and_template_the_container_came_from() 
     checkpoint.expansions.push(plans::Expansion {
         extra: Default::default(),
         retired: None,
+        retry_generation: None,
+        final_result: false,
+        final_fragment: false,
+        floor_warnings: Vec::new(),
         source: String::new(),
         nodes: Vec::new(),
         uses: vec![patch::TemplateUse {

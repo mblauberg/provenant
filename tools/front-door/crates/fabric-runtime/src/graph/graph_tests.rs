@@ -494,7 +494,6 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         attachments: Vec::new(),
         family_group: None,
         context: None,
-        replay_digest: None,
         extra: Default::default(),
         composite_members: Vec::new(),
         when: Vec::new(),
@@ -537,6 +536,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         required_verdict: None,
         require_findings: false,
         skip_without_findings: None,
+        ..Default::default()
     }
 }
 
@@ -561,6 +561,7 @@ fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
         template_resolvers: Default::default(),
         peer_origin_work_key: None,
         review_tier_override: None,
+        replay_digest: None,
         schema_version: 1,
         graph_id: "g-test".to_owned(),
         nodes,

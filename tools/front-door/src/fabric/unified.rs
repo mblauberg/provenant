@@ -653,17 +653,9 @@ pub(crate) fn enrich_status_rows_within(
                 PeerResult::Run { data, .. } => match *data {
                     RunResult::Status {
                         attempt: record,
-                        extra,
-                    } if record.attempt_id == attempt => {
-                        let waits = extra
-                            .get("lane_waits")
-                            .cloned()
-                            .map(serde_json::from_value)
-                            .transpose()
-                            .map_err(|_| FacadeError::StateCorrupt)?
-                            .unwrap_or_default();
-                        (record, waits)
-                    }
+                        lane_waits,
+                        ..
+                    } if record.attempt_id == attempt => (record, lane_waits),
                     _ => return Err(FacadeError::StateCorrupt),
                 },
                 _ => return Err(FacadeError::StateCorrupt),

@@ -778,6 +778,22 @@ pub(super) fn validate_flat_plan(
             when: node.when.clone(),
             require_findings: node.require_findings,
             skip_without_findings: node.skip_without_findings,
+            template: node.template.clone(),
+            review_base: node.review_base.clone(),
+            capability_sources: node.capability_sources.clone(),
+            repair_scope_gate: node.repair_scope_gate,
+            detached: node.detached,
+            provision_worktree: node.provision_worktree,
+            review_behaviour: node.review_behaviour,
+            removed_requirements: node.removed_requirements.clone(),
+            parent_node: node.parent_node.clone(),
+            review_lens: node.review_lens.clone(),
+            repair_lens: node.repair_lens.clone(),
+            repair_writer: node.repair_writer,
+            repair_triage: node.repair_triage,
+            repair_risk_assessment: node.repair_risk_assessment,
+            retry_generation: node.retry_generation,
+            container_retry: node.container_retry,
         });
     }
 

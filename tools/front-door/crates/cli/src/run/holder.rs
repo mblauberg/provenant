@@ -907,6 +907,7 @@ mod tests {
                 fresh_continuation: None,
                 schema_version: 1,
                 task: run::TaskRequest {
+                    limit_extensions: Default::default(),
                     context: Some(provenant_records::run::WorkContext {
                         graph_id: Some(format!("lane-{id}")),
                         node_id: Some("node".into()),
