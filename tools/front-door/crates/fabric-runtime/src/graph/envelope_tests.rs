@@ -840,7 +840,7 @@ fn a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit() {
         .bind(GraphExecution {
             extra: Default::default(),
             bases: None,
-            directory: base.clone(),
+            directory: inputs.checkout.clone(),
             document: document.clone(),
         })
         .unwrap();
@@ -931,7 +931,7 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
             .bind(GraphExecution {
                 extra: Default::default(),
                 bases: None,
-                directory: base.clone(),
+                directory: inputs.checkout.clone(),
                 document: document.clone(),
             })
             .unwrap();

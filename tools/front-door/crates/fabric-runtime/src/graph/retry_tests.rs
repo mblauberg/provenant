@@ -218,7 +218,7 @@ fn redo_container_after_checkpoint_crash(
         .bind(GraphExecution {
             extra: Default::default(),
             bases: None,
-            directory: base,
+            directory: inputs.checkout.clone(),
             document: document.clone(),
         })
         .unwrap();
@@ -1447,7 +1447,7 @@ fn retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work() {
         .bind(GraphExecution {
             extra: Default::default(),
             bases: None,
-            directory: base,
+            directory: inputs.checkout.clone(),
             document: document.clone(),
         })
         .unwrap();
@@ -2069,7 +2069,7 @@ fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
         .bind(GraphExecution {
             extra: Default::default(),
             bases: None,
-            directory: base,
+            directory: inputs.checkout.clone(),
             document: document.clone(),
         })
         .unwrap();
@@ -2165,7 +2165,7 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
         .bind(GraphExecution {
             extra: Default::default(),
             bases: None,
-            directory: base,
+            directory: inputs.checkout.clone(),
             document: document.clone(),
         })
         .unwrap();

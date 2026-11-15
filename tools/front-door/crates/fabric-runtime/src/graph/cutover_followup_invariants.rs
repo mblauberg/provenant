@@ -461,7 +461,7 @@ fn a_cancel_after_checkpoint_reload_closes_every_linked_inbox_request() {
             .bind(GraphExecution {
                 extra: Default::default(),
                 bases: None,
-                directory: base.clone(),
+                directory: inputs.checkout.clone(),
                 document: document.clone(),
             })
             .unwrap();

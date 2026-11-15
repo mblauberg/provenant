@@ -896,7 +896,7 @@ fn loop_delivery_retry_reopens_failed_wrapper_and_dependants() {
             .bind(GraphExecution {
                 extra: Default::default(),
                 bases: None,
-                directory: base.clone(),
+                directory: inputs.checkout.clone(),
                 document: document.clone(),
             })
             .unwrap();
@@ -1723,7 +1723,7 @@ fn loop_cancelled_ask_cleanup_replays_after_failure_and_crash() {
             .bind(GraphExecution {
                 extra: Default::default(),
                 bases: None,
-                directory: base.clone(),
+                directory: inputs.checkout.clone(),
                 document: document.clone(),
             })
             .unwrap();

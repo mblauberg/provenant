@@ -28,7 +28,7 @@ fn stored_fixture() -> StoredCheckpoint {
     let execution = GraphExecution {
         extra: Default::default(),
         bases: None,
-        directory: base.clone(),
+        directory: inputs.checkout.clone(),
         document: document.clone(),
     };
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
@@ -316,7 +316,7 @@ fn manual_resume_publishes_marker_before_reopened_checkpoint() {
         .bind(GraphExecution {
             extra: Default::default(),
             bases: None,
-            directory: base.clone(),
+            directory: inputs.checkout.clone(),
             document: document.clone(),
         })
         .unwrap();
@@ -660,7 +660,7 @@ fn checkpoint_collection_removes_matching_scratch_documents() {
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
     let mut fixture: StoredCheckpoint = stored_fixture();
-    fixture.execution.directory = base.join("checkout");
+    fixture.execution.directory = inputs.checkout.clone();
     fixture.checkpoint.nodes[0].state = NodeState::Running;
     let scratch = fixture
         .execution
@@ -1110,7 +1110,7 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
     let read = || FileJournal::read_advance_error(&root, project, "errors").unwrap();
     assert_eq!(read(), None);
     let mut journal = FileJournal::open(&root, project, "errors", budget, &cancel, &clock).unwrap();
-    for directory in [base.clone(), base.join("state")] {
+    for directory in [inputs.checkout.clone(), inputs.home.clone()] {
         journal
             .bind(GraphExecution {
                 extra: Default::default(),
@@ -1124,7 +1124,7 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
     let execution = FileJournal::execution(&root, project, "errors")
         .unwrap()
         .unwrap();
-    assert_eq!(execution.directory, base);
+    assert_eq!(execution.directory, inputs.checkout);
     // Recording takes no graph lock, so it works while the journal is held.
     let set = |error| FileJournal::set_advance_error(&root, project, "errors", error).unwrap();
     set(Some("first"));
@@ -1143,7 +1143,7 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
         .bind(GraphExecution {
             extra: Default::default(),
             bases: None,
-            directory: base.join("state"),
+            directory: inputs.home.clone(),
             document: document.clone(),
         })
         .unwrap();
@@ -1153,7 +1153,7 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
             .unwrap()
             .unwrap()
             .directory,
-        base
+        inputs.checkout
     );
 }
 #[test]
@@ -1185,7 +1185,7 @@ fn schema_two_document_with_optional_fields_absent_reloads() {
             .bind(GraphExecution {
                 extra: Default::default(),
                 bases: None,
-                directory: base.clone(),
+                directory: inputs.checkout.clone(),
                 document: document.clone(),
             })
             .unwrap();
@@ -1229,7 +1229,7 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
     let execution = GraphExecution {
         extra: Default::default(),
         bases: Some(bases),
-        directory: base.clone(),
+        directory: inputs.checkout.clone(),
         document: document.clone(),
     };
     assert!(
@@ -1395,7 +1395,7 @@ fn bound_attempt_manifest_survives_file_journal_reopen_and_reattachment() {
     let execution = GraphExecution {
         extra: Default::default(),
         bases: None,
-        directory: base_dir.clone(),
+        directory: inputs.checkout.clone(),
         document: document.clone(),
     };
     let mut owner = RecordingOwner::default();
@@ -1509,7 +1509,7 @@ fn implicit_writer_binding_reattaches_without_resolving_the_moved_head() {
     let execution = GraphExecution {
         extra: Default::default(),
         bases: None,
-        directory: directory.clone(),
+        directory: inputs.checkout.clone(),
         document: document.clone(),
     };
     let first_head = "1".repeat(40);
@@ -1614,7 +1614,7 @@ fn prompts_are_stored_by_digest_and_collected_with_the_graph() {
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
     let mut fixture: StoredCheckpoint = stored_fixture();
-    fixture.execution.directory = base.clone();
+    fixture.execution.directory = inputs.checkout.clone();
     let node = fixture.execution.document.nodes[0].clone();
     let state = fixture.checkpoint.nodes[0].clone();
     fixture.execution.document.nodes.clear();
@@ -1708,7 +1708,7 @@ mod launch_recovery {
                 execution: GraphExecution {
                     extra: Default::default(),
                     bases: None,
-                    directory: base,
+                    directory: inputs.checkout.clone(),
                     document: serde_json::from_value(serde_json::json!({
                         "schema_version":2, "graph_id":"launch-recovery", "nodes":nodes
                     }))

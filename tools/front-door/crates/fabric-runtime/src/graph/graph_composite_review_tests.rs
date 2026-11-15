@@ -529,7 +529,7 @@ fn status_and_replay_agree_on_persisted_partial_composite() {
         .bind(GraphExecution {
             extra: Default::default(),
             bases: None,
-            directory: base,
+            directory: inputs.checkout.clone(),
             document: document.clone(),
         })
         .unwrap();

@@ -567,7 +567,7 @@ fn launched_reader_stop_restart_replays_file_checkpoint_without_new_work() {
         .bind(GraphExecution {
             extra: Default::default(),
             bases: None,
-            directory: base,
+            directory: inputs.checkout.clone(),
             document: document.clone(),
         })
         .unwrap();
