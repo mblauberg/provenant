@@ -138,7 +138,7 @@ fn suite() -> Result {
     );
     let out = rig.execute(&executable, &["descendants"], None)?;
     assert_eq!(out.stdout.bytes, b"ready\nterminal\nreaped\n");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 fn account_placement() -> Result {
     use provenant_confinement::permissions::{
@@ -342,7 +342,7 @@ fn account_placement() -> Result {
     }
     seen.sort();
     assert_eq!(seen, ["one", "two"]);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 fn main() -> ExitCode {

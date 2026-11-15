@@ -82,7 +82,7 @@ fn identity_mail_tasks_and_events_use_durable_scoped_receipts() -> Result {
         2,
     )?;
     assert_eq!(conflict["status"], "invalid");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn custody_claim_adoption_and_release_share_the_mine_view() -> Result {
@@ -142,7 +142,7 @@ fn custody_claim_adoption_and_release_share_the_mine_view() -> Result {
             .iter()
             .any(|item| item["subject"]["id"] == "3078" && item["state"]["state"] == "released")
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn malformed_operations_and_waits_fail_before_state_creation() -> Result {
@@ -170,7 +170,7 @@ fn malformed_operations_and_waits_fail_before_state_creation() -> Result {
             .any(|v| v["command"] == "provenant fabric claim list")
     );
     assert!(!rig.state.exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn domain_config_accepts_typed_peers_and_only_lower_limits() -> Result {
@@ -211,7 +211,7 @@ fn domain_config_accepts_typed_peers_and_only_lower_limits() -> Result {
         !rig.state.join("fabric/fabric.sqlite3").exists()
             || call(&rig, &["fabric", "mail", "read"], 0)?["data"]["page"]["items"] == json!([])
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -266,7 +266,7 @@ fn linked_worktrees_share_projects_and_ignore_git_redirects() -> Result {
     let non_git = call(&rig, &["fabric", "identity"], 0)?;
     assert_ne!(primary["data"]["project"], non_git["data"]["project"]);
     assert_eq!(non_git["data"]["federation"], Value::Null);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -307,7 +307,7 @@ fn non_git_directories_beneath_home_stay_local_and_remote_homes_refuse_local_wri
     )?;
     assert_eq!(refused["error"]["code"], "home_unavailable");
     assert!(!rig.state.join("fabric/fabric.sqlite3").exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]

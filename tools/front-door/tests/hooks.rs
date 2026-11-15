@@ -99,7 +99,7 @@ fn recorded_claude_events_use_native_protocol_and_never_touch_legacy_state() -> 
         }
         assert!(output.stdout.bytes.len() <= 8192);
     }
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]

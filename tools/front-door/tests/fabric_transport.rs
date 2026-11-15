@@ -82,7 +82,7 @@ fn peer_health_advertises_graph_submission() -> Result {
     assert_eq!(health["execution"], true, "{health}");
     assert_eq!(health["run_capabilities"]["submit"], true, "{health}");
     assert!(!rig.state.join("attempts").exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -124,7 +124,7 @@ fn peer_doctor_returns_the_local_report() -> Result {
     let report = &response["result"]["data"];
     assert!(report["claude"].is_array(), "{report}");
     assert!(report["peer_agent"].is_string(), "{report}");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn hosts_doctor_uses_the_configured_peer_transport() -> Result {
     let request: Value = serde_json::from_slice(&std::fs::read(request)?)?;
     assert_eq!(request["action"], json!({"action": "doctor"}), "{request}");
     assert_eq!(request["protocol"], DOCTOR_PROTOCOL, "{request}");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn hosts_doctor_unknown_peer_refuses_with_unknown_host() -> Result {
     let (status, output) = json_command(&rig, &["hosts", "doctor", "nowhere", "--json"])?;
     assert_ne!(status, 0);
     assert_eq!(output["error"]["code"], "UNKNOWN_HOST", "{output}");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -267,7 +267,7 @@ fn hosts_doctor_rejects_untrusted_peer_reports() -> Result {
         );
         assert!(output["error"]["code"].as_str().is_some(), "{output}");
     }
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -305,7 +305,7 @@ fn peer_run_statuses_refuses_more_than_one_page() -> Result {
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(response["result"]["result"], "error");
     assert_eq!(response["result"]["data"]["error"]["code"], "invalid_input");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -349,7 +349,7 @@ fn peer_console_inbox_is_read_only_and_refuses_an_oversized_page() -> Result {
     // A peer on the previous feature fence is refused before the action decodes.
     let old = ask(CONSOLE_DETAIL_PROTOCOL, 50)?;
     assert_eq!(old["result"]["data"]["error"]["code"], "peer_version");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -392,7 +392,7 @@ fn peer_wait_refuses_remote_fanout() -> Result {
         response["result"]["data"]["error"]["code"],
         "confinement_refused"
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn peer_ingress_refuses_protocol_before_decoding_or_running_mutations() -> Result {
@@ -425,7 +425,7 @@ fn peer_ingress_refuses_protocol_before_decoding_or_running_mutations() -> Resul
             assert!(!rig.state.join("fabric/fabric.sqlite3").exists());
         }
     }
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -440,7 +440,7 @@ fn peer_ingress_rejects_wrong_host_before_coordination_mutation() -> Result {
     assert_eq!(code(&output), 3);
     assert!(output.stdout.bytes.is_empty());
     assert!(!rig.state.join("fabric/fabric.sqlite3").exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -478,7 +478,7 @@ fn peer_ingress_refuses_the_target_host_as_source() -> Result {
             .contains("peer source host must be a configured peer other than this host")
     );
     assert!(!rig.state.join("fabric/fabric.sqlite3").exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -511,7 +511,7 @@ fn peer_ingress_refuses_a_trace_naming_another_host_than_the_sender() -> Result 
     assert_eq!(code(&served), 0, "{:?}", served.stderr.bytes);
     let reply: Value = serde_json::from_slice(&served.stdout.bytes)?;
     assert_eq!(reply["result"]["result"], "health", "{reply}");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -558,7 +558,7 @@ fn peer_replays_a_home_mutation_once_with_the_original_actor() -> Result {
     let items = events["data"]["page"]["items"].as_array().ok_or("events")?;
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["record"]["detail"], "remote note");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -614,7 +614,7 @@ fn peer_frames_a_local_run_event_failure() -> Result {
             ..
         }
     ));
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -901,7 +901,7 @@ fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result
             .any(|row| row["kind"] == "graph" && row["state"] == "cancelled"),
         "{cancelled}"
     );
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }
@@ -981,7 +981,7 @@ fn submission_preserves_explicit_named_route_tier() -> Result {
             effort: None,
         }
     );
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }
@@ -997,7 +997,7 @@ fn submission_stamps_the_local_host_on_its_trace() -> Result {
         submitted_policy(&rig, "trace-host", json!({"kind":"named","name":"senior"}))?;
     assert_eq!(attempt["trace"]["host"], identity["data"]["host"]);
     assert_eq!(attempt["trace"]["attempt"], attempt["attempt_id"]);
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }
@@ -1024,7 +1024,7 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
     assert!(!plan.silent(1999, Some(0)));
     assert!(plan.silent(2000, Some(0)));
     assert!(!plan.silent(2000, Some(2000)));
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }
@@ -1266,7 +1266,7 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
     assert_eq!(replayed, after);
     assert_eq!(std::fs::read(&legacy_path)?, legacy);
     assert_eq!(std::fs::read(&origin_legacy_path)?, legacy);
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }
@@ -1297,7 +1297,7 @@ fn peer_dispatch_set_host_reaches_the_peer_attempt() -> Result {
         std::fs::read_dir(rig.root.join("peer-state/attempts"))?.count(),
         1
     );
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }
@@ -1352,7 +1352,7 @@ fn peer_dispatch_refuses_an_oversized_frame_before_contact() -> Result {
     }
     assert!(!rig.root.join("peer-stderr").exists());
     assert!(!rig.root.join("peer-state/attempts").exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -1404,7 +1404,7 @@ fn peer_dispatch_refuses_misplaced_writers_and_unknown_hosts_before_contact() ->
     }
     assert!(!contacted.exists());
     assert!(!rig.root.join("peer-state/attempts").exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -1570,7 +1570,7 @@ fn peer_dispatch_launches_a_large_argv_prompt() -> Result {
         reference
     );
     assert_eq!(std::fs::read_dir(&attempts)?.count(), launched, "{replay}");
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }
@@ -2436,7 +2436,7 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
         Some(format!("{peer}/{attempt}").as_str())
     );
 
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }

@@ -1098,7 +1098,7 @@ fn graph_opencode_observes_v2_wal_session() -> Result {
                 assert!(!lane["reason"].to_string().contains("misspelt"), "{lane}");
             }
         }
-        rig.assert_legacy_unchanged()?;
+        rig.assert_v1_root_untouched()?;
         cleanup.disarm();
     }
     Ok(())
@@ -1444,7 +1444,7 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
         assert!(lane["started_at"].is_null(), "{lane}");
         assert!(lane["applied_route"].is_null(), "{lane}");
         assert!(account.join("refreshed").exists());
-        rig.assert_legacy_unchanged()?;
+        rig.assert_v1_root_untouched()?;
         cleanup.disarm();
         return Ok(());
     }
@@ -1520,7 +1520,7 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
             );
         }
     }
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }
@@ -4566,7 +4566,7 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
         "--json",
     ])?;
     assert_eq!(code(&out), 0);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 fn main() -> ExitCode {

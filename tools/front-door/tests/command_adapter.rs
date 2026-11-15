@@ -813,7 +813,7 @@ fn disk_report_json_and_human_output_leave_missing_state_absent() -> support::Re
     assert!(String::from_utf8(human.stdout.bytes)?.contains("class=worktree"));
     assert!(!rig.state.exists());
     assert_eq!(std::fs::read(rig.project.join(".git/index")).ok(), before);
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     Ok(())
 }
 

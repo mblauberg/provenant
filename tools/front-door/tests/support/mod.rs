@@ -13,8 +13,8 @@ use std::{
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-// Slice A owns the production graph version declarations. Keep graph fixtures
-// on the current format until those public declarations are integrated.
+// Current graph format, mirrored here because the validator/journal do not
+// expose their version declarations to integration fixtures.
 pub const GRAPH_DOCUMENT_SCHEMA_VERSION: u32 = 2;
 pub const GRAPH_CHECKPOINT_SCHEMA_VERSION: u64 = 2;
 
@@ -599,7 +599,7 @@ impl TestRig {
         Ok(serde_json::to_value(checkpoint)?)
     }
 
-    pub fn assert_legacy_unchanged(&self) -> Result {
+    pub fn assert_v1_root_untouched(&self) -> Result {
         for tail in [
             ".agents/sentinel",
             ".local/state/agent-harness/sentinel",

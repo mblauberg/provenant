@@ -59,7 +59,7 @@ fn cli_usage_records_exclude_arguments_prompts_and_results() -> Result {
             .contains(&key.as_str())
         }));
     }
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn project_usage_is_captured_before_commands_and_labels_subset_rows() -> Result 
             .lines()
             .any(|line| line.contains(&format!("cli.verb  root  project={project}")))
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -129,5 +129,5 @@ fn usage_report_includes_zero_count_cli_verbs() -> Result {
             .iter()
             .any(|v| v["kind"] == "cli.verb" && v["unit"] == "quota tick")
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }

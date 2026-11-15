@@ -417,7 +417,7 @@ fn check_install_source_failures_keep_the_typed_outcome() -> Result {
         assert_ne!(code(&output), 0);
     }
     assert!(!rig.state.exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -544,7 +544,7 @@ fn real_install_check_uninstall_use_only_the_isolated_home() -> Result {
     );
     assert!(!rig.root.join("codex/skills/example").exists());
     assert!(rig.home.join(".local/bin/provenant").is_symlink());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -597,7 +597,7 @@ fn external_claude_config_without_home_move_keeps_ownership() -> Result {
     assert_eq!(report["data"]["outcome"]["findings"], serde_json::json!([]));
     assert!(fs::symlink_metadata(config.join("skills/example")).is_err());
     assert!(!fs::read_to_string(config.join("settings.json"))?.contains("'hook' 'claude'"));
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -729,7 +729,7 @@ fn hook_ownership_survives_upgrade_without_flags_and_explicit_off_removes_it() -
         } else {
             assert!(!retained.contains("'hook' 'claude'"));
         }
-        rig.assert_legacy_unchanged()?;
+        rig.assert_v1_root_untouched()?;
     }
     Ok(())
 }
@@ -756,7 +756,7 @@ fn unknown_install_flag_is_rejected_without_writes() -> Result {
     );
     assert!(message.contains("--unknown-install-option"), "{message}");
     assert!(!rig.state.exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -2397,7 +2397,7 @@ fn install_and_upgrade_leave_every_registered_account_identical() -> Result {
         fs::read(claude[1].join(".credentials.json"))?,
         b"fixture credential"
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
