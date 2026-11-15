@@ -144,6 +144,12 @@ An occupied concurrency threshold warns and proceeds unless its declared policy 
 - Why: a graph that starts must be able to finish within its bounds.
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
+### Composite settlement
+
+A composite's state, outputs and error summary derive from its members. A patch that replaces or skips a member recomputes the affected composite boundaries in the same checkpoint.
+- Why: recovery must validate a checkpoint against the topology it records.
+- Owner: `crates/fabric-runtime/src/graph/composites.rs`, `crates/fabric-runtime/src/graph/patch.rs`
+
 ### Live steering unavailable
 
 Every provider currently returns `control_unsupported` for live steering; delivery transports come later (2.1, #3278).
