@@ -796,6 +796,9 @@ fn run_list_is_compact_and_pages_newest_first() -> Result<(), Box<dyn std::error
         "provider":"fixture", "model":"fixture/model", "effort":"high",
         "account_label":"fixture", "account_key":"private-key", "source":"pool",
         "pool_selection": {
+            "selection_rule":"weighted_draw", "considered_exclusions":[],
+            "exploration":{"selected":false, "percent":0, "enabled":false, "source":"fixture"},
+            "weight_source":"config", "account_load":null,
             "pool":"senior", "candidates":[], "roll":0, "total_weight":1,
             "pick":"fixture/model"
         }
