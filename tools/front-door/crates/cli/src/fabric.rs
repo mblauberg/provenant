@@ -5,8 +5,8 @@ pub mod graph_relay;
 
 /// Shared identity/config setup for CLI leaves and the binary's fabric edges.
 pub use context::{
-    Context, PeerFailure, acquire_custody, chair_process, checkout_branch, current_chair,
-    current_session, facade_outcome, in_lane, publish,
+    Context, PeerFailure, acquire_custody, chair_process, checkout_branch, checkout_subject, current_chair,
+    current_session, facade_outcome, in_lane, inspect_checkout_subject, publish,
 };
 
 /// Trusted project and actor identity for sibling leaves such as workflow.
@@ -184,6 +184,8 @@ pub enum EdgeError {
     Root(#[from] provenant_core::RootError),
     #[error(transparent)]
     Utility(#[from] provenant_confinement::utility::UtilityError),
+    #[error(transparent)]
+    CheckoutCustody(#[from] provenant_confinement::worktrees::WorktreeError),
     #[error(transparent)]
     Time(#[from] provenant_core::TimeError),
     #[error(transparent)]

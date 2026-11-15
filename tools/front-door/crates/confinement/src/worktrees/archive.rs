@@ -90,7 +90,7 @@ pub(super) fn capture(
             GitRefName::discard_archive(&ref_id).map_err(|_| WorktreeError::InvalidRequest)?;
         execute_mutation(
             context,
-            GitMutation::CreateArchiveRef {
+            GitMutation::CreatePreservationRef {
                 reference: reference.clone(),
                 tip,
             },

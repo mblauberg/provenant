@@ -122,6 +122,7 @@ pub trait RetirementFeeds {
     fn authority(&self) -> Result<provenant_core::ActorId, String>;
     fn custody(&self, lane: &WorktreeInfo) -> Result<(), String>;
     fn forge(&self, branch: &GitRefName) -> ForgeObservation;
+    fn fresh_forge(&self, branch: &GitRefName) -> ForgeObservation;
     fn integration_bases(&self) -> Vec<(String, GitOid)>;
     fn remote_guard(
         &self,
@@ -197,16 +198,14 @@ fn kept_landing_record(
 ) -> RemovalRecord {
     RemovalRecord {
         project,
-        subject: Subject::new(SubjectKind::Worktree, lane.path.to_string_lossy()),
+        subject: Subject::new(SubjectKind::Path, lane.path.to_string_lossy()),
         tip: lane.head,
         outcome: RemovalOutcome::Kept { cause },
     }
 }
 
 fn canonical_worktree_subject(verified: &VerifiedWorktree) -> Result<Subject, WorktreeError> {
-    let canonical = canonicalize(verified.path())?;
-    let path = canonical.to_str().ok_or(WorktreeError::InvalidRequest)?;
-    Ok(Subject::new(SubjectKind::Worktree, path))
+    super::acquire_worktree_subject(verified.repo())
 }
 
 fn pending_retirement_for_candidate(
@@ -269,6 +268,13 @@ fn validate_forge_head(
     branch: &GitRefName,
     evidence: &LandedEvidence,
 ) -> Result<(), WorktreeError> {
+    validate_forge_observation(feeds.forge(branch), evidence)
+}
+
+fn validate_forge_observation(
+    observation: ForgeObservation,
+    evidence: &LandedEvidence,
+) -> Result<(), WorktreeError> {
     let LandingSource::ForgeMerged {
         pr,
         head,
@@ -277,7 +283,7 @@ fn validate_forge_head(
     else {
         return Ok(());
     };
-    match feeds.forge(branch) {
+    match observation {
         ForgeObservation::Merged {
             pr: current_pr,
             head: current_head,
@@ -460,11 +466,6 @@ pub(super) fn begin_worktree_retirement(
         return Err(WorktreeError::InvalidRequest);
     }
     let reference = retirement_reference(context, port, lane, verified, &decision, cancel)?;
-    let worktree_path = match &reference.endpoint {
-        RefEndpoint::Worktree { path } => path.clone(),
-        _ => worktree.id.clone(),
-    };
-    let worktree = Subject::new(SubjectKind::Worktree, worktree_path);
     begin_retirement_step(
         context,
         port,
@@ -609,7 +610,7 @@ pub(super) fn finish_worktree_retirement(
         .related_subjects
         .iter()
         .find(|subject| subject.kind == SubjectKind::Worktree)
-        .filter(|subject| Path::new(&subject.id) == path)
+        .filter(|subject| subject.worktree_path().as_deref() == Some(path))
         .cloned()
         .ok_or(WorktreeError::IdentityChanged)?;
     let step = RetirementStep::Worktree { subject };
@@ -636,7 +637,7 @@ pub(super) fn fail_worktree_retirement(
         .related_subjects
         .iter()
         .find(|subject| subject.kind == SubjectKind::Worktree)
-        .filter(|subject| Path::new(&subject.id) == path)
+        .filter(|subject| subject.worktree_path().as_deref() == Some(path))
         .cloned()
         .ok_or(WorktreeError::IdentityChanged)?;
     update_retirement_step(
@@ -691,12 +692,12 @@ fn path_is_absent(path: &Path) -> Result<bool, WorktreeError> {
     }
 }
 
-/// Recover only outcomes whose absence is proved by fresh repository and
-/// filesystem observations. Present candidates stay pending for the R3
-/// selector to re-evaluate with current retention evidence.
+/// Recover outcomes only after fresh filesystem and repository evidence proves
+/// the linked worktree is gone and its reference can safely be retired.
 pub fn resume_pending_retirements(
     context: &WorktreeContext<'_>,
     port: &dyn RetirementPort,
+    feeds: &dyn RetirementFeeds,
     cancel: &CancelToken,
 ) -> Result<Vec<RetirementRecord>, WorktreeError> {
     validate_binding(context)?;
@@ -716,9 +717,18 @@ pub fn resume_pending_retirements(
                     {
                         continue;
                     }
-                    let path = Path::new(&subject.id);
+                    let Some(path) = subject.worktree_path() else {
+                        return Err(WorktreeError::InvalidOutput);
+                    };
                     let registered = inventory.iter().any(|entry| entry.path == path);
-                    if registered || !path_is_absent(path)? {
+                    let old_incarnation_gone = if registered {
+                        verify_worktree(context.repo, &path)
+                            .and_then(|verified| super::worktree_subject(verified.repo()))
+                            .is_ok_and(|current| current != *subject)
+                    } else {
+                        path_is_absent(&path)?
+                    };
+                    if !old_incarnation_gone {
                         continue;
                     }
                     let evidence = record.decision.evidence().clone();
@@ -742,20 +752,97 @@ pub fn resume_pending_retirements(
                     };
                     let reference = GitRefName::new(&record.reference.identity.reference)
                         .map_err(|_| WorktreeError::InvalidOutput)?;
-                    if !matches!(
-                        context.facts.resolve_commit(context, reference, cancel),
-                        Err(WorktreeError::NotFound)
-                    ) {
+                    let ledger = RefLedger::for_context(context)?;
+                    let Some(current_owner) = ledger.load(&RefEndpoint::Local, &reference)? else {
+                        continue;
+                    };
+                    if !record
+                        .reference
+                        .matches_ownership(&current_owner.ownership())
+                        .map_err(|_| WorktreeError::InvalidOutput)?
+                    {
                         continue;
                     }
-                    let evidence = record.decision.evidence().clone();
-                    if record.accepts_completion_evidence(&outcome.step, &evidence) {
+                    let Some(evidence) = fresh_reference_retirement_evidence(
+                        context,
+                        &record,
+                        &reference,
+                        feeds,
+                        cancel,
+                    )?
+                    else {
+                        continue;
+                    };
+                    if !record.accepts_completion_evidence(&outcome.step, &evidence) {
+                        continue;
+                    }
+                    let current =
+                        match context
+                            .facts
+                            .resolve_commit(context, reference.clone(), cancel)
+                        {
+                            Ok(current) => Some(current),
+                            Err(WorktreeError::NotFound) => None,
+                            // An incomplete observation leaves this durable step
+                            // available to the next owner pass.
+                            Err(_) => continue,
+                        };
+                    if current.is_none() {
                         record = update_retirement_step(
                             port,
                             &record,
                             RetirementStep::Reference,
                             RetirementStepState::Completed { evidence },
                         )?;
+                        continue;
+                    }
+                    if current != Some(record.expected_tip) {
+                        continue;
+                    }
+                    let eligible = || {
+                        let ledger = RefLedger::for_context(context)?;
+                        let Some(current_owner) = ledger.load(&RefEndpoint::Local, &reference)?
+                        else {
+                            return Err(WorktreeError::IdentityChanged);
+                        };
+                        if !record
+                            .reference
+                            .matches_ownership(&current_owner.ownership())
+                            .map_err(|_| WorktreeError::InvalidOutput)?
+                        {
+                            return Err(WorktreeError::IdentityChanged);
+                        }
+                        let fresh = fresh_durable_retirement_evidence(
+                            context,
+                            &record,
+                            &reference,
+                            cancel,
+                        )?
+                        .ok_or(WorktreeError::RegistrationUnconfirmed)?;
+                        if record.accepts_completion_evidence(&outcome.step, &fresh) {
+                            Ok(())
+                        } else {
+                            Err(WorktreeError::IdentityChanged)
+                        }
+                    };
+                    match delete_ref_leased_when(
+                        context,
+                        &reference,
+                        record.expected_tip,
+                        cancel,
+                        &eligible,
+                    ) {
+                        Ok(RefDeletion::Removed | RefDeletion::Absent) => {
+                            record = update_retirement_step(
+                                port,
+                                &record,
+                                RetirementStep::Reference,
+                                RetirementStepState::Completed { evidence },
+                            )?;
+                        }
+                        // Changed and checked-out refs are not this retirement's
+                        // completion. A later evidence pass can decide again.
+                        Ok(RefDeletion::Changed | RefDeletion::CheckedOut) | Err(_) => {}
                     }
                 }
             }
@@ -763,6 +850,117 @@ pub fn resume_pending_retirements(
         updated.push(record);
     }
     Ok(updated)
+}
+
+/// Revalidate the immutable retirement proof against current repository state.
+/// A missing or incomplete proof is retryable and never authorises a deletion.
+fn fresh_reference_retirement_evidence(
+    context: &WorktreeContext<'_>,
+    record: &RetirementRecord,
+    reference: &GitRefName,
+    feeds: &dyn RetirementFeeds,
+    cancel: &CancelToken,
+) -> Result<Option<RemovalEvidence>, WorktreeError> {
+    if feeds
+        .custody(&branch_candidate(context, reference, record.expected_tip))
+        .is_err()
+    {
+        return Ok(None);
+    }
+    let forge = feeds.fresh_forge(reference);
+    if matches!(
+        &forge,
+        ForgeObservation::Open { .. } | ForgeObservation::Unknown(_)
+    ) {
+        return Ok(None);
+    }
+    if let RemovalEvidence::Landing { evidence } = record.decision.evidence()
+        && validate_forge_observation(forge, evidence).is_err()
+    {
+        return Ok(None);
+    }
+    fresh_durable_retirement_evidence(context, record, reference, cancel)
+}
+
+fn fresh_durable_retirement_evidence(
+    context: &WorktreeContext<'_>,
+    record: &RetirementRecord,
+    reference: &GitRefName,
+    cancel: &CancelToken,
+) -> Result<Option<RemovalEvidence>, WorktreeError> {
+    let evidence = record.decision.evidence();
+    match evidence {
+        RemovalEvidence::Landing { evidence } => {
+            let references = match retained_refs(context, Some(reference), None, &[], cancel) {
+                Ok(references) => references,
+                Err(_) => return Ok(None),
+            };
+            if validate_removal_evidence(
+                context,
+                record.expected_tip,
+                evidence,
+                &references,
+                cancel,
+            )
+            .is_err()
+            {
+                return Ok(None);
+            }
+            Ok(Some(RemovalEvidence::Landing {
+                evidence: evidence.clone(),
+            }))
+        }
+        RemovalEvidence::ExplicitDiscard {
+            archive: Some(proof),
+        } => {
+            if !proof.valid_for(record.expected_tip) {
+                return Ok(None);
+            }
+            let root = match context
+                .project_state
+                .open_verified_directory(OsStr::new("discard-archives"))
+            {
+                Ok(root) => root,
+                Err(_) => return Ok(None),
+            };
+            let archive = match root.open_verified_directory(OsStr::new(&proof.id)) {
+                Ok(archive) => archive,
+                Err(_) => return Ok(None),
+            };
+            let manifest = match archive.read_bounded(OsStr::new("archive-ref.json"), 4096) {
+                Ok(manifest) => manifest,
+                Err(_) => return Ok(None),
+            };
+            let manifest: serde_json::Value = match serde_json::from_slice(&manifest) {
+                Ok(manifest) => manifest,
+                Err(_) => return Ok(None),
+            };
+            let Some(id) = proof.id.strip_prefix("archive-") else {
+                return Ok(None);
+            };
+            let Ok(archive_ref) = GitRefName::discard_archive(id) else {
+                return Ok(None);
+            };
+            let expected_tip = record.expected_tip.to_string();
+            if manifest["reference"] != archive_ref.as_str()
+                || manifest["tip"].as_str() != Some(expected_tip.as_str())
+            {
+                return Ok(None);
+            }
+            match archive.metadata_at(OsStr::new("tip.bundle"), false) {
+                Ok(bundle) if bundle.kind == FileKind::Regular && bundle.size > 0 => {}
+                _ => return Ok(None),
+            }
+            Ok(Some(evidence.clone()))
+        }
+        RemovalEvidence::ExplicitDiscard { archive: None }
+            if record.related_subjects.is_empty() =>
+        {
+            Ok(Some(evidence.clone()))
+        }
+        RemovalEvidence::ExplicitDiscard { archive: None }
+        | RemovalEvidence::IdleRetirement { .. } => Ok(None),
+    }
 }
 
 /// Recheck each candidate under repository and writer custody. Failures keep
@@ -1677,11 +1875,11 @@ fn collect_impl(
                 }
                 report.removals.extend(failed.removals());
             }
-            if !report
-                .removals
-                .iter()
-                .any(|r| r.subject.id == lane.path.to_string_lossy() && r.tip == lane.head)
-            {
+            if !report.removals.iter().any(|r| {
+                (r.subject.worktree_path().as_deref() == Some(lane.path.as_path())
+                    || (r.subject.kind == SubjectKind::Path && Path::new(&r.subject.id) == lane.path))
+                    && r.tip == lane.head
+            }) {
                 let cause = match &error {
                     WorktreeError::IncompleteCensus { .. }
                     | WorktreeError::CensusUnknown { .. } => RemovalUncertainty::CensusUnknown,

@@ -7,52 +7,69 @@ use provenant_records::custody::*;
 
 fn canonical(subject: &Subject) -> Result<Subject> {
     text(&subject.id, "custody subject")?;
-    if subject.id.len() > 4096 || subject.id.chars().any(char::is_control) {
+    if subject.id.chars().any(char::is_control) {
         return Err(Error::Invalid("custody subject"));
     }
     let mut subject = subject.clone();
-    if subject.kind.is_path() {
-        let path = std::path::Path::new(&subject.id);
-        if !path.is_absolute()
-            || path
-                .components()
-                .any(|part| matches!(part, std::path::Component::ParentDir))
-        {
-            return Err(Error::Invalid("absolute custody path"));
+    if subject.kind == SubjectKind::Worktree {
+        if subject.worktree_identity().is_none() {
+            return Err(Error::Invalid("worktree identity"));
         }
-        // Resolve the nearest existing ancestor, so aliases stay stable even
-        // before creation and after removal. No stored-shape fallback.
-        let mut ancestor = path;
-        let mut tail = Vec::new();
-        let mut canonical = loop {
-            match ancestor.canonicalize() {
-                Ok(path) => break path,
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                    tail.push(
-                        ancestor
-                            .file_name()
-                            .ok_or(Error::Invalid("custody path"))?
-                            .to_owned(),
-                    );
-                    ancestor = ancestor.parent().ok_or(Error::Invalid("custody path"))?;
-                }
-                Err(source) => {
-                    return Err(Error::Io {
-                        path: ancestor.into(),
-                        source,
-                    });
-                }
-            }
-        };
-        for part in tail.iter().rev() {
-            canonical.push(part);
-        }
-        subject.id = canonical.to_str().ok_or(Error::PathEncoding)?.to_owned();
+    } else {
         if subject.id.len() > 4096 {
-            return Err(Error::Invalid("custody path"));
+            return Err(Error::Invalid("custody subject"));
+        }
+        if subject.kind.is_path() {
+            let path = std::path::Path::new(&subject.id);
+            let canonical = canonical_path(path)?;
+            subject.id = canonical.to_str().ok_or(Error::PathEncoding)?.to_owned();
+            if subject.id.len() > 4096 {
+                return Err(Error::Invalid("custody path"));
+            }
         }
     }
     Ok(subject)
+}
+
+fn canonical_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(Error::Invalid("absolute custody path"));
+    }
+    // Resolve the nearest existing ancestor, so aliases stay stable even
+    // before creation and after removal. No stored-shape fallback.
+    let mut ancestor = path;
+    let mut tail = Vec::new();
+    let mut canonical = loop {
+        match ancestor.canonicalize() {
+            Ok(path) => break path,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                tail.push(
+                    ancestor
+                        .file_name()
+                        .ok_or(Error::Invalid("custody path"))?
+                        .to_owned(),
+                );
+                ancestor = ancestor.parent().ok_or(Error::Invalid("custody path"))?;
+            }
+            Err(source) => {
+                return Err(Error::Io {
+                    path: ancestor.into(),
+                    source,
+                });
+            }
+        }
+    };
+    for part in tail.iter().rev() {
+        canonical.push(part);
+    }
+    if canonical.as_os_str().len() > 4096 {
+        return Err(Error::Invalid("custody path"));
+    }
+    Ok(canonical)
 }
 fn chair_key(chair: &Chair) -> Result<String> {
     Ok(CanonicalV1::record_digest(
@@ -116,21 +133,41 @@ fn read_retirement(
     project: ProjectId,
     id: &str,
 ) -> Result<Option<RetirementRecord>> {
-    let raw: Option<Vec<u8>> = db
+    let row: Option<(Vec<u8>, i64)> = db
         .query_row(
-            "SELECT substr(record,1,?3) FROM retirements WHERE project=?1 AND id=?2",
+            "SELECT substr(record,1,?3),pending FROM retirements WHERE project=?1 AND id=?2",
             params![project.to_string(), id, MAX_RECORD_READ_BYTES],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let record = raw.as_deref().map(decode::<RetirementRecord>).transpose()?;
+    let record = row
+        .as_ref()
+        .map(|(raw, _)| decode::<RetirementRecord>(raw))
+        .transpose()?;
     if let Some(record) = &record {
         if record.project != project || record.id != id {
             return Err(Error::Invalid("retirement record identity"));
         }
         validate_retirement_identity(record)?;
+        if !row
+            .as_ref()
+            .is_some_and(|(_, pending)| *pending == retirement_pending(record))
+        {
+            return Err(Error::Invalid("retirement pending state"));
+        }
     }
     Ok(record)
+}
+fn retirement_pending(record: &RetirementRecord) -> i64 {
+    if record
+        .outcomes
+        .iter()
+        .any(|outcome| !matches!(&outcome.state, RetirementStepState::Completed { .. }))
+    {
+        1
+    } else {
+        0
+    }
 }
 fn validate_retirement_identity(record: &RetirementRecord) -> Result<()> {
     text(&record.id, "retirement id")?;
@@ -156,15 +193,8 @@ fn validate_retirement_identity(record: &RetirementRecord) -> Result<()> {
         || record.reference.generation == 0
         || record.subject != expected_subject
         || record.related_subjects.iter().any(|subject| {
-            let path = std::path::Path::new(&subject.id);
             subject.kind != SubjectKind::Worktree
-                || subject.id.is_empty()
-                || subject.id.len() > 4096
-                || subject.id.chars().any(char::is_control)
-                || !path.is_absolute()
-                || path
-                    .components()
-                    .any(|part| matches!(part, std::path::Component::ParentDir))
+                || subject.worktree_path().is_none()
                 || subject == &record.subject
         })
         || record.outcomes.len() != expected_steps.len()
@@ -206,21 +236,13 @@ fn same_retirement_intent(existing: &RetirementRecord, requested: &RetirementRec
 }
 fn save_retirement(db: &rusqlite::Connection, record: &RetirementRecord) -> Result<()> {
     validate_retirement(record)?;
-    // The row is anchored on a subject the retirement actually holds: a
-    // decision that keeps its reference (a detached worktree's HEAD, say)
-    // holds only its related subjects.
-    let anchor = record
-        .subjects()
-        .next()
-        .ok_or(Error::Invalid("retirement without a custodied subject"))?;
     db.execute(
-        "INSERT INTO retirements(project,id,revision,kind,subject,record) VALUES(?1,?2,?3,?4,?5,?6)",
+        "INSERT INTO retirements(project,id,revision,pending,record) VALUES(?1,?2,?3,?4,?5)",
         params![
             record.project.to_string(),
             record.id,
             i64::try_from(record.revision).map_err(|_| Error::Invalid("retirement revision"))?,
-            anchor.kind.as_str(),
-            anchor.id,
+            retirement_pending(record),
             encode(record)?,
         ],
     )?;
@@ -262,6 +284,37 @@ impl HostStore {
     ) -> Result<Option<RetirementRecord>> {
         request.check()?;
         read_retirement(&self.0.db, project, id)
+    }
+
+    /// Read only unfinished retirement records through the declared project
+    /// index. The row flag is checked against the decoded step outcomes.
+    pub fn pending_retirements(
+        &self,
+        project: ProjectId,
+        request: &Request<'_>,
+    ) -> Result<Vec<RetirementRecord>> {
+        request.check()?;
+        let mut statement = self.0.db.prepare(
+            "SELECT id,substr(record,1,?2),pending FROM retirements WHERE project=?1 AND pending=1 ORDER BY id",
+        )?;
+        let mut rows = statement.query(params![project.to_string(), MAX_RECORD_READ_BYTES])?;
+        let mut records = Vec::new();
+        while let Some(row) = rows.next()? {
+            request.check()?;
+            let id: String = row.get(0)?;
+            let raw: Vec<u8> = row.get(1)?;
+            let pending: i64 = row.get(2)?;
+            let record: RetirementRecord = decode(&raw)?;
+            if record.project != project || record.id != id {
+                return Err(Error::Invalid("retirement record identity"));
+            }
+            validate_retirement_identity(&record)?;
+            if pending != retirement_pending(&record) || pending != 1 {
+                return Err(Error::Invalid("retirement pending state"));
+            }
+            records.push(record);
+        }
+        Ok(records)
     }
 
     /// Start a durable, resumable retirement and point custody at its owner in
@@ -389,11 +442,12 @@ impl HostStore {
                 .ok_or(Error::Invalid("retirement revision"))?;
             validate_retirement_identity(&record)?;
             let changed = tx.execute(
-                "UPDATE retirements SET revision=?3,record=?4 WHERE project=?1 AND id=?2 AND revision=?5",
+                "UPDATE retirements SET revision=?3,pending=?4,record=?5 WHERE project=?1 AND id=?2 AND revision=?6",
                 params![
                     project.to_string(),
                     id,
                     i64::try_from(record.revision).map_err(|_| Error::Invalid("retirement revision"))?,
+                    retirement_pending(&record),
                     encode(&record)?,
                     i64::try_from(expected_revision).map_err(|_| Error::Invalid("retirement revision"))?,
                 ],

@@ -599,10 +599,8 @@ pub(super) fn launch_on_host_with_wait(
             subjects.push(Subject::new(SubjectKind::Graph, graph));
         }
         if let Some(writer) = &request.task.writer {
-            subjects.push(Subject::new(
-                SubjectKind::Worktree,
-                writer.worktree.to_string_lossy(),
-            ));
+            subjects.push(crate::fabric::checkout_subject(edge.roots, &writer.worktree)
+                .map_err(|error| Fail::new(Status::Error, ErrorKind::Fabric, error.to_string()))?);
             match crate::fabric::checkout_branch(edge.roots, &writer.worktree) {
                 Ok(Some(branch)) => subjects.push(Subject::new(SubjectKind::Branch, branch)),
                 Ok(None) => {}

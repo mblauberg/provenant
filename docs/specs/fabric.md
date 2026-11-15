@@ -58,7 +58,12 @@ Subject kinds are declared once in `records::custody::SubjectKind`: graph,
 attempt, branch, ref, worktree, pr, issue, path and cloud key. Records retain
 the holder (chair or attempt nested under a chair), project, origin,
 active/landed/retired/released state, last activity, related artefacts and
-dispatch provenance.
+dispatch provenance. Worktree custody identifies an immutable checkout incarnation:
+its subject contains the canonical path association and a generation published
+once in that checkout's private Git directory. Creation, launch and retirement
+share this identity. Recreating a removed path allocates a new generation;
+retired subjects and their history remain immutable. Previews observe existing
+identities without creating them.
 `LandedEvidence` names its predicate (subsumed or landed) and proof source.
 The custody-owned `RetirementRecord` pins the endpoint-qualified reference
 generation, expected commit, authority and initial proof in the host store.
@@ -76,8 +81,15 @@ authority choice and never claims landing. Worktree discard pins the archive
 ID and exact tip captured before removal in that same record. `Removed`
 projections carry the completed step proof and durable retirement ID. Retention
 and evidence owners decide eligibility; the custody-owned lifecycle
-alone records intent, resumable outcomes and removal projections. State alone
-never authorises deletion.
+alone records intent, resumable outcomes and removal projections. Every worktree
+removal first proves that a surviving ref retains its tip or creates and durably
+records a preservation ref; detached HEAD metadata alone is not preservation.
+The pending retirement index covers every record with an unfinished step and
+clears only when all declared steps complete. One lifecycle replay owner resumes
+linked worktree and reference steps with fresh evidence; a missing checkout does
+not seal a receipt while reference deletion is pending. Changed identity or
+unavailable evidence leaves the retirement retryable. State alone never
+authorises deletion.
 
 Claims do not expire, lock or refuse overlapping advisory ownership. Acquiring
 another holder's item warns, records the previous holder in the same transaction

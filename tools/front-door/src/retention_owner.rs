@@ -65,7 +65,7 @@ impl<'a> Owner<'a> {
         port: &dyn worktrees::RetirementPort,
         cancel: &CancelToken,
     ) -> Result<Vec<RemovalRecord>, WorktreeError> {
-        let records = worktrees::resume_pending_retirements(context, port, cancel)?;
+        let records = worktrees::resume_pending_retirements(context, port, self, cancel)?;
         Ok(records
             .into_iter()
             .flat_map(|record| record.removals())
@@ -133,6 +133,34 @@ impl<'a> Owner<'a> {
             .ok_or_else(|| "forge not observed".to_string())?
             .clone()
     }
+    fn forge_from_pulls(
+        branch: &provenant_confinement::repo::GitRefName,
+        pulls: Vec<Pull>,
+    ) -> ForgeObservation {
+        let mut matching: Vec<_> = pulls
+            .into_iter()
+            .filter(|p| {
+                p.head.name == branch.short_name()
+                    && p.head.repo.as_ref().map(|r| &r.full_name)
+                        == p.base.repo.as_ref().map(|r| &r.full_name)
+            })
+            .collect();
+        if let Some(open) = matching.iter().find(|p| p.state == "open") {
+            return ForgeObservation::Open {
+                base: format!("refs/heads/{}", open.base.name),
+            };
+        }
+        matching.sort_by_key(|p| p.number);
+        match matching.pop() {
+            Some(p) if p.merged_at.is_some() => ForgeObservation::Merged {
+                pr: p.number.to_string(),
+                head: p.head.sha,
+                merge_commit: p.merge_commit_sha,
+            },
+            Some(p) => ForgeObservation::Closed { head: p.head.sha },
+            None => ForgeObservation::Absent,
+        }
+    }
     pub(crate) fn remote_safe(
         &self,
         branch: &str,
@@ -181,19 +209,19 @@ impl<'a> Owner<'a> {
         provenant_cli::fabric::Context::open_read_only(self.roots.clone(), self.home, self.project)
             .map_err(|e| e.to_string())
     }
-    fn subjects(lane: &WorktreeInfo) -> Vec<Subject> {
+    fn subjects(&self, lane: &WorktreeInfo) -> Result<Vec<Subject>, String> {
         let mut subjects = if lane.primary {
             Vec::new()
         } else {
-            vec![Subject::new(
-                SubjectKind::Worktree,
-                lane.path.to_string_lossy(),
-            )]
+            provenant_cli::fabric::inspect_checkout_subject(self.roots, &lane.path)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .collect()
         };
         if let Some(branch) = &lane.branch {
             subjects.push(Subject::new(SubjectKind::Branch, branch));
         }
-        subjects
+        Ok(subjects)
     }
 }
 impl worktrees::RetirementFeeds for Owner<'_> {
@@ -216,7 +244,7 @@ impl worktrees::RetirementFeeds for Owner<'_> {
         else {
             return Ok(());
         };
-        let subjects = Self::subjects(lane);
+        let subjects = self.subjects(lane)?;
         let mut query = CustodyQuery {
             project: Some(context.identity.project),
             ..Default::default()
@@ -281,33 +309,17 @@ impl worktrees::RetirementFeeds for Owner<'_> {
             };
         }
         let pulls = match self.pulls(false) {
-            Ok(p) => p,
+            Ok(pulls) => pulls,
             Err(error) => return ForgeObservation::Unknown(error),
         };
-        let mut matching: Vec<_> = pulls
-            .into_iter()
-            .filter(|p| {
-                p.head.name == branch.short_name()
-                    && p.head.repo.as_ref().map(|r| &r.full_name)
-                        == p.base.repo.as_ref().map(|r| &r.full_name)
-            })
-            .collect();
-        if let Some(open) = matching.iter().find(|p| p.state == "open") {
-            return ForgeObservation::Open {
-                base: format!("refs/heads/{}", open.base.name),
-            };
-        }
         // A reused branch's most recent PR owns its recorded head. A moved tip
         // will fail the collector's exact-head abandonment/merge comparison.
-        matching.sort_by_key(|p| p.number);
-        match matching.pop() {
-            Some(p) if p.merged_at.is_some() => ForgeObservation::Merged {
-                pr: p.number.to_string(),
-                head: p.head.sha,
-                merge_commit: p.merge_commit_sha,
-            },
-            Some(p) => ForgeObservation::Closed { head: p.head.sha },
-            None => ForgeObservation::Absent,
+        Self::forge_from_pulls(branch, pulls)
+    }
+    fn fresh_forge(&self, branch: &provenant_confinement::repo::GitRefName) -> ForgeObservation {
+        match self.pulls(true) {
+            Ok(pulls) => Self::forge_from_pulls(branch, pulls),
+            Err(error) => ForgeObservation::Unknown(error),
         }
     }
     fn integration_bases(&self) -> Vec<(String, GitOid)> {

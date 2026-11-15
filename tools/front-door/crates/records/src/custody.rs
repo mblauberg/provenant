@@ -46,7 +46,7 @@ macro_rules! subject_kinds {
     }
 }
 subject_kinds! {
-    Graph => ("graph", false), Attempt => ("attempt", false), Branch => ("branch", false), Ref => ("ref", false), Worktree => ("worktree", true),
+    Graph => ("graph", false), Attempt => ("attempt", false), Branch => ("branch", false), Ref => ("ref", false), Worktree => ("worktree", false),
     Pr => ("pr", false), Issue => ("issue", false), Path => ("path", true), CloudKey => ("cloud_key", false),
 }
 impl std::fmt::Display for SubjectKind {
@@ -59,7 +59,37 @@ pub struct Subject {
     pub kind: SubjectKind,
     pub id: String,
 }
+/// One checkout incarnation. The canonical path is an association, never its
+/// identity by itself; Git's private directory owns the immutable generation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeIdentity {
+    pub path: String,
+    pub generation: String,
+}
+
 impl Subject {
+    pub fn worktree(path: impl Into<String>, generation: impl Into<String>) -> Self {
+        let identity = WorktreeIdentity { path: path.into(), generation: generation.into() };
+        Self::new(SubjectKind::Worktree, serde_json::json!(identity).to_string())
+    }
+
+    pub fn worktree_identity(&self) -> Option<WorktreeIdentity> {
+        if self.kind != SubjectKind::Worktree { return None; }
+        let identity: WorktreeIdentity = serde_json::from_str(&self.id).ok()?;
+        if !valid_worktree_path(&identity.path)
+            || identity.generation.is_empty()
+            || identity.generation.len() > 256
+            || !identity.generation.bytes().all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+            || Self::worktree(&identity.path, &identity.generation) != *self
+        { return None; }
+        Some(identity)
+    }
+
+    pub fn worktree_path(&self) -> Option<std::path::PathBuf> {
+        Some(self.worktree_identity()?.path.into())
+    }
+
     pub fn new(kind: SubjectKind, id: impl Into<String>) -> Self {
         Self {
             kind,
@@ -76,10 +106,14 @@ impl std::str::FromStr for Subject {
     type Err = String;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let (kind, id) = value.split_once(':').ok_or("expected KIND:ID")?;
-        if id.is_empty() || id.len() > 4096 || id.chars().any(char::is_control) {
-            return Err("invalid custody subject id".into());
-        }
-        Ok(Self::new(kind.parse()?, id))
+        let subject = Self::new(kind.parse()?, id);
+        let valid = if subject.kind == SubjectKind::Worktree {
+            subject.worktree_identity().is_some()
+        } else {
+            !id.is_empty() && id.len() <= 4096 && !id.chars().any(char::is_control)
+        };
+        if !valid { return Err("invalid custody subject id".into()); }
+        Ok(subject)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -786,6 +820,9 @@ impl RetirementRecord {
     }
 
     pub fn valid_evidence(&self) -> bool {
+        if self.related_subjects.iter().any(|subject| subject.worktree_identity().is_none()) {
+            return false;
+        }
         if !self
             .decision
             .valid_for(&self.related_subjects, self.expected_tip)
@@ -806,15 +843,16 @@ impl RetirementRecord {
                 let [worktree] = self.related_subjects.as_slice() else {
                     return false;
                 };
+                let Some(identity) = worktree.worktree_identity() else { return false; };
                 let expected = crate::CanonicalV1::record_digest(
                     "custody-worktree-head",
                     2,
-                    &(self.reference.identity.repository, &worktree.id),
+                    &(self.reference.identity.repository, &identity.path),
                 );
                 self.reference.identity.reference == "HEAD"
                     && self.reference.generation > 0
                     && worktree.kind == SubjectKind::Worktree
-                    && valid_worktree_path(&worktree.id)
+                    && worktree.worktree_identity().is_some()
                     && matches!(&self.decision, RetirementDecision::RetireWorktree { .. })
                     && expected.is_ok_and(|expected| &expected == path_digest)
             }
@@ -1111,7 +1149,7 @@ mod tests {
             generation: 4,
             origin: RefOrigin::Created,
         };
-        let worktree = Subject::new(SubjectKind::Worktree, "/fixture/idle");
+        let worktree = Subject::worktree("/fixture/idle", "fixture-1");
         let idle = RetirementDecision::RetireWorktree {
             authority: ActorId::from_bytes([4; 16]),
             evidence: RemovalEvidence::IdleRetirement { tip },
@@ -1144,7 +1182,7 @@ mod tests {
 
         let subsumed = RetirementRecord::plan(
             project,
-            vec![Subject::new(SubjectKind::Worktree, "/fixture/subsumed")],
+            vec![Subject::worktree("/fixture/subsumed", "fixture-1")],
             reference.clone(),
             tip,
             RetirementDecision::RetireWorktree {
@@ -1191,7 +1229,7 @@ mod tests {
         };
         let explicit_record = RetirementRecord::plan(
             project,
-            vec![Subject::new(SubjectKind::Worktree, "/fixture/idle")],
+            vec![Subject::worktree("/fixture/idle", "fixture-1")],
             reference.clone(),
             tip,
             explicit.clone(),
@@ -1273,7 +1311,7 @@ mod tests {
             .valid_evidence()
         );
         let detached_path = "/fixture/detached";
-        let detached_worktree = Subject::new(SubjectKind::Worktree, detached_path);
+        let detached_worktree = Subject::worktree(detached_path, "fixture-1");
         let detached_reference = RefOwnership {
             repository: project,
             endpoint: RefEndpoint::Worktree {
@@ -1338,7 +1376,7 @@ mod tests {
             for source in &sources {
                 let record = RemovalRecord {
                     project,
-                    subject: Subject::new(SubjectKind::Worktree, "feature"),
+                    subject: Subject::worktree("/fixture/feature", "fixture-1"),
                     tip: oid,
                     outcome: RemovalOutcome::Removed {
                         evidence: RemovalEvidence::Landing {
@@ -1363,7 +1401,7 @@ mod tests {
         }
         let explicit = RemovalRecord {
             project,
-            subject: Subject::new(SubjectKind::Worktree, "feature"),
+            subject: Subject::worktree("/fixture/feature", "fixture-1"),
             tip: oid,
             outcome: RemovalOutcome::Removed {
                 evidence: RemovalEvidence::ExplicitDiscard {
@@ -1383,7 +1421,7 @@ mod tests {
         for &cause in RemovalUncertainty::ALL {
             let record = RemovalRecord {
                 project,
-                subject: Subject::new(SubjectKind::Worktree, "feature"),
+                subject: Subject::worktree("/fixture/feature", "fixture-1"),
                 tip: oid,
                 outcome: RemovalOutcome::Kept { cause },
             };
@@ -1394,10 +1432,23 @@ mod tests {
     }
 
     #[test]
+    fn worktree_identity_preserves_incarnations_and_rejects_path_only_subjects() {
+        let first = Subject::worktree("/fixture/reused", "generation-1");
+        let second = Subject::worktree("/fixture/reused", "generation-2");
+        assert_ne!(first, second);
+        assert_eq!(first.worktree_path(), second.worktree_path());
+        assert_eq!(first.to_string().parse::<Subject>().unwrap(), first);
+        assert!(Subject::new(SubjectKind::Worktree, "/fixture/reused").worktree_path().is_none());
+        for (path, generation) in [("relative", "generation-1"), ("/fixture/../escape", "generation-1"), ("/fixture/reused", "")] {
+            assert!(Subject::worktree(path, generation).worktree_path().is_none());
+        }
+    }
+
+    #[test]
     fn every_declared_subject_kind_round_trips() {
         for &kind in SubjectKind::ALL {
             assert_eq!(kind.as_str().parse::<SubjectKind>().unwrap(), kind);
-            let subject = Subject::new(kind, "item:with:colons");
+            let subject = if kind == SubjectKind::Worktree { Subject::worktree("/fixture/checkout", "generation-1") } else { Subject::new(kind, "item:with:colons") };
             assert_eq!(subject.to_string().parse::<Subject>().unwrap(), subject);
             assert_eq!(
                 serde_json::from_value::<Subject>(serde_json::to_value(&subject).unwrap()).unwrap(),

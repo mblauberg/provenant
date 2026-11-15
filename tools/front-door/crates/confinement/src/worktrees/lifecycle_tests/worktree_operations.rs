@@ -33,6 +33,10 @@ impl RetirementFeeds for CollectorRetirementFixture {
         self.forge.clone()
     }
 
+    fn fresh_forge(&self, branch: &GitRefName) -> ForgeObservation {
+        self.forge(branch)
+    }
+
     fn integration_bases(&self) -> Vec<(String, GitOid)> {
         Vec::new()
     }
@@ -916,6 +920,7 @@ fn explicit_discard_publishes_recoverable_data_before_removing_work() -> Result<
     let worktree_path = fs::canonicalize(&created.path)?;
     let retirement = HostRetirementFixture::new(&owner)?;
     retirement.seed_lane(&context, &created)?;
+    let worktree_subject = acquire_worktree_subject_at(&context, &created.path)?;
     run_in_worktree(
         &fixture,
         &created.path,
@@ -942,10 +947,6 @@ fn explicit_discard_publishes_recoverable_data_before_removing_work() -> Result<
     assert!(
         tar.windows(b"untracked evidence".len())
             .any(|bytes| bytes == b"untracked evidence")
-    );
-    let worktree_subject = provenant_records::custody::Subject::new(
-        provenant_records::custody::SubjectKind::Worktree,
-        worktree_path.to_string_lossy(),
     );
     let record = retirement
         .retirement_for_subject(owner.binding.project_id(), &worktree_subject)?

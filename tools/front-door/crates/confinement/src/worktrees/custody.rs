@@ -1,6 +1,65 @@
 //! Writer custody, locking and terminal checks.
 use super::*;
 
+const INCARNATION: &str = "provenant-custody-generation";
+
+/// Observe the immutable checkout incarnation without changing it. Missing
+/// identity is explicit; a path-only subject can never alias retired custody.
+pub fn worktree_subject(
+    repo: &VerifiedRepo,
+) -> Result<provenant_records::custody::Subject, WorktreeError> {
+    repo.revalidate()?;
+    let bytes = repo
+        .private_dir()
+        .read_stable(OsStr::new(INCARNATION), 256)?;
+    let generation = std::str::from_utf8(&bytes).map_err(|_| WorktreeError::InvalidOutput)?;
+    let path = repo
+        .root_path()
+        .to_str()
+        .ok_or(WorktreeError::InvalidRequest)?;
+    let subject = provenant_records::custody::Subject::worktree(path, generation);
+    if subject.worktree_identity().is_none() {
+        return Err(WorktreeError::InvalidOutput);
+    }
+    repo.revalidate()?;
+    Ok(subject)
+}
+
+/// Publish once in the private Git directory. Removing and recreating a linked
+/// checkout removes this marker, so even the same path receives fresh custody.
+/// No-replace publication lets concurrent observers share one generation.
+pub fn acquire_worktree_subject(
+    repo: &VerifiedRepo,
+) -> Result<provenant_records::custody::Subject, WorktreeError> {
+    repo.revalidate()?;
+    match repo
+        .private_dir()
+        .metadata_at(OsStr::new(INCARNATION), false)
+    {
+        Ok(_) => {
+            repo.private_dir().sync()?;
+            return worktree_subject(repo);
+        }
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error.into()),
+    }
+    let generation = provenant_os::fs::temporary_name()?;
+    match repo.private_dir().atomic_write(
+        OsStr::new(INCARNATION),
+        ".custody-",
+        generation.as_bytes(),
+        PublishMode::NoReplace,
+    ) {
+        Ok(publication) => publication
+            .require_durable()
+            .map_err(|_| WorktreeError::RegistrationUnconfirmed)?,
+        Err(error) if error.is_exists() => {}
+        Err(error) => return Err(error.into()),
+    }
+    repo.private_dir().sync()?;
+    worktree_subject(repo)
+}
+
 /// A writer must pass this check before its terminal result is accepted.
 /// Index and working-tree cleanliness do not prove a Git operation has ended.
 pub fn check_writer_terminal(repo: &VerifiedRepo) -> Result<(), WorktreeError> {

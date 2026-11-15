@@ -607,6 +607,7 @@ fn create_with_default(
     if worktree_dirty_at(context, verified.repo(), cancel)? != WorktreeCondition::Clean {
         return Err(WorktreeError::RegistrationUnconfirmed);
     }
+    acquire_worktree_subject(verified.repo())?;
     // Release the verified checkout descriptors before allowing a sibling
     // launcher to inspect this newly created worktree.
     drop(verified);
@@ -897,9 +898,8 @@ pub(super) fn execute_mutation(
     let _ = context.facts.take_inventory(context);
     context.workers.invalidate();
     let operation = match &mutation {
-        GitMutation::BundleCreate { .. } | GitMutation::CreateArchiveRef { .. } => {
-            GitMutationOperation::BundleCreate
-        }
+        GitMutation::BundleCreate { .. } => GitMutationOperation::BundleCreate,
+        GitMutation::CreatePreservationRef { .. } => GitMutationOperation::PreserveRef,
         GitMutation::DiscardWorktree { .. } => GitMutationOperation::WorktreeRemove,
         GitMutation::FastForward { .. } => GitMutationOperation::FastForward,
         GitMutation::WorktreeAdd { .. } => GitMutationOperation::WorktreeAdd,
@@ -1017,6 +1017,24 @@ pub(super) fn checked_out_elsewhere(
     Ok(false)
 }
 
+/// Ensure the candidate tip survives beyond its checkout. The current branch
+/// is excluded because retirement may delete it after removing the worktree.
+fn preserve_unsubsumed_tip(
+    context: &WorktreeContext<'_>,
+    entry: &GitWorktree,
+    tip: GitOid,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    let references = retained_refs(context, entry.branch.as_ref(), None, &[], cancel)?;
+    for reference in references {
+        if is_ancestor(context, tip, reference.commit, cancel)? {
+            return Ok(());
+        }
+    }
+    super::refs::preserve_tip(context, tip, cancel)?;
+    Ok(())
+}
+
 /// The same fenced removal core with one durable-authority callback after the
 /// final worktree and repository checks and immediately before Git mutation.
 #[allow(clippy::too_many_arguments)]
@@ -1106,6 +1124,16 @@ pub(super) fn remove_tree_when_before_delete(
     } else {
         None
     };
+    // A discard archive carries its own durable bundle and proof. Every other
+    // removal must first have a surviving ref or a recorded preservation ref.
+    if archive.is_none() {
+        preserve_unsubsumed_tip(context, entry, expected_head, cancel)?;
+        tree_unchanged(
+            &context.facts.fresh_inventory(context, cancel)?,
+            entry,
+            expected_head,
+        )?;
+    }
     before_delete(&locked.verified, &canonical, archive.as_ref())?;
     // A cache that cannot be derived must not block removal; warn and skip it.
     let cargo_cache = crate::permissions::worktree_cargo_cache_path(context.home, &locked.verified)

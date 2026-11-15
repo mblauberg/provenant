@@ -464,8 +464,9 @@ pub(crate) fn replay_worktree_settlement(
     match std::fs::symlink_metadata(worktree) {
         Ok(_) => Ok(None),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Absence settles only the worktree projection. The linked
+            // reference step still needs replay under fresh Git evidence.
             let mut receipt = receipt.clone();
-            receipt["state"] = serde_json::json!("pruned");
             receipt["recovered_from_intent"] = serde_json::json!(true);
             Ok(Some(receipt))
         }
