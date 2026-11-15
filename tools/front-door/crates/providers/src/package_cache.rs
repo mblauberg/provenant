@@ -52,14 +52,10 @@ pub(crate) fn bind_native(
 
     // Corepack derives its package-manager download cache from HOME or
     // XDG_CACHE_HOME. Bind only COREPACK_HOME, keeping provider XDG state intact.
-    if (home_changed || cache_changed) && !preserve_explicit(&["COREPACK_HOME"], host_var, env) {
-        if host_var("COREPACK_HOME").is_some_and(|value| value.is_empty()) {
-            warn_unsupported();
-        } else {
-            match corepack_home(home, host_var) {
-                Setting::Present(Some(path)) => set_env(env, "COREPACK_HOME", path),
-                Setting::Missing | Setting::Present(None) => warn_unsupported(),
-            }
+    if (home_changed || cache_changed) && !preserve_corepack_home(host_var, env) {
+        match corepack_home(home, host_var) {
+            Setting::Present(Some(path)) => set_env(env, "COREPACK_HOME", path),
+            Setting::Missing | Setting::Present(None) => warn_unsupported(),
         }
     }
 
@@ -370,6 +366,21 @@ fn preserve_explicit(
     false
 }
 
+fn preserve_corepack_home(
+    host_var: &dyn Fn(&str) -> Option<OsString>,
+    env: &mut Vec<(OsString, OsString)>,
+) -> bool {
+    if env_value(env, "COREPACK_HOME").is_some() {
+        return true;
+    }
+    if let Some(value) = host_var("COREPACK_HOME") {
+        // Corepack uses nullish precedence, so even an empty value is explicit.
+        set_env(env, "COREPACK_HOME", value);
+        return true;
+    }
+    false
+}
+
 pub(super) fn explicit_host_value(
     host_var: &dyn Fn(&str) -> Option<OsString>,
     names: &[&str],
@@ -612,6 +623,15 @@ mod tests {
         assert_eq!(
             corepack_home(home, &host_var),
             Setting::Present(Some(local_app_data.join("node/corepack")))
+        );
+
+        let explicit_empty = |name: &str| (name == "COREPACK_HOME").then(OsString::new);
+        let mut env = Vec::new();
+        assert!(preserve_corepack_home(&explicit_empty, &mut env));
+        assert_eq!(
+            var(&env, "COREPACK_HOME"),
+            Some(OsStr::new("")),
+            "Corepack treats an explicitly empty home as a value"
         );
     }
 
