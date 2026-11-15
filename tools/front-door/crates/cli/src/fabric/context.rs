@@ -362,14 +362,14 @@ impl Context {
             None
         };
         let host = provenant_config::bind_host(&roots)?;
-        // Chair paths resolve harness markers separately through inbox_address.
+        // The service identity and custody holder share this harness selection.
         let identity = Identity::bind(
             &binding,
             host,
             cwd,
             &config,
             std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
-            None,
+            active_harness_client(),
             key,
         )?;
         Ok(Self {
@@ -441,7 +441,7 @@ impl Context {
             cwd,
             &config,
             std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
-            None,
+            active_harness_client(),
             key,
         )?;
         Ok(Self {
@@ -516,6 +516,7 @@ impl Context {
             || provenant_core::ProjectId::from_bytes(bytes),
             |binding| binding.project_id(),
         );
+        let client = active_harness_client();
         let identity = Identity {
             project,
             host,
@@ -523,9 +524,9 @@ impl Context {
                 host,
                 &config,
                 std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
-                None,
+                client,
             )?,
-            client: config.client_label.clone(),
+            client: client.unwrap_or(&config.client_label).to_owned(),
             cwd: AbsolutePath::new(cwd).map_err(|_| EdgeError::Invalid)?,
             common_dir: AbsolutePath::new(common_dir).map_err(|_| EdgeError::Invalid)?,
             federation: None,
@@ -910,6 +911,10 @@ fn harness_client(
             _ => None,
         }
     })
+}
+
+fn active_harness_client() -> Option<&'static str> {
+    harness_client(None).map(|harness| harness.spec().name)
 }
 /// A peer call failure: the stable error plus, for transport failures, the
 /// peer and cause. The detail is message text only; the wire codes are unchanged.
