@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Require each native inventory entry in the macOS list and passing JUnit."""
+import importlib.machinery
+import importlib.util
 import json
 from pathlib import Path
 import sys
@@ -7,6 +9,10 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parent.parent
 INVENTORY = ROOT / 'config/native-test-inventory.json'
+loader = importlib.machinery.SourceFileLoader('flaky_quarantine', str(ROOT / 'scripts/flaky-quarantine'))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+quarantine = importlib.util.module_from_spec(spec)
+loader.exec_module(quarantine)
 
 
 def inventory(path):
@@ -29,7 +35,7 @@ def inventory(path):
     return rows
 
 
-def check(rows, listing, results):
+def check(rows, listing, results, quarantined=frozenset()):
     suites = listing['rust-suites']
     errors = []
     reports = {}
@@ -39,6 +45,10 @@ def check(rows, listing, results):
         except (OSError, ET.ParseError) as error:
             errors.append(f'{path.name}: invalid JUnit report: {error}')
     for name, platform, lane, variables, binary in rows:
+        package = suites.get(binary, {}).get('package-name')
+        if (package, name) in quarantined:
+            print(f'{name}: quarantined ({package})')
+            continue
         if not name or name not in suites.get(binary, {}).get('testcases', {}):
             errors.append(f'{name}: absent from macOS nextest list for {binary}')
         try:
@@ -61,13 +71,15 @@ def main():
         sys.exit('usage: check-native-inventory LIST_JSON RESULTS_DIR')
     try:
         rows = inventory(INVENTORY)
-        errors = check(rows, json.loads(Path(sys.argv[1]).read_text()), Path(sys.argv[2]))
+        entries = quarantine.parse_config(quarantine.DEFAULT_CONFIG.read_text(encoding='utf-8'))['test']
+        quarantined = {(entry['package'], entry['name']) for entry in entries}
+        errors = check(rows, json.loads(Path(sys.argv[1]).read_text()), Path(sys.argv[2]), quarantined)
     except (OSError, ValueError, KeyError, TypeError) as error:
         sys.exit(f'Cannot check native inventory: {error}')
     if errors:
         print('\n'.join(errors), file=sys.stderr)
         return 1
-    print(f'All {len(rows)} native inventory entries passed in their required lanes.')
+    print('Native inventory entries passed or were quarantined.')
     return 0
 
 

@@ -12,7 +12,7 @@ module = importlib.util.module_from_spec(spec)
 loader.exec_module(module)
 name = 'example::native_test'
 row = [name, 'macOS', 'native', 'PROVENANT_CONFINEMENT_REQUIRED', 'suite']
-listing = {'rust-suites': {'suite': {'testcases': {name: {}}}}}
+listing = {'rust-suites': {'suite': {'package-name': 'example', 'testcases': {name: {}}}}}
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     (root / 'native.json').write_text(json.dumps({'PROVENANT_CONFINEMENT_REQUIRED': '1'}))
@@ -32,6 +32,8 @@ with tempfile.TemporaryDirectory() as directory:
         assert module.check([row], listing, root)
     report.write_text('<testsuites/>')  # Empty filter or zero tests.
     assert module.check([row], listing, root)
+    assert not module.check([row], listing, root, {('example', name)})
+    assert module.check([row], listing, root, {('other', name)})
     write_case()
     (root / 'native.json').write_text('{}')
     assert module.check([row], listing, root)

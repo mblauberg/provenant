@@ -287,7 +287,6 @@ jobs:
     if: needs.macos-scope.outputs.run_rust == 'true'
     outputs:
       nextest_filter: ${{ steps.affected.outputs.nextest_filter }}
-      quarantine_filter: ${{ steps.quarantine.outputs.filter }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -338,14 +337,18 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           IS_MAIN: ${{ github.event_name != 'pull_request' }}
         run: ../../scripts/select-affected-crate-tests
-      - name: Validate selectors and flaky-test quarantine once
-        id: quarantine
+      - name: Validate selectors
         working-directory: tools/front-door
         run: |
           cargo nextest list --profile ci --ignore-default-filter --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --message-format json > "$RUNNER_TEMP/linux-test-list.json"
           python3 ../../scripts/check-nextest-filters --test-list "$RUNNER_TEMP/linux-test-list.json"
-          filter="$(../../scripts/flaky-quarantine --test-list "$RUNNER_TEMP/linux-test-list.json")"
-          printf 'filter=%s\n' "$filter" >> "$GITHUB_OUTPUT"
+      - name: Upload Linux test list
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-test-list
+          path: ${{ runner.temp }}/linux-test-list.json
+          if-no-files-found: error
+          retention-days: 1
       - name: Upload Linux test archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -357,7 +360,7 @@ jobs:
 
   rust:
     name: Rust front door (${{ matrix.partition }}/3)
-    needs: [macos-scope, rust-test-archive]
+    needs: [macos-scope, rust-test-archive, rust-macos-archive]
     if: needs.macos-scope.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -397,7 +400,7 @@ jobs:
         working-directory: tools/front-door
         env:
           NEXTTEST_FILTER: ${{ needs.rust-test-archive.outputs.nextest_filter }}
-          QUARANTINE_FILTER: ${{ needs.rust-test-archive.outputs.quarantine_filter }}
+          QUARANTINE_FILTER: ${{ needs.rust-macos-archive.outputs.quarantine_filter }}
         run: |
           filter="$NEXTTEST_FILTER"
           if [ -n "$QUARANTINE_FILTER" ]; then
@@ -428,7 +431,7 @@ jobs:
         continue-on-error: true
         working-directory: tools/front-door
         env:
-          QUARANTINE_FILTER: ${{ needs.rust-test-archive.outputs.quarantine_filter }}
+          QUARANTINE_FILTER: ${{ needs.rust-macos-archive.outputs.quarantine_filter }}
         run: |
           if [ -n "$QUARANTINE_FILTER" ]; then
             cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level flaky --final-status-level pass -E "$QUARANTINE_FILTER"
@@ -471,8 +474,10 @@ jobs:
     name: Build macOS test archive
     runs-on: macos-15
     timeout-minutes: 20
-    needs: macos-scope
-    if: needs.macos-scope.outputs.run_macos == 'true'
+    needs: [macos-scope, rust-test-archive]
+    if: needs.macos-scope.outputs.run_rust == 'true'
+    outputs:
+      quarantine_filter: ${{ steps.quarantine.outputs.filter }}
     env:
       CARGO_INCREMENTAL: "0"
     permissions:
@@ -515,7 +520,17 @@ jobs:
           if-no-files-found: warn
       - name: List macOS tests in the archive
         working-directory: tools/front-door
-        run: cargo nextest list --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --message-format json > "$RUNNER_TEMP/native-test-list.json"
+        run: cargo nextest list --profile ci --ignore-default-filter --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --message-format json > "$RUNNER_TEMP/native-test-list.json"
+      - name: Download Linux test list
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: linux-test-list
+          path: ${{ runner.temp }}
+      - name: Validate flaky-test quarantine
+        id: quarantine
+        run: |
+          filter="$(scripts/flaky-quarantine --test-list "$RUNNER_TEMP/linux-test-list.json" --test-list "$RUNNER_TEMP/native-test-list.json")"
+          printf 'filter=%s\n' "$filter" >> "$GITHUB_OUTPUT"
       - name: Upload macOS test archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -544,6 +559,7 @@ jobs:
         group: [custody, provider-dispatch, dispatch, light]
     env:
       CARGO_INCREMENTAL: "0"
+      QUARANTINE_FILTER: ${{ needs.rust-macos-archive.outputs.quarantine_filter }}
     permissions:
       contents: read
     steps:
@@ -655,6 +671,17 @@ jobs:
             ${{ runner.temp }}/native-test-results/
           if-no-files-found: error
           retention-days: 1
+
+      - name: Run quarantined macOS tests (advisory)
+        if: ${{ !cancelled() && matrix.group == 'custody' }}
+        continue-on-error: true
+        working-directory: tools/front-door
+        run: |
+          if [ -n "$QUARANTINE_FILTER" ]; then
+            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level flaky --final-status-level pass -E "$QUARANTINE_FILTER"
+          else
+            echo 'No quarantined tests to run.'
+          fi
 
   rust-macos-inventory:
     name: Verify macOS native evidence

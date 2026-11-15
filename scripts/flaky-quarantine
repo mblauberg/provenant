@@ -110,7 +110,7 @@ def make_filter(config, tests, today):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--test-list", type=Path, help="Use a saved nextest JSON listing")
+    parser.add_argument("--test-list", type=Path, action="append", help="Use saved nextest JSON listings")
     parser.add_argument("--today", type=dt.date.fromisoformat, default=dt.date.today())
     args = parser.parse_args()
 
@@ -121,7 +121,7 @@ def main():
             print("")
             return 0
         if args.test_list:
-            raw_tests = args.test_list.read_text(encoding="utf-8")
+            tests = set().union(*(read_tests(path.read_text(encoding="utf-8")) for path in args.test_list))
         else:
             command = [
                 "cargo", "nextest", "list", "--workspace", "--locked", "--profile", "ci",
@@ -130,7 +130,8 @@ def main():
             ]
             raw_tests = subprocess.run(command, cwd=DEFAULT_CONFIG.parents[1], check=True,
                                        capture_output=True, text=True).stdout
-        print(make_filter(config, read_tests(raw_tests), args.today))
+            tests = read_tests(raw_tests)
+        print(make_filter(config, tests, args.today))
     except (OSError, subprocess.CalledProcessError, json.JSONDecodeError, KeyError, ValueError) as error:
         print(f"flaky quarantine check failed: {error}", file=sys.stderr)
         return 1
