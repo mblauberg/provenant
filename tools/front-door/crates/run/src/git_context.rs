@@ -1997,7 +1997,7 @@ mod tests {
             &DrainFixture(executor.clone()),
             &binary,
             &root,
-            _temp.path(),
+            scratch.path(),
             &base,
         )?;
         context.write_to(&Directory::open_anchor(&output)?, &output)?;
