@@ -17,12 +17,16 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-provenant-test-support = { path = "../test-support" }
+provenant-test-support = { path = "../test-support", features = ["fixture"] }
 provenant-supervisor = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }
 
 [features]
-fixture = ["provenant-os/fixture"]
+fixture = [
+    "provenant-os/fixture",
+    "provenant-core/fixture",
+    "provenant-records/fixture",
+]
 
 [[test]]
 name = "process"

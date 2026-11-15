@@ -6,6 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+fixture = [
+    "provenant-config/fixture",
+    "provenant-core/fixture",
+    "provenant-records/fixture",
+]
+
 [dependencies]
 jiff = { workspace = true }
 serde = { workspace = true }

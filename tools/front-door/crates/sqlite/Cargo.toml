@@ -5,6 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+fixture = [
+    "provenant-os/fixture",
+    "provenant-core/fixture",
+]
+
 [dependencies]
 provenant-os = { workspace = true }
 provenant-core = { workspace = true }

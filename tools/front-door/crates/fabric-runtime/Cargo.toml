@@ -22,12 +22,20 @@ toml_edit = { workspace = true }
 
 [features]
 # Records checkpoint reads for host-path counting fixtures.
-fixture = []
+fixture = [
+    "provenant-os/fixture",
+    "provenant-config/fixture",
+    "provenant-confinement/fixture",
+    "provenant-core/fixture",
+    "provenant-records/fixture",
+    "provenant-routing/fixture",
+    "provenant-fabric-store/fixture",
+]
 
 [dev-dependencies]
 rusqlite = { workspace = true }
 provenant-core = { workspace = true, features = ["fixture"] }
-provenant-test-support = { path = "../test-support" }
+provenant-test-support = { path = "../test-support", features = ["fixture"] }
 provenant-os = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }
 

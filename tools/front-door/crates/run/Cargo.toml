@@ -7,7 +7,17 @@ license.workspace = true
 publish = false
 
 [features]
-fixture = ["dep:provenant-test-support"]
+fixture = [
+    "dep:provenant-test-support",
+    "provenant-test-support/fixture",
+    "provenant-os/fixture",
+    "provenant-confinement/fixture",
+    "provenant-core/fixture",
+    "provenant-config/fixture",
+    "provenant-records/fixture",
+    "provenant-supervisor/fixture",
+    "provenant-sqlite/fixture",
+]
 
 [lints]
 workspace = true
@@ -30,7 +40,7 @@ toml_edit = { workspace = true }
 
 [dev-dependencies]
 libc = { workspace = true }
-provenant-test-support = { path = "../test-support" }
+provenant-test-support = { path = "../test-support", features = ["fixture"] }
 provenant-os = { workspace = true, features = ["fixture"] }
 provenant-supervisor = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }

@@ -73,6 +73,30 @@ description = "Provenant command composition and transport edge"
 publish = false
 license.workspace = true
 
+[features]
+# One opt-in development feature set: pass --features fixture to build, test
+# (workspace or -p), clippy and nextest. Every member forwards fixture to
+# its workspace dependencies and includes its own test-only features.
+# Dev-dependencies request the same set; defaults stay empty for release.
+fixture = [
+    "provenant-os/fixture",
+    "provenant-quota/fixture",
+    "provenant-telemetry/fixture",
+    "provenant-fabric-runtime/fixture",
+    "provenant-fabric-store/fixture",
+    "provenant-workflow/fixture",
+    "provenant-run/fixture",
+    "provenant-providers/fixture",
+    "provenant-routing/fixture",
+    "provenant-cli/fixture",
+    "provenant-core/fixture",
+    "provenant-records/fixture",
+    "provenant-config/fixture",
+    "provenant-supervisor/fixture",
+    "provenant-confinement/fixture",
+    "provenant-sqlite/fixture",
+]
+
 [dependencies]
 sha2 = { workspace = true }
 jiff = { workspace = true }
@@ -105,13 +129,13 @@ toml_edit = { workspace = true }
 
 [dev-dependencies]
 provenant-fabric-runtime = { workspace = true, features = ["fixture"] }
-provenant-test-support = { path = "crates/test-support" }
+provenant-test-support = { path = "crates/test-support", features = ["fixture"] }
 provenant-os = { workspace = true, features = ["fixture"] }
 regex = { workspace = true }
 rusqlite = { workspace = true }
 provenant-cli = { workspace = true, features = ["fixture"] }
 provenant-run = { workspace = true, features = ["fixture"] }
-provenant-core = { workspace = true }
+provenant-core = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 toml_edit = { workspace = true }
@@ -120,9 +144,15 @@ provenant-supervisor = { workspace = true, features = ["fixture"] }
 [profile.dev]
 debug = "line-tables-only"
 
-[profile.test]
-# Tests need assertions, not DWARF; retain line tables in the developer profile.
+# Third-party dependencies carry no DWARF; workspace crates keep line tables.
+# The test profile inherits dev, including these overrides, to reuse artefacts.
+[profile.dev.package."*"]
 debug = 0
+
+# Optimise proc-macros and their dependencies without emitting build-script DWARF.
+[profile.dev.build-override]
+debug = 0
+opt-level = 1
 
 [profile.release]
 opt-level = "z"
