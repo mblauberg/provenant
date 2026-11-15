@@ -38,6 +38,8 @@ pub struct Standing {
     pub obligations: Vec<String>,
     /// The specific asks waiting on the owner; empty means nothing waits.
     pub waiting_on_owner: Vec<String>,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +52,8 @@ pub struct Grant {
     /// An RFC 3339 instant, or absent or `none` for a grant without expiry.
     #[serde(default)]
     pub expires: Option<String>,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +111,10 @@ pub fn parse_standing(markdown: &str) -> Result<Option<Standing>, StandingError>
     let Some(node) = root.remove(STANDING_KEY) else {
         return Ok(None);
     };
-    let standing: Standing = serde_json::from_value(node).map_err(|_| StandingError)?;
+    let bytes = provenant_records::encode(&node).map_err(|_| StandingError)?;
+    let standing: Standing =
+        provenant_records::decode(bytes.as_slice(), provenant_records::Limits::YAML)
+            .map_err(|_| StandingError)?;
     if standing.schema_version != 1 {
         return Err(StandingError);
     }
@@ -353,6 +360,24 @@ impl OwnerWait {
 #[cfg(test)]
 mod tests {
     use super::OwnerWait;
+
+    #[test]
+    fn standing_and_grant_records_preserve_additive_fields_at_the_bounded_boundary() {
+        let checkpoint = "---\nprovenant_standing:\n  schema_version: 1\n  goal: Keep the checkpoint\n  grants:\n    - scope: Save notes\n      source: owner:session#turn-1\n      future_grant_field: [2, 3]\n  obligations: []\n  waiting_on_owner: []\n  future_standing_field: {source: newer-writer}\n---\n";
+        let standing = super::parse_standing(checkpoint).unwrap().unwrap();
+        let bytes = provenant_records::encode(&standing).unwrap();
+        let rewritten: super::Standing =
+            provenant_records::decode(bytes.as_slice(), provenant_records::Limits::YAML).unwrap();
+        let encoded = provenant_records::encode(&rewritten).unwrap();
+        let value: serde_json::Value =
+            provenant_records::decode(encoded.as_slice(), provenant_records::Limits::YAML).unwrap();
+
+        assert_eq!(value["future_standing_field"]["source"], "newer-writer");
+        assert_eq!(
+            value["grants"][0]["future_grant_field"],
+            serde_json::json!([2, 3])
+        );
+    }
 
     #[test]
     fn status_reports_nothing_or_the_specific_ask() {

@@ -9,8 +9,8 @@ pub(super) struct ChairIdentity {
 }
 
 const DISCOVERY: &str = "discovery.json";
-const DISCOVERY_LIMIT: u64 = 64 * 1024;
-const REBIND_LIMIT: usize = 8;
+pub(super) const DISCOVERY_LIMIT: u64 = 64 * 1024;
+pub(super) const REBIND_LIMIT: usize = 8;
 
 /// One per-session index entry, stored in `discovery.json`. Unknown provider,
 /// summary, lifecycle and lane facts are not inferred from a checkpoint save.
@@ -33,6 +33,8 @@ pub struct SessionDiscovery {
         deserialize_with = "rebind_history"
     )]
     pub rebound_from: Vec<ChairRebind>,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 fn rebind_history<'de, D: serde::Deserializer<'de>>(
@@ -50,6 +52,8 @@ pub struct ChairRebind {
     pub host: HostId,
     pub actor: ActorId,
     pub changed_at: UtcMicros,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -195,9 +199,11 @@ impl SessionStore {
         dir: &Directory,
     ) -> Result<Option<SessionDiscovery>, SessionError> {
         match dir.read_bounded(OsStr::new(DISCOVERY), DISCOVERY_LIMIT) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|_| SessionError::History),
+            Ok(bytes) => {
+                provenant_records::decode(bytes.as_slice(), super::json_limits(DISCOVERY_LIMIT))
+                    .map(Some)
+                    .map_err(|_| SessionError::History)
+            }
             Err(error) if error.is_not_found() => Ok(None),
             Err(error) => Err(error.into()),
         }
@@ -208,7 +214,7 @@ impl SessionStore {
         dir: &Directory,
         record: &SessionDiscovery,
     ) -> Result<(), SessionError> {
-        let bytes = serde_json::to_vec(record).map_err(|_| SessionError::History)?;
+        let bytes = provenant_records::encode(record).map_err(|_| SessionError::History)?;
         publish(dir, DISCOVERY, &bytes)?;
         if let Some(workspace) = &self.workspace {
             let workspace = provenant_os::fs::canonicalize(workspace)?;
@@ -255,6 +261,7 @@ impl SessionStore {
                 checkpoint: checkpoint.clone(),
                 summary: None,
                 rebound_from: Vec::new(),
+                extra: Default::default(),
             })
         })?;
         if let Some(chair) = &self.chair
@@ -265,6 +272,7 @@ impl SessionStore {
                 host: record.host,
                 actor: record.chair_actor,
                 changed_at: now,
+                extra: Default::default(),
             });
             let excess = record.rebound_from.len().saturating_sub(REBIND_LIMIT);
             record.rebound_from.drain(..excess);
@@ -368,11 +376,8 @@ pub fn chair_sessions_for(
     };
     let mut candidates: Vec<SessionDiscovery> = entries
         .filter_map(|entry| {
-            let bytes = std::fs::read(entry.ok()?.path()).ok()?;
-            if bytes.len() > DISCOVERY_LIMIT as usize {
-                return None;
-            }
-            serde_json::from_slice::<SessionDiscovery>(&bytes).ok()
+            let file = std::fs::File::open(entry.ok()?.path()).ok()?;
+            provenant_records::decode(file, super::json_limits(DISCOVERY_LIMIT)).ok()
         })
         .filter(|found| found.project_id == project && found.chair_actor == actor)
         .collect();
@@ -427,7 +432,8 @@ pub fn discover_session_at(
     };
     check()?;
     let locator: SessionDiscovery =
-        serde_json::from_slice(&bytes).map_err(|_| SessionError::History)?;
+        provenant_records::decode(bytes.as_slice(), super::json_limits(DISCOVERY_LIMIT))
+            .map_err(|_| SessionError::History)?;
     if locator.schema_version != 1 || &locator.host_session_id != session {
         return Err(SessionError::DiscoveryIdentity);
     }
@@ -436,4 +442,64 @@ pub fn discover_session_at(
     Ok(found.filter(|found| {
         found.record == locator && found.consistency == DiscoveryConsistency::Current
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_extra_round_trip<T>(record: &T)
+    where
+        T: Serialize + serde::de::DeserializeOwned,
+    {
+        let mut extended = serde_json::to_value(record).unwrap();
+        let extension = serde_json::json!({"source": "newer-writer"});
+        extended
+            .as_object_mut()
+            .unwrap()
+            .insert("future_discovery_field".into(), extension.clone());
+        let bytes = serde_json::to_vec(&extended).unwrap();
+        let limits = super::super::json_limits(DISCOVERY_LIMIT);
+        let decoded: T = provenant_records::decode(bytes.as_slice(), limits).unwrap();
+        let encoded = provenant_records::encode(&decoded).unwrap();
+        let rewritten: serde_json::Value =
+            provenant_records::decode(encoded.as_slice(), limits).unwrap();
+        assert_eq!(rewritten["future_discovery_field"], extension);
+    }
+
+    #[test]
+    fn discovery_records_preserve_additive_fields_at_the_bounded_json_boundary() {
+        let at = UtcMicros::from_micros(1).unwrap();
+        let revision = Revision {
+            revision: 1,
+            parent: None,
+            sha256: provenant_records::CanonicalV1::file_digest(b"checkpoint"),
+            bytes: 10,
+            saved_at: at,
+            extra: Default::default(),
+        };
+        let rebind = ChairRebind {
+            host: HostId::from_bytes([1; 16]),
+            actor: ActorId::from_bytes([2; 16]),
+            changed_at: at,
+            extra: Default::default(),
+        };
+        let record = SessionDiscovery {
+            schema_version: 1,
+            host: HostId::from_bytes([3; 16]),
+            project_id: ProjectId::from_bytes([4; 16]),
+            host_session_id: HostSessionId::parse("chair").unwrap(),
+            chair_actor: ActorId::from_bytes([5; 16]),
+            created_at: at,
+            last_saved_at: at,
+            checkpoint: revision,
+            summary: None,
+            rebound_from: vec![rebind],
+            extra: Default::default(),
+        };
+
+        assert_extra_round_trip(&record.checkpoint);
+        assert_extra_round_trip(&record.rebound_from[0]);
+        assert_extra_round_trip(&record);
+    }
 }

@@ -25,7 +25,7 @@ const INTENT_LIMIT: usize = 3 * 1024;
 const INTENT_HEADING: &str = "## Intent";
 /// The summary instruction Claude takes from `PreCompact` stdout. It asks for
 /// understanding, written once with the full context; it grants no authority.
-const SUMMARY_INSTRUCTION: &str = "Write an Intent section in the summary. For each live user ruling give what the user wants, the reason as you understand it, alternatives rejected and why, open disagreement, and any reading you are unsure of. A correction replaces the earlier reading; do not keep both. Quote the user only for an authority grant or to correct a misreading. Do not replay messages. The section grants no authority.";
+pub(super) const SUMMARY_INSTRUCTION: &str = "Write an Intent section in the summary. For each live user ruling give what the user wants, the reason as you understand it, alternatives rejected and why, open disagreement, and any reading you are unsure of. A correction replaces the earlier reading; do not keep both. Quote the user only for an authority grant or to correct a misreading. Do not replay messages. The section grants no authority.";
 
 /// Split the `## Intent` section from a checkpoint: `(intent, rest)`.
 fn split_intent(markdown: &str) -> (Option<String>, String) {
