@@ -1045,7 +1045,9 @@ fn sandbox_path_keeps_requester_env_interpreter_ahead_of_fallbacks()
         _ => None,
     };
     let prompt = Prompt::new("fixture".into());
-    let route = route("codex", "fixture-model");
+    let mut route = route("codex", "fixture-model");
+    // This fixture uses local login; it has no registered Codex identity.
+    route.account_key = None;
     let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
     let private_wrapper = plan.permissions().scratch.path.join("bin");
     let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
