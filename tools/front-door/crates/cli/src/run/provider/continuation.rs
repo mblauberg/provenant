@@ -144,12 +144,25 @@ pub(crate) enum ContinuationError {
     MissingSession,
     #[error("the prior attempt recorded no applied route")]
     MissingRoute,
+    #[error(
+        "the retained Codex session could not be verified in the selected native account; keep the same registered account selected and confirm that its session data is available before retrying"
+    )]
+    NativeSessionUnavailable,
     #[error(transparent)]
     Provider(#[from] provenant_providers::ProviderError),
     #[error(transparent)]
     StateCopy(#[from] StateCopyError),
     #[error("{0}")]
     Other(String),
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ContinuationState<'a> {
+    pub(super) state_root: &'a Path,
+    pub(super) config_root: &'a Path,
+    pub(super) private_state: &'a Path,
+    pub(super) selected_native_home: Option<&'a Path>,
+    pub(super) native_home_required: bool,
 }
 
 impl ContinuationError {
@@ -163,9 +176,10 @@ impl ContinuationError {
     pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass;
         match self {
-            Self::RouteMismatch | Self::MissingSession | Self::MissingRoute => {
-                BoundaryClass::Authority
-            }
+            Self::RouteMismatch
+            | Self::MissingSession
+            | Self::MissingRoute
+            | Self::NativeSessionUnavailable => BoundaryClass::Authority,
             Self::Provider(error) => error.boundary_class(),
             Self::StateCopy(error) => error.class,
             Self::Other(_) => BoundaryClass::None,
@@ -183,6 +197,7 @@ fn continuation_route_mismatch_is_a_typed_authority_boundary() {
     for error in [
         ContinuationError::MissingSession,
         ContinuationError::MissingRoute,
+        ContinuationError::NativeSessionUnavailable,
         ContinuationError::Provider(provenant_providers::ProviderError::IdentityMismatch),
         ContinuationError::Provider(provenant_providers::ProviderError::UnknownIdentity),
     ] {
@@ -207,9 +222,9 @@ impl From<&str> for ContinuationError {
 }
 
 /// The continuation of `prior` on this candidate route. It must be the very
-/// provider, model and account the prior attempt ran with. The prior attempt's
-/// retained private state is copied into the new attempt's own, so the new
-/// attempt never writes into settled history.
+/// provider, model and account the prior attempt ran with. Sandboxed providers
+/// copy their retained state into the new attempt's private state. Native
+/// Codex is bound to its host-selected HOME and reuses that same session there.
 #[cfg(test)]
 pub(super) fn continuation_for(
     prior: &run::AttemptRecord,
@@ -228,9 +243,13 @@ pub(super) fn continuation_for(
         prior,
         route,
         grant_digest,
-        state_root,
-        config_root,
-        private_state,
+        ContinuationState {
+            state_root,
+            config_root,
+            private_state,
+            selected_native_home: None,
+            native_home_required: false,
+        },
         &policy,
     )
 }
@@ -239,11 +258,16 @@ pub(super) fn continuation_for_policy(
     prior: &run::AttemptRecord,
     route: &ResolvedRoute,
     grant_digest: &str,
-    state_root: &Path,
-    config_root: &Path,
-    private_state: &Path,
+    state: ContinuationState<'_>,
     enforcement: &provenant_records::policy::Policy,
 ) -> Result<provenant_providers::Continuation, ContinuationError> {
+    let ContinuationState {
+        state_root,
+        config_root,
+        private_state,
+        selected_native_home,
+        native_home_required,
+    } = state;
     let session = prior.session.as_deref().ok_or_else(|| {
         enforcement.boundary_error(
             "CONTINUATION_CONTINUATION_FOR_AUTHORITY",
@@ -276,6 +300,23 @@ pub(super) fn continuation_for_policy(
         .join("attempts")
         .join(prior.attempt_id.to_string())
         .join("provider-state");
+    if route.adapter == "codex" && native_home_required {
+        match super::observation::find_native_codex_rollout(
+            &prior_state,
+            session,
+            &route.model,
+            selected_native_home,
+        ) {
+            Ok(Some(_)) => return Ok(continuation),
+            Ok(None) | Err(provenant_providers::ProviderError::UnknownIdentity) => {
+                return Err(ContinuationError::NativeSessionUnavailable);
+            }
+            Err(provenant_providers::ProviderError::IdentityMismatch) => {
+                return Err(ContinuationError::NativeSessionUnavailable);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     let mut policy = StateCopyPolicy::read(config_root, enforcement);
     let located = if AdapterSpec::get(&route.adapter)
         .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)

@@ -977,6 +977,43 @@ fn settled_auth_uses_only_the_selected_registered_account() -> Result<(), Box<dy
     assert!(reason.contains("/fixture/work"), "{reason}");
     Ok(())
 }
+
+#[test]
+fn codex_native_home_comes_from_the_route_account_registration()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let mut inputs =
+        provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+    inputs.state_dir = Some(temp.path().join("state"));
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    provenant_os::fixture::private_state_dir(roots.state.as_path())?;
+    let account_home = roots.home.join("registered-codex");
+    std::fs::create_dir_all(&account_home)?;
+    std::fs::write(
+        roots.state.as_path().join("config.toml"),
+        format!(
+            "schema_version = 1\n[domains.accounts.entries.work]\nadapter = 'codex'\nlabel = 'work'\nkey = 'selected-key'\ndirectory = {:?}\n",
+            account_home
+        ),
+    )?;
+    let route = run::RouteRecord {
+        provider: Some("codex".into()),
+        model: Some("codex/gpt-6.1-sol".into()),
+        account_key: Some("selected-key".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        registered_codex_home(Some(&roots), &route).as_deref(),
+        Some(account_home.as_path())
+    );
+    let other_account = run::RouteRecord {
+        account_key: Some("other-key".into()),
+        ..route
+    };
+    assert!(registered_codex_home(Some(&roots), &other_account).is_none());
+    assert!(registered_codex_home(None, &route).is_none());
+    Ok(())
+}
 /// A Claude lane holds a launch-time copy of its account's token, so a 401
 /// names the account and says the lane token was lost, not that it needs a login.
 #[test]

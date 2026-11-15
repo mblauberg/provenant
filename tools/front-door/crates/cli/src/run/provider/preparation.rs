@@ -3540,9 +3540,13 @@ pub(super) fn prepare_candidates(
                 prior,
                 &route,
                 &task.authority_digest.to_string(),
-                state_root,
-                roots.state.as_path(),
-                &private_state,
+                ContinuationState {
+                    state_root,
+                    config_root: roots.state.as_path(),
+                    private_state: &private_state,
+                    selected_native_home: account.as_ref().map(|account| account.directory()),
+                    native_home_required: !sandbox.effective,
+                },
                 &launch_policy,
             ) {
                 Ok(continuation) => Some(continuation),
@@ -4212,20 +4216,15 @@ pub(super) fn prepare_candidates(
                 .find(|(key, _)| key == environment)
                 .map(|(_, value)| PathBuf::from(value))
                 .unwrap_or_else(|| home.join(fallback));
-            let selector = paths
-                .provider_state
-                .join(format!("codex-observation-{scratch_name}.json"));
-            let bytes = serde_json::to_vec(&serde_json::json!({
-                "schema_version": 1,
-                "home": provenant_records::StructuredPathWire::from_path(&codex_home)
-                    .map_err(|error| error.to_string())?,
-            }))
-            .map_err(|error| error.to_string())?;
             // This is host settlement metadata, outside the adapter's writable
             // candidate subtree. Keep it out of the adapter setup steps, whose
             // file writes are deliberately restricted to scratch.
-            if let Err(error) = write_setup_file(&[&paths.provider_state], &selector, &bytes, false)
-            {
+            if let Err(error) = write_native_codex_selector(
+                &paths.provider_state,
+                &scratch_name,
+                &codex_home,
+                &route,
+            ) {
                 reasons.push(setup_skip(&label, error));
                 continue;
             }
