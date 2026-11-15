@@ -639,7 +639,9 @@ fn retry_node_scope(
         }
     }
     // Settled consumers keep the generations they observed, including any
-    // internal outputs they selected directly. Pending consumers see the redo.
+    // internal outputs they selected directly. Composite rows are derived
+    // from their current members, so they must not snapshot a member being
+    // retried. Pending consumers see the redo.
     let mut affected = reset_ids.clone();
     loop {
         let before = affected.len();
@@ -657,13 +659,32 @@ fn retry_node_scope(
             && affected.contains(&consumer.id)
             && consumer.state.settled()
         {
-            let snapshots = &mut consumer.settled_dependency_snapshots;
-            for prior in graph
-                .checkpoint
+            let composite_members = expanded
                 .nodes
                 .iter()
-                .filter(|node| reset_ids.contains(&node.id) && node.state.settled())
-            {
+                .find(|node| node.id == consumer.id && node.composite.is_some())
+                .map(|node| node.composite_members.as_slice());
+            let is_composite_member = |id: &str| {
+                composite_members.is_some_and(|members| {
+                    members.iter().any(|member| {
+                        id == member
+                            || id
+                                .strip_prefix(member)
+                                .is_some_and(|suffix| suffix.starts_with("--"))
+                    })
+                })
+            };
+            let snapshots = &mut consumer.settled_dependency_snapshots;
+            if composite_members.is_some() {
+                // Composite outputs and state are derived from current member
+                // settlement, even when the composite itself was settled.
+                snapshots.retain(|id, _| !is_composite_member(id));
+            }
+            for prior in graph.checkpoint.nodes.iter().filter(|node| {
+                reset_ids.contains(&node.id)
+                    && node.state.settled()
+                    && !is_composite_member(&node.id)
+            }) {
                 let mut snapshot = prior.clone();
                 snapshot.settled_dependency_snapshots.clear();
                 snapshot.previous_attempts.clear();
