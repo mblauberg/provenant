@@ -1,6 +1,6 @@
 # Run native session and worktree hooks
 Owner: provenant
-Anchor: [`hooks_session.rs`](../../tools/front-door/tests/hooks_session.rs)
+Anchor: [`hooks::run`](../../tools/front-door/src/hooks.rs)
 
 `provenant install --harness claude --hooks on` registers these hooks in the
 Claude settings (see [install](install.md)). Other harnesses use their native

@@ -1,12 +1,12 @@
 # Execution: runs
 
 Owner: `crates/run`, `crates/records`, `crates/fabric-runtime`
-Anchor: `crates/run/src/tests.rs`, `crates/records/src/format2_tests.rs`
+Anchor: `crates/run/src/lib.rs`, `crates/records/src/stop.rs`
 
 Run admits attempts and records their outcomes. [Launch](run-launch.md),
 [settlement](run-settlement.md), [Git and delivery](run-git.md) and
-[attribution](run-attribution.md) specify their boundaries. Paths in test
-citations are relative to `tools/front-door/`.
+[attribution](run-attribution.md) specify their boundaries. Paths are relative
+to `tools/front-door/`.
 
 ## Operation IDs
 
@@ -16,7 +16,6 @@ inputs across the name family and allocate a new name for different inputs.
 Collected names remain reserved. Each attempt has a unique work key, including
 its graph-assigned attempt number.
 - Why: lost replies and concurrent requests must not duplicate work or identity.
-- Test: `crates/run/src/tests.rs::concurrent_creates_of_one_work_key_admit_one_attempt`; `tests/graph_cli.rs::a_named_run_replays_its_input_and_a_changed_input_takes_the_next_name`
 
 ## Host Cargo home
 
@@ -41,14 +40,12 @@ cache (or attempt scratch for read-only lanes). No separate lane download store,
 Cargo home or symlink setup exists. The host's own build output supplies target
 seed generations.
 - Why: Cargo fingerprints dependency source paths; changing the home path defeats reuse even when symlinks reach the same content.
-- Test: `crates/confinement/src/cargo.rs::tests`; `crates/confinement/src/permissions/policy/host.rs::tests::relocated_cargo_credentials_are_mandatory_denials`; `crates/run/src/writer.rs::cargo_setup_tests::cargo_config_makes_toolchain_unverifiable`
 
 ## Cargo target seed
 
 A target seed is cloned only for a matching compiler and target. A published
 generation is immutable, and collection cannot race an active clone.
 - Why: reuse must not introduce incompatible or partially collected build output.
-- Test: `crates/run/src/cargo_seed.rs::tests`; `crates/run/src/target_seed_gc.rs::active_clone_lock_prevents_collection`
 
 ## Publication order
 
@@ -56,7 +53,6 @@ Settlement imports and publishes private work before releasing writer custody;
 the worktree lock remains held through both. A sealed terminal decision can be
 replayed after publication contention without relaunching the provider.
 - Why: a second writer must not race unfinished publication.
-- Test: `crates/run/src/dispatch_settlement_tests.rs::a_busy_publication_lock_leaves_the_sealed_decision_to_replay`
 
 ## A writer stops on a token budget
 
@@ -64,7 +60,6 @@ Natural completion takes precedence over budget action. A warning does not stop
 work; a hard boundary stops it. Providers without live usage expose an advisory
 limit rather than a fabricated measurement.
 - Why: budget enforcement must preserve completed work and report its evidence.
-- Test: `crates/supervisor/src/guardian/tests.rs::budget_actions_preserve_clean_points_and_natural_completion`
 
 ## Every limit names the layer that set it
 
@@ -76,7 +71,6 @@ their reported source from it, so status JSON and the preamble show the true
 layer.
 - Why: a value reported under the wrong source sends the operator to the wrong
   place to change it.
-- Test: `crates/config/src/tests.rs::every_registered_knob_reports_the_layer_that_set_it`
 
 ## Lane Git and import
 
@@ -88,8 +82,6 @@ The GitHub credential receipt governs token delivery even when sandboxing is
 off: `none` withholds host token environment variables, `injected` passes only
 the selected token, and `ambient` preserves the native host environment.
 - Why: untrusted lane state must not alter shared Git or publish over another writer.
-- Test: `crates/confinement/tests/lane_git_conformance.rs::lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only`
-  `crates/cli/src/run/provider/gh_auth.rs::tests::selection_drives_receipt_and_environment_without_disclosing_tokens`
 
 ## PR contributions JSON reference
 
@@ -107,7 +99,6 @@ always goes to the chair; no successor writer starts while custody is uncertain.
 A restart preserves the worktree and archives prior attempts. Bounds may turn a
 restart into a chair decision. See [routing](routing.md) for route selection.
 - Why: one decision keeps stop handling consistent and protects writer custody.
-- Test: `crates/records/src/format2_tests.rs::the_spec_table_matches_the_stop_table`; `crates/fabric-runtime/src/graph/next_step_tests.rs::on_stop_sends_a_stop_to_the_chair_and_unproved_custody_always_goes_there`
 
 | Cause | Default | Pinned | Retries |
 | --- | --- | --- | --- |

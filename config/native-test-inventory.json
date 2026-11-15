@@ -1,0 +1,107 @@
+[
+  {
+    "test": "tests::staged_skills_native_probes",
+    "platform": "macOS",
+    "invocation": "custody",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED",
+    "binary": "provenant-providers"
+  },
+  {
+    "test": "permissions::tests::escape::native_sandbox_blocks_path_escape_probes",
+    "platform": "macOS",
+    "invocation": "custody",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED",
+    "binary": "provenant-confinement"
+  },
+  {
+    "test": "run::provider::project_paths::tests::configured_shared_path_allows_lane_lock_contended_by_host",
+    "platform": "macOS",
+    "invocation": "custody",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED",
+    "binary": "provenant-cli"
+  },
+  {
+    "test": "lane_prepare_isolates_nested_writer_state",
+    "platform": "macOS",
+    "invocation": "capability",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_LANE_TOOLS_REQUIRED",
+    "binary": "provenant::worktrees"
+  },
+  {
+    "test": "writer_production_plan_denies_outside_writes",
+    "platform": "macOS",
+    "invocation": "dispatch",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_LANE_TOOLS_REQUIRED",
+    "binary": "provenant::worktrees"
+  },
+  {
+    "test": "worktrees::census_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep",
+    "platform": "macOS",
+    "invocation": "census",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED",
+    "binary": "provenant-confinement"
+  },
+  {
+    "test": "worktrees::census_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree",
+    "platform": "macOS",
+    "invocation": "census",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED",
+    "binary": "provenant-confinement"
+  },
+  {
+    "test": "sys::pid::tests::native_occupancy_reports_image_and_open_file_with_identity_completeness",
+    "platform": "macOS",
+    "invocation": "census",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED",
+    "binary": "provenant-os"
+  },
+  {
+    "test": "sys::pid::tests::native_occupancy_never_proves_an_unqueryable_process_empty",
+    "platform": "macOS",
+    "invocation": "census",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED",
+    "binary": "provenant-os"
+  },
+  {
+    "test": "sys::pid::tests::native_current_process_is_not_an_eligible_platform_daemon",
+    "platform": "macOS",
+    "invocation": "census",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED",
+    "binary": "provenant-os"
+  },
+  {
+    "test": "sys::pid::tests::native_same_user_sleep_is_not_an_eligible_daemon",
+    "platform": "macOS",
+    "invocation": "census",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED",
+    "binary": "provenant-os"
+  },
+  {
+    "test": "sys::pid::tests::native_offsealed_platform_process_is_refused_when_present",
+    "platform": "macOS",
+    "invocation": "census",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED",
+    "binary": "provenant-os"
+  },
+  {
+    "test": "command_custom_shebang_runtime_keeps_credentials_and_writes_denied",
+    "platform": "macOS",
+    "invocation": "provider-dispatch",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED",
+    "binary": "provenant::command_adapter"
+  },
+  {
+    "test": "tests::claude_network_on_native_tls_files_are_readable",
+    "platform": "macOS",
+    "invocation": "tls",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED",
+    "binary": "provenant-providers"
+  },
+  {
+    "test": "opencode::tests::read_only_search_runs_in_native_profile",
+    "platform": "macOS",
+    "invocation": "custody",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED",
+    "binary": "provenant-providers"
+  }
+]

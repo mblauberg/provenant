@@ -69,8 +69,8 @@ run_rust=true'
 
 # Inventory-only edits must exercise the evidence gate on macOS.
 git -C "$repo" checkout -q --detach "$common"
-mkdir -p "$repo/docs/runbooks"
-printf '%s\n' inventory > "$repo/docs/runbooks/ci.md"
+mkdir -p "$repo/config"
+printf '%s\n' inventory > "$repo/config/native-test-inventory.json"
 git -C "$repo" add .
 git -C "$repo" commit -qm 'update native inventory'
 head=$(git -C "$repo" rev-parse HEAD)

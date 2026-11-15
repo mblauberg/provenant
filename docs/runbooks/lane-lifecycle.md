@@ -120,4 +120,4 @@ Sources are sampled, so intermediate states between samples are not reported.
 
 Tests run Git only through `provenant_os::fixture` (`git_command()` or
 `run_git(cwd, args)`), which drops the lane's `GIT_*` binding so a fixture never
-commits into the lane's own repository (`tests/workspace_policy.rs` enforces it).
+commits into the lane's own repository (the workspace policy gate enforces it).

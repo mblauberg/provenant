@@ -6,6 +6,7 @@ description: "Use for TDD and choosing, writing, merging or deleting tests."
 # Test design
 
 Tests pin invariants derived from declarations at public boundaries, using deterministic, modular fixtures.
+Tests cite the spec section they pin with `Spec: docs/specs/NAME.md#anchor`; the drift gate resolves the link, and specs name owning symbols rather than individual tests, line numbers or inventory counts.
 Classify failures as defects (fix code), stale or rigid tests (redesign or delete), or rigid code (redesign).
 When a test and the design disagree, the test moves; delete redundant tests and tests of removed mechanisms.
 Merge near-duplicates into table-driven invariants; avoid exact messages, counts, order or snapshots unless they are the invariant.

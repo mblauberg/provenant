@@ -1,11 +1,11 @@
 # Consumer contract
 
 Owner: `crates/core/src/consumer_env.rs` (environment), `crates/config/src/repository_files.rs` (repository files), `crates/cli/src/external_contract.rs` (the outward declaration)
-Anchor: `crates/cli/src/external_contract.rs::the_consumer_contract_spec_agrees_with_the_declaration`
+Anchor: `crates/cli/src/external_contract.rs::ExternalContract`
 
 This page is what a repository, its scripts and its CI may rely on when they
 adopt Provenant or run beside it. Each table below is the rendering of one
-declaration in code; a test fails when the page and the declaration disagree.
+declaration in code.
 [Using Provenant 2 from another repository](../runbooks/using-provenant-2-from-another-repository.md)
 is the procedure.
 
@@ -25,7 +25,6 @@ change to its declaration.
 
 - Why: a consumer must know which surfaces it may build on before it builds,
   and promising only what is used keeps the rest free to improve.
-- Test: `crates/core/src/consumer_env.rs::declared_names_are_unique_provenant_names_and_never_test_names`
 - Owner: `crates/core/src/consumer_env.rs`
 
 ## No repository coupling
@@ -39,8 +38,6 @@ port table or settings, never a name compiled into a reader.
 
 - Why: adopting Provenant, or running it beside a repository's own tooling,
   must not force a layout on the repository or collide with what it has.
-- Test: `tests/command_adapter.rs::a_bare_repository_runs_a_lane_and_gains_only_declared_paths`;
-  `crates/config/src/repository_files.rs::repository_paths_are_unique_and_inside_the_provenant_directory`
 - Owner: `crates/config/src/repository_files.rs`, `crates/config/src/ports.rs`
 
 ## Commands
@@ -53,8 +50,6 @@ naming its replacement and is never an alias; 2.0 replaced `provenant
 dispatch` with `provenant run TEMPLATE BRIEF`.
 
 - Why: a script that drives Provenant needs a fixed grammar and one parseable form.
-- Test: `crates/cli/src/external_contract.rs::the_declaration_round_trips_and_partitions_the_command_surface`;
-  `crates/cli/src/lib.rs::each_removed_spelling_exits_2_with_one_line_naming_its_replacement`
 - Owner: `crates/cli/src/grammar.rs`, `crates/config/src/removed.rs`
 
 ## Run files are internal
@@ -65,7 +60,6 @@ interface. Consumers read run state through `provenant status --json`,
 the file set may change in any release.
 
 - Why: a consumer that parses records pins their layout and blocks every format change.
-- Test: `crates/cli/src/external_contract.rs::the_declaration_round_trips_and_partitions_the_command_surface`
 - Owner: `crates/records/src/attempt_file.rs`
 
 ## Environment
@@ -119,7 +113,6 @@ listed because a lane's home is never the caller's.
 | `PROVENANT_BUILD_DISK_LIMITS` | lane | internal | Encoded build disk limits. | only for the cargo child of the lane's cargo shim |
 
 - Why: a repository's scripts detect and adapt to a lane only through these names.
-- Test: `crates/cli/src/external_contract.rs::the_consumer_contract_spec_agrees_with_the_declaration`
 - Owner: `crates/core/src/consumer_env.rs`
 
 ## State root
@@ -129,8 +122,6 @@ names another. The 1.x root `~/.local/share/provenant/v1` is never written by
 2.x, so reinstalling 1.x finds its state as it was left. This tier is evolving.
 
 - Why: two majors must be able to coexist and roll back without migration.
-- Test: `src/state_handoff.rs::tests::copies_only_declared_owner_configuration_and_never_reads_receipts`;
-  `crates/core/src/roots.rs::changing_the_candidate_preserves_all_captured_boundaries`
 - Owner: `crates/core/src/roots.rs`, `src/state_handoff.rs`
 
 ## Repository files
@@ -149,8 +140,6 @@ All are optional; a repository with none gets compiled and host defaults.
 | `.provenant/scratch` | directory | created | internal | Operator scratch for briefs and graph documents; Provenant excludes it through `.git/info/exclude`. |
 
 - Why: a repository must know every path Provenant may read or create in it.
-- Test: `crates/cli/src/external_contract.rs::the_consumer_contract_spec_agrees_with_the_declaration`;
-  `crates/config/src/repository_policy.rs::every_declared_launch_policy_key_is_accepted_and_others_are_refused`
 - Owner: `crates/config/src/repository_files.rs`
 
 ## Exit codes
@@ -172,7 +161,6 @@ because `provenant process-tree --json` is read through it.
 | `cancelled` | 130 |
 
 - Why: a script branches on the exit code before it parses any output.
-- Test: `crates/cli/src/external_contract.rs::the_consumer_contract_spec_agrees_with_the_declaration`
 - Owner: `crates/cli/src/render.rs`
 
 ## Process tree
@@ -196,6 +184,4 @@ these fields; new fields may be added. This tier is stable.
 | processes[] | `rss_bytes` |
 
 - Why: a memory guard in a repository's build needs a stable reading of its own lane.
-- Test: `crates/supervisor/src/process_tree.rs::declared_sample_fields_are_the_serialised_sample`;
-  `tests/command_adapter.rs::command_lane_reads_its_supervisors_process_tree_through_the_cli`
 - Owner: `crates/supervisor/src/process_tree.rs`
