@@ -1523,9 +1523,13 @@ mod tests {
     fn publication_lock_timeout_is_a_busy_refresh_and_cleans_completed_stage() {
         let state = tempfile::tempdir().unwrap();
         let state_path = state.path().to_path_buf();
+        let (start_lock_tx, start_lock_rx) = std::sync::mpsc::channel();
         let (locked_tx, locked_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let collector = std::thread::spawn(move || {
+            start_lock_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the build callback starts the publication contention");
             let _lock = target_seed::lock_store(&state_path).unwrap();
             locked_tx.send(()).unwrap();
             release_rx
@@ -1534,6 +1538,7 @@ mod tests {
         });
 
         let identity = identity("repo", "aaa");
+        let build_entered = std::cell::Cell::new(false);
         let outcome = refresh_racing_with_publication_wait(
             state.path(),
             &identity,
@@ -1541,6 +1546,10 @@ mod tests {
             1,
             |stage| {
                 fs::create_dir(stage.join("target"))?;
+                fs::write(stage.join("target/artifact"), b"built")?;
+                assert!(stage.join("target/artifact").is_file());
+                build_entered.set(true);
+                start_lock_tx.send(()).map_err(io::Error::other)?;
                 locked_rx
                     .recv_timeout(Duration::from_secs(5))
                     .map_err(io::Error::other)?;
@@ -1549,6 +1558,10 @@ mod tests {
         );
         release_tx.send(()).unwrap();
         collector.join().unwrap();
+        assert!(
+            build_entered.get(),
+            "publication contention follows build entry"
+        );
         assert_eq!(outcome.unwrap(), Refresh::Busy);
 
         let store = target_seed::store_path(state.path());
