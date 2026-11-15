@@ -3,9 +3,10 @@
 //!
 //! Recognized configuration is deliberately narrow: npm `cache` from its user
 //! config or an explicit/trusted PREFIX config, and pnpm `cacheDir`/`storeDir`
-//! from its project/global config. Only absolute literal global paths are
-//! copied into environment selectors; unsupported or ambiguous paths warn and
-//! remain under the package manager's own configuration handling.
+//! from project config or global `config.yaml`. Only absolute literal global
+//! paths are copied into environment selectors; legacy global pnpm `.npmrc`
+//! paths are ambiguous across pnpm versions, so they warn and remain under the
+//! package manager's own configuration handling.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -207,7 +208,13 @@ fn pnpm_global_path(
         Ok(path) => path,
         Err(()) => return Setting::Present(None),
     };
-    ini_setting(&user, legacy_ini_key).unwrap_or(Setting::Present(None))
+    // pnpm versions differ in whether they consume legacy `.npmrc` cache/store
+    // keys. Do not promote one into a higher-priority environment selector
+    // unless its applicability is established; leave pnpm to resolve it.
+    match ini_setting(&user, legacy_ini_key) {
+        Ok(Setting::Missing) => Setting::Missing,
+        Ok(Setting::Present(_)) | Err(()) => Setting::Present(None),
+    }
 }
 
 /// A present setting with no parsed path is unsupported or ambiguous, so the
@@ -671,6 +678,22 @@ mod tests {
             Some(OsStr::new("/host/pnpm-store"))
         );
         assert!(env.iter().all(|(_, value)| value != "secret-value"));
+
+        std::fs::remove_file(xdg_config.join("pnpm/config.yaml")).expect("remove pnpm config");
+        std::fs::write(
+            home.join(".npmrc"),
+            "cache = /host/npm-cache\ncache-dir = /legacy/pnpm-cache\nstore-dir = /legacy/pnpm-store\n",
+        )
+        .expect("legacy pnpm config");
+        let mut legacy_env = vec![("HOME".into(), account.clone().into_os_string())];
+        bind_native(&home, &project, &host_var, &mut legacy_env);
+        assert_eq!(
+            var(&legacy_env, "npm_config_cache"),
+            Some(OsStr::new("/host/npm-cache")),
+            "npm's own user cache remains supported"
+        );
+        assert!(var(&legacy_env, "pnpm_config_cache_dir").is_none());
+        assert!(var(&legacy_env, "pnpm_config_store_dir").is_none());
 
         std::fs::write(
             project.join(".npmrc"),
