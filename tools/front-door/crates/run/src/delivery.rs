@@ -307,6 +307,13 @@ impl HostDeliveryContext {
             input: Some(input.to_vec()),
         };
         let timeout = Duration::from_secs(30);
+        let truncated = std::cell::Cell::new(false);
+        let forge_limit = || RunError::DeliveryLimit {
+            stage,
+            tool: "gh",
+            command: git_subcommand(args),
+            limit: stdout_limit(false, args),
+        };
         let response = forge
             .request_with(
                 operation,
@@ -355,16 +362,24 @@ impl HostDeliveryContext {
                     };
                     let executor = SystemExecutor::new(1).map_err(std::io::Error::other)?;
                     let fallback = provenant_core::CancelToken::new();
-                    self.facts
+                    let outcome = self
+                        .facts
                         .with_executor::<_, Box<dyn std::error::Error + Send + Sync>>(
                             &executor,
                             self.cancellation.as_ref().unwrap_or(&fallback),
                             |executor| executor.execute(options).map_err(Into::into),
                         )
-                        .map_err(std::io::Error::other)
+                        .map_err(std::io::Error::other)?;
+                    truncated.set(outcome.stdout.truncated);
+                    Ok(outcome)
                 },
             )
             .map_err(|error| {
+                // The port reports an over-bound capture as an unknown
+                // disposition; the bound itself is the typed refusal.
+                if truncated.get() {
+                    return forge_limit();
+                }
                 if stage == Stage::Prepare {
                     prepare_error(DeliveryPrepareStep::ForgePort, error.to_string())
                 } else {

@@ -594,6 +594,19 @@ fn forge_none_skips_builtin_gh_even_when_it_is_available()
         &gh,
         &format!("#!/bin/sh\n: > '{}'\nexit 0\n", marker.display()),
     )?;
+    // Opening a pull request needs a hosted push URL, whatever forge is chosen.
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    fixture.executable(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n",
+            git.display()
+        ),
+    )?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
     fixture.environment.retain(|(key, _)| key != "PATH");
     fixture
         .environment
