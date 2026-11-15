@@ -303,10 +303,7 @@ fn resolve_writer_with(
         return Ok(WriterRequest {
             extra,
             custody_project: Some(custody_project),
-            project: layout
-                .project()
-                .unwrap_or_else(|| repo.root_path())
-                .to_path_buf(),
+            project: repo.root_path().to_path_buf(),
             worktree: path,
         });
     }
@@ -315,10 +312,7 @@ fn resolve_writer_with(
     Ok(WriterRequest {
         extra,
         custody_project: Some(custody_project),
-        project: layout
-            .project()
-            .unwrap_or_else(|| repo.root_path())
-            .to_path_buf(),
+        project: repo.root_path().to_path_buf(),
         worktree: worktree.path().to_path_buf(),
     })
 }

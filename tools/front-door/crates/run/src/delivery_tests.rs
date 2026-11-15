@@ -1,6 +1,7 @@
 //! Host Git conformance with a linked worktree and a local bare remote.
 use super::delivery::*;
 use super::*;
+use provenant_confinement::worktrees;
 use provenant_core::{CancelToken, GitOid, ProjectId};
 use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_os::fs::Directory;
