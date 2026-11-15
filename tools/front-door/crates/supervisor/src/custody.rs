@@ -1675,11 +1675,166 @@ struct StoredObservation {
     guardian: Option<ProcessIdentity>,
     #[serde(default)]
     provider: Option<ProcessIdentity>,
+    #[serde(default)]
+    descendants: Vec<ProcessIdentity>,
+    /// Older checkpoints cannot certify a full process-tree snapshot.
+    #[serde(default)]
+    census_complete: bool,
     publication_pending: bool,
     #[serde(default)]
     priority: Option<i32>,
     #[serde(flatten)]
     extra: ExtraFields,
+}
+
+/// Read-only process presence for the exact identities recorded by one
+/// attempt's supervisor. An unknown observation never means the holder died.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HolderPresence {
+    Live,
+    Gone,
+    Unknown,
+}
+
+/// Observe the guardian and provider recorded for this exact attempt, then
+/// require a complete host census before declaring their process session gone.
+/// PID reuse never supplies liveness by itself; permission, malformed evidence,
+/// incomplete census and any remaining session member stay unknown.
+pub fn observe_holder(
+    directory: &Directory,
+    scope: Scope,
+    observer: &dyn ProcessObserver,
+) -> HolderPresence {
+    let record = match read_record::<StoredObservation>(directory, "process.json", RECORD_LIMIT) {
+        Ok(record) => record,
+        // Running state without its scoped native checkpoint cannot prove that
+        // no writer survived; a missing file is not a liveness observation.
+        Err(_) => return HolderPresence::Unknown,
+    };
+    observe_holder_record(scope, observer, record, None)
+}
+
+/// The bounded census-taking wrapper for one exact supervisor checkpoint.
+/// Batch status callers can instead share one host census across all rows.
+pub fn observe_holder_with_census(
+    directory: &Directory,
+    scope: Scope,
+    observer: &dyn ProcessObserver,
+    census: &crate::census::Census,
+) -> HolderPresence {
+    let record = match read_record::<StoredObservation>(directory, "process.json", RECORD_LIMIT) {
+        Ok(record) => record,
+        Err(_) => return HolderPresence::Unknown,
+    };
+    observe_holder_record(scope, observer, record, Some(census))
+}
+
+fn observe_holder_record(
+    scope: Scope,
+    observer: &dyn ProcessObserver,
+    record: StoredObservation,
+    census: Option<&crate::census::Census>,
+) -> HolderPresence {
+    if record.schema_version != 1
+        || record.scope != scope
+        || record.publication_pending
+    {
+        return HolderPresence::Unknown;
+    }
+    let Some(guardian) = record.guardian.as_ref() else {
+        return HolderPresence::Unknown;
+    };
+    let mut identities = vec![guardian];
+    if let Some(provider) = record.provider.as_ref() {
+        identities.push(provider);
+    }
+    identities.extend(record.descendants.iter());
+    if identities.iter().any(|identity| {
+        identity.validate().is_err()
+            || identity.native_start == 0
+            || identity.boot != guardian.boot
+    }) {
+        return HolderPresence::Unknown;
+    }
+    let boot = match observer.boot_identity() {
+        Ok(boot) if !boot.is_empty() => boot,
+        _ => return HolderPresence::Unknown,
+    };
+    if boot != guardian.boot {
+        return HolderPresence::Gone;
+    }
+    let mut unknown = false;
+    let root_count = identities.len() - record.descendants.len();
+    for (index, expected) in identities.into_iter().enumerate() {
+        match observer.observe(expected.pid) {
+            ProcessObservation::Present(fact)
+                if fact.validate().is_ok()
+                    && fact.identity == *expected
+                    && !fact.zombie =>
+            {
+                return if index < root_count {
+                    HolderPresence::Live
+                } else {
+                    HolderPresence::Unknown
+                };
+            }
+            ProcessObservation::Present(_) | ProcessObservation::Absent => {}
+            ProcessObservation::Unknown(_) => unknown = true,
+        }
+    }
+    if unknown {
+        return HolderPresence::Unknown;
+    }
+    if !record.census_complete {
+        return HolderPresence::Unknown;
+    }
+    if let Some(census) = census {
+        classify_holder_census(&record, census)
+    } else {
+        match observer.census(crate::census::MAX_CENSUS_ENTRIES) {
+            Ok(census) => classify_holder_census(&record, &census),
+            Err(_) => HolderPresence::Unknown,
+        }
+    }
+}
+
+fn classify_holder_census(
+    record: &StoredObservation,
+    census: &crate::census::Census,
+) -> HolderPresence {
+    use crate::census::ProcessLookup;
+    let Some(guardian) = record.guardian.as_ref() else {
+        return HolderPresence::Unknown;
+    };
+    if !census.is_complete() {
+        return HolderPresence::Unknown;
+    }
+    let mut owned_sessions = vec![guardian.session_id];
+    let mut owned_groups = vec![guardian.group_id];
+    if let Some(provider) = record.provider.as_ref() {
+        owned_sessions.push(provider.session_id);
+        owned_groups.push(provider.group_id);
+    }
+    if census.processes().values().any(|fact| {
+        !fact.zombie
+            && (owned_sessions.contains(&fact.identity.session_id)
+                || owned_groups.contains(&fact.identity.group_id))
+    }) {
+        return HolderPresence::Unknown;
+    }
+    // Complete census plus no current process in the exact recorded session
+    // is the absence proof. PID reuse remains irrelevant to this conclusion.
+    for pid in std::iter::once(guardian.pid).chain(
+        record
+            .provider
+            .as_ref()
+            .map(|provider| provider.pid),
+    ) {
+        if matches!(census.process(pid), ProcessLookup::Unknown) {
+            return HolderPresence::Unknown;
+        }
+    }
+    HolderPresence::Gone
 }
 
 /// A reboot after both identities were recorded proves the entire old process
@@ -1714,25 +1869,7 @@ pub fn checkpoint_before_reboot(
 /// in this boot. Only an observed absence counts; an unreadable process or
 /// record leaves the attempt open.
 pub fn holder_gone(directory: &Directory, scope: Scope, observer: &dyn ProcessObserver) -> bool {
-    let record = match read_record::<StoredObservation>(directory, "process.json", RECORD_LIMIT) {
-        Ok(record) => record,
-        // No process was ever recorded, so the reservation alone speaks for it.
-        Err(CustodyError::Filesystem(error)) if error.is_not_found() => return true,
-        Err(_) => return false,
-    };
-    let Some(guardian) = record.guardian else {
-        return false;
-    };
-    let gone = |identity: &ProcessIdentity| match observer.observe(identity.pid) {
-        ProcessObservation::Absent => true,
-        ProcessObservation::Present(fact) => fact.identity != *identity || fact.zombie,
-        ProcessObservation::Unknown(_) => false,
-    };
-    record.schema_version == 1
-        && record.scope == scope
-        && !record.publication_pending
-        && gone(&guardian)
-        && record.provider.as_ref().is_none_or(gone)
+    observe_holder(directory, scope, observer) == HolderPresence::Gone
 }
 /// Whether any of these PIDs may still be alive (a signal-0 probe, no effect).
 pub fn any_pid_alive(pids: &[i64]) -> bool {

@@ -621,6 +621,59 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
+fn unsettled_reservation_fences_a_slot_after_its_lock_disappears() -> Result<(), Box<dyn Error>> {
+    // Spec: docs/specs/supervisor.md#one-writer-removal-never-forces
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let path = fixture.root.join(".worktrees/unsettled");
+    let slot = writer_directory(context.project_state, &path)?;
+    let scope = provenant_records::custody::Scope {
+        attempt: provenant_core::AttemptId::from_bytes([76; 16]),
+        generation: 1,
+    };
+    let lease = provenant_supervisor::fixture::acquire_writer(
+        slot.try_clone()?,
+        scope,
+        WaitBudget::nonblocking(context.clock.mono_now()),
+        &cancel(),
+        context.clock,
+    )?;
+    let reservation = slot
+        .current_path()?
+        .join(scope.attempt.to_string())
+        .join("reservation.json");
+    let evidence = fs::read(&reservation)?;
+    assert_eq!(
+        disk_writer_state(context.project_state, &path),
+        Occupancy::Held,
+        "a live kernel lease remains positively busy"
+    );
+    drop(lease);
+    fs::remove_file(slot.current_path()?.join(WRITER_LOCK))?;
+
+    assert!(matches!(
+        disk_writer_state(context.project_state, &path),
+        Occupancy::Unknown { evidence, .. }
+            if evidence.contains(&scope.attempt.to_string())
+                && evidence.contains("provenant reconcile")
+    ));
+    for result in [
+        cache_writer_probe(context.project_state, &path).map(|_| ()),
+        cache_writer_guard(context.project_state, &path).map(|_| ()),
+    ] {
+        assert!(matches!(
+            result,
+            Err(Occupancy::Unknown { evidence, .. })
+                if evidence.contains(&scope.attempt.to_string())
+                    && evidence.contains("provenant reconcile")
+        ));
+    }
+    assert_eq!(fs::read(reservation)?, evidence);
+    Ok(())
+}
+
+#[test]
 fn git_inventory_accepts_unregistered_and_recreated_worktrees() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;

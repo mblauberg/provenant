@@ -359,13 +359,18 @@ fn pending_retirements(
         .map_err(RetirementWriter::error)
 }
 
-pub(crate) fn presence(
+fn presence_with_census(
     record: &CustodyRecord,
     roots: &Roots,
     host: provenant_core::HostId,
     actor: provenant_core::ActorId,
+    census: Option<&provenant_supervisor::census::Census>,
 ) -> HolderPresence {
     if let Holder::Attempt { attempt, .. } = record.holder {
+        // A local process census cannot prove absence on another host.
+        if record.holder.chair().is_some_and(|chair| chair.host != host) {
+            return HolderPresence::Unknown;
+        }
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let context = provenant_run::ExecutionContext {
@@ -396,30 +401,26 @@ pub(crate) fn presence(
                     ) {
                         return HolderPresence::Unknown;
                     }
-                    let path = roots
-                        .state
-                        .as_path()
-                        .join("attempts")
-                        .join(attempt.attempt_id.to_string());
-                    match provenant_os::fs::Directory::open_anchor(&path) {
-                        Ok(directory)
-                            if provenant_supervisor::custody::holder_gone(
-                                &directory,
-                                provenant_records::custody::Scope {
-                                    attempt: attempt.attempt_id,
-                                    generation: attempt.generation,
-                                },
-                                &provenant_supervisor::census::SystemProcessObserver,
-                            ) =>
-                        {
-                            HolderPresence::Unattended
+                    match census.and_then(|census| {
+                        provenant_run::attempt_presence_with_census(
+                            roots.state.as_path(),
+                            &attempt,
+                            census,
+                        )
+                    }) {
+                        Some(
+                            provenant_run::AttemptPresence::Unattended
+                            | provenant_run::AttemptPresence::Settling,
+                        ) => HolderPresence::Unattended,
+                        Some(provenant_run::AttemptPresence::Live) => HolderPresence::Live,
+                        Some(provenant_run::AttemptPresence::Unknown) | None => {
+                            HolderPresence::Unknown
                         }
-                        _ => HolderPresence::Unknown,
                     }
                 }
                 Err(_) => HolderPresence::Unknown,
             },
-            Ok(None) => HolderPresence::Unattended,
+            Ok(None) => HolderPresence::Unknown,
             Err(_) => HolderPresence::Unknown,
         };
     }
@@ -610,10 +611,28 @@ pub fn status(args: &Status, globals: &Globals) -> u8 {
                 next: None,
             },
         };
+        let census = page
+            .items
+            .iter()
+            .any(|record| matches!(&record.holder, Holder::Attempt { .. }))
+            .then(|| {
+                provenant_supervisor::census::ProcessObserver::census(
+                    &provenant_supervisor::census::SystemProcessObserver,
+                    provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+                )
+                .ok()
+            })
+            .flatten();
         let mut items = Vec::new();
         let mut lines = Vec::new();
         for record in page.items {
-            let presence = presence(&record, &resolved.roots, chair.host, chair.actor);
+            let presence = presence_with_census(
+                &record,
+                &resolved.roots,
+                chair.host,
+                chair.actor,
+                census.as_ref(),
+            );
             let mine = record.holder.belongs_to(&chair);
             if !mine && presence != HolderPresence::Unattended {
                 continue;
@@ -627,10 +646,10 @@ pub fn status(args: &Status, globals: &Globals) -> u8 {
                 format!(
                     "{} {}",
                     record.subject,
-                    if presence == HolderPresence::Unattended {
-                        "unattended"
-                    } else {
-                        "active"
+                    match presence {
+                        HolderPresence::Live => "active",
+                        HolderPresence::Unattended => "unattended",
+                        HolderPresence::Unknown => "unknown",
                     }
                 )
             });

@@ -116,6 +116,18 @@ active view. The digest reads this view instead of extracting PRs from prose.
 For graph nodes with a typed review result, the digest shows execution state
 separately from verdict, findings count and findings availability.
 
+For a durable `running` attempt, host status reports native writer presence as
+`live`, `unattended`, `settling` or `unknown`. `running` is shown only while the
+recorded guardian or provider identity is present. `unattended` requires every
+recorded guardian, provider and tracked descendant identity to be absent, a
+complete process-tree checkpoint with no omitted descendants, and a complete
+bounded census with no remaining process in the recorded session or groups. A
+PID or its reuse alone, a host that cannot observe the writer, missing
+checkpoints, permission errors and incomplete evidence remain `unknown`; status
+does not mutate or schedule recovery.
+Unattended and settling rows name the scoped `provenant reconcile` action,
+which rechecks custody before settlement.
+
 `adopt KIND:ID` takes custody of an external item; `release KIND:ID` records an
 explicit release. `fabric claim acquire|renew|verify|release` takes the same
 subject spelling; renew records activity without a lease or secret token.

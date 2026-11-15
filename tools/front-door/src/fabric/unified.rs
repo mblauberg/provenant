@@ -605,6 +605,22 @@ pub(crate) fn enrich_status_rows_within(
     };
     let call = provenant_run::Request { clock, cancel };
     let store = provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?;
+    let local_prefix = format!("{}/", context.identity.host);
+    let local_census = rows
+        .iter()
+        .any(|row| {
+            row["kind"] == "attempt"
+                && row["attempt_id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with(&local_prefix))
+        })
+        .then(|| {
+            provenant_supervisor::census::ProcessObserver::census(
+                &provenant_supervisor::census::SystemProcessObserver,
+                provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+            )
+            .map_err(|_| ())
+        });
     let mut peer_executor = None;
     for row in rows.iter_mut() {
         if row["kind"] != "attempt" {
@@ -716,12 +732,18 @@ pub(crate) fn enrich_status_rows_within(
         if let Some(subtree) = &record.peer.peer_subtree {
             row["peer_subtree"] = json!(subtree);
         }
-        let mut projected = provenant_cli::run::project_lane(
+        let census = local_census
+            .as_ref()
+            .and_then(|census| census.as_ref().ok())
+            .map(Ok)
+            .unwrap_or(Err(()));
+        let mut projected = provenant_cli::run::project_lane_with_census(
             &record,
             &waits,
             context.roots.state.as_path(),
             clock.wall_now().ok(),
-            host == context.identity.host,
+            host == context.identity.host && row["latest_attempt"] == true,
+            census,
         );
         if host == context.identity.host
             && let Some(store) = &store
@@ -748,6 +770,7 @@ pub(crate) fn enrich_status_rows_within(
         project_attempt_failure(row);
     }
     project_node_waits(rows);
+    project_node_liveness(rows);
     project_node_failures(rows);
     for row in rows.iter_mut() {
         if let Some(object) = row.as_object_mut() {
@@ -872,6 +895,50 @@ fn project_node_waits(rows: &mut [Value]) {
         );
         if let Some(wait) = waits.get(&key) {
             row["waiting_for"] = wait.clone();
+        }
+    }
+}
+
+/// A checkpoint records the last durable node state. Project native liveness
+/// onto its current node without changing the checkpoint or confusing an
+/// unobservable writer with a live one.
+fn project_node_liveness(rows: &mut [Value]) {
+    let observations: std::collections::BTreeMap<_, _> = rows
+        .iter()
+        .filter(|row| {
+            row["kind"] == "attempt"
+                && row["latest_attempt"] == true
+                && row["recorded_state"] == "running"
+                && row["presence"].is_string()
+                && row["presence"] != "live"
+        })
+        .filter_map(|row| {
+            Some((
+                (
+                    row["graph_id"].as_str()?.to_owned(),
+                    row["node_id"].as_str()?.to_owned(),
+                ),
+                (row["state"].clone(), row["presence"].clone(), row["reason"].clone()),
+            ))
+        })
+        .collect();
+    for row in rows
+        .iter_mut()
+        .filter(|row| row["kind"] == "node" && row["state"] == "running")
+    {
+        let key = (
+            row["graph_id"].as_str().unwrap_or_default().to_owned(),
+            row["node_id"].as_str().unwrap_or_default().to_owned(),
+        );
+        let Some((state, presence, reason)) = observations.get(&key) else {
+            continue;
+        };
+        row["recorded_state"] = json!("running");
+        row["state"] = state.clone();
+        row["presence"] = presence.clone();
+        if reason.is_string() {
+            row["reason"] = reason.clone();
+            row["next"] = reason.clone();
         }
     }
 }
@@ -3137,6 +3204,39 @@ mod tests {
         attempt["state"] = json!("terminal");
         project_node_waits(&mut rows);
         assert!(rows[1]["waiting_for"].is_null());
+    }
+
+    #[test]
+    fn graph_status_projects_unobserved_writer_as_unknown_on_attempt_and_node() {
+        let target = GraphTarget {
+            graph: "g".into(),
+            node: None,
+            attempt: None,
+        };
+        let mut rows = status_rows(&graph_snapshot(checkpoint("g")), &target);
+        let attempt = rows
+            .iter_mut()
+            .find(|row| row["kind"] == "attempt")
+            .unwrap();
+        attempt["latest_attempt"] = json!(true);
+        attempt["recorded_state"] = json!("running");
+        attempt["state"] = json!("unknown");
+        attempt["presence"] = json!("unknown");
+        attempt["reason"] = json!("the writer process state cannot be verified; run `provenant reconcile g/parent` to inspect recovery before retrying");
+        project_node_liveness(&mut rows);
+
+        let node = rows.iter().find(|row| row["kind"] == "node").unwrap();
+        assert_eq!(node["recorded_state"], "running");
+        assert_eq!(node["state"], "unknown");
+        assert_eq!(node["presence"], "unknown");
+        assert!(node["next"].as_str().unwrap().contains("provenant reconcile"));
+        let reading = render_graph_status(&rows);
+        let parent = reading
+            .lines()
+            .find(|line| line.starts_with("g/parent#"))
+            .unwrap();
+        assert!(parent.contains(" unknown "), "{reading}");
+        assert!(!parent.contains(" running "), "{reading}");
     }
 
     #[test]
