@@ -14,7 +14,7 @@ fn terminal_status_sees_graphs_submitted_under_harness_markers() -> Result {
         std::fs::write(
             &document,
             serde_json::to_vec(&serde_json::json!({
-                "schema_version":1,"graph_id":graph,"nodes":[{
+                "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":graph,"nodes":[{
                     "id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}
                 }]
             }))?,
@@ -87,7 +87,7 @@ fn invalid_json_is_an_envelope() -> Result {
             .unwrap_or_default()
             .contains("Usage:")
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -123,7 +123,7 @@ fn help_and_version_need_no_roots_and_catalogue_help_drives_every_leaf() -> Resu
     let empty = rig.command(&[])?;
     assert_eq!(code(&empty), 2);
     assert!(!rig.state.exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result {
@@ -177,7 +177,7 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
         human.stdout.bytes,
         format!("{}\n", release.display()).as_bytes()
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Result {
@@ -215,7 +215,7 @@ fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Resul
     assert_eq!(value["command"], "root");
     let hook = rig.command(&["hook", "claude", "pre-tool-use", "--json"])?;
     assert_eq!(code(&hook), 2);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -302,7 +302,7 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
         "2147483647",
     ])?;
     assert_eq!(code(&internal), 3); // Reaches supervisor's typed invalid-handshake error.
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -401,16 +401,20 @@ fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authorit
     );
     assert!(stderr.contains("lanes.max_concurrency"), "{stderr}");
     assert!(!stderr.contains("PathWire"), "{stderr}");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
 fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
+    let graph_checkpoint_days = provenant_config::GcSettings::default().graph_checkpoint_days;
     let rig = TestRig::new()?.without_state()?;
     let show = rig.command(&["config", "show", "--json"])?;
     assert_eq!(code(&show), 0);
     let show: serde_json::Value = serde_json::from_slice(&show.stdout.bytes)?;
-    assert_eq!(show["data"]["gc"]["graph_checkpoint_days"], 90);
+    assert_eq!(
+        show["data"]["gc"]["graph_checkpoint_days"],
+        graph_checkpoint_days
+    );
     assert_eq!(
         show["data"]["origins"]["gc.graph_checkpoint_days"]["kind"],
         "compiled"
@@ -472,8 +476,8 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
         .iter()
         .find(|field| field["path"] == "gc.graph_checkpoint_days")
         .ok_or("retention field")?;
-    assert_eq!(field["default"], 90);
-    assert_eq!(field["value"], 90);
+    assert_eq!(field["default"], graph_checkpoint_days);
+    assert_eq!(field["value"], graph_checkpoint_days);
     assert_eq!(field["source"], "default");
     std::fs::create_dir_all(&rig.state)?;
     std::fs::write(
@@ -488,7 +492,7 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
         show["data"]["origins"]["gc.graph_checkpoint_days"]["kind"],
         "user"
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -528,7 +532,7 @@ fn config_check_and_doctor_report_pool_effort_warnings_as_advice() -> Result {
     let doctor: serde_json::Value = serde_json::from_slice(&doctor.stdout.bytes)?;
     assert_eq!(doctor["status"], "ok");
     assert_eq!(doctor["data"]["warnings"][0], warning);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -612,5 +616,5 @@ fn hosts_doctor_uses_non_billing_status_and_preserves_identity_selection() -> Re
         code(&rig.command(&["hosts", "doctor", "bad;host", "--json"])?),
         2
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }

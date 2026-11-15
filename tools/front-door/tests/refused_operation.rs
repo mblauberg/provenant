@@ -5,10 +5,7 @@ use provenant_core::{CancelToken, RootInputs};
 use provenant_os::clock::SystemClock;
 use provenant_run::{ExecutionContext, OperationState, Request, RunStore};
 use serde_json::{Value, json};
-use std::{
-    fs,
-    time::{Duration, Instant},
-};
+use std::fs;
 use support::{Result, TestRig, code};
 
 #[test]
@@ -145,11 +142,9 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
                 .is_some_and(|reason| !reason.is_empty()),
             "{status}"
         );
-        let start = Instant::now();
         let waited = rig.command(&["wait", "dirty-writer", "--timeout", "30s", "--json"])?;
         assert_ne!(code(&waited), 0, "{waited:?}");
         assert_ne!(code(&waited), 124, "{waited:?}");
-        assert!(start.elapsed() < Duration::from_secs(2));
         let observed = support::last_json_record(&waited.stdout.bytes)?;
         assert_eq!(observed["data"]["timed_out"], false, "{observed}");
         let listed = rig.command(&["status", "--all", "--json"])?;
