@@ -325,8 +325,8 @@ pub(super) fn prepare_command(
             policy.mandatory_mut().add_state_read(root)?;
         }
     }
+    set_cargo_profile(&mut spec.env, &settings, !sandbox.effective);
     if sandbox.effective {
-        set_cargo_profile(&mut spec.env, &settings);
         set_cargo_jobs(
             &mut spec.env,
             registry
@@ -740,18 +740,14 @@ pub(super) fn scratch_cargo_output(
 pub(super) fn set_cargo_profile(
     env: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>,
     settings: &provenant_config::LaneBuildSettings,
+    inherit_host_environment: bool,
 ) {
-    for (name, value) in [
-        (
-            "CARGO_INCREMENTAL",
-            if settings.incremental() { "1" } else { "0" },
-        ),
-        ("CARGO_PROFILE_DEV_DEBUG", settings.debug_level()),
-    ] {
-        if !env.iter().any(|(existing, _)| existing == name) {
-            env.push((name.into(), value.into()));
-        }
-    }
+    let host_environment = if inherit_host_environment {
+        std::env::vars_os().collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let _ = settings.apply_cargo_build_profile(env, &host_environment);
 }
 
 /// A candidate that did not launch, typed by why it was skipped.

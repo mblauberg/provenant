@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     path::{Component, Path, PathBuf},
 };
 
@@ -395,6 +396,26 @@ pub struct LaneBuildSettings {
     /// minutes unless set.
     pub build_dir_grace_seconds: Option<u64>,
 }
+
+/// The two Cargo settings that define the writer lane's development profile.
+/// Seed builds and lane builds use this same value so Cargo can reuse the
+/// seeded fingerprints.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CargoBuildProfile {
+    pub incremental: String,
+    pub debug: String,
+}
+
+impl CargoBuildProfile {
+    pub fn environment(&self) -> [(OsString, OsString); 2] {
+        [
+            ("CARGO_INCREMENTAL".into(), self.incremental.clone().into()),
+            ("CARGO_PROFILE_DEV_DEBUG".into(), self.debug.clone().into()),
+        ]
+    }
+}
+
 /// Longest configurable gap between lane starts: ten minutes.
 pub const MAX_START_SPACING_MS: u64 = 600_000;
 /// Default lane port space: 64 blocks of 16 ports from 30000, below the
@@ -434,6 +455,59 @@ pub fn deserialize_auto<'de, D: serde::Deserializer<'de>>(
     }
 }
 impl LaneBuildSettings {
+    fn configured_cargo_profile(&self) -> CargoBuildProfile {
+        CargoBuildProfile {
+            incremental: if self.incremental() { "1" } else { "0" }.into(),
+            debug: self.debug_level().into(),
+        }
+    }
+
+    /// Resolve the profile values for this lane, preserving explicit values
+    /// already present in its environment. Non-UTF-8 values cannot be sealed
+    /// into a generation manifest, so callers may fall back to an unseeded
+    /// build.
+    pub fn cargo_build_profile(
+        &self,
+        environment: &[(OsString, OsString)],
+    ) -> Option<CargoBuildProfile> {
+        let configured = self.configured_cargo_profile();
+        let value = |name: &str, fallback: &str| {
+            environment
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.to_str().map(str::to_owned))
+                .unwrap_or_else(|| Some(fallback.to_owned()))
+        };
+        Some(CargoBuildProfile {
+            incremental: value("CARGO_INCREMENTAL", &configured.incremental)?,
+            debug: value("CARGO_PROFILE_DEV_DEBUG", &configured.debug)?,
+        })
+    }
+
+    /// Insert configured defaults only when an explicit environment value is
+    /// absent, except that provider defaults are replaced with the configured
+    /// profile. Values explicitly inherited from the host take precedence.
+    pub fn apply_cargo_build_profile(
+        &self,
+        environment: &mut Vec<(OsString, OsString)>,
+        explicit_environment: &[(OsString, OsString)],
+    ) -> Option<CargoBuildProfile> {
+        let defaults = self.configured_cargo_profile();
+        for (name, configured) in defaults.environment() {
+            let value = explicit_environment
+                .iter()
+                .find(|(key, _)| key == &name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or(configured);
+            if let Some((_, current)) = environment.iter_mut().find(|(key, _)| key == &name) {
+                *current = value;
+            } else {
+                environment.push((name, value));
+            }
+        }
+        self.cargo_build_profile(environment)
+    }
+
     pub fn memory_pressure_threshold(&self) -> MemoryPressureThreshold {
         self.memory_pressure_threshold.unwrap_or_default()
     }
@@ -960,6 +1034,68 @@ pub fn parse_cache_size(text: &str) -> Result<u64, &'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cargo_build_profile_resolves_config_and_preserves_explicit_environment() {
+        use super::*;
+
+        let defaults = LaneBuildSettings::default();
+        assert_eq!(
+            defaults.cargo_build_profile(&[]).unwrap(),
+            CargoBuildProfile {
+                incremental: "0".into(),
+                debug: "line-tables-only".into(),
+            }
+        );
+
+        let configured: LaneBuildSettings =
+            toml_edit::de::from_str("cargo_incremental = true\ncargo_debug = 'full'").unwrap();
+        let mut environment = vec![
+            ("CARGO_INCREMENTAL".into(), "0".into()),
+            ("CARGO_PROFILE_DEV_DEBUG".into(), "line-tables-only".into()),
+        ];
+        let profile = configured
+            .apply_cargo_build_profile(&mut environment, &[])
+            .unwrap();
+        assert_eq!(
+            profile,
+            CargoBuildProfile {
+                incremental: "1".into(),
+                debug: "full".into(),
+            }
+        );
+        assert!(
+            environment
+                .iter()
+                .any(|(key, value)| { key == "CARGO_INCREMENTAL" && value == "1" })
+        );
+        assert!(
+            environment
+                .iter()
+                .any(|(key, value)| { key == "CARGO_PROFILE_DEV_DEBUG" && value == "full" })
+        );
+
+        let mut environment = vec![
+            ("CARGO_INCREMENTAL".into(), "1".into()),
+            ("CARGO_PROFILE_DEV_DEBUG".into(), "line-tables-only".into()),
+        ];
+        let explicit_environment = vec![("CARGO_INCREMENTAL".into(), "0".into())];
+        let profile = configured
+            .apply_cargo_build_profile(&mut environment, &explicit_environment)
+            .unwrap();
+        assert_eq!(
+            profile,
+            CargoBuildProfile {
+                incremental: "0".into(),
+                debug: "full".into(),
+            }
+        );
+        assert!(
+            environment
+                .iter()
+                .any(|(key, value)| { key == "CARGO_PROFILE_DEV_DEBUG" && value == "full" })
+        );
+    }
+
     #[test]
     fn retention_registry_rows_round_trip_to_declared_kinds() {
         use super::*;
