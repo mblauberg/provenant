@@ -999,16 +999,38 @@ mod tests {
             };
             let rendered = super::render_output(command.clone(), Ok((data.clone(), String::new())));
             let next = rendered.summary.unwrap().next.unwrap();
-            assert_eq!(
-                next,
-                "provenant output repair/writer#2 --part result --offset 42"
-            );
+            let mut words = next.split_whitespace();
+            assert_eq!(words.next(), Some("provenant"));
+            let crate::ParseOutcome::Invocation(invocation) =
+                crate::parse(words.map(std::ffi::OsString::from))
+            else {
+                panic!("output follow-up must parse as a CLI invocation");
+            };
+            let crate::Command::Output(output) = invocation.command else {
+                panic!("non-EOF follow-up must read output");
+            };
+            assert_eq!(output.target.to_string(), "repair/writer#2");
+            assert_eq!(output.offset, 42);
+            assert!(matches!(output.part, crate::Part::Result));
+            assert!(!next.contains("22222222222222222222222222222222"));
             data["eof"] = json!(true);
             let rendered = super::render_output(command, Ok((data, String::new())));
+            let next = rendered.summary.unwrap().next.unwrap();
+            let mut words = next.split_whitespace();
+            assert_eq!(words.next(), Some("provenant"));
+            let crate::ParseOutcome::Invocation(invocation) =
+                crate::parse(words.map(std::ffi::OsString::from))
+            else {
+                panic!("wait follow-up must parse as a CLI invocation");
+            };
+            let crate::Command::Wait(wait) = invocation.command else {
+                panic!("EOF follow-up must wait for the public handle");
+            };
             assert_eq!(
-                rendered.summary.unwrap().next.as_deref(),
-                Some("provenant wait repair/writer#2")
+                wait.targets,
+                vec!["repair/writer#2".parse::<crate::Target>().unwrap()]
             );
+            assert!(!next.contains("22222222222222222222222222222222"));
         }
     }
 
@@ -1033,119 +1055,119 @@ mod tests {
     }
 
     #[test]
-    fn output_summary_names_planner_fallback_and_reason() {
-        let data = json!({
-            "attempt_id":"attempt",
-            "state":"succeeded",
-            "planner_fallback":{"stage":"static", "reason":"planner route failed"}
-        });
-        let summary = output_summary(&data, "fallback completed", true, None);
-        let text = summary.lines.join("\n");
-        assert!(text.contains("planner fallback: static (reason: planner route failed)"));
+    fn planner_fallback_reason_is_shared_by_graph_output_and_sanitised_summary() {
+        let cases = [
+            Some("planner route failed"),
+            Some("fragment \u{1b}[31minvalid"),
+            None,
+        ];
+        for reason in cases {
+            let mut planner = json!({
+                "id":"planner", "state":"succeeded", "attempts":[]
+            });
+            if let Some(reason) = reason {
+                planner["outputs"] = json!({
+                    "schema_version":2,
+                    "result":null,
+                    "verdict":null,
+                    "findings":[],
+                    "findings_available":null,
+                    "branch":null,
+                    "commit":null,
+                    "warnings":[],
+                    "plan":{
+                        "fallback_reason":reason,
+                        "future_plan_fact":{"revision":2}
+                    }
+                });
+            }
+            let payload = json!({
+                "schema_version":2,
+                "graph_id":"graph",
+                "plan_digest":"digest",
+                "future_checkpoint_fact":{"revision":2},
+                "nodes":[
+                    planner,
+                    {"id":"planner--fallback--static", "state":"succeeded", "attempts":[]},
+                    {"id":"synthesis", "state":"succeeded", "attempts":[]}
+                ]
+            });
+            let bytes = serde_json::to_vec(&payload).unwrap();
+            let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+                provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())
+                    .unwrap();
+            assert_eq!(fallback_reason_for_graph(&checkpoint).as_deref(), reason);
+            let encoded = provenant_records::encode(&checkpoint).unwrap();
+            let restored: serde_json::Value =
+                provenant_records::decode(encoded.as_slice(), provenant_records::Limits::default())
+                    .unwrap();
+            assert_eq!(
+                restored["future_checkpoint_fact"],
+                payload["future_checkpoint_fact"]
+            );
+            if reason.is_some() {
+                assert_eq!(
+                    restored["nodes"][0]["outputs"]["plan"]["future_plan_fact"],
+                    payload["nodes"][0]["outputs"]["plan"]["future_plan_fact"]
+                );
+            }
+
+            let mut data = serde_json::Value::Null;
+            let mut text = String::new();
+            if let Some(reason) = reason {
+                add_planner_fallback(&mut data, &mut text, reason.to_owned());
+                assert_eq!(data["planner_fallback"]["reason"], reason);
+                assert!(!text.contains('\u{1b}'));
+            }
+            let summary = output_summary(&data, "fallback completed", true, None);
+            let fallback_line = summary
+                .lines
+                .iter()
+                .find(|line| line.starts_with("planner fallback:"));
+            match (reason, fallback_line) {
+                (Some(reason), Some(line)) => {
+                    let visible = reason.replace('\u{1b}', "");
+                    assert!(line.contains(visible.trim()), "{line:?}");
+                    assert!(!line.contains('\u{1b}'));
+                }
+                (None, None) => {}
+                _ => panic!("summary fallback presence must follow graph evidence"),
+            }
+        }
     }
 
     #[test]
-    fn output_summary_sanitises_planner_fallback_reason() {
-        let data = json!({
-            "planner_fallback":{"stage":"static", "reason":"fragment \u{1b}[31minvalid"}
-        });
-        let summary = output_summary(&data, "fallback completed", true, None);
-        let text = summary.lines.join("\n");
-        assert!(text.contains("planner fallback: static (reason: fragment [31minvalid)"));
-        assert!(!text.contains('\u{1b}'));
-    }
-
-    #[test]
-    fn planner_fallback_text_sanitises_reason_and_keeps_json_value() {
-        let reason = "invalid fragment \u{1b}[31mpattern";
-        let mut data = serde_json::Value::Null;
-        let mut text = String::new();
-        add_planner_fallback(&mut data, &mut text, reason.into());
-        assert!(text.contains("Reason: invalid fragment [31mpattern"));
-        assert!(!text.contains('\u{1b}'));
-        assert_eq!(data["planner_fallback"]["reason"], reason);
-    }
-
-    #[test]
-    fn output_finds_fallback_reason_for_every_node_of_the_graph() {
-        // `synthesis` depends on the expansion but is not part of it.
-        let checkpoint = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"graph","plan_digest":"digest","nodes":[
-                {"id":"planner", "state":"succeeded", "attempts":[],
-                 "outputs":{"schema_version":2,"result":null,"verdict":null,"findings":[],"findings_available":null,"branch":null,"commit":null,"warnings":[],
-                    "plan":{"fallback_reason":"planner fragment invalid: invalid fragment"}}},
-                {"id":"planner--fallback--static", "state":"succeeded", "attempts":[]},
-                {"id":"synthesis", "state":"succeeded", "attempts":[]}
-            ],
-            "expansions":[{"source":"planner","nodes":[{
-                "id":"planner--fallback--static","access":"read_only","prompt":"Static stage","route":{"alias":"junior"}
-            }]}]
-        }))
-        .unwrap();
-        assert_eq!(
-            fallback_reason_for_graph(&checkpoint).as_deref(),
-            Some("planner fragment invalid: invalid fragment")
-        );
-    }
-
-    #[test]
-    fn output_reports_no_fallback_when_no_planner_fell_back() {
-        let checkpoint = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"graph","plan_digest":"digest","nodes":[
-                {"id":"synthesis", "state":"succeeded", "attempts":[]}
-            ]
-        }))
-        .unwrap();
-        assert_eq!(fallback_reason_for_graph(&checkpoint), None);
-    }
-
-    #[test]
-    fn provider_error_from_result_keeps_the_whole_multiline_message() {
-        let message = provider_error_from_result(
-            b"Model not recognized: gemini-3.8-pro\nAvailable models:\nGemini 2.5 Flash\nGPT-OSS 120B (Medium)\n",
-        )
-        .unwrap();
-        assert!(message.starts_with("Model not recognized: gemini-3.8-pro; "));
-        assert!(message.ends_with("GPT-OSS 120B (Medium)"));
+    fn provider_result_keeps_nonempty_diagnostic_lines() {
+        let source = "provider reported a refusal\n\nchoose an available model\nfinal diagnostic";
+        let message = provider_error_from_result(source.as_bytes()).unwrap();
+        for line in source.lines().filter(|line| !line.trim().is_empty()) {
+            assert!(message.contains(line.trim()));
+        }
         assert_eq!(provider_error_from_result(b"\n  \n"), None);
     }
 
     #[test]
-    fn provider_error_uses_failure_before_trailing_tracing_warning() {
-        let stderr = b"provider process failed: exit code 1\n\
-2026-11-02T00:00:00.123456Z  WARN codex_core: skill scan failed\n";
-        assert_eq!(
-            provider_error_from_stderr(stderr).as_deref(),
-            Some("provider process failed: exit code 1")
-        );
-    }
-
-    #[test]
-    fn provider_error_keeps_non_warning_lines_that_mention_warn() {
-        assert_eq!(
-            provider_error_from_stderr(b"test-failed WARN: assertion failed\n").as_deref(),
-            Some("test-failed WARN: assertion failed")
-        );
-    }
-
-    #[test]
-    fn provider_error_skips_warning_level_lines() {
-        assert_eq!(
-            provider_error_from_stderr(
-                b"warning: retrying request\nreal failure\n2026-11-02T00:00:00Z WARN cleanup failed\n"
-            )
-            .as_deref(),
-            Some("real failure")
-        );
-    }
-
-    #[test]
-    fn provider_error_does_not_headline_a_warning_without_a_failure_line() {
-        assert_eq!(
-            provider_error_from_stderr(
-                b"WARN: skill scan failed\n2026-11-02T00:00:00Z WARN cleanup failed\n"
+    fn provider_stderr_selects_the_last_non_warning_diagnostic() {
+        let cases: &[(&[u8], Option<&str>)] = &[
+            (
+                b"provider process failed\n2026-11-02T00:00:00.123456Z  WARN codex_core: skill scan failed\n",
+                Some("provider process failed"),
             ),
-            None
-        );
+            (
+                b"test-failed WARN: assertion failed\n",
+                Some("test-failed WARN: assertion failed"),
+            ),
+            (
+                b"warning: retrying request\nreal failure\n2026-11-02T00:00:00Z WARN cleanup failed\n",
+                Some("real failure"),
+            ),
+            (
+                b"WARN: skill scan failed\n2026-11-02T00:00:00Z WARN cleanup failed\n",
+                None,
+            ),
+        ];
+        for (stderr, expected) in cases {
+            assert_eq!(provider_error_from_stderr(stderr).as_deref(), *expected);
+        }
     }
 }

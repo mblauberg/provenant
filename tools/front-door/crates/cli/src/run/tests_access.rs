@@ -99,23 +99,20 @@ fn lane_access_allows_codex_standalone_read_roots() -> Result<(), Box<dyn std::e
         provenant_confinement::refuses_lane_root(shape, false, &credentials),
         "writes stay strict"
     );
-    // Against a machine's real home: build a temp release and walk it
-    // through `lane_access`. A lane can seal `~/.codex`; then the fixture
-    // cannot exist and the filesystem part is skipped silently.
-    let Some(home) = std::env::var_os("HOME") else {
-        return Ok(());
-    };
-    let releases = Path::new(&home).join(".codex/packages/standalone/releases");
-    if std::fs::create_dir_all(&releases).is_err() {
-        return Ok(());
-    }
-    let Ok(temp) = tempfile::tempdir_in(&releases) else {
-        return Ok(());
-    };
+    let home = provenant_os::fixture::tempdir(|root| {
+        tempfile::Builder::new()
+            .prefix("codex-home-")
+            .tempdir_in(root)
+    })?;
+    let releases = home
+        .path()
+        .join(".codex/packages/standalone/releases");
+    std::fs::create_dir_all(&releases)?;
+    let temp = tempfile::tempdir_in(&releases)?;
     let release = std::fs::canonicalize(temp.path())?;
     let state = tempfile::tempdir()?;
     let state = std::fs::canonicalize(state.path())?;
-    let credentials = provenant_core::CredentialRoots::for_home(Path::new(&home));
+    let credentials = provenant_core::CredentialRoots::for_home(home.path());
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
         attach: Vec::new(),
         mode: Some(Mode::ReadOnly),
@@ -493,8 +490,9 @@ fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std
         ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
     };
     use std::os::unix::fs::PermissionsExt;
-    if crate::fabric::in_lane() {
-        // A lane suppresses the host quota writes this test observes.
+    if super::reexec_test_in_lane(
+        "run::tests::access_tests::opencode_stderr_quota_settles_and_records_refusal",
+    )? {
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
@@ -606,12 +604,8 @@ fn opencode_stderr_quota_text_does_not_overturn_a_successful_run()
         None,
     )?;
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
-    assert!(
-        crate::quota::read_cache_at(&state)
-            .map(|records| records.iter().all(|record| record.refusals.is_empty()))
-            .unwrap_or(true),
-        "a successful run must not persist a quota refusal"
-    );
+    let records = crate::quota::read_cache_at(&state)?;
+    assert!(records.iter().all(|record| record.refusals.is_empty()));
     Ok(())
 }
 #[test]

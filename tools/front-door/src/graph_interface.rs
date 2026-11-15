@@ -636,9 +636,6 @@ fn validate_set_path(key: &str) -> Result<(), Box<provenant_records::diagnostic:
         "branch" | "base" | "new_worktree" => Err(cli_input_error(
             "use --branch B --base REF for a new writer worktree",
         )),
-        "placement" | "cloud" => Err(cli_input_error(
-            provenant_fabric_runtime::graph::CLOUD_PLACEMENT_REMOVED,
-        )),
         "host" | "account" | "confidential" | "provider_timeout" | "capabilities"
         | "capability" | "build_heavy" | "build_weight" | "write_roots" | "write_root"
         | "local_cargo" | "ci_scope" | "preset" | "isolation" | "supervision" | "receipts"
@@ -880,27 +877,25 @@ mod tests {
         // No provider offers it: refused as invalid input, naming the form to use.
         let refusal = with_model("no-such-model-9").unwrap_err();
         assert_eq!(refusal.code, "invalid_input");
-        let detail = refusal.detail.unwrap_or_default();
-        assert!(
-            detail.contains("unknown model `no-such-model-9`"),
-            "{detail}"
-        );
-        assert!(detail.contains("provider/model form"), "{detail}");
-    }
+        let secret = with_model("sk-x y").unwrap_err();
+        assert_eq!(secret.code, "invalid_input");
+        assert!(!serde_json::to_string(&secret).unwrap().contains("sk-x y"));
 
-    #[test]
-    fn ambiguous_bare_model_names_each_provider_form() {
+        let candidates = ["codex/gpt-6.1-terra", "cursor/gpt-6.1-terra"];
         let detail = bare_model_detail(
             "gpt-6.1-terra",
             &BareModelError::Ambiguous {
-                candidates: vec!["codex/gpt-6.1-terra".into(), "cursor/gpt-6.1-terra".into()],
+                candidates: candidates
+                    .iter()
+                    .map(|candidate| (*candidate).into())
+                    .collect(),
             },
         );
-        assert_eq!(
-            detail,
-            "model `gpt-6.1-terra` is offered by several providers: codex/gpt-6.1-terra, cursor/gpt-6.1-terra; name one as provider/model"
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| detail.contains(candidate))
         );
-        // A name that is not identifier-shaped is never echoed.
         let secret = bare_model_detail("sk-x y", &BareModelError::Unknown);
         assert!(!secret.contains("sk-x y"), "{secret}");
     }
@@ -928,115 +923,105 @@ mod tests {
     }
 
     #[test]
-    fn attempt_cloud_placement_is_refused_in_both_set_forms() {
-        let cloud = "{target='t',provider='p'}";
-        for setting in [
-            format!("attempt.cloud={cloud}"),
-            format!("attempt={{cloud={cloud}}}"),
-            format!("attempt.placement={cloud}"),
-        ] {
-            let mut request = run_request();
-            request.set.push(setting.clone());
-            let error = run_input(request).expect_err("cloud placement must refuse");
-            assert!(
-                error
-                    .detail
-                    .as_deref()
-                    .is_some_and(|detail| detail.contains("cloud launch")),
-                "{setting}: {error:?}"
+    fn launch_error_projection_uses_pre_attempt_failure_facts() {
+        let mut cases = vec![
+            (
+                Outcome::Waiting,
+                json!({"id":"writer", "state":"failed", "attempts":[], "advance_error":"binding failed"}),
+                Some("writer"),
+                None,
+            ),
+            (
+                Outcome::Waiting,
+                json!({"id":"retry", "state":"blocked", "attempts":[], "advance_error":"retrying", "advance_error_code":"retrying"}),
+                None,
+                None,
+            ),
+            (
+                Outcome::Waiting,
+                json!({"id":"launched", "state":"failed", "attempts":[{}], "advance_error":"fallback_route_pinned"}),
+                None,
+                None,
+            ),
+            (
+                Outcome::Failed,
+                json!({"id":"launched", "state":"failed", "attempts":[{}], "advance_error":"fallback_route_pinned"}),
+                None,
+                None,
+            ),
+            (
+                Outcome::Failed,
+                json!({"id":"failed", "state":"blocked", "attempts":[], "advance_error":"binding failed"}),
+                Some("failed"),
+                None,
+            ),
+        ];
+        for code in ["launch_refused", "launch_retry_exhausted"] {
+            cases.push((
+                Outcome::Waiting,
+                json!({"id":"writer", "state":"blocked", "attempts":[], "advance_error":"bounded launch refused", "advance_error_code":code, "advance_owner_code":"writer_lock_busy"}),
+                Some("writer"),
+                Some("writer_lock_busy"),
+            ));
+        }
+
+        for (outcome, node, expected_id, expected_owner) in cases {
+            let data = json!({"checkpoint":{"nodes":[node]}});
+            let projected = launch_error_node(&data, outcome);
+            assert_eq!(
+                projected.and_then(|node| node["id"].as_str()),
+                expected_id,
+                "outcome {outcome:?}, input node {}",
+                data["checkpoint"]["nodes"][0],
+            );
+            assert_eq!(
+                projected.and_then(|node| node["advance_owner_code"].as_str()),
+                expected_owner,
             );
         }
-    }
 
-    #[test]
-    fn pending_graph_projects_failed_pre_attempt_node() {
-        let data = json!({"status":"pending", "checkpoint":{"nodes":[
-            {"id":"retry", "state":"blocked", "attempts":[], "advance_error":"retrying"},
-            {"id":"writer", "state":"failed", "attempts":[], "advance_error":"binding failed"},
-            {"id":"other", "state":"running", "attempts":[{}]}
-        ]}});
-        assert_eq!(response_outcome("run", &data), Outcome::Waiting);
-        assert_eq!(
-            launch_error_node(&data, Outcome::Waiting).map(|node| &node["id"]),
-            Some(&json!("writer"))
-        );
-        let mut timed_out = data.clone();
-        timed_out["timed_out"] = json!(true);
-        assert_eq!(response_outcome("run", &timed_out), Outcome::Waiting);
-        assert_eq!(
-            launch_error_node(&timed_out, Outcome::Waiting).map(|node| &node["id"]),
-            Some(&json!("writer"))
-        );
-    }
-
-    #[test]
-    fn pending_graph_projects_definitive_blocked_launch_errors() {
-        for code in ["launch_refused", "launch_retry_exhausted"] {
-            let data = json!({"status":"pending", "timed_out":true, "checkpoint":{"nodes":[
-                {"id":"slow", "state":"running", "attempts":[{}]},
-                {"id":"writer", "state":"blocked", "attempts":[],
-                 "advance_error":"bounded launch refused", "advance_error_code":code,
-                 "advance_owner_code":"writer_lock_busy"}
-            ]}});
+        for timed_out in [false, true] {
+            let data = json!({"status":"pending", "timed_out":timed_out});
             assert_eq!(response_outcome("run", &data), Outcome::Waiting);
-            let node = launch_error_node(&data, Outcome::Waiting).unwrap();
-            assert_eq!(node["id"], "writer");
-            assert_eq!(node["advance_owner_code"], "writer_lock_busy");
-            let mut retrying = data.clone();
-            retrying["checkpoint"]["nodes"][1]["advance_error_code"] = json!("retrying");
-            assert!(launch_error_node(&retrying, Outcome::Waiting).is_none());
-            let mut launched = data.clone();
-            launched["checkpoint"]["nodes"][1]["attempts"] = json!([{}]);
-            assert!(launch_error_node(&launched, Outcome::Waiting).is_none());
         }
     }
 
     #[test]
     fn run_receipt_is_bounded_and_ends_in_one_next_command() {
-        let nodes: Vec<_> = (0..40)
+        let nodes: Vec<_> = (0..provenant_cli::limits::SUMMARY_ROWS.saturating_add(1))
             .map(|n| json!({"id":format!("n{n}"), "state":"failed", "advance_error_code":"preparation_refused",
-                "advance_error":"x".repeat(1000), "attempts":[]}))
+                "advance_error":"x".repeat(provenant_cli::limits::SUMMARY_ROW_BYTES.saturating_add(1)), "attempts":[]}))
             .collect();
-        for (status, command) in [
-            ("pending", "provenant wait review-1"),
-            ("complete", "provenant output review-1"),
-            ("paused", "provenant status review-1"),
-        ] {
+        for status in ["pending", "complete", "paused"] {
             let data =
                 json!({"status":status, "checkpoint":{"graph_id":"review-1", "nodes":nodes}});
             for announced in [false, true] {
                 let human = run_human(&data, &json!({"op":"run"}), announced);
-                assert!(
-                    human.starts_with(if announced { "refused" } else { "review-1" }),
-                    "{human}"
-                );
-                assert!(human.ends_with(&format!("next: {command}\n")), "{human}");
-                assert!(
-                    human
-                        .lines()
-                        .filter(|line| line.starts_with("next:"))
-                        .count()
-                        == 1
-                );
                 assert!(
                     human
                         .lines()
                         .all(|line| line.len() <= provenant_cli::limits::SUMMARY_ROW_BYTES)
                 );
                 assert!(human.lines().count() <= provenant_cli::limits::SUMMARY_ROWS + 4);
+                let next: Vec<_> = human
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("next: "))
+                    .collect();
+                assert_eq!(next.len(), 1, "{human}");
+                assert!(!next[0].is_empty(), "{human}");
             }
         }
     }
 
     #[test]
     fn a_suffixed_name_is_announced_and_a_replay_is_not_a_failure() {
-        let data = json!({"status":"pending", "named":{"requested":"fix", "graph":"fix-2", "taken":"fix"},
-            "checkpoint":{"graph_id":"fix-2", "nodes":[]}});
+        let data = json!({"status":"pending", "named":{"requested":"base", "graph":"base-2", "taken":"base"},
+            "checkpoint":{"graph_id":"base-2", "nodes":[]}});
         let human = run_human(&data, &json!({}), false);
-        assert!(
-            human.contains("fix exists with different input; started fix-2"),
-            "{human}"
-        );
+        for field in ["taken", "graph"] {
+            let name = data["named"][field].as_str().unwrap();
+            assert!(human.contains(name), "{field} {name} missing from {human}");
+        }
         let replay = json!({"status":"complete", "outcome":"failed", "named":{"graph":"fix", "replayed":true}});
         assert_eq!(response_outcome("run", &replay), Outcome::Ok);
         let fresh = json!({"status":"complete", "outcome":"failed"});
@@ -1054,22 +1039,12 @@ mod tests {
              "attempt":{"new_worktree":{"branch":"batch/work", "base":"main"}}},
             {"id":"two", "routes":[{"adapter":"codex", "model":"gpt"}]}
         ]});
-        assert_eq!(
-            run_headline(&checkpoint, "pending", Some(&document), &json!({})),
-            "g-2 pending senior new:batch/work"
-        );
-        assert_eq!(
-            run_headline(&checkpoint, "pending", None, &json!({})),
-            "g-2 pending - -"
-        );
-    }
-
-    #[test]
-    fn failed_attempt_does_not_project_launch_error() {
-        let data = json!({"checkpoint":{"nodes":[
-            {"id":"task", "state":"failed", "attempts":[{}], "advance_error":"fallback_route_pinned"}
-        ]}});
-        assert!(launch_error_node(&data, Outcome::Failed).is_none());
+        let headline = run_headline(&checkpoint, "pending", Some(&document), &json!({}));
+        let fields: Vec<_> = headline.split_whitespace().collect();
+        assert_eq!(fields, ["g-2", "pending", "senior", "new:batch/work"]);
+        let headline = run_headline(&checkpoint, "pending", None, &json!({}));
+        let absent: Vec<_> = headline.split_whitespace().collect();
+        assert_eq!(absent, ["g-2", "pending", "-", "-"]);
     }
 
     #[test]

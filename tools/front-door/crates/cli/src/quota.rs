@@ -4204,6 +4204,47 @@ mod tests {
     }
 
     #[test]
+    fn readiness_reasons_round_trip_through_the_bounded_record_decoder()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use ReadinessReason::*;
+        let cases = [
+            (NotProbed, "not_probed"),
+            (Stale, "stale"),
+            (ProbeTimeout, "probe_timeout"),
+            (CommandFailure, "command_failure"),
+            (MissingExecutable, "missing_executable"),
+            (SignedOut, "signed_out"),
+            (LoginExpired, "login_expired"),
+            (AccountMismatch, "account_mismatch"),
+            (Exhausted, "exhausted"),
+            (ProviderRefusal, "provider_refusal"),
+            (UncalibratedPartialCoverage, "uncalibrated_partial_coverage"),
+            (InvalidEvidence, "invalid_evidence"),
+            (UnreachablePeer, "unreachable_peer"),
+            (UnsupportedPeerVersion, "unsupported_peer_version"),
+        ];
+        for (reason, wire_name) in cases {
+            let encoded = provenant_records::encode(&reason)?;
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&encoded)?,
+                serde_json::Value::String(wire_name.into())
+            );
+            let decoded: ReadinessReason = provenant_records::decode(
+                encoded.as_slice(),
+                provenant_records::Limits::default(),
+            )?;
+            assert_eq!(decoded, reason);
+            match reason {
+                NotProbed | Stale | ProbeTimeout | CommandFailure | MissingExecutable
+                | SignedOut | LoginExpired | AccountMismatch | Exhausted | ProviderRefusal
+                | UncalibratedPartialCoverage | InvalidEvidence | UnreachablePeer
+                | UnsupportedPeerVersion => {}
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn probe_failure_readiness_is_account_wide_and_a_fresh_success_clears_it()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
@@ -4506,11 +4547,12 @@ mod tests {
         .unwrap();
         assert_eq!(rep.coverage.known, 3);
         assert_eq!(rep.coverage.total, 3);
-        let headline = format!(
-            "Quota: {}/{} current readings\n",
-            rep.coverage.known, rep.coverage.total
+        let human = quota_human_at(&rep, jiff::tz::TimeZone::UTC);
+        let headline = human.lines().next().expect("coverage headline");
+        assert_eq!(
+            headline.split_whitespace().nth(1),
+            Some(format!("{}/{}", rep.coverage.known, rep.coverage.total).as_str())
         );
-        assert_eq!(headline, "Quota: 3/3 current readings\n");
     }
 
     struct FixtureAdapter {
