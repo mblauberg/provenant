@@ -135,8 +135,12 @@ returns its typed exports, without inventing an attempt identity. A bare graph
 with multiple top-level nodes remains ambiguous and lists only those nodes;
 `output GRAPH/NODE` selects a composite explicitly. Prompt, stderr, transcript,
 events, receipt and artifact-path reads require an attempt and are unavailable
-for a composite. A bounded composite excerpt reports `complete: false` when the
-checkpoint says its source result was truncated, with an unknown source length.
+for a composite. If a composite has typed exports but no result text, output
+returns those exports with an empty byte chunk. Offsets and limits count bytes;
+a page that splits a UTF-8 character uses lossless base64 bytes and advances by
+exactly the returned byte count. A bounded composite excerpt reports
+`complete: false` when the checkpoint says its source result was truncated,
+with an unknown source length.
 
 For attempt targets, output and steering resolve the same numbered attempt.
 Output reads are bounded and a clamped tail reports its effective bound.
