@@ -1,5 +1,6 @@
 //! Bind native package-manager caches to host locations when an adapter uses
-//! private HOME/XDG roots. Only cache and store paths cross this boundary.
+//! private HOME/XDG roots. Only package cache/store paths, including Corepack's
+//! package-manager download cache, cross this boundary.
 //!
 //! Recognised configuration is deliberately narrow: npm `cache` from its user
 //! config or the first PATH-selected Node installation's `etc/npmrc`, and pnpm
@@ -47,6 +48,15 @@ pub(crate) fn bind_native(
 
     if !home_changed && !cache_changed && !data_changed && !config_changed {
         return;
+    }
+
+    // Corepack derives its package-manager download cache from HOME or
+    // XDG_CACHE_HOME. Bind only COREPACK_HOME, keeping provider XDG state intact.
+    if (home_changed || cache_changed) && !preserve_corepack_home(host_var, env) {
+        match corepack_home(home, host_var) {
+            Setting::Present(Some(path)) => set_env(env, "COREPACK_HOME", path),
+            Setting::Missing | Setting::Present(None) => warn_unsupported(),
+        }
     }
 
     let project = match project_settings(cwd, home) {
@@ -356,6 +366,21 @@ fn preserve_explicit(
     false
 }
 
+fn preserve_corepack_home(
+    host_var: &dyn Fn(&str) -> Option<OsString>,
+    env: &mut Vec<(OsString, OsString)>,
+) -> bool {
+    if env_value(env, "COREPACK_HOME").is_some() {
+        return true;
+    }
+    if let Some(value) = host_var("COREPACK_HOME") {
+        // Corepack uses nullish precedence, so even an empty value is explicit.
+        set_env(env, "COREPACK_HOME", value);
+        return true;
+    }
+    false
+}
+
 pub(super) fn explicit_host_value(
     host_var: &dyn Fn(&str) -> Option<OsString>,
     names: &[&str],
@@ -372,6 +397,24 @@ pub(super) fn npm_default_cache(home: &Path) -> PathBuf {
         home.join("AppData/Local/npm-cache")
     } else {
         home.join(".npm")
+    }
+}
+
+fn corepack_home(home: &Path, host_var: &dyn Fn(&str) -> Option<OsString>) -> Setting {
+    let base = if let Some(path) = host_var("XDG_CACHE_HOME") {
+        PathBuf::from(path)
+    } else if let Some(path) = host_var("LOCALAPPDATA") {
+        PathBuf::from(path)
+    } else {
+        if !home.is_absolute() {
+            return Setting::Present(None);
+        }
+        return Setting::Present(Some(home.join(".cache/node/corepack")));
+    };
+    if base.is_absolute() {
+        Setting::Present(Some(base.join("node/corepack")))
+    } else {
+        Setting::Present(None)
     }
 }
 
@@ -555,6 +598,45 @@ mod tests {
 
     // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
     #[test]
+    fn corepack_home_uses_host_cache_precedence() {
+        let home = Path::new("/fixture/host-home");
+        let empty = |_: &str| None;
+        assert_eq!(
+            corepack_home(home, &empty),
+            Setting::Present(Some(home.join(".cache/node/corepack")))
+        );
+
+        let cache = Path::new("/fixture/xdg/cache");
+        let local_app_data = Path::new("/fixture/local-app-data");
+        let host = host_vars(&[
+            ("XDG_CACHE_HOME", &cache),
+            ("LOCALAPPDATA", &local_app_data),
+        ]);
+        let host_var = |name: &str| host.get(name).cloned();
+        assert_eq!(
+            corepack_home(home, &host_var),
+            Setting::Present(Some(cache.join("node/corepack")))
+        );
+
+        let host = host_vars(&[("LOCALAPPDATA", &local_app_data)]);
+        let host_var = |name: &str| host.get(name).cloned();
+        assert_eq!(
+            corepack_home(home, &host_var),
+            Setting::Present(Some(local_app_data.join("node/corepack")))
+        );
+
+        let explicit_empty = |name: &str| (name == "COREPACK_HOME").then(OsString::new);
+        let mut env = Vec::new();
+        assert!(preserve_corepack_home(&explicit_empty, &mut env));
+        assert_eq!(
+            var(&env, "COREPACK_HOME"),
+            Some(OsStr::new("")),
+            "Corepack treats an explicitly empty home as a value"
+        );
+    }
+
+    // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
+    #[test]
     fn npm_cache_binding_follows_first_path_selected_node_installation() {
         use std::os::unix::fs::symlink;
 
@@ -619,6 +701,7 @@ mod tests {
         let cache = root.path().join("xdg/cache");
         let data = root.path().join("xdg/data");
         let config = root.path().join("xdg/config");
+        let expected_corepack = cache.join("node/corepack");
         std::fs::create_dir_all(project.join(".git")).expect("project root");
         std::fs::create_dir_all(&home).expect("home");
         let host = host_vars(&[
@@ -683,11 +766,18 @@ mod tests {
                 .unwrap_or_else(|| pnpm_default_store(&home, &host_var));
             assert_eq!([npm, pnpm_cache, pnpm_store], expected, "{adapter}");
             match adapter {
-                "agy" => assert_eq!(
-                    env_path(&env, "npm_config_cache").as_ref(),
-                    Some(&expected[0]),
-                    "Agy must bind npm cache while its account HOME differs"
-                ),
+                "agy" => {
+                    assert_eq!(
+                        env_path(&env, "npm_config_cache").as_ref(),
+                        Some(&expected[0]),
+                        "Agy must bind npm cache while its account HOME differs"
+                    );
+                    assert_eq!(
+                        env_path(&env, "COREPACK_HOME").as_ref(),
+                        Some(&expected_corepack),
+                        "Agy must keep Corepack downloads in the shared host XDG cache"
+                    );
+                }
                 "opencode" => {
                     assert_eq!(
                         env_path(&env, "npm_config_cache"),
@@ -704,6 +794,11 @@ mod tests {
                         Some(&expected[2]),
                         "OpenCode must bind pnpm store while XDG data changes"
                     );
+                    assert_eq!(
+                        env_path(&env, "COREPACK_HOME").as_ref(),
+                        Some(&expected_corepack),
+                        "OpenCode keeps private XDG state while Corepack uses the host cache"
+                    );
                 }
                 "codex" | "cursor" => {
                     for key in [
@@ -713,6 +808,10 @@ mod tests {
                     ] {
                         assert!(env_path(&env, key).is_none(), "{adapter} injected {key}");
                     }
+                    assert!(
+                        env_path(&env, "COREPACK_HOME").is_none(),
+                        "{adapter} must retain Corepack's host default"
+                    );
                 }
                 _ => unreachable!("fixture adapter is covered above"),
             }
@@ -737,6 +836,7 @@ mod tests {
         let project = root.path().join("repo");
         let xdg_config = home.join("config");
         let npm_global = root.path().join("npm-global/etc/npmrc");
+        let explicit_corepack = root.path().join("host/corepack-cache");
         std::fs::create_dir_all(project.join(".git")).expect("project root");
         std::fs::create_dir_all(xdg_config.join("pnpm")).expect("pnpm config");
         std::fs::create_dir_all(npm_global.parent().expect("npm global config parent"))
@@ -757,7 +857,10 @@ mod tests {
             "cacheDir: /host/pnpm-cache\nstoreDir: /host/pnpm-store\n_auth: secret-value\n",
         )
         .expect("pnpm config");
-        let host = host_vars(&[("XDG_CONFIG_HOME", &xdg_config)]);
+        let host = host_vars(&[
+            ("XDG_CONFIG_HOME", &xdg_config),
+            ("COREPACK_HOME", &explicit_corepack),
+        ]);
         let host_var = |name: &str| host.get(name).cloned();
 
         let mut env = vec![("HOME".into(), account.clone().into_os_string())];
@@ -773,6 +876,11 @@ mod tests {
         assert_eq!(
             var(&env, "pnpm_config_store_dir"),
             Some(OsStr::new("/host/pnpm-store"))
+        );
+        assert_eq!(
+            var(&env, "COREPACK_HOME"),
+            Some(explicit_corepack.as_os_str()),
+            "explicit host Corepack cache takes precedence"
         );
         assert!(env.iter().all(|(_, value)| value != "secret-value"));
 
@@ -825,6 +933,11 @@ mod tests {
         ] {
             assert!(var(&project_env, key).is_none(), "{key}");
         }
+        assert_eq!(
+            var(&project_env, "COREPACK_HOME"),
+            Some(explicit_corepack.as_os_str()),
+            "project XDG drift cannot replace an explicit host Corepack cache"
+        );
         assert!(
             project_env
                 .iter()

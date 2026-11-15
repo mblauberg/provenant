@@ -653,7 +653,7 @@ fn selected_node_prefix_from_path(path: &OsStr, homebrew_prefixes: &[PathBuf]) -
     if npm_bin != node_bin {
         return None;
     }
-    let npm = std::fs::canonicalize(npm).ok()?;
+    let npm = std::fs::canonicalize(&npm).ok()?;
     let node = std::fs::canonicalize(node).ok()?;
 
     for prefix in homebrew_prefixes {

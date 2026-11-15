@@ -151,6 +151,7 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
     ]);
     let host_var = |name: &str| host.get(name).cloned();
     let expected_npm = home.join(".npm");
+    let expected_corepack = xdg_cache.join("node/corepack");
     let expected_pnpm_cache = xdg_cache.join("pnpm");
     let expected_pnpm_store = xdg_data.join("pnpm/store");
     let keychain_root = tempfile::tempdir()?;
@@ -231,6 +232,11 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
                 "Agy must bind npm's default cache while its account HOME differs"
             );
             assert_eq!(
+                configured("COREPACK_HOME").as_ref(),
+                Some(&expected_corepack),
+                "Agy must bind Corepack downloads while its account HOME differs"
+            );
+            assert_eq!(
                 configured("pnpm_config_cache_dir")
                     .or_else(|| configured("npm_config_cache_dir"))
                     .as_ref(),
@@ -250,6 +256,11 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
                 configured("npm_config_cache"),
                 None,
                 "OpenCode keeps npm's host HOME default"
+            );
+            assert_eq!(
+                configured("COREPACK_HOME").as_ref(),
+                Some(&expected_corepack),
+                "OpenCode keeps private XDG state while Corepack downloads stay shared"
             );
             assert_eq!(
                 configured("pnpm_config_cache_dir")
@@ -272,6 +283,7 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
         if matches!(id, "codex" | "cursor") {
             for key in [
                 "npm_config_cache",
+                "COREPACK_HOME",
                 "pnpm_config_cache_dir",
                 "pnpm_config_store_dir",
             ] {
