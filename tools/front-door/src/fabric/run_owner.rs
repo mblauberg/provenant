@@ -1905,7 +1905,7 @@ mod graph_control_tests {
         let checkpoint = |reference: String| {
             move || {
                 serde_json::from_value(serde_json::json!({
-                    "schema_version":1,"graph_id":"g","plan_digest":"fixture",
+                    "schema_version":2,"graph_id":"g","plan_digest":"fixture",
                     "nodes":[
                         {"id":"composite","state":"running","attempts":[]},
                         {"id":"lane","state":"running","attempts":[{

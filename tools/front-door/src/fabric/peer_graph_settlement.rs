@@ -832,7 +832,7 @@ fn graph_hint_requires_a_matching_attempt() -> Result<(), Box<dyn std::error::Er
         "schema_version":1,"graph_id":"hint-test","nodes":[{"id":"one","prompt":"work","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
     }))?;
     let checkpoint = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":"hint-test","plan_digest":"digest","nodes":[{
+        "schema_version":2,"graph_id":"hint-test","plan_digest":"digest","nodes":[{
             "id":"one","worktree":null,"state":"running","attempts":[{
                 "key":{"graph_id":"hint-test","node_id":"one","route_index":0, "attempt": 1},
                 "route":{"adapter":"fixture","model":"fixture/model"},"state":"starting",

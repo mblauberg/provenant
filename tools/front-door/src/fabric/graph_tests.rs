@@ -1079,20 +1079,19 @@ mod graph_review_tests {
     #[test]
     fn review_identity_requires_read_only_and_recognises_behaviour()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{GraphNode, is_review_node};
-        for role in [
-            None,
-            Some("lens"),
-            Some("lens.correctness"),
-            Some("review.verify"),
-            Some("plan.review"),
+        use provenant_fabric_runtime::graph::{GraphNode, is_review_node, template::ReviewBehaviour};
+        for (role, reviews) in [
+            (None, false),
+            (Some("lens"), true),
+            (Some("lens.correctness"), true),
+            (Some("review.verify"), true),
+            (Some("plan.review"), false),
         ] {
             for behaviour in [
                 None,
-                Some("lens"),
-                Some("verify"),
-                Some("synthesis"),
-                Some("plan"),
+                Some(ReviewBehaviour::Lens),
+                Some(ReviewBehaviour::Verify),
+                Some(ReviewBehaviour::Synthesis),
             ] {
                 for access in ["read_only", "worktree_write"] {
                     let node: GraphNode = serde_json::from_value(serde_json::json!({
@@ -1100,9 +1099,7 @@ mod graph_review_tests {
                         "review_behaviour":behaviour, "prompt":"Review",
                         "route":{"alias":"senior"}
                     }))?;
-                    let expected = access == "read_only"
-                        && (matches!(role, Some("lens" | "lens.correctness" | "review.verify"))
-                            || matches!(behaviour, Some("lens" | "verify" | "synthesis")));
+                    let expected = access == "read_only" && (reviews || behaviour.is_some());
                     assert_eq!(
                         is_review_node(&node),
                         expected,
@@ -1751,7 +1748,7 @@ mod result_tests {
     #[allow(dead_code)] // The custom worktree driver includes this module without libtest.
     fn graph_status_fixture() -> provenant_fabric_runtime::graph::GraphRun {
         let checkpoint = serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "fixture", "plan_digest": "digest",
+            "schema_version": 2, "graph_id": "fixture", "plan_digest": "digest",
             "nodes": [
                 {"id":"ordinary", "state":"failed", "worktree":null,
                  "advance_error":"repair this", "attempts":[
@@ -2178,8 +2175,7 @@ mod result_tests {
             .writer_binding
             .as_mut()
             .unwrap()
-            .extra
-            .clear();
+            .source_directory_identity = None;
         assert!(!super::writer_source_identity_matches(
             &run.checkpoint,
             path,
@@ -2944,7 +2940,7 @@ mod result_tests {
     fn graph_status_shows_waiting_ci_checks_head_and_live_elapsed() {
         let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(serde_json::json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "graph_id": "delivery",
                 "plan_digest": "digest",
                 "nodes": [{
@@ -3178,7 +3174,7 @@ mod result_tests {
         // This is the durable state if the process stops immediately after saving
         // the final terminal node, before advance clears the structural pause.
         let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "graph_id": "graph",
             "plan_digest": "digest",
             "pause": {"cause": {"kind": "structural_limit"}, "reason": "node limit exceeded"},

@@ -2553,7 +2553,7 @@ mod tests {
     }
 
     fn checkpoint(graph: &str) -> GraphCheckpoint {
-        serde_json::from_value(json!({"schema_version":1,"graph_id":graph,"plan_digest":"digest","nodes":[
+        serde_json::from_value(json!({"schema_version":2,"graph_id":graph,"plan_digest":"digest","nodes":[
             {"id":"parent","state":"running","worktree":null,"attempts":[
                 {"launched":true,"key":{"graph_id":graph,"node_id":"parent","route_index":0, "attempt": 1},"route":{"alias":"senior"},"state":"running","attempt_ref":"11111111111111111111111111111111/22222222222222222222222222222222","launch_actor":"actor"}
             ]},
