@@ -486,14 +486,12 @@ impl Holder for HostHolder<'_> {
             .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
+        let call = run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
         let record = store
-            .record(
-                context.attempt_id,
-                &run::Request {
-                    clock: &clock,
-                    cancel: &cancel,
-                },
-            )
+            .record(context.attempt_id, &call)
             .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
         let registration = provenant_providers::REGISTRY.iter().find(|entry| {
             Some(entry.adapter.id())
@@ -515,14 +513,29 @@ impl Holder for HostHolder<'_> {
             .map_err(|_| custody::CustodyError::InvalidRecord)? =
             registration.and_then(|entry| entry.stderr_decoder);
         if let (Some(registration), Some(route)) = (registration, record.applied_route.clone()) {
-            let stream = registration
-                .adapter
-                .stream(None)
+            let continuation = store
+                .continuation_expectation(context.attempt_id, &call)
                 .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
-            let mut stream = stream;
-            if let Some(model) = super::stream_model(&route) {
-                stream.expect_model(&model);
-            }
+            let stream = match continuation.as_ref() {
+                Some(continuation) => {
+                    let model =
+                        super::stream_model(&route).ok_or(custody::CustodyError::InvalidRecord)?;
+                    registration
+                        .adapter
+                        .stream_for_continuation(&continuation.session, &model)
+                        .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?
+                }
+                None => {
+                    let mut stream = registration
+                        .adapter
+                        .stream(None)
+                        .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
+                    if let Some(model) = super::stream_model(&route) {
+                        stream.expect_model(&model);
+                    }
+                    stream
+                }
+            };
             let (configuration_root, _) = context.disk_roots();
             *self
                 .stdout_frames
@@ -670,8 +683,9 @@ mod tests {
         let initial =
             br#"{"event":"init","conversation_id":"s1","init":{"model":"expected-model"}}"#;
 
-        let mut stream = registration.adapter.stream(None)?;
-        stream.expect_model("expected-model");
+        let stream = registration
+            .adapter
+            .stream_for_continuation("s1", "expected-model")?;
         let first_frame = QuotaFrames {
             decoder: Mutex::new(None),
             evidence: Arc::new(Mutex::new(Some(QuotaCapture {
@@ -715,13 +729,60 @@ mod tests {
                 .pending_identity_conflict
         );
 
+        let stream = registration
+            .adapter
+            .stream_for_continuation("s1", "expected-model")?;
+        let wrong_first_session = QuotaFrames {
+            decoder: Mutex::new(None),
+            evidence: Arc::new(Mutex::new(Some(QuotaCapture {
+                adapter: registration.adapter,
+                stream,
+                attempt: Directory::open_anchor(&attempt_path)?,
+                state_root: temp.path().into(),
+                route: route.clone(),
+                holder_context: Vec::new(),
+                shared: true,
+                recorded: false,
+                pending_session: None,
+                session_ready: None,
+                pending_conflict_session: None,
+                ready_source: None,
+                pending_source_conflict: false,
+                pending_identity_conflict: false,
+                identity_conflict: false,
+            }))),
+            source: Mutex::new(Some(source.clone())),
+            identity_conflict_observed: std::sync::atomic::AtomicBool::new(false),
+            identity_evidence_incomplete: std::sync::atomic::AtomicBool::new(false),
+            identity_eof_fragment_observed: std::sync::atomic::AtomicBool::new(false),
+            eof_fragment_in_progress: std::sync::atomic::AtomicBool::new(false),
+            stderr: false,
+        };
+        assert_eq!(
+            wrong_first_session.decode(
+                br#"{"event":"init","conversation_id":"fresh-session","init":{"model":"expected-model"}}"#
+            ),
+            Ok(provenant_os::capture::FrameEvent::Progress)
+        );
+        assert!(wrong_first_session.identity_conflict_observed());
+        assert!(
+            wrong_first_session
+                .evidence
+                .lock()
+                .map_err(|_| "capture lock")?
+                .as_ref()
+                .ok_or("capture")?
+                .pending_identity_conflict
+        );
+
         for mismatch in [
             br#"{"event":"init","conversation_id":"s2","init":{"model":"expected-model"}}"#
                 .as_slice(),
             br#"{"event":"init","conversation_id":"s1","init":{"model":"other-model"}}"#.as_slice(),
         ] {
-            let mut stream = registration.adapter.stream(None)?;
-            stream.expect_model("expected-model");
+            let mut stream = registration
+                .adapter
+                .stream_for_continuation("s1", "expected-model")?;
             registration.adapter.observe(&mut stream, initial)?;
             let frames = QuotaFrames {
                 decoder: Mutex::new(None),
@@ -816,8 +877,9 @@ mod tests {
             ..Default::default()
         };
         let make_frames = || -> Result<QuotaFrames, Box<dyn std::error::Error>> {
-            let mut stream = registration.adapter.stream(None)?;
-            stream.expect_model("expected-model");
+            let stream = registration
+                .adapter
+                .stream_for_continuation("s1", "expected-model")?;
             Ok(QuotaFrames {
                 decoder: Mutex::new(None),
                 evidence: Arc::new(Mutex::new(Some(QuotaCapture {

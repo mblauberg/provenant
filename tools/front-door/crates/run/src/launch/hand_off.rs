@@ -824,6 +824,7 @@ mod tests {
         });
         let plan = PreparedLaunch {
             limits: Default::default(),
+            continuation_expectation: None,
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),
@@ -932,6 +933,7 @@ mod tests {
         assert!(record.requested_priority.is_none());
         let plan = || PreparedLaunch {
             limits: Default::default(),
+            continuation_expectation: None,
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),

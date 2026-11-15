@@ -179,6 +179,7 @@ pub struct StreamState {
     discarding: bool,
     retained_events: Vec<ProviderEvent>,
     session: Option<String>,
+    expected_session: Option<String>,
     model: Option<String>,
     model_conflict: bool,
     expected_model: Option<String>,
@@ -204,6 +205,7 @@ impl StreamState {
             discarding: false,
             retained_events: Vec::new(),
             session: None,
+            expected_session: None,
             model: None,
             model_conflict: false,
             expected_model: None,
@@ -222,8 +224,18 @@ impl StreamState {
         }
     }
     pub(crate) fn bind_identity(&mut self, session: &str, model: &str) {
-        self.session = Some(session.into());
+        self.expect_session(session);
         self.expected_model = Some(model.into());
+    }
+    /// Bind session reports to the retained provider session before a resumed
+    /// turn begins. The expected value stays separate from observed evidence,
+    /// so a child that emits no session report cannot inherit a false match.
+    pub fn expect_session(&mut self, session: &str) {
+        self.expected_session = Some(session.into());
+    }
+    /// The retained session this stream must report, when it is a continuation.
+    pub fn expected_session(&self) -> Option<&str> {
+        self.expected_session.as_deref()
     }
     /// Bind streamed model reports to the admitted route before a live turn
     /// begins. A mismatch is an identity conflict, not a replacement model.
@@ -303,7 +315,12 @@ impl StreamState {
         for event in &events {
             match event {
                 ProviderEvent::Session(session) => {
-                    if session.is_empty() || self.session.as_ref().is_some_and(|old| old != session)
+                    if session.is_empty()
+                        || self
+                            .expected_session
+                            .as_ref()
+                            .is_some_and(|expected| expected != session)
+                        || self.session.as_ref().is_some_and(|old| old != session)
                     {
                         return Err(ProviderError::IdentityMismatch);
                     }

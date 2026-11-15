@@ -1599,7 +1599,7 @@ fn prepare_inner(
             &delegated,
             prompt_text,
             paths,
-            None,
+            resume,
             locate_override,
             fixture_token,
             wait,
@@ -4437,9 +4437,27 @@ pub(super) fn prepare_candidates(
                 }
             }
         }
+        // Carry the exact continuation expectation already bound into the
+        // provider's shared stream decoder. Admission seals it with this
+        // candidate route so the live and terminal host decoders can prove
+        // that a resumed child stayed in its predecessor session.
+        let continuation_expectation = match (resume.is_some(), spec.stream.expected_session()) {
+            (true, Some(session)) => Some(run::ContinuationExpectation {
+                session: session.to_owned(),
+            }),
+            (true, None) => {
+                return Err(PrepareError::Refusal {
+                    message: "provider prepared a resumed invocation without its retained session binding".into(),
+                    cause: provenant_records::run::TerminalCause::ContinuationRefused,
+                    note: None,
+                });
+            }
+            (false, _) => None,
+        };
         apply_sandbox_mode(task, sandbox.clone(), &mut spec.env, &mut provider);
         return Ok(run::PreparedLaunch {
             limits,
+            continuation_expectation,
             skipped_routes: reasons,
             argv: spec.argv,
             environment: spec.env,

@@ -49,6 +49,7 @@ impl Providers for Ready {
     ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
         Ok(PreparedLaunch {
             limits: Default::default(),
+            continuation_expectation: None,
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),

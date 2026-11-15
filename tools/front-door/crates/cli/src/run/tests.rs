@@ -267,6 +267,59 @@ fn confirmed_intentional_stop_trims_only_the_final_incomplete_record()
     Ok(())
 }
 
+#[test]
+fn resumed_provider_requires_matching_observed_session() -> Result<(), Box<dyn std::error::Error>> {
+    let route = run::RouteRecord {
+        provider: Some("agy".into()),
+        model: Some("agy/gemini-3.8-flash".into()),
+        ..Default::default()
+    };
+    let decode = |stdout: &[u8]| {
+        Registry::default().decode_inner_expected(
+            &route,
+            stdout,
+            &[],
+            &clean_exit(),
+            Path::new("/nonexistent"),
+            false,
+            Some("retained-session"),
+        )
+    };
+    let matching = concat!(
+        "{\"event\":\"init\",\"conversation_id\":\"retained-session\",\"init\":{\"model\":\"gemini-3.8-flash\"}}\n",
+        "{\"event\":\"result\",\"result\":{\"conversation_id\":\"retained-session\",\"status\":\"SUCCESS\",\"response\":\"continued\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n"
+    );
+    let decoded = decode(matching.as_bytes())?;
+    assert_eq!(decoded.session.as_deref(), Some("retained-session"));
+    assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+
+    let fresh = concat!(
+        "{\"event\":\"init\",\"conversation_id\":\"fresh-session\",\"init\":{\"model\":\"gemini-3.8-flash\"}}\n",
+        "{\"event\":\"result\",\"result\":{\"conversation_id\":\"fresh-session\",\"status\":\"SUCCESS\",\"response\":\"continued\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n"
+    );
+    let decoded = decode(fresh.as_bytes())?;
+    assert_eq!(
+        decoded.terminal_cause,
+        Some(run::TerminalCause::IdentityMismatch)
+    );
+
+    let missing = br#"{"event":"result","result":{"conversation_id":"","status":"SUCCESS","response":"continued","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+    let decoded = decode(missing)?;
+    assert_eq!(decoded.session, None);
+    assert_eq!(decoded.outcome, run::Outcome::Unsettled);
+
+    let conflict = concat!(
+        "{\"event\":\"init\",\"conversation_id\":\"retained-session\",\"init\":{\"model\":\"gemini-3.8-flash\"}}\n",
+        "{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"fresh-session\",\"step_type\":\"agent_response\",\"text_delta\":\"continued\"}}\n"
+    );
+    let decoded = decode(conflict.as_bytes())?;
+    assert_eq!(
+        decoded.terminal_cause,
+        Some(run::TerminalCause::IdentityMismatch)
+    );
+    Ok(())
+}
+
 /// Population of OpenCode's own session record: the synthetic v2
 /// `session_message` database the dispatch tests pair with the fixtures.
 fn seed_opencode_session(
