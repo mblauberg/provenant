@@ -2329,28 +2329,14 @@ impl Factory {
                 },
             )
             .map_err(retry_patch_error)?;
-            journal.save(&checkpoint).map_err(graph_journal_error)?;
-            target.node = Some(node);
-        }
-        // Retry is a new request: retain its PATH for this and later advances.
-        {
-            let mut journal = FileJournal::open(
-                &self.context.roots.state,
-                self.context.identity.project,
-                &id,
-                budget,
-                cancel,
-                &self.clock,
-            )
-            .map_err(graph_journal_error)?;
-            let checkpoint = journal
-                .load(&id)
-                .map_err(graph_journal_error)?
-                .ok_or(FacadeError::NotFound)?;
+            // Publish the retry state and the requester's PATH under the same
+            // journal lock, so a concurrent graph advance cannot launch the
+            // pending node with the previous requester's environment.
             journal
                 .set_requester_path(self.requester_lane_path())
                 .map_err(graph_journal_error)?;
             journal.save(&checkpoint).map_err(graph_journal_error)?;
+            target.node = Some(node);
         }
         let run = self.graph(
             GraphInput::Resume {

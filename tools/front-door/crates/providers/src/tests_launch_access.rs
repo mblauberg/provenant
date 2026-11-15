@@ -76,6 +76,7 @@ pub(super) fn fixture_input<'a>(
         images: &[],
         command: None,
         route,
+        provider_model: None,
         confined,
         prompt,
         continuation: None,
@@ -530,6 +531,31 @@ fn cursor_uses_outer_confinement_for_fresh_and_resumed_tool_access() -> Result<(
         cursor::Cursor.prepare(input),
         Err(ProviderError::PromptTooLarge { .. })
     ));
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#provider-model-scope
+#[test]
+fn cursor_effort_launch_spelling_keeps_canonical_continuation_identity()
+-> Result<(), ProviderError> {
+    let prompt = Prompt::new("resume this session".into());
+    let mut route = route("cursor", "grok-4.7");
+    route.effort = Some("high".into());
+    let continuation = Continuation::retained("cursor", "fixture-session", &route, "fixture")?;
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), true);
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.provider_model = Some("grok-4.7-high");
+    input.continuation = Some(&continuation);
+
+    let spec = cursor::Cursor.prepare(input)?;
+    assert_eq!(route.model, "grok-4.7");
+    assert_eq!(route.effort.as_deref(), Some("high"));
+    assert!(spec.argv.windows(2).any(|pair| {
+        pair[0] == "--model" && pair[1] == "grok-4.7-high"
+    }));
+    assert!(spec.argv.windows(2).any(|pair| {
+        pair[0] == "--resume" && pair[1] == "fixture-session"
+    }));
     Ok(())
 }
 

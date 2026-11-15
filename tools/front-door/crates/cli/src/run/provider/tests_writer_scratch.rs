@@ -1133,6 +1133,7 @@ printf 'agy 1.0.0\n'
             policy: &launch_policy,
             command: None,
             route: &codex_route,
+            provider_model: None,
             confined: &confinement.plan,
             prompt: &codex_prompt,
             continuation: None,

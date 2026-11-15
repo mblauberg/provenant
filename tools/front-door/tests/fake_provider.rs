@@ -242,6 +242,7 @@ fn account_placement() -> Result {
             images: &[],
             command: None,
             route: &route,
+            provider_model: None,
             confined: &plan,
             prompt: &prompt,
             continuation: None,

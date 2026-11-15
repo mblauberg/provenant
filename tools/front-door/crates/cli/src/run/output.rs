@@ -129,6 +129,25 @@ pub(super) fn output_summary(
             plain_text(fallback["reason"].as_str().unwrap_or_default(), 160)
         ));
     }
+    if headed {
+        let availability = data["applied_route"]["availability_warning"].as_str();
+        let launch = data["applied_route"]["launch_warnings"].as_array();
+        let mut seen = std::collections::BTreeSet::new();
+        for warning in availability
+            .into_iter()
+            .chain(launch.into_iter().flatten().filter_map(Value::as_str))
+        {
+            let warning = plain_text(warning, 2048);
+            let warning = if warning.starts_with("warning:") {
+                warning
+            } else {
+                format!("warning: {warning}")
+            };
+            if seen.insert(warning.clone()) {
+                lines.push(warning);
+            }
+        }
+    }
     if headed && data.get("writer_base").is_some() {
         for (label, key) in [
             ("base", "writer_base"),
@@ -1024,6 +1043,39 @@ mod tests {
                 .lines
                 .iter()
                 .any(|line| line.contains("expected concern"))
+        );
+    }
+
+    #[test]
+    fn output_summary_surfaces_structured_route_warnings_once() {
+        let data = json!({
+            "state":"succeeded",
+            "applied_route":{
+                "availability_warning":"account work availability is stale; the provider will check it",
+                "launch_warnings":[
+                    "warning: pinned model is outside the configured provider scope",
+                    "warning: image input is not supported"
+                ]
+            }
+        });
+        let summary = output_summary(&data, "answer", true, None);
+        assert_eq!(
+            summary
+                .lines
+                .iter()
+                .filter(|line| line.as_str()
+                    == "warning: pinned model is outside the configured provider scope")
+                .count(),
+            1
+        );
+        assert!(summary.lines.iter().any(|line| {
+            line == "warning: account work availability is stale; the provider will check it"
+        }));
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line == "warning: image input is not supported")
         );
     }
 

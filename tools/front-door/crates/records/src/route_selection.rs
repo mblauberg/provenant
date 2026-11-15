@@ -139,6 +139,9 @@ pub struct RouteDiagnostics {
     pub pacing_reserve_fact: Option<crate::diagnostic::ResourceFact>,
     pub account_load: Option<AccountLoad>,
     pub account_exclusions: Vec<String>,
+    /// Warnings produced while preparing this exact route for launch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch_warnings: Vec<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityPreference {

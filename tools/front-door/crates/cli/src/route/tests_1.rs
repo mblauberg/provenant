@@ -319,7 +319,7 @@
                 exclude: vec![],
             },
         });
-        let super::Data::Resolved(preview) = super::execute(
+        let super::Data::Resolved(mut preview) = super::execute(
             &command,
             &roots,
             provenant_core::WallTime::from_unix_seconds(100)?,
@@ -334,9 +334,15 @@
                 .guidance()
                 .contains("PRIVATE_SENTINEL")
         );
+        preview
+            .route
+            .diagnostics
+            .launch_warnings
+            .push("warning: pinned model is outside the configured provider scope".into());
         let text = super::resolved_text(&preview);
         assert!(!text.contains("PRIVATE_SENTINEL"), "{text}");
         assert!(!text.contains("Carry the task to completion"), "{text}");
+        assert!(text.contains("warning: pinned model is outside the configured provider scope"));
         Ok(())
     }
 

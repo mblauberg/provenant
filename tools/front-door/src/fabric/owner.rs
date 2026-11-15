@@ -4409,8 +4409,9 @@ mod journal_error_tests {
             )
             .unwrap_err();
         assert_eq!(missing.code(), "state_corrupt");
-        // Exercise the other record writer too: adapter capability checks
-        // refuse inside RunService, after the graph owner has built its intent.
+        // Exercise the saved preflight result too: this canonical graph intent
+        // resolves to a typed route refusal before a provider launch. It still
+        // needs an idempotent result and the same changed-intent fence.
         let service_key = graph::AttemptKey {
             route_index: 1,
             attempt: 2,
@@ -4425,33 +4426,39 @@ mod journal_error_tests {
             input.context.attempt = Some(2);
             input
         };
-        let service_refusal = owner
-            .observe_or_start(
-                &service_key,
-                service_node("service preflight"),
-                &unsupported,
-                graph::AccessMode::ReadOnly,
-                None,
-                replay,
-            )
-            .unwrap_err();
+        let service_refusal = owner.observe_or_start(
+            &service_key,
+            service_node("service preflight"),
+            &unsupported,
+            graph::AccessMode::ReadOnly,
+            None,
+            replay,
+        )?;
+        assert!(matches!(
+            &service_refusal,
+            graph::AttemptObservation::Terminal {
+                outcome: graph::AttemptOutcome::PreparationRefused(
+                    provenant_records::run::TerminalCause::RouteResolutionRefused
+                ),
+                launched: false,
+                ..
+            }
+        ));
         let operation = graph_operation("graph-attempt-operation", &service_key)?;
         let saved = store
             .operation(&operation, &call)?
             .ok_or("service refusal")?;
         assert_eq!(saved.preflight_digest_version, Some(1));
         assert!(saved.origin_intent_digest.is_some());
-        let repeated = owner
-            .observe_or_start(
-                &service_key,
-                service_node("service preflight"),
-                &unsupported,
-                graph::AccessMode::ReadOnly,
-                None,
-                replay,
-            )
-            .unwrap_err();
-        assert_eq!(repeated.code(), service_refusal.code());
+        let repeated = owner.observe_or_start(
+            &service_key,
+            service_node("service preflight"),
+            &unsupported,
+            graph::AccessMode::ReadOnly,
+            None,
+            replay,
+        )?;
+        assert_eq!(repeated, service_refusal);
         let changed = owner
             .observe_or_start(
                 &service_key,

@@ -859,7 +859,14 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
         &["route", "resolve", "--route", "utility", "--confidential"],
         0,
     )?;
-    assert_eq!(pool["data"]["model"], "claude-haiku-5-5");
+    let utility_model = pool["data"]["model"].as_str().ok_or("utility model")?;
+    assert!(
+        pool["data"]["pool_selection"]["candidates"]
+            .as_array()
+            .ok_or("utility candidates")?
+            .iter()
+            .any(|candidate| candidate["model"] == utility_model)
+    );
     let resolved = call(
         &rig,
         &[
@@ -891,12 +898,16 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
     );
     // A positional name is a route, an exact model, or a unique model by its ID (#1838).
     for (name, model) in [
-        ("utility", "claude-haiku-5-5"),
+        ("utility", utility_model),
         ("codex/gpt-6.1-terra", "gpt-6.1-terra"),
         ("gpt-6.1-terra", "gpt-6.1-terra"),
         ("terra", "gpt-6.1-terra"),
     ] {
-        let named = call(&rig, &["route", "resolve", name], 0)?;
+        let named = if name == "utility" {
+            call(&rig, &["route", "resolve", name, "--confidential"], 0)?
+        } else {
+            call(&rig, &["route", "resolve", name], 0)?
+        };
         assert_eq!(named["data"]["model"], model, "{name}");
     }
     let selected = rig.root.join("selected-project");

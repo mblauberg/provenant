@@ -18,6 +18,85 @@ pub(super) fn preparation_executable(
     }
 }
 
+/// Use the requester's retained PATH for lanes, after excluding the project
+/// and selected worktree. Model and command launch preparation share this
+/// filtered value; command lookup must not drift to the advancing supervisor.
+pub(super) fn filtered_requester_lane_path(
+    host: Option<&run::HostLaunchContext>,
+    project: &Path,
+    worktree: &Path,
+) -> Result<Option<std::ffi::OsString>, String> {
+    use std::os::unix::ffi::OsStrExt;
+    host.and_then(|host| host.lane_path.as_deref())
+        .map(|path| {
+            run::filtered_lane_path(std::ffi::OsStr::from_bytes(path), project, worktree)
+                .map_err(|error| error.to_string())
+        })
+        .transpose()
+}
+
+fn include_local_login(
+    spec: &AdapterSpec,
+    entries: &[provenant_providers::accounts::Registration],
+    selected: Option<&str>,
+) -> bool {
+    if !spec.local_login {
+        return false;
+    }
+    let has_entry = entries.iter().any(|entry| entry.adapter == spec.name);
+    if !has_entry {
+        return true;
+    }
+
+    // Keep a declared local identity selectable beside registered accounts,
+    // but do not add it to ordinary routing where unobserved HOME credentials
+    // could outrank an available registered account.
+    if !spec.is_unregistered_local(spec.local_account.1) {
+        return false;
+    }
+    selected.is_some_and(|selector| {
+        selector == spec.local_account.1
+            || (selector == spec.local_account.0
+                && !entries.iter().any(|entry| {
+                    entry.adapter == spec.name && (entry.label == selector || entry.key == selector)
+                }))
+    })
+}
+
+fn select_account<'a>(
+    entries: &'a [provenant_providers::accounts::Registration],
+    selector: &str,
+    requested_adapter: Option<&str>,
+) -> Result<&'a provenant_providers::accounts::Registration, PrepareError> {
+    // Exact keys identify credentials; only use labels when no exact key
+    // exists. This keeps the synthetic `local` identity distinct from any
+    // registered account that happens to use the same label.
+    let candidates = |by_key: bool| {
+        entries.iter().filter(move |entry| {
+            (if by_key {
+                entry.key == selector
+            } else {
+                entry.label == selector
+            }) && requested_adapter.is_none_or(|adapter| entry.adapter == adapter)
+        })
+    };
+    let by_key = entries.iter().any(|entry| {
+        entry.key == selector && requested_adapter.is_none_or(|adapter| entry.adapter == adapter)
+    });
+    let mut matching = candidates(by_key);
+    let entry = matching.next().ok_or_else(|| PrepareError::Refusal {
+        message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
+        cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+        note: None,
+    })?;
+    if matching.any(|other| other.key != entry.key || other.adapter != entry.adapter) {
+        return Err(PrepareError::Other(
+            "account alias is ambiguous; use its exact registered key".into(),
+        ));
+    }
+    Ok(entry)
+}
+
 const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Repeated preparation must never reuse a lane's mutable Git state. Keep the
@@ -135,6 +214,18 @@ pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Opt
             "warning: adapter {adapter} does not support image_input; attachments remain readable"
         )
     })
+}
+
+fn push_launch_warning(route: &mut ResolvedRoute, warning: impl Into<String>) {
+    let warning = warning.into();
+    let warning = if warning.starts_with("warning:") {
+        warning
+    } else {
+        format!("warning: {warning}")
+    };
+    if !route.diagnostics.launch_warnings.contains(&warning) {
+        route.diagnostics.launch_warnings.push(warning);
+    }
 }
 
 /// Warn when an ignore file the routed adapter declares, in the writer's
@@ -2493,6 +2584,13 @@ pub(super) fn prepare_candidates(
     let protected_worktrees = protected_worktrees(registry, &source, &git)?;
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
+    let requested_adapter = match &task.route {
+        run::RequestedRoute::Adapter { provider, .. } => Some(provider.as_str()),
+        run::RequestedRoute::Model { model, .. } => {
+            model.split_once('/').map(|(adapter, _)| adapter)
+        }
+        run::RequestedRoute::Named { .. } | run::RequestedRoute::Review { .. } => None,
+    };
     let mut default_failures = std::collections::BTreeMap::new();
     for spec in ADAPTER_SPECS.iter().filter(|spec| eligible(spec.name)) {
         let Some((environment, fallback)) = spec.default_account_directory else {
@@ -2555,7 +2653,12 @@ pub(super) fn prepare_candidates(
         .filter(|spec| spec.local_login && eligible(spec.name))
     {
         let adapter = spec.name;
-        if !entries.iter().any(|entry| entry.adapter == adapter) && locate(adapter).is_ok() {
+        if include_local_login(spec, &entries, task.account.as_deref())
+            && locate(adapter).is_ok()
+            && !entries
+                .iter()
+                .any(|entry| entry.adapter == adapter && entry.key == spec.local_account.1)
+        {
             entries.push(provenant_providers::accounts::Registration {
                 adapter: adapter.into(),
                 label: spec.local_account.0.into(),
@@ -2766,13 +2869,6 @@ pub(super) fn prepare_candidates(
             }
         }
     }
-    let requested_adapter = match &task.route {
-        run::RequestedRoute::Adapter { provider, .. } => Some(provider.as_str()),
-        run::RequestedRoute::Model { model, .. } => {
-            model.split_once('/').map(|(adapter, _)| adapter)
-        }
-        run::RequestedRoute::Named { .. } | run::RequestedRoute::Review { .. } => None,
-    };
     // A continuation keeps the prior attempt's account, never a fresh pick.
     let prior_account = resume
         .and_then(|prior| prior.applied_route.as_ref())
@@ -2781,22 +2877,8 @@ pub(super) fn prepare_candidates(
         .account
         .as_deref()
         .filter(|_| resume.is_none())
-        .map(|label| {
-            let mut matching = entries.iter().filter(|e| {
-                (e.label == label || e.key == label)
-                    && requested_adapter.is_none_or(|adapter| e.adapter == adapter)
-            });
-            let entry = matching.next().ok_or_else(|| PrepareError::Refusal {
-                message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
-                cause: provenant_records::run::TerminalCause::UnregisteredAccount,
-                note: None,
-            })?;
-            if matching.any(|other| other.key != entry.key || other.adapter != entry.adapter) {
-                return Err(PrepareError::Other(
-                    "account alias is ambiguous; use its exact registered key".into(),
-                ));
-            }
-            Ok(entry.key.as_str())
+        .map(|selector| {
+            select_account(&entries, selector, requested_adapter).map(|entry| entry.key.as_str())
         })
         .transpose()?
         .or(prior_account);
@@ -3639,10 +3721,11 @@ pub(super) fn prepare_candidates(
         } else {
             None
         };
-        let mut provider_route = adapter_route(&route);
+        let provider_route = adapter_route(&route);
         let model_id =
             provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?;
-        provider_route.model = catalogue.launch_model(&model_id, route.effort.as_deref());
+        let launch_model = catalogue.launch_model(&model_id, route.effort.as_deref());
+        let provider_model = (launch_model != route.model).then_some(launch_model);
         let project_id_str = project_id.to_string();
         let project_key = format!("domains.lanes.projects.{project_id_str}.user_skills");
         let project_override = config
@@ -3681,19 +3764,11 @@ pub(super) fn prepare_candidates(
             task,
             &plan,
         );
-        let lane_path = registry
-            .host
-            .and_then(|host| host.lane_path.as_deref())
-            .map(|path| {
-                use std::os::unix::ffi::OsStrExt;
-                let project = task
-                    .writer
-                    .as_ref()
-                    .map_or(source.as_path(), |writer| writer.project.as_path());
-                run::filtered_lane_path(std::ffi::OsStr::from_bytes(path), project, &cwd)
-            })
-            .transpose()
-            .map_err(|error| error.to_string())?;
+        let path_project = task
+            .writer
+            .as_ref()
+            .map_or(source.as_path(), |writer| writer.project.as_path());
+        let lane_path = filtered_requester_lane_path(registry.host, path_project, &cwd)?;
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
                 credential_roots: credential_roots.clone(),
@@ -3701,6 +3776,7 @@ pub(super) fn prepare_candidates(
                 policy: &launch_policy,
                 command: None,
                 route: provider_route,
+                provider_model: provider_model.as_deref(),
                 confined: &plan,
                 prompt: &prompt,
                 continuation: continuation.as_ref(),
@@ -4100,16 +4176,16 @@ pub(super) fn prepare_candidates(
                 && record.account_key == route.account_key
                 && record.fixture_ref == format!("installed/{}/login-unverified", route.adapter)
         }) {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: OpenCode login status is unverified; the selected launch will check authentication"
+            push_launch_warning(
+                &mut route,
+                "OpenCode login status is unverified; the selected launch will check authentication",
             );
         }
         if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
-            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+            push_launch_warning(&mut route, warning);
         }
         for warning in ignore_file_warnings(&route.adapter, task, roots.state.as_path()) {
-            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+            push_launch_warning(&mut route, warning);
         }
         if matches!(
             &task_request.choice,
@@ -4117,24 +4193,27 @@ pub(super) fn prepare_candidates(
         ) && let Some(scope) = config.providers.get(&route.adapter)
             && let Some(warning) = scope.pin_warning(&route.adapter, &route.model)
         {
-            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+            push_launch_warning(&mut route, warning);
         }
         if route.eligibility == provenant_records::RouteEligibility::UnverifiedModel {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: model {}/{} is not in the catalogue; the provider will check it",
-                route.adapter,
-                route.model
+            push_launch_warning(
+                &mut route,
+                format!(
+                    "model {}/{} is not in the catalogue; the provider will check it",
+                    route.adapter, route.model
+                ),
             );
         }
         for warning in config.domains.routing.pool_effort_warnings(&catalogue) {
-            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+            push_launch_warning(&mut route, warning);
         }
         if let Some((fallback, reason)) = &fallback_dropped {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: {label}: model policy fallback {} ({reason}); dropped",
-                fallback.as_str()
+            push_launch_warning(
+                &mut route,
+                format!(
+                    "{label}: model policy fallback {} ({reason}); dropped",
+                    fallback.as_str()
+                ),
             );
         }
         if writer.is_some()
@@ -4143,9 +4222,7 @@ pub(super) fn prepare_candidates(
                 .routing
                 .opus_writer_advisory(&catalogue, &route)
         {
-            // Advice must never refuse an otherwise valid dispatch, even if
-            // the caller has closed its diagnostic stream.
-            let _ = writeln!(std::io::stderr().lock(), "{advisory}");
+            push_launch_warning(&mut route, advisory);
         }
         // Install on the host only once the head, route and lane setup are
         // known to be usable, and before the sandbox is entered.
@@ -4183,9 +4260,6 @@ pub(super) fn prepare_candidates(
             resume.is_some(),
             current_candidate > 0,
         );
-        if let Some(warning) = provider.availability_warning.as_deref() {
-            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
-        }
         provider.account_source = Some(if resume.is_some() {
             provenant_records::run::AccountSource::Continuation
         } else if task.account.is_some() {
@@ -4485,7 +4559,11 @@ mod receipt_tests {
             confidential: false,
             fallback: Fallback::None,
         };
-        let resolved = provenant_routing::resolve(&request, &context)?;
+        let mut resolved = provenant_routing::resolve(&request, &context)?;
+        resolved
+            .diagnostics
+            .launch_warnings
+            .push("warning: fixture launch diagnostic".into());
         let requested = run::RequestedRoute::Named {
             extra: Default::default(),
             required_family: None,
@@ -4498,6 +4576,10 @@ mod receipt_tests {
         assert_eq!(wire["effort"], "high");
         assert_eq!(wire["account_label"], "work");
         assert_eq!(wire["source"], "named_route");
+        assert_eq!(
+            wire["launch_warnings"][0],
+            "warning: fixture launch diagnostic"
+        );
         let mut uncertain = resolved.clone();
         uncertain.readiness = provenant_records::RouteReadiness::Ready {
             availability_warning: Some("Stale".into()),
@@ -4763,6 +4845,7 @@ mod user_skills_tests {
                     let input = PrepareInput {
                         credential_roots: provenant_core::CredentialRoots::for_home(&home),
                         route: &route,
+                        provider_model: None,
                         policy: &launch_policy,
                         confined: &plan,
                         prompt: &prompt,
@@ -5187,6 +5270,143 @@ mod candidate_walk_regressions {
         let refusal = redraw_candidates(Err(error), &mut reasons, &mut rejected).unwrap_err();
         assert!(
             matches!(refusal, PrepareError::RouteResolution { error: crate::route::DispatchError::Edge(error), checks } if matches!(*error, crate::route::EdgeError::Quota(provenant_quota::QuotaError::AllowanceExhausted)) && checks.iter().any(|check| check.route == "cursor/spent" && check.cause == Some(provenant_records::RouteExclusionReason::Exhausted)))
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod route_launch_boundary_regressions {
+    use super::*;
+    use std::os::unix::ffi::OsStrExt;
+
+    fn agy_entry(
+        label: &str,
+        key: &str,
+        directory: &Path,
+    ) -> provenant_providers::accounts::Registration {
+        provenant_providers::accounts::Registration {
+            adapter: "agy".into(),
+            label: label.into(),
+            key: key.into(),
+            org_fingerprint: None,
+            directory: directory.into(),
+            plan: None,
+            priority: None,
+            billing_anchor: None,
+            plans: Vec::new(),
+            directories: Vec::new(),
+            limits: None,
+            display_name: None,
+            hidden: false,
+            order: None,
+            headline: None,
+            settings: Default::default(),
+        }
+    }
+
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    #[test]
+    fn agy_local_login_is_explicit_beside_registered_accounts_and_not_a_root() -> Result<(), String>
+    {
+        let spec = AdapterSpec::get("agy").ok_or("agy adapter missing")?;
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let home = std::fs::canonicalize(temp.path()).map_err(|error| error.to_string())?;
+        let registered = agy_entry("work", "agy-registered", &home.join(".agy-work"));
+        assert!(!include_local_login(
+            spec,
+            std::slice::from_ref(&registered),
+            None
+        ));
+        assert!(include_local_login(
+            spec,
+            std::slice::from_ref(&registered),
+            Some(spec.local_account.1)
+        ));
+        assert!(include_local_login(
+            spec,
+            std::slice::from_ref(&registered),
+            Some(spec.local_account.0)
+        ));
+
+        let mut settings = provenant_providers::accounts::Settings::default();
+        settings.entries.insert("work".into(), registered.clone());
+        let roots = credential_roots(&Registry::default(), &home, &settings)?;
+        assert!(roots.entries().iter().any(|root| {
+            root.source == "account registry: agy/work" && root.path == registered.directory
+        }));
+        assert!(
+            !roots
+                .entries()
+                .iter()
+                .any(|root| root.source.starts_with("account registry: agy/default"))
+        );
+
+        let mut candidates = vec![registered.clone()];
+        candidates.push(agy_entry(spec.local_account.0, spec.local_account.1, &home));
+        assert_eq!(
+            select_account(&candidates, spec.local_account.1, Some("agy"))
+                .map_err(|error| error.to_string())?
+                .key,
+            spec.local_account.1
+        );
+        assert_eq!(
+            select_account(&candidates, spec.local_account.0, Some("agy"))
+                .map_err(|error| error.to_string())?
+                .key,
+            spec.local_account.1
+        );
+        assert_eq!(
+            select_account(&candidates, "agy-registered", Some("agy"))
+                .map_err(|error| error.to_string())?
+                .key,
+            "agy-registered"
+        );
+
+        let labelled_collision = agy_entry("local", "agy-other", &home.join(".agy-other"));
+        let mut colliding_candidates = vec![labelled_collision];
+        colliding_candidates.push(agy_entry(spec.local_account.0, spec.local_account.1, &home));
+        assert_eq!(
+            select_account(&colliding_candidates, spec.local_account.1, Some("agy"))
+                .map_err(|error| error.to_string())?
+                .key,
+            spec.local_account.1
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
+    #[test]
+    fn requester_path_filter_is_shared_with_named_command_lookup() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = std::fs::canonicalize(temp.path()).map_err(|error| error.to_string())?;
+        let project = root.join("project");
+        let worktree = project.join(".worktrees/selected");
+        let bin = root.join("requester-bin");
+        std::fs::create_dir_all(&worktree).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&bin).map_err(|error| error.to_string())?;
+        let executable = bin.join("fixture-command");
+        std::fs::write(&executable, b"#!/bin/sh\nexit 0\n").map_err(|error| error.to_string())?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+        let mut host = run::HostLaunchContext::from_environment(
+            &root.join("state"),
+            &project,
+            "/usr/bin/git".into(),
+        );
+        let supplied =
+            std::env::join_paths([bin.as_os_str(), project.as_os_str(), worktree.as_os_str()])
+                .map_err(|error| error.to_string())?;
+        host.lane_path = Some(supplied.as_os_str().as_bytes().to_vec());
+
+        let filtered = filtered_requester_lane_path(Some(&host), &project, &worktree)?
+            .ok_or("requester PATH disappeared")?;
+        let directories = std::env::split_paths(&filtered).collect::<Vec<_>>();
+        assert_eq!(directories, [bin]);
+        assert_eq!(
+            find_command_on_path("fixture-command", &directories)?,
+            executable
         );
         Ok(())
     }
