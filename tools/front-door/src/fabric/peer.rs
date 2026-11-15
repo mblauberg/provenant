@@ -586,12 +586,20 @@ pub fn peer(
                         extra: Default::default(),
                     }
                 } else {
-                    peer_result(owner.snapshots_local(targets, &cancel), |data| {
-                        PeerResult::RunStatuses {
+                    peer_result(
+                        owner.snapshots_local(targets, &cancel).map(|mut data| {
+                            for attempt in &mut data {
+                                provenant_fabric_runtime::runs::project_peer_attempt_diagnostics(
+                                    attempt,
+                                );
+                            }
+                            data
+                        }),
+                        |data| PeerResult::RunStatuses {
                             data,
                             extra: Default::default(),
-                        }
-                    })
+                        },
+                    )
                 }
             }
             PeerAction::CancelSubmission { .. } => peer_result(
@@ -642,6 +650,7 @@ pub fn peer(
                                 after,
                             )?);
                         }
+                        value.project_peer_diagnostics();
                         Ok(value)
                     });
                 peer_result(observed, |value| PeerResult::Run {
@@ -760,14 +769,18 @@ pub fn peer(
                     }
                 })
             }
-            PeerAction::Lanes { all, limit, .. } => {
-                peer_result(owner.lanes_local(*all, *limit, &cancel), |data| {
-                    PeerResult::RunStatuses {
-                        data,
-                        extra: Default::default(),
+            PeerAction::Lanes { all, limit, .. } => peer_result(
+                owner.lanes_local(*all, *limit, &cancel).map(|mut data| {
+                    for attempt in &mut data {
+                        provenant_fabric_runtime::runs::project_peer_attempt_diagnostics(attempt);
                     }
-                })
-            }
+                    data
+                }),
+                |data| PeerResult::RunStatuses {
+                    data,
+                    extra: Default::default(),
+                },
+            ),
             PeerAction::LaneWaits { targets, .. } => {
                 if !(1..=100).contains(&targets.len()) {
                     PeerResult::Error {

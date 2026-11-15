@@ -87,6 +87,7 @@ pub enum ConfinementGuard {
     ProcessPolicyMissing,
     ProfileLimitExceeded,
     ProfileTransportFailed,
+    ProjectBindingDirectoryUnsafe,
     ProjectBindingMismatch,
     ProjectBindingMissing,
     ProtectedPathOverlap,
