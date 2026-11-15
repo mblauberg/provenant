@@ -476,14 +476,15 @@ impl UtilityRuntime {
         // is the primary itself. Linked worktrees need the shared resolver so
         // their own root never becomes the project-configuration owner.
         let project_root = if repo.private_git_dir() == repo.common_git_dir() {
-            Some(repo.root_path())
+            Some(repo.root_path().to_path_buf())
         } else {
             let environment = crate::worktrees::project_layout_git_environment();
+            let git = self.git.program()?;
             let layout = crate::worktrees::project_layout_for_common_at_state(
                 executor,
                 repo.common_git_dir(),
                 &self.host_state,
-                self.git.program()?,
+                &git,
                 &environment,
                 budget.timeout,
                 cancel,
@@ -2588,21 +2589,19 @@ pub(crate) mod tests {
         )?;
         let binding = provenant_config::bind_project(&roots, discovered.location)?;
         assert_eq!(binding.primary_checkout_hint(), Some(root.as_path()));
-        let error = runtime
-            .open_repo(
-                &fixture.executor,
-                &linked,
-                UtilityBudget::bounded(Duration::from_secs(10))?,
-                &CancelToken::new(),
-            )
-            .expect_err("linked config in a primary-owned lane root must be refused");
-        assert!(
-            matches!(
-                error,
-                UtilityError::Transport(TransportError::LaneConfig { .. })
-            ),
-            "unexpected refusal: {error}"
+        let result = runtime.open_repo(
+            &fixture.executor,
+            &linked,
+            UtilityBudget::bounded(Duration::from_secs(10))?,
+            &CancelToken::new(),
         );
+        match result {
+            Err(UtilityError::Transport(TransportError::LaneConfig { .. })) => {}
+            Err(error) => return Err(format!("unexpected refusal: {error}").into()),
+            Ok(_) => {
+                return Err("linked config in a primary-owned lane root was accepted".into());
+            }
+        }
         Ok(())
     }
 
