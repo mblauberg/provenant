@@ -571,14 +571,40 @@ fn npm_cache_path(value: &str, host_var: &dyn Fn(&str) -> Option<OsString>) -> O
         {
             return None;
         }
-        let value = host_var(name)
-            .or_else(|| host_var(&name.to_ascii_uppercase()))?
+        let value = safe_host_path_variable(name, host_var)?
             .into_string()
             .ok()?;
         expanded.push_str(&value);
         remainder = &variable[end + 1..];
     }
     absolute_literal(&expanded)
+}
+
+fn safe_host_path_variable(
+    name: &str,
+    host_var: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<OsString> {
+    const ALLOWED: &[&str] = &[
+        "APPDATA",
+        "HOME",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LOCALAPPDATA",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USERPROFILE",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+    ];
+
+    let upper = name.to_ascii_uppercase();
+    if !ALLOWED.contains(&upper.as_str()) {
+        return None;
+    }
+    host_var(name).or_else(|| host_var(&upper))
 }
 
 fn yaml_setting(path: &Path, key: &str) -> Result<Setting, ()> {
@@ -700,14 +726,15 @@ fn preserve_pnpm_selectors(
         }
     }
 
-    let conflict =
-        match family {
-            Some(PnpmSelectorFamily::Legacy) => current
-                .is_some_and(|current| legacy.as_ref().is_none_or(|legacy| legacy != &current)),
-            Some(PnpmSelectorFamily::Current) => legacy
-                .is_some_and(|legacy| current.as_ref().is_none_or(|current| current != &legacy)),
-            None => false,
-        };
+    let conflict = match family {
+        Some(PnpmSelectorFamily::Legacy) => current
+            .as_ref()
+            .is_some_and(|current| legacy.as_ref().is_none_or(|legacy| legacy != current)),
+        Some(PnpmSelectorFamily::Current) => legacy
+            .as_ref()
+            .is_some_and(|legacy| current.as_ref().is_none_or(|current| current != legacy)),
+        None => false,
+    };
     (legacy.is_some() || current.is_some(), conflict)
 }
 
@@ -931,7 +958,7 @@ fn warn_unsupported() {
     use std::io::Write;
     let _ = writeln!(
         std::io::stderr().lock(),
-        "warning: native package cache settings could not be resolved safely; configured paths were left unchanged"
+        "warning: native package cache settings could not be resolved safely; configured paths were left unchanged. Set an absolute cache/store path or use supported host path variables"
     );
 }
 
@@ -1455,6 +1482,7 @@ mod tests {
         .expect("pnpm config");
         let mut host = host_vars(&[
             ("HOME", &home),
+            ("XDG_CACHE_HOME", &home.join("cache")),
             ("XDG_CONFIG_HOME", &xdg_config),
             ("COREPACK_HOME", &explicit_corepack),
         ]);
@@ -1463,6 +1491,7 @@ mod tests {
             "PATH".to_owned(),
             std::env::join_paths([&pnpm_bin]).expect("pnpm fixture PATH"),
         );
+        host.insert("NPM_TOKEN".to_owned(), OsString::from("sentinel-npm-token"));
         let host_var = |name: &str| host.get(name).cloned();
 
         let mut env = vec![("HOME".into(), account.clone().into_os_string())];
@@ -1504,6 +1533,27 @@ mod tests {
             interpolated
                 .iter()
                 .all(|(_, value)| value != "secret-value")
+        );
+
+        std::fs::write(home.join(".npmrc"), "cache=${XDG_CACHE_HOME}/npm-cache\n")
+            .expect("standard host path interpolation");
+        let mut standard_path = vec![("HOME".into(), account.clone().into_os_string())];
+        bind_native(&home, &project, &host_var, &mut standard_path);
+        assert_eq!(
+            var(&standard_path, "npm_config_cache"),
+            Some(home.join("cache/npm-cache").as_os_str()),
+            "standard XDG cache paths are resolved from the host environment"
+        );
+
+        std::fs::write(home.join(".npmrc"), "cache=/tmp/cache-${NPM_TOKEN}\n")
+            .expect("unsupported secret interpolation");
+        let mut secret_path = vec![("HOME".into(), account.clone().into_os_string())];
+        bind_native(&home, &project, &host_var, &mut secret_path);
+        assert!(var(&secret_path, "npm_config_cache").is_none());
+        assert!(
+            secret_path
+                .iter()
+                .all(|(_, value)| value != "sentinel-npm-token")
         );
 
         std::fs::remove_file(xdg_config.join("pnpm/config.yaml")).expect("remove pnpm config");
