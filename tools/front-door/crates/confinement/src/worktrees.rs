@@ -185,6 +185,35 @@ impl From<provenant_config::ConfigError> for WorktreeError {
     }
 }
 
+/// Declared alternatives for admitting a checkout whose HEAD is detached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetachedWorktreeRemedy {
+    CreateBranch,
+    ReadOnly,
+}
+impl DetachedWorktreeRemedy {
+    pub const ALL: &'static [Self] = &[Self::CreateBranch, Self::ReadOnly];
+
+    fn instruction(self) -> &'static str {
+        match self {
+            Self::CreateBranch => "git switch -c BRANCH",
+            Self::ReadOnly => "remove --worktree and pass --mode read-only",
+        }
+    }
+}
+struct DetachedWorktreeRemedies;
+impl std::fmt::Display for DetachedWorktreeRemedies {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, remedy) in DetachedWorktreeRemedy::ALL.iter().enumerate() {
+            if index != 0 {
+                formatter.write_str(" or ")?;
+            }
+            formatter.write_str(remedy.instruction())?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum WorktreeError {
     #[error(transparent)]
@@ -201,9 +230,7 @@ pub enum WorktreeError {
     DetachedPrimary,
     #[error("detached HEAD at {head} is not merged into the integration branch")]
     DetachedUnmerged { head: GitOid },
-    #[error(
-        "detached HEAD at {head}; git switch -c BRANCH or remove --worktree and pass --mode read-only"
-    )]
+    #[error("detached HEAD at {head}; {}", DetachedWorktreeRemedies)]
     DetachedWorktree { head: GitOid },
     #[error("worktree writer is busy{}", .holder.as_ref().map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
     WriterBusy { holder: Option<AttemptId> },
@@ -389,6 +416,14 @@ impl WorktreeError {
                 | Self::UnknownOccupancy { .. }
                 | Self::GitEntryHeld { .. }
         )
+    }
+
+    /// Typed alternatives for the detached-checkout admission refusal.
+    pub fn detached_remedies(&self) -> &'static [DetachedWorktreeRemedy] {
+        match self {
+            Self::DetachedWorktree { .. } => DetachedWorktreeRemedy::ALL,
+            _ => &[],
+        }
     }
 
     /// The operator's next step for a refusal that has one.
@@ -910,6 +945,31 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detached_worktree_refusal_carries_the_head_and_declared_remedies() {
+        let head = "1".repeat(40).parse::<GitOid>().unwrap();
+        let error = WorktreeError::DetachedWorktree { head };
+        assert!(
+            matches!(&error, WorktreeError::DetachedWorktree { head: actual } if *actual == head)
+        );
+        let mut branch = false;
+        let mut read_only = false;
+        for remedy in error.detached_remedies() {
+            match remedy {
+                DetachedWorktreeRemedy::CreateBranch => {
+                    assert!(!branch, "duplicate branch remedy");
+                    branch = true;
+                }
+                DetachedWorktreeRemedy::ReadOnly => {
+                    assert!(!read_only, "duplicate read-only remedy");
+                    read_only = true;
+                }
+            }
+        }
+        assert!(branch && read_only);
+        assert!(WorktreeError::InvalidRequest.detached_remedies().is_empty());
+    }
 
     #[test]
     fn admission_causes_keep_transient_observation_distinct_from_custody() {
