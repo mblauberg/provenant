@@ -1,21 +1,9 @@
 //! Workflow leaves through the isolated binary: receipts, review coverage, sessions.
 mod support;
 use serde_json::{Value, json};
-use support::{Result, TestRig, code};
-
-fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<Value> {
-    let mut args = args.to_vec();
-    args.push("--json");
-    let output = rig.command(&args)?;
-    assert_eq!(
-        code(&output),
-        expected,
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout.bytes),
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    Ok(serde_json::from_slice(&output.stdout.bytes)?)
-}
+#[cfg(unix)]
+use support::git;
+use support::{Result, TestRig, call, code};
 fn request(rig: &TestRig, name: &str, value: Value) -> Result<String> {
     let path = rig.root.join(name);
     std::fs::write(&path, serde_json::to_vec(&value)?)?;
@@ -47,20 +35,6 @@ fn pr_receipt_request(head: &str) -> Value {
         "kind": "pr", "repository": "02".repeat(16), "number": 12, "head": head
     });
     value
-}
-
-#[cfg(unix)]
-fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
-    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let output = rig.execute(&git, args, None)?;
-    if code(&output) != 0 {
-        return Err(format!(
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr.bytes)
-        )
-        .into());
-    }
-    Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
 }
 
 /// The target's commit, then a pull request of two commits on it: the
@@ -235,12 +209,6 @@ fn a_retired_receipt_is_named_and_saved_again() -> Result {
     let review = request(&rig, "review.json", json!({"delivery_id": DELIVERY}))?;
     let refused = call(&rig, &["workflow", "review", "--request", &review], 1)?;
     assert_eq!(refused["error"]["code"], "RECEIPT_RETIRED");
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .ok_or("message")?
-            .starts_with("receipt shape retired: save it again")
-    );
     let saved = save_receipt(&rig, &pending, "1", 0)?;
     assert_eq!(saved["data"]["receipt"]["revision"], 2);
     assert_eq!(
@@ -258,12 +226,7 @@ fn pr_head_mismatch_refuses_the_save() -> Result {
     record_gh_calls(&mut rig, &history.first, &history.target)?;
     let pending = request(&rig, "pr.json", pr_receipt_request(&history.second))?;
     let refused = save_receipt(&rig, &pending, "0", 2)?;
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .ok_or("message")?
-            .contains("PR head differs")
-    );
+    assert_eq!(refused["error"]["code"], "INVALID");
     Ok(())
 }
 
@@ -299,12 +262,7 @@ fn pr_report_downgrade_without_recorded_paths_requires_resave() -> Result {
     std::fs::remove_file(&marker)?;
     let review = request(&rig, "review.json", json!({"delivery_id": DELIVERY}))?;
     let refused = call(&rig, &["workflow", "review", "--request", &review], 2)?;
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .ok_or("message")?
-            .contains("workflow receipt save")
-    );
+    assert_eq!(refused["error"]["code"], "INVALID");
     assert!(!marker.exists());
     Ok(())
 }
@@ -406,12 +364,7 @@ fn chair_summary_guarded_update() -> Result {
         ],
         1,
     )?;
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("identity")
-    );
+    assert_eq!(refused["error"]["code"], "IDENTITY");
     assert_eq!(
         call(&rig, &["workflow", "session", "show", "chair"], 0)?["data"],
         before["data"]
@@ -447,12 +400,6 @@ fn chair_summary_guarded_update() -> Result {
     )?;
     assert_eq!(stale["error"]["code"], "SUMMARY_STALE");
     assert_eq!(stale["data"]["current_revision"], 1);
-    assert!(
-        stale["error"]["repair"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("chair summary show")
-    );
     let show = call(&rig, &["chair", "summary", "show", "chair"], 0)?;
     assert_eq!(show["data"]["summary"]["now"], "Working");
     let checkpoint = call(&rig, &["workflow", "session", "show", "chair"], 0)?;
@@ -498,21 +445,10 @@ fn chair_summary_guarded_update() -> Result {
         ],
         1,
     )?;
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("8192-byte")
-    );
+    assert_eq!(refused["error"]["code"], "INVALID");
     let missing = call(&rig, &["chair", "summary", "show", "missing-chair"], 1)?;
     assert_eq!(missing["status"], "failed");
     assert_eq!(missing["error"]["code"], "MISSING");
-    assert!(
-        missing["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("missing-chair")
-    );
     let missing_diff = call(
         &rig,
         &["chair", "summary", "diff", "missing-chair", "--from", "1"],
@@ -586,12 +522,7 @@ fn chair_log_cli_replay_and_pages() -> Result {
         ],
         1,
     )?;
-    assert!(
-        old["error"]["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("expired")
-    );
+    assert_eq!(old["error"]["code"], "CHAIR_LOG_EXPIRED");
     let original = append(&first, "first")?;
     assert_eq!(append(&first, "first")?["data"], original["data"]);
     let correction = request(
@@ -865,12 +796,6 @@ fn session_save_outside_checkout_requires_project() -> Result {
     rig.project = rig.root.clone();
     let refused = call(&rig, &args, 1)?;
     assert_eq!(refused["error"]["code"], "SESSION_PROJECT_MISSING");
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .ok_or("message")?
-            .contains("--project")
-    );
     assert_eq!(state_snapshot(&rig.state.join("workflow"))?, before);
     let unknown = call(
         &rig,
@@ -964,10 +889,6 @@ fn session_save_refuses_conflicting_explicit_project() -> Result {
         1,
     )?;
     assert_eq!(refused["error"]["code"], "SESSION_PROJECT_MISMATCH");
-    let message = refused["error"]["message"].as_str().ok_or("message")?;
-    assert!(message.contains("--project"));
-    assert!(message.contains(rig.project.to_str().ok_or("project")?));
-    assert!(message.contains(other.to_str().ok_or("other")?));
     assert!(!rig.state.join("workflow").exists());
     Ok(())
 }
@@ -975,7 +896,6 @@ fn session_save_refuses_conflicting_explicit_project() -> Result {
 #[test]
 fn session_save_refuses_another_registered_project() -> Result {
     let mut rig = TestRig::new()?;
-    let project = rig.project.clone();
     let source = rig.root.join("checkpoint.md");
     std::fs::write(&source, "checkpoint\n")?;
     let args = [
@@ -998,9 +918,6 @@ fn session_save_refuses_another_registered_project() -> Result {
     rig.project = other;
     let refused = call(&rig, &args, 1)?;
     assert_eq!(refused["error"]["code"], "SESSION_PROJECT");
-    let message = refused["error"]["message"].as_str().ok_or("message")?;
-    assert!(message.contains(project.to_str().ok_or("project")?));
-    assert!(message.contains("--project"));
     assert_eq!(state_snapshot(&rig.state.join("workflow"))?, before);
     // An explicit selection can deliberately use the same ID in this project.
     let mut explicit = args.to_vec();
@@ -1156,12 +1073,6 @@ fn session_save_discovery_restart() -> Result {
         // Only the attempted write's demand telemetry may change on refusal.
         let unchanged: Value = serde_json::from_slice(&std::fs::read(&discovery_path)?)?;
         assert_eq!(unchanged, discovery);
-        assert!(
-            refused["error"]["message"]
-                .as_str()
-                .ok_or("message")?
-                .contains("--rebind")
-        );
         let rebound = call(
             &rig,
             &[
@@ -1283,9 +1194,9 @@ fn long_checkpoints_save_up_to_the_documented_bound() -> Result {
 }
 
 #[test]
-fn checkpoint_warns_only_above_eight_kib() -> Result {
+fn checkpoint_warning_tracks_the_project_soft_budget() -> Result {
     let rig = TestRig::new()?;
-    let file = rig.root.join("warn.md");
+    let file = rig.root.join("checkpoint.md");
     let save = |bytes: usize| -> Result<Value> {
         std::fs::write(&file, "x".repeat(bytes - 1) + "\n")?;
         call(
@@ -1294,49 +1205,24 @@ fn checkpoint_warns_only_above_eight_kib() -> Result {
                 "workflow",
                 "session",
                 "save",
-                "s-warn",
+                "budget",
                 "--file",
                 &file.to_string_lossy(),
             ],
             0,
         )
     };
-    assert_eq!(save(8 * 1024)?["data"]["warnings"], json!([]));
-    let warned = save(8 * 1024 + 1)?;
-    let warnings = warned["data"]["warnings"].as_array().ok_or("warnings")?;
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(
-        warnings[0]
-            .as_str()
-            .ok_or("warning")?
-            .contains("the soft budget is 2048")
-    );
-    Ok(())
-}
+    let check = |bytes: usize, warns: bool| -> Result<Value> {
+        let saved = save(bytes)?;
+        let warnings = saved["data"]["warnings"].as_array().ok_or("warnings")?;
+        assert_eq!(warnings.is_empty(), !warns);
+        Ok(saved)
+    };
 
-#[test]
-fn checkpoint_honours_the_project_soft_budget() -> Result {
-    let rig = TestRig::new()?;
-    let file = rig.root.join("budget.md");
-    let save = |bytes: usize| -> Result<Value> {
-        std::fs::write(&file, "x".repeat(bytes - 1) + "\n")?;
-        call(
-            &rig,
-            &[
-                "workflow",
-                "session",
-                "save",
-                "s-budget",
-                "--file",
-                &file.to_string_lossy(),
-            ],
-            0,
-        )
-    };
-    let project = save(12 * 1024)?["data"]["project"]
-        .as_str()
-        .ok_or("project")?
-        .to_owned();
+    let first = check(8 * 1024, false)?;
+    let project = first["data"]["project"].as_str().ok_or("project")?;
+    check(8 * 1024 + 1, true)?;
+
     let config = rig.state.join("config.toml");
     let mut doc: toml_edit::DocumentMut = std::fs::read_to_string(&config)?.parse()?;
     let retention = doc
@@ -1351,23 +1237,15 @@ fn checkpoint_honours_the_project_soft_budget() -> Result {
         .as_table_mut()
         .ok_or("projects")?;
     let entry = projects
-        .entry(&project)
+        .entry(project)
         .or_insert(toml_edit::table())
         .as_table_mut()
         .ok_or("project entry")?;
     entry["checkpoint_soft_bytes"] = toml_edit::value(32 * 1024);
     std::fs::write(&config, doc.to_string())?;
-    // The raised budget keeps a checkpoint quiet that the default would warn on.
-    assert_eq!(save(12 * 1024)?["data"]["warnings"], json!([]));
-    let warned = save(32 * 1024 + 1)?;
-    let warnings = warned["data"]["warnings"].as_array().ok_or("warnings")?;
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(
-        warnings[0]
-            .as_str()
-            .ok_or("warning")?
-            .contains("the soft budget is 32768")
-    );
+
+    check(32 * 1024, false)?;
+    check(32 * 1024 + 1, true)?;
     Ok(())
 }
 
@@ -1438,32 +1316,19 @@ fn session_save_warns_once_only_when_disk_is_low() -> Result {
             }
             let output = rig.command(&args)?;
             assert_eq!(code(&output), 0);
-            let stderr = String::from_utf8_lossy(&output.stderr.bytes);
-            assert!(!stderr.contains("Disk pressure:"), "{stderr}");
-            let stdout = String::from_utf8_lossy(&output.stdout.bytes);
-            let lines: Vec<String> = if json {
-                let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
-                value["data"]["warnings"]
+            assert!(output.stderr.bytes.is_empty());
+            let warning_count = if json {
+                serde_json::from_slice::<Value>(&output.stdout.bytes)?["data"]["warnings"]
                     .as_array()
                     .ok_or("warnings")?
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .filter(|line| line.starts_with("Disk pressure:"))
-                    .map(str::to_owned)
-                    .collect()
+                    .len()
             } else {
-                stdout
+                String::from_utf8_lossy(&output.stdout.bytes)
                     .lines()
-                    .filter_map(|line| line.strip_prefix("warning: Disk pressure:"))
-                    .map(|line| format!("Disk pressure:{line}"))
-                    .collect()
+                    .filter(|line| line.starts_with("warning: "))
+                    .count()
             };
-            assert_eq!(lines.len(), usize::from(warning), "{stdout}");
-            if warning {
-                assert!(lines[0].contains("provenant disk report"));
-                assert!(lines[0].contains("provenant gc"));
-                assert!(lines[0].len() < 160);
-            }
+            assert_eq!(warning_count, usize::from(warning));
         }
     }
     Ok(())

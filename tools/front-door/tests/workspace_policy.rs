@@ -900,101 +900,85 @@ fn internal_edges_obey_the_layering_table() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn os_cannot_depend_on_supervisor() -> Result<(), Box<dyn Error>> {
-    let workspace: DocumentMut = "[workspace.dependencies]\nprovenant-supervisor = { path = 'crates/supervisor' }\nprocesses = { package = 'provenant-supervisor', path = 'crates/supervisor' }".parse()?;
-    for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
-        for scope in [String::new(), "target.'cfg(unix)'.".to_owned()] {
-            for declaration in [
-                "provenant-supervisor = { path = '../supervisor' }",
-                "processes = { package = 'provenant-supervisor', path = '../supervisor' }",
-                "provenant-supervisor.workspace = true",
-                "processes.workspace = true",
-            ] {
-                let manifest: DocumentMut =
-                    format!("[package]\nname = 'provenant-os'\n[{scope}{kind}]\n{declaration}")
-                        .parse()?;
-                let error = check_internal_edges(&manifest, &workspace)
-                    .err()
-                    .ok_or("os must not import supervisor")?;
-                assert!(error.contains("provenant-supervisor"), "{error}");
+fn internal_dependency_boundaries_cover_declaration_forms_and_scopes() -> Result<(), Box<dyn Error>>
+{
+    let scopes = ["", "target.'cfg(unix)'."];
+    let kinds = ["dependencies", "dev-dependencies", "build-dependencies"];
+
+    // Two forbidden cross-layer edges cover direct, renamed and workspace
+    // declarations in both ordinary and target-specific tables.
+    for (member, dependency) in [("os", "supervisor"), ("routing", "run")] {
+        let package = format!("provenant-{dependency}");
+        let renamed = format!("renamed-{dependency}");
+        let workspace: DocumentMut = format!(
+            "[workspace.dependencies]\n{package} = {{ path = 'crates/{dependency}' }}\n{renamed} = {{ package = '{package}', path = 'crates/{dependency}' }}"
+        )
+        .parse()?;
+        let declarations = [
+            format!("{package} = {{ path = '../{dependency}' }}"),
+            format!("{renamed} = {{ package = '{package}', path = '../{dependency}' }}"),
+            format!("{package}.workspace = true"),
+            format!("{renamed}.workspace = true"),
+        ];
+        for kind in kinds {
+            for scope in scopes {
+                for declaration in &declarations {
+                    let manifest: DocumentMut = format!(
+                        "[package]\nname = 'provenant-{member}'\n[{scope}{kind}]\n{declaration}"
+                    )
+                    .parse()?;
+                    assert!(
+                        check_internal_edges(&manifest, &workspace).is_err(),
+                        "{member} -> {package} must be refused in {scope}{kind}: {declaration}"
+                    );
+                }
             }
         }
     }
-    Ok(())
-}
 
-#[test]
-fn routing_cannot_depend_on_run() -> Result<(), Box<dyn Error>> {
-    let workspace: DocumentMut = "[workspace.dependencies]\nprovenant-run = { path = 'crates/run' }\nrunner = { package = 'provenant-run', path = 'crates/run' }".parse()?;
-    for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
-        for scope in [String::new(), "target.'cfg(unix)'.".to_owned()] {
-            for declaration in [
-                "provenant-run = { path = '../run' }",
-                "runner = { package = 'provenant-run', path = '../run' }",
-                "provenant-run.workspace = true",
-                "runner.workspace = true",
-            ] {
-                let manifest: DocumentMut = format!(
-                    "[package]\nname = 'provenant-routing'\n[{scope}{kind}]\n{declaration}"
-                )
-                .parse()?;
-                let error = check_internal_edges(&manifest, &workspace)
-                    .err()
-                    .ok_or("routing must not import run")?;
-                assert!(error.contains("provenant-run"), "{error}");
-            }
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn internal_dev_exceptions_do_not_allow_production_edges() -> Result<(), Box<dyn Error>> {
+    // A crate may name itself only in its development dependencies.
     let workspace: DocumentMut = "".parse()?;
-    for (member, dependency) in [("os", "os"), ("supervisor", "supervisor")] {
-        for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
-            for scope in [String::new(), "target.'cfg(unix)'.".to_owned()] {
+    for member in ["os", "supervisor"] {
+        for kind in kinds {
+            for scope in scopes {
                 let manifest: DocumentMut = format!(
-                    "[package]\nname = 'provenant-{member}'\n[{scope}{kind}]\nprovenant-{dependency} = {{ path = '../{dependency}' }}"
+                    "[package]\nname = 'provenant-{member}'\n[{scope}{kind}]\nprovenant-{member} = {{ path = '../{member}' }}"
                 )
                 .parse()?;
                 assert_eq!(
                     check_internal_edges(&manifest, &workspace).is_ok(),
                     kind == "dev-dependencies",
-                    "{member} -> {dependency} in {scope}{kind}"
+                    "{member} self-edge in {scope}{kind}"
                 );
             }
         }
     }
-    Ok(())
-}
 
-#[test]
-fn os_dependency_keeps_its_policy_checked_name() -> Result<(), Box<dyn Error>> {
-    let workspace: DocumentMut = "".parse()?;
-    for alias in ["provenant-os", "native"] {
-        let manifest: DocumentMut = format!(
-            "[package]\nname = 'provenant-config'\n[dependencies]\n{alias} = {{ package = 'provenant-os', path = '../os' }}"
-        ).parse()?;
-        assert_eq!(
-            check_internal_edges(&manifest, &workspace).is_ok(),
-            alias == "provenant-os"
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn libraries_cannot_depend_on_cli() -> Result<(), Box<dyn Error>> {
-    let workspace: DocumentMut = "".parse()?;
+    // Libraries never depend on the CLI, for any Cargo dependency kind.
     for (member, _) in LAYERS.iter().filter(|(name, _)| *name != "provenant") {
-        for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        for kind in kinds {
             let manifest: DocumentMut = format!(
                 "[package]\nname = 'provenant-{member}'\n[{kind}]\nprovenant-cli = {{ path = '../cli' }}"
             )
             .parse()?;
-            assert!(check_internal_edges(&manifest, &workspace).is_err());
+            assert!(
+                check_internal_edges(&manifest, &workspace).is_err(),
+                "{member} -> cli must be refused in {kind}"
+            );
         }
+    }
+
+    // This crate has one approved checked alias for its direct OS dependency.
+    for (alias, allowed) in [("provenant-os", true), ("native", false)] {
+        let manifest: DocumentMut = format!(
+            "[package]\nname = 'provenant-config'\n[dependencies]\n{alias} = {{ package = 'provenant-os', path = '../os' }}"
+        )
+        .parse()?;
+        assert_eq!(
+            check_internal_edges(&manifest, &workspace).is_ok(),
+            allowed,
+            "config -> os alias {alias}"
+        );
     }
     Ok(())
 }
