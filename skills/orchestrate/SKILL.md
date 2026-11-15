@@ -30,7 +30,7 @@ senior and root constraints to principal; consult recorded cost per template.
 coupled work that cannot split. Review each slice lightly and the integrated
 head with the full panel.
 
-`run --branch NAME --base REF` creates a single writer's worktree. Register one
+`run implement --branch NAME --base REF` creates a single writer's worktree. Register one
 by hand (`provenant worktree create BRANCH`) only to share it: `batch` gives every
 slice the same worktree, so its writers run in sequence. Parallel writers need
 a graph with a worktree and write scope per node.
