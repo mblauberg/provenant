@@ -783,7 +783,7 @@ impl Serialize for WorktreeInfo {
         state.serialize_field("writer", self.occupancy.label())?;
         state.serialize_field("owner", self.owner_label())?;
         if self.is_unowned() {
-            state.serialize_field("next", "This checkout has no Provenant lane owner; it may have been created outside Provenant. Inspect its custody, then select it explicitly with --worktree <path>.")?;
+            state.serialize_field("next", "No Provenant lane currently owns this checkout. Inspect its custody, then select it explicitly with --worktree <path>.")?;
         }
         state.end()
     }
