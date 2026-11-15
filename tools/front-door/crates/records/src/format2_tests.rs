@@ -148,12 +148,13 @@ fn one_terminal_classification_binds_reason_stop_source_and_graph_result() {
     assert_eq!(stop.cause().default_next(), NextStep::NewRoute);
     assert_eq!(empty.node_outcome, SettlementNodeOutcome::Failed);
 
+    let blocked_handoff = handoff(HandoffStatus::Blocked, "Needs an owner decision.");
     let blocked = SettlementReason::classify(
         Outcome::Succeeded,
         Some(&evidence),
         &[],
         Some(TerminalCause::Blocked),
-        None,
+        Some(&blocked_handoff),
     )
     .unwrap();
     assert_eq!(blocked.reason, SettlementReason::DeclaredStop);
