@@ -13,7 +13,7 @@ tier = "senior"
 access = "read_only"
 outputs = ["result", "findings", "verdict"]
 
-[node.extensions]
+[node]
 review_lens = "${lens}"
 
 [parameters.lens]
