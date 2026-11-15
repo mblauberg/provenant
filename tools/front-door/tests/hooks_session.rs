@@ -207,9 +207,76 @@ fn session_start_warns_once_only_when_disk_is_below_headroom() -> Result {
     for (hook, source) in [("session-start", "startup"), ("compact", "compact")] {
         let output = run_hook(&rig, hook, &start(&rig, "disk-session", source))?;
         assert_eq!(code(&output), 0);
-        assert!(!context(&output)?.contains("Disk pressure:"));
-        assert!(!String::from_utf8_lossy(&output.stderr.bytes).contains("Disk pressure:"));
+        assert!(output.stdout.bytes.is_empty());
+        assert!(output.stderr.bytes.is_empty());
     }
+    Ok(())
+}
+
+#[test]
+fn chair_session_hooks_are_silent_in_lanes_and_the_answer_guard_stays_active() -> Result {
+    let mut rig = TestRig::new()?;
+    binding(&rig)?;
+
+    // A chair session still receives its normal checkpoint context.
+    let chair = run_hook(
+        &rig,
+        "session-start",
+        &start(&rig, "chair-session", "startup"),
+    )?;
+    assert_eq!(code(&chair), 0);
+    assert!(!chair.stdout.bytes.is_empty());
+
+    // The lane marker is set by the launcher. All chair and checkpoint
+    // lifecycle handlers must return quietly before reading or mutating state.
+    rig.env
+        .push((provenant_core::consumer_env::LANE_DEPTH.into(), "1".into()));
+    let lane_hooks = [
+        (
+            "chair-start",
+            json!({"hook_event_name":"SessionStart","session_id":"lane-session","cwd":rig.project}),
+        ),
+        ("session-start", start(&rig, "lane-session", "startup")),
+        ("compact", start(&rig, "lane-session", "compact")),
+        (
+            "chair-prompt",
+            json!({"hook_event_name":"UserPromptSubmit","session_id":"lane-session","cwd":rig.project,"prompt":"lane task"}),
+        ),
+        (
+            "chair-stop",
+            json!({"hook_event_name":"Stop","session_id":"lane-session","cwd":rig.project}),
+        ),
+        (
+            "pre-compact",
+            json!({"hook_event_name":"PreCompact","session_id":"lane-session","cwd":rig.project}),
+        ),
+        (
+            "stop",
+            json!({"hook_event_name":"Stop","session_id":"lane-session","cwd":rig.project}),
+        ),
+    ];
+    for (hook, input) in lane_hooks {
+        let output = run_hook(&rig, hook, &input)?;
+        assert_eq!(code(&output), 0, "{hook}");
+        assert!(output.stdout.bytes.is_empty(), "{hook}: {output:?}");
+        assert!(output.stderr.bytes.is_empty(), "{hook}: {output:?}");
+    }
+
+    // PreToolUse still executes its lane-aware path, leaving answer delivery
+    // to Fabric mail rather than being swallowed with chair lifecycle hooks.
+    let guard = run_hook(
+        &rig,
+        "pre-tool-use",
+        &json!({
+            "hook_event_name":"PreToolUse",
+            "tool_name":"Bash",
+            "tool_input":{"command":"git status --short"},
+            "cwd":rig.project,
+            "session_id":"lane-session"
+        }),
+    )?;
+    assert_eq!(code(&guard), 0);
+    assert!(!guard.stderr.bytes.is_empty());
     Ok(())
 }
 

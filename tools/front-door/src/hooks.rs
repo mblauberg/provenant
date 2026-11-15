@@ -71,6 +71,14 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
         diagnostic("hook skipped: adapter or handler was not recognised");
         return 0;
     };
+    // These hooks report or mutate the chair's interactive session. A Fabric
+    // worker has its own task prompt and reports through lane state, so do not
+    // ask it to save or restore the chair's checkpoint. Resolve once here so
+    // every provider gets the same boundary. The answer guard is deliberately
+    // excluded: inside lanes it routes answers through Fabric mail.
+    if provenant_cli::fabric::in_lane() && is_chair_session_handler(spec.handler) {
+        return 0;
+    }
     // Test delivery budgets must also fit inside the enclosing guard budget.
     // Release builds retain the normal local deadline.
     let deadline = started
@@ -143,6 +151,18 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
             }
         }
     }
+}
+fn is_chair_session_handler(handler: Handler) -> bool {
+    matches!(
+        handler,
+        Handler::ChairPrompt
+            | Handler::ChairStart
+            | Handler::ChairStop
+            | Handler::SessionStart
+            | Handler::PreCompact
+            | Handler::Compact
+            | Handler::Stop
+    )
 }
 fn diagnostic(message: &str) {
     let _ = writeln!(
