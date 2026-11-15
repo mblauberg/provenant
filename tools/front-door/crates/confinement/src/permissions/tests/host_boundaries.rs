@@ -43,8 +43,16 @@ fn native_host_inventory_protects_aliases_and_later_worktrees()
     std::os::unix::fs::symlink(&github, home.join(".config/gh/hosts.yml"))?;
     std::os::unix::fs::symlink(&login, home.join(".config/cursor/state.vscdb"))?;
     let own = primary.join(".worktrees/own");
+    let other_primary_worktree = primary.join(".worktrees/other");
     let later = other.join(".git/.worktrees/later");
-    let inventory = MandatoryRoots::for_host(&roots, &home, &own, &[], &[], &[])?;
+    let mut inventory = MandatoryRoots::for_host(&roots, &home, &own, &[], &[], &[])?;
+    // Model the Git-aware caller adding the selected primary's verified
+    // project allocation root. `for_host` itself stays context-free and does
+    // not infer this path from the registered common directory.
+    inventory.add_protected(PathGrant {
+        path: primary.join(".worktrees"),
+        scope: PathScope::Subtree,
+    })?;
     let (mut plan, mut profile) = write_grants_fixture();
     plan.policy =
         Some(crate::run_config::RunConfig::default().policy_for_launch(&state, inventory));
@@ -81,11 +89,6 @@ fn native_host_inventory_protects_aliases_and_later_worktrees()
             "own",
         );
         let source = render(&GrantSet::build(&plan, &profile, &home, Some(worktree))?)?;
-        assert!(source.contains(&format!(
-            "(deny file-write* (require-all (subpath \"{}\") (require-not (subpath \"{}\"))))",
-            primary.join(".worktrees").display(),
-            own.display()
-        )));
         for path in [&github, &login] {
             assert!(source.contains(&format!(
                 "(deny file-write* (literal \"{}\"))",
@@ -119,7 +122,12 @@ fn native_host_inventory_protects_aliases_and_later_worktrees()
         sources.push((selected, source));
     }
     // These directories and files did not exist when the profile was rendered.
-    for path in [&own, &later, &other.join(".worktrees-other")] {
+    for path in [
+        &own,
+        &other_primary_worktree,
+        &later,
+        &other.join(".worktrees-other"),
+    ] {
         std::fs::create_dir_all(path)?;
     }
     let executor = SystemExecutor::new(2)?;
@@ -139,6 +147,7 @@ fn native_host_inventory_protects_aliases_and_later_worktrees()
     let script = r#"
 set -eu
 printf own > "$1/allowed"
+if printf foreign > "$8/blocked"; then exit 86; fi
 if printf foreign > "$2/blocked"; then exit 81; fi
 if /bin/cat "$3"; then exit 82; fi
 if printf overwrite > "$3"; then exit 83; fi
@@ -172,6 +181,7 @@ if printf overwrite > "$6"; then exit 85; fi
                 other.join(".worktrees-other").into_os_string(),
                 login.as_os_str().to_owned(),
                 if selected { "yes" } else { "no" }.into(),
+                other_primary_worktree.as_os_str().to_owned(),
             ],
             &provenant_core::AttemptId::from_bytes([9; 16]),
             &provenant_os::fs::Directory::open_anchor(&root)?,
