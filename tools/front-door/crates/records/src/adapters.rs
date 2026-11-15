@@ -724,6 +724,12 @@ impl std::fmt::Display for UnsupportedLaunch {
 impl std::error::Error for UnsupportedLaunch {}
 
 impl AdapterSpec {
+    /// Whether account entries describe metadata for one shared local login
+    /// instead of separate registered credential trees.
+    pub fn uses_shared_local_login(&self) -> bool {
+        !self.registered_account && self.local_login
+    }
+
     /// Whether `key` names the synthetic entry of an unregistered local login.
     /// Only an adapter that has both registered accounts and a local login (agy)
     /// has one: it runs on the user's own login, so nothing is registered, probed
