@@ -3226,7 +3226,23 @@ mod panel_tests {
     // Spec: docs/specs/routing.md#pinned-review-selection
     #[test]
     fn incomplete_pinned_review_metadata_uses_configured_unreadable_path_floors() {
-        let review = provenant_routing::RoutingConfig::default().review;
+        let mut review = provenant_routing::RoutingConfig::default().review;
+        // Keep a non-default floor in the fixture so this catches a fallback
+        // that silently drops project-configured coverage.
+        review.floors.insert(
+            "project-private".into(),
+            provenant_routing::ReviewFloor {
+                paths: vec!["docs/private/**".into()],
+                tier: "routine".into(),
+                lenses: vec!["tests".into()],
+            },
+        );
+        let configured_floor_lenses = review
+            .floors
+            .values()
+            .flat_map(|floor| floor.lenses.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(configured_floor_lenses.contains("tests"));
         let document = serde_json::from_value(json!({
             "schema_version": 1, "graph_id": "incomplete-review-context",
             "nodes": [{"id": "anchor", "access": "read_only", "prompt": "Review", "route": {"alias": "senior"}}],
@@ -3245,7 +3261,12 @@ mod panel_tests {
                 launch_resolvers_with(&review, &document, selection, |_, _| Ok("fixture".into()))
                     .unwrap();
             let lenses = &resolvers["review-panel"];
-            assert!(lenses.len() >= 8, "{lenses:?}");
+            for lens in &configured_floor_lenses {
+                assert!(
+                    lenses.contains(lens),
+                    "missing configured floor lens {lens}: {lenses:?}"
+                );
+            }
             for lens in ["correctness-spec", "reliability", "security-privacy"] {
                 assert!(lenses.iter().any(|selected| selected == lens), "{lenses:?}");
             }
@@ -3266,11 +3287,11 @@ mod panel_tests {
         let quick =
             launch_resolvers_with(&review, &document, empty_diff, |_, _| Ok("fixture".into()))
                 .unwrap();
-        assert_eq!(quick["review-panel"].len(), 1);
         assert!(
             !quick["review-advice-correctness-spec"][0]
                 .contains("configured unreadable-path floors were applied")
         );
+        assert!(!quick["review-panel"].iter().any(|lens| lens == "tests"));
     }
 
     #[test]
