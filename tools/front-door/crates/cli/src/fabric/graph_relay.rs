@@ -1084,8 +1084,8 @@ fn relay_review_subject_commit(
             })
             .and_then(|progress| progress.outputs.as_ref())
             .and_then(|outputs| outputs.commit.clone()),
-        // A head binding can advance with an upstream writer chain. Unless a
-        // delivered head has been sealed for this new review, retain the
+        // A head binding follows a moving upstream writer chain. This relay
+        // has no immutable delivered-head binding for it, so keep the
         // configured fallback floors instead of using an earlier source pin.
         SourceBinding::Head { .. } => None,
         // The graph's integration base is only the admission-time branch
