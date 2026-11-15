@@ -227,3 +227,16 @@ Checks report findings and unavailable evidence without repairing the subject.
 Release checks inspect the artifact to be distributed as well as Git evidence.
 
 - Why: an inspection must not change its subject or certify an uninspected artifact.
+
+### Release symlinks
+
+A release symlink is portable only when its relative target stays inside the
+repository and names a tracked regular file in that same tree. Absolute,
+escaping, malformed, missing or untracked targets and links to another
+symlink remain findings.
+The check resolves Git targets from each tree's entries and reads current
+worktree links without following them through the host filesystem.
+
+- Why: every published link must have one inspectable target in the tree being
+  checked, independent of host files or link-chain behaviour.
+- Owner: `crates/cli/src/check/release.rs`

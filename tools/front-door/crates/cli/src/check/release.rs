@@ -3,10 +3,11 @@ use super::{CheckError, GitContext, Scan, WorkingFile, checked_bytes, index_reco
 use provenant_confinement::utility::{GitObjectKind, GitRead};
 use provenant_core::GitOid;
 use provenant_os::exec::Termination;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const MAX_FILE: u64 = 5 * 1024 * 1024;
+const MAX_CACHED_SYMLINK_BYTES: usize = 1024 * 1024;
 const PUBLIC: &[&str] = &[
     "ACKNOWLEDGEMENTS.md",
     "README.md",
@@ -69,10 +70,14 @@ pub(super) fn inspect(
         let mode = std::str::from_utf8(entry.mode)
             .map_err(|_| CheckError::Evidence("malformed Git index mode"))?
             .to_owned();
-        if tracked.insert(path, mode).is_some() {
+        if tracked.insert(path, (mode, oid.to_owned())).is_some() {
             return Err(CheckError::Evidence("duplicate Git index entry"));
         }
     }
+    let tracked_modes = tracked
+        .iter()
+        .map(|(path, (mode, _))| (path.clone(), mode.clone()))
+        .collect::<BTreeMap<_, _>>();
     for required in LEGAL {
         if !tracked.contains_key(*required) {
             scan.finding(
@@ -93,16 +98,54 @@ pub(super) fn inspect(
             )?;
         }
     }
-    for (path, mode) in tracked {
+    let mut working_modes = BTreeMap::new();
+    let mut working_links = Vec::new();
+    for (path, (mode, oid)) in &tracked {
+        if mode == "120000" {
+            let target = release_read(
+                git,
+                GitRead::RawObject {
+                    kind: GitObjectKind::Blob,
+                    oid: parse_oid(oid)?,
+                },
+            )?;
+            if target.len() as u64 > MAX_FILE {
+                return Err(CheckError::Evidence("publication blob exceeds 5 MiB"));
+            }
+            scan.note(format!("release:index-symlink:{path}"), &target);
+            if let Some(message) =
+                symlink_problem(&symlink_destination(path, &target), &tracked_modes)
+            {
+                scan.finding("release.symlink", Path::new(path), 1, message)?;
+            }
+        }
+    }
+    for (path, (_mode, _)) in tracked {
         path_rules(&mut scan, &path, &worktree_roots)?;
-        let mut symlink = mode == "120000";
         match read_file(git.repo.root_dir(), Path::new(&path), MAX_FILE)? {
             WorkingFile::Bytes(bytes) => {
+                working_modes.insert(path.clone(), "100644".to_owned());
                 scan.note(format!("release:working:{path}"), &bytes);
             }
-            WorkingFile::Symlink(target) => {
-                symlink = true;
-                scan.note(format!("release:working-symlink:{path}"), &target);
+            WorkingFile::Symlink {
+                path: link_path,
+                target,
+            } => {
+                let link_path = link_path
+                    .to_str()
+                    .ok_or(CheckError::Evidence("tracked symlink path is not UTF-8"))?
+                    .to_owned();
+                working_modes.insert(link_path.clone(), "120000".to_owned());
+                scan.note(format!("release:working-symlink:{link_path}"), &target);
+                if link_path != path {
+                    scan.finding(
+                        "release.symlink",
+                        Path::new(&link_path),
+                        1,
+                        "tracked path is reached through a symlinked parent",
+                    )?;
+                }
+                working_links.push((link_path.clone(), symlink_destination(&link_path, &target)));
             }
             WorkingFile::Missing => {
                 let Some((rule, message)) = required_file(&path) else {
@@ -112,17 +155,16 @@ pub(super) fn inspect(
                 scan.finding(rule, Path::new(&path), 1, message)?;
             }
         }
-        if symlink {
-            scan.finding(
-                "release.symlink",
-                Path::new(&path),
-                1,
-                "tracked symlink is not portable",
-            )?;
+    }
+    for (path, destination) in working_links {
+        if let Some(message) = symlink_problem(&destination, &working_modes) {
+            scan.finding("release.symlink", Path::new(&path), 1, message)?;
         }
     }
     let mut seen_commits = BTreeSet::new();
     let mut seen_blobs = HashSet::new();
+    let mut symlink_target_cache = HashMap::<GitOid, Vec<u8>>::new();
+    let mut cached_symlink_bytes = 0usize;
     for commit in commits {
         if !seen_commits.insert(commit.to_string()) {
             continue;
@@ -140,6 +182,10 @@ pub(super) fn inspect(
         let bytes = release_read(git, GitRead::AllTreeEntries { oid: commit })?;
         scan.note(format!("release:tree:{commit}"), &bytes);
         let entries = tree_entries(&bytes)?;
+        let modes = entries
+            .iter()
+            .map(|entry| (entry.path.clone(), entry.mode.clone()))
+            .collect::<BTreeMap<_, _>>();
         // Legal-file completeness applies to publication heads, not every
         // intermediate historical snapshot in a range.
         if commit == head || range.is_some_and(|(_, tip)| tip == commit) {
@@ -163,14 +209,7 @@ pub(super) fn inspect(
         }
         for entry in entries {
             path_rules(&mut scan, &entry.path, &worktree_roots)?;
-            if entry.mode == "120000" {
-                scan.finding(
-                    "release.symlink",
-                    Path::new(&entry.path),
-                    1,
-                    "tracked symlink is not portable",
-                )?;
-            } else if !entry.regular() {
+            if !entry.regular() && entry.mode != "120000" {
                 return Err(CheckError::Evidence(
                     "unsupported entry in publication tree",
                 ));
@@ -178,7 +217,38 @@ pub(super) fn inspect(
             if entry.size > MAX_FILE {
                 return Err(CheckError::Evidence("publication blob exceeds 5 MiB"));
             }
-            if seen_blobs.insert(entry.oid) {
+            if entry.mode == "120000" {
+                let raw = if let Some(raw) = symlink_target_cache.get(&entry.oid) {
+                    raw.clone()
+                } else {
+                    release_read(
+                        git,
+                        GitRead::RawObject {
+                            kind: GitObjectKind::Blob,
+                            oid: entry.oid.clone(),
+                        },
+                    )?
+                };
+                if raw.len() as u64 != entry.size {
+                    return Err(CheckError::Evidence(
+                        "publication blob size does not match tree",
+                    ));
+                }
+                if !symlink_target_cache.contains_key(&entry.oid)
+                    && raw.len() <= MAX_CACHED_SYMLINK_BYTES - cached_symlink_bytes
+                {
+                    cached_symlink_bytes += raw.len();
+                    symlink_target_cache.insert(entry.oid.clone(), raw.clone());
+                }
+                if let Some(message) =
+                    symlink_problem(&symlink_destination(&entry.path, &raw), &modes)
+                {
+                    scan.finding("release.symlink", Path::new(&entry.path), 1, message)?;
+                }
+                if seen_blobs.insert(entry.oid.clone()) {
+                    scan.note(format!("release:blob:{}", entry.oid), &raw);
+                }
+            } else if seen_blobs.insert(entry.oid) {
                 let raw = release_read(
                     git,
                     GitRead::RawObject {
@@ -271,6 +341,117 @@ fn required_file(path: &str) -> Option<(&'static str, &'static str)> {
         None
     }
 }
+#[derive(Clone)]
+struct ResolvedSymlinkTarget {
+    path: String,
+    traversed_directories: Vec<String>,
+}
+type SymlinkDestination = Result<ResolvedSymlinkTarget, &'static str>;
+
+/// Resolve a Git symlink target lexically. This deliberately does not consult
+/// the host filesystem, so historical trees are judged only against their own
+/// tracked paths.
+fn symlink_destination(path: &str, target: &[u8]) -> SymlinkDestination {
+    let target = std::str::from_utf8(target).map_err(|_| "symlink target is not valid UTF-8")?;
+    if target.is_empty() || target.contains('\0') {
+        return Err("symlink target is empty or malformed");
+    }
+    let drive_prefix = |value: &str| {
+        value
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphabetic())
+            && value.as_bytes().get(1) == Some(&b':')
+    };
+    let mut portable_target = target;
+    while let Some(rest) = portable_target.strip_prefix("./") {
+        portable_target = rest;
+    }
+    if target.starts_with('/') || target.starts_with('\\') || drive_prefix(portable_target) {
+        return Err("symlink target must be relative");
+    }
+    if target.contains('\\') {
+        return Err("symlink target contains a nonportable path separator");
+    }
+    if target.split('/').any(|component| component.contains(':')) {
+        return Err("symlink target contains a nonportable path component");
+    }
+    if target.ends_with('/') {
+        return Err("symlink target must name a tracked regular file");
+    }
+
+    let mut resolved = path
+        .rsplit_once('/')
+        .map(|(parent, _)| parent.split('/').map(str::to_owned).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut traversed_directories = (1..=resolved.len())
+        .map(|length| resolved[..length].join("/"))
+        .collect::<Vec<_>>();
+    let components = target.split('/').collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        match *component {
+            "" | "." => {}
+            ".." => {
+                if resolved.pop().is_none() {
+                    return Err("symlink target escapes the repository tree");
+                }
+            }
+            value => resolved.push(value.to_owned()),
+        }
+        if !matches!(*component, "" | "." | "..") && index + 1 < components.len() {
+            traversed_directories.push(resolved.join("/"));
+        }
+    }
+    if resolved.is_empty() {
+        return Err("symlink target must name a tracked regular file");
+    }
+    Ok(ResolvedSymlinkTarget {
+        path: resolved.join("/"),
+        traversed_directories,
+    })
+}
+
+fn symlink_problem(
+    destination: &SymlinkDestination,
+    tracked_modes: &BTreeMap<String, String>,
+) -> Option<&'static str> {
+    match destination {
+        Err(message) => Some(*message),
+        Ok(target) => {
+            for directory in &target.traversed_directories {
+                match tracked_modes.get(directory).map(String::as_str) {
+                    Some("120000") => {
+                        return Some(
+                            "symlink target traverses another symlink; chains and cycles are not portable",
+                        );
+                    }
+                    Some(_) => return Some("symlink target traverses a tracked non-directory"),
+                    None if !has_tracked_descendant(directory, tracked_modes) => {
+                        return Some("symlink target traverses an untracked directory");
+                    }
+                    None => {}
+                }
+            }
+            match tracked_modes.get(&target.path).map(String::as_str) {
+                Some("100644" | "100755") => None,
+                Some("120000") => {
+                    Some("symlink target is another symlink; chains and cycles are not portable")
+                }
+                Some(_) => Some("symlink target is not a regular tracked file"),
+                None => Some("symlink target is not tracked in this tree"),
+            }
+        }
+    }
+}
+
+fn has_tracked_descendant(path: &str, tracked_modes: &BTreeMap<String, String>) -> bool {
+    let prefix = format!("{path}/");
+    tracked_modes
+        .range(prefix.clone()..)
+        .next()
+        .is_some_and(|(candidate, _)| candidate.starts_with(&prefix))
+}
+
 struct Entry {
     mode: String,
     oid: GitOid,
