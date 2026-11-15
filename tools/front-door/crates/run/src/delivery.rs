@@ -3458,7 +3458,15 @@ mod stored_format_tests {
                 ..Default::default()
             },
         )?;
-        assert_eq!(updated.extra.get("future_record_field"), Some(&future));
+        let rewritten = provenant_records::encode(&updated)?;
+        let shape: serde_json::Value = provenant_records::decode(
+            rewritten.as_slice(),
+            provenant_records::Limits {
+                max_bytes: crate::RECORD_LIMIT,
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(shape.get("future_record_field"), Some(&future));
         Ok(())
     }
 }
