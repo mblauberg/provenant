@@ -2,11 +2,11 @@
 //! private HOME/XDG roots. Only cache and store paths cross this boundary.
 //!
 //! Recognised configuration is deliberately narrow: npm `cache` from its user
-//! config or an explicit/trusted PREFIX config, and pnpm `cacheDir`/`storeDir`
-//! from project config or global `config.yaml`. Only absolute literal global
-//! paths are copied into environment selectors; legacy global pnpm `.npmrc`
-//! paths are ambiguous across pnpm versions, so they warn and remain under the
-//! package manager's own configuration handling.
+//! config or the first PATH-selected Node installation's `etc/npmrc`, and pnpm
+//! `cacheDir`/`storeDir` from project config or global `config.yaml`. Only
+//! absolute literal global paths are copied into environment selectors; legacy
+//! global pnpm `.npmrc` paths are ambiguous across pnpm versions, so they warn
+//! and remain under the package manager's own configuration handling.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -189,7 +189,7 @@ pub(super) fn npm_global_cache(
     let global = global
         .or_else(|| prefix.map(|prefix| prefix.join("etc/npmrc")))
         .or_else(|| {
-            crate::launch::homebrew_node_prefix(host_var).map(|prefix| prefix.join("etc/npmrc"))
+            crate::launch::selected_node_prefix(host_var).map(|prefix| prefix.join("etc/npmrc"))
         });
     if let Some(path) = global {
         return if path.is_absolute() {
@@ -541,6 +541,67 @@ mod tests {
 
     fn var<'a>(env: &'a [(OsString, OsString)], key: &str) -> Option<&'a OsStr> {
         env_value(env, key)
+    }
+
+    fn executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::create_dir_all(path.parent().expect("executable parent"))
+            .expect("executable directory");
+        std::fs::write(path, b"fixture executable").expect("fixture executable file");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("fixture executable mode");
+    }
+
+    // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
+    #[test]
+    fn npm_cache_binding_follows_first_path_selected_node_installation() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let home = root.path().join("host-home");
+        let account = root.path().join("account-home");
+        let project = root.path().join("repo");
+        let selected = root.path().join("nvm/versions/node/v24.0.1");
+        let later = root.path().join("later-node-prefix");
+        let selected_bin = selected.join("bin");
+        let later_bin = later.join("bin");
+        std::fs::create_dir_all(&home).expect("host home");
+        std::fs::create_dir_all(&account).expect("account home");
+        std::fs::create_dir_all(project.join(".git")).expect("project root");
+        executable(&selected_bin.join("node"));
+        executable(&selected_bin.join("npm"));
+        executable(&later_bin.join("node"));
+        executable(&later_bin.join("npm"));
+        std::fs::create_dir_all(later.join("etc")).expect("later global config");
+        std::fs::write(later.join("etc/npmrc"), "cache=/later-private-cache\n")
+            .expect("later package config");
+        let path = std::env::join_paths([&selected_bin, &later_bin]).expect("fixture PATH");
+        let host = HashMap::from([("PATH".to_owned(), path)]);
+        let host_var = |name: &str| host.get(name).cloned();
+
+        assert_eq!(
+            crate::launch::selected_node_prefix(&host_var).as_deref(),
+            Some(selected.as_path()),
+            "later Node installations must not supply npm config"
+        );
+        let mut env = vec![("HOME".into(), account.clone().into_os_string())];
+        bind_native(&home, &project, &host_var, &mut env);
+        let shared_default = home.join(".npm");
+        assert_eq!(
+            var(&env, "npm_config_cache"),
+            Some(shared_default.as_os_str()),
+            "an unconfigured NVM install uses the shared host default, not account HOME"
+        );
+
+        std::fs::create_dir_all(selected.join("etc")).expect("selected global config");
+        std::fs::write(selected.join("etc/npmrc"), "cache=/selected-cache\n")
+            .expect("selected package config");
+        let mut configured = vec![("HOME".into(), account.into_os_string())];
+        bind_native(&home, &project, &host_var, &mut configured);
+        assert_eq!(
+            var(&configured, "npm_config_cache"),
+            Some(OsStr::new("/selected-cache")),
+            "the selected NVM installation's global cache remains authoritative"
+        );
     }
 
     #[test]

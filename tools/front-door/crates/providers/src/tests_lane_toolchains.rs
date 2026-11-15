@@ -104,37 +104,55 @@ fn cargo_source_setting_controls_host_binding_grants_and_offline_mode() -> Resul
 #[test]
 fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
 -> Result<(), Box<dyn std::error::Error>> {
-    let home = Path::new("/fixture/home");
-    let host_var = |name: &str| {
-        if name == provenant_core::consumer_env::SANDBOX {
-            Some("off".into())
-        } else {
-            std::env::var_os(name)
-        }
-    };
-    let expected = |selectors: &[&str], setting: crate::package_cache::Setting, default| {
-        crate::package_cache::explicit_host_value(&host_var, selectors)
-            .map(std::path::PathBuf::from)
-            .or(match setting {
-                crate::package_cache::Setting::Missing => Some(default),
-                crate::package_cache::Setting::Present(path) => path,
-            })
-    };
-    let expected_npm = expected(
-        &["npm_config_cache"],
-        crate::package_cache::npm_global_cache(home, &host_var),
-        crate::package_cache::npm_default_cache(home),
-    );
-    let expected_pnpm_cache = expected(
-        &["pnpm_config_cache_dir", "npm_config_cache_dir"],
-        crate::package_cache::pnpm_global_path(home, &host_var, "cacheDir", "cache-dir"),
-        crate::package_cache::pnpm_default_cache(home, &host_var),
-    );
-    let expected_pnpm_store = expected(
-        &["pnpm_config_store_dir", "npm_config_store_dir"],
-        crate::package_cache::pnpm_global_path(home, &host_var, "storeDir", "store-dir"),
-        crate::package_cache::pnpm_default_store(home, &host_var),
-    );
+    use std::{collections::HashMap, os::unix::fs::PermissionsExt};
+
+    // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
+    let path_fixture = tempfile::tempdir()?;
+    let home = path_fixture.path().join("host-home");
+    let xdg_cache = path_fixture.path().join("xdg/cache");
+    let xdg_data = path_fixture.path().join("xdg/data");
+    let xdg_config = path_fixture.path().join("xdg/config");
+    let selected_node = path_fixture.path().join("nvm/versions/node/v24.0.1");
+    let later_node = path_fixture.path().join("later-node-prefix");
+    let selected_bin = selected_node.join("bin");
+    let later_bin = later_node.join("bin");
+    for path in [
+        selected_bin.join("node"),
+        selected_bin.join("npm"),
+        later_bin.join("node"),
+        later_bin.join("npm"),
+    ] {
+        std::fs::create_dir_all(path.parent().expect("program parent"))?;
+        std::fs::write(&path, b"fixture executable")?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    std::fs::create_dir_all(later_node.join("etc"))?;
+    std::fs::write(later_node.join("etc/npmrc"), "cache=/later-node-cache\n")?;
+    let path = std::env::join_paths([&selected_bin, &later_bin])?;
+    let host = HashMap::from([
+        (
+            provenant_core::consumer_env::SANDBOX.to_owned(),
+            "off".into(),
+        ),
+        ("PATH".to_owned(), path),
+        ("HOME".to_owned(), home.clone().into_os_string()),
+        (
+            "XDG_CACHE_HOME".to_owned(),
+            xdg_cache.clone().into_os_string(),
+        ),
+        (
+            "XDG_DATA_HOME".to_owned(),
+            xdg_data.clone().into_os_string(),
+        ),
+        (
+            "XDG_CONFIG_HOME".to_owned(),
+            xdg_config.clone().into_os_string(),
+        ),
+    ]);
+    let host_var = |name: &str| host.get(name).cloned();
+    let expected_npm = home.join(".npm");
+    let expected_pnpm_cache = xdg_cache.join("pnpm");
+    let expected_pnpm_store = xdg_data.join("pnpm/store");
     let keychain_root = tempfile::tempdir()?;
     let account_home = keychain_root.path().join("accounts/agy-work");
     let keychain = account_home.join("Library/Keychains/login.keychain-db");
@@ -163,7 +181,7 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
         let mut permissions = base_plan.permissions().clone();
         // The package-config fixture needs a real temp cwd; bind that cwd into
         // read_roots and keep credential roots aligned with fixture_input HOME.
-        permissions.credential_roots = provenant_core::CredentialRoots::for_home(home);
+        permissions.credential_roots = provenant_core::CredentialRoots::for_home(&home);
         permissions.read_roots = vec![crate::launch::subtree(project_root)];
         let plan = provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
             scope: base_plan.scope(),
@@ -180,6 +198,9 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
             .adapter;
         let mut input = fixture_input(&route, &plan, &prompt, project_root, None);
         input.host_var = &host_var;
+        input.home = &home;
+        input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
+        input.provenant.home = &home;
         if id == "agy" {
             input.account = Some(&account);
         }
@@ -204,58 +225,58 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
         };
         if id == "agy" {
             assert_eq!(selected_home, account_home);
-            if let Some(expected) = &expected_npm {
-                assert_eq!(
-                    configured("npm_config_cache").as_ref(),
-                    Some(expected),
-                    "{id}"
-                );
-            }
-            if let Some(expected) = &expected_pnpm_cache {
-                assert_eq!(
-                    configured("pnpm_config_cache_dir")
-                        .or_else(|| configured("npm_config_cache_dir"))
-                        .as_ref(),
-                    Some(expected),
-                    "{id}"
-                );
-            }
-            if let Some(expected) = &expected_pnpm_store
-                && crate::package_cache::explicit_host_value(&host_var, &["PNPM_HOME"]).is_none()
-            {
-                assert_eq!(
-                    configured("pnpm_config_store_dir")
-                        .or_else(|| configured("npm_config_store_dir"))
-                        .as_ref(),
-                    Some(expected),
-                    "{id}"
-                );
-            }
+            assert_eq!(
+                configured("npm_config_cache").as_ref(),
+                Some(&expected_npm),
+                "Agy must bind npm's default cache while its account HOME differs"
+            );
+            assert_eq!(
+                configured("pnpm_config_cache_dir")
+                    .or_else(|| configured("npm_config_cache_dir"))
+                    .as_ref(),
+                Some(&expected_pnpm_cache),
+                "Agy must bind pnpm cache to the fixed host XDG path"
+            );
+            assert_eq!(
+                configured("pnpm_config_store_dir")
+                    .or_else(|| configured("npm_config_store_dir"))
+                    .as_ref(),
+                Some(&expected_pnpm_store),
+                "Agy must bind pnpm store to the fixed host XDG path"
+            );
         }
         if id == "opencode" {
-            if let Some(expected) = &expected_pnpm_cache {
-                assert_eq!(
-                    configured("pnpm_config_cache_dir")
-                        .or_else(|| configured("npm_config_cache_dir"))
-                        .as_ref(),
-                    Some(expected),
-                    "{id}"
-                );
-            }
-            if let Some(expected) = &expected_pnpm_store
-                && crate::package_cache::explicit_host_value(&host_var, &["PNPM_HOME"]).is_none()
-            {
-                assert_eq!(
-                    configured("pnpm_config_store_dir")
-                        .or_else(|| configured("npm_config_store_dir"))
-                        .as_ref(),
-                    Some(expected),
-                    "{id}"
-                );
-            }
+            assert_eq!(
+                configured("npm_config_cache"),
+                None,
+                "OpenCode keeps npm's host HOME default"
+            );
+            assert_eq!(
+                configured("pnpm_config_cache_dir")
+                    .or_else(|| configured("npm_config_cache_dir"))
+                    .as_ref(),
+                Some(&expected_pnpm_cache),
+                "OpenCode binds pnpm cache to the fixed host XDG path"
+            );
+            assert_eq!(
+                configured("pnpm_config_store_dir")
+                    .or_else(|| configured("npm_config_store_dir"))
+                    .as_ref(),
+                Some(&expected_pnpm_store),
+                "OpenCode binds pnpm store to the fixed host XDG path"
+            );
             assert!(prepared.env.iter().any(|(key, value)| {
                 key == "XDG_CACHE_HOME" && value == "/fixture/state/cache"
             }));
+        }
+        if matches!(id, "codex" | "cursor") {
+            for key in [
+                "npm_config_cache",
+                "pnpm_config_cache_dir",
+                "pnpm_config_store_dir",
+            ] {
+                assert!(configured(key).is_none(), "{id} injected {key}");
+            }
         }
     }
     Ok(())
