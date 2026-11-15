@@ -83,6 +83,7 @@ impl CommitSourcePreparation {
                 .create(path)?;
         }
         let task = run::TaskRequest {
+            limit_extensions: Default::default(),
             context: None,
             extra: Default::default(),
             build_heavy: false,

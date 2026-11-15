@@ -919,6 +919,39 @@ struct PlannedNode {
     require_findings: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     skip_without_findings: Option<bool>,
+    // Host-owned node fields, copied from `GraphNode` at planning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    template: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_base: Option<String>,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    capability_sources: provenant_records::run::CapabilitySources,
+    #[serde(skip_serializing_if = "model::is_false")]
+    repair_scope_gate: bool,
+    #[serde(skip_serializing_if = "model::is_false")]
+    detached: bool,
+    #[serde(skip_serializing_if = "model::is_false")]
+    provision_worktree: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_behaviour: Option<template::ReviewBehaviour>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    removed_requirements: Vec<RemovedRequirement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_node: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_lens: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repair_lens: Option<String>,
+    #[serde(skip_serializing_if = "model::is_false")]
+    repair_writer: bool,
+    #[serde(skip_serializing_if = "model::is_false")]
+    repair_triage: bool,
+    #[serde(skip_serializing_if = "model::is_false")]
+    repair_risk_assessment: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_generation: Option<u64>,
+    #[serde(skip_serializing_if = "model::is_false")]
+    container_retry: bool,
 }
 
 /// Node labels override graph defaults. Scheduler identity comes from the plan.
@@ -1854,10 +1887,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     journal,
                     &mut stopped_children,
                 )?;
-                if checkpoint.nodes[node_index]
-                    .extra
-                    .contains_key(relay::SUBTREE_CANCEL)
-                {
+                if checkpoint.nodes[node_index].subtree_cancel.is_some() {
                     continue;
                 }
             }

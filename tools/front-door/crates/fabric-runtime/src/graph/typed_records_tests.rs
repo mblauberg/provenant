@@ -60,7 +60,7 @@ fn decode_typed_record<T: serde::de::DeserializeOwned>(
     value: &Value,
 ) -> Result<T, provenant_records::DecodeError> {
     let bytes = serde_json::to_vec(value).unwrap();
-    provenant_records::json::decode(bytes.as_slice(), provenant_records::Limits::default())
+    provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())
 }
 
 fn decision(base: bool) -> Value {
@@ -402,7 +402,7 @@ fn graph_document_host_metadata_round_trips_and_rejects_malformed_values() {
 #[test]
 fn graph_execution_peer_fields_round_trip_and_reject_malformed_values() {
     let digest = provenant_core::Digest::from_bytes([0x4d; 32]);
-    let mut raw = json!({
+    let raw = json!({
         "directory": "/tmp/graph",
         "document": {"schema_version": 1, "graph_id": "receiver", "nodes": []},
         "peer_origin_context": {
@@ -552,14 +552,14 @@ fn writer_binding_identity_round_trips_and_rejects_malformed_values() {
     let wire = serde_json::json!({"worktree":"checkout","head":"1".repeat(40),"source_directory_identity":{"device":7,"inode":9}});
     let bytes = serde_json::to_vec(&wire).unwrap();
     let binding: WriterWorktreeBinding =
-        provenant_records::json::decode(bytes.as_slice(), provenant_records::Limits::default())
+        provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())
             .unwrap();
     assert_eq!(serde_json::to_value(binding).unwrap(), wire);
     let mut malformed = wire;
     malformed["source_directory_identity"]["device"] = serde_json::json!(false);
     let bytes = serde_json::to_vec(&malformed).unwrap();
     assert!(matches!(
-        provenant_records::json::decode::<WriterWorktreeBinding, _>(
+        provenant_records::decode::<WriterWorktreeBinding, _>(
             bytes.as_slice(),
             provenant_records::Limits::default()
         ),

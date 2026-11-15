@@ -1199,7 +1199,7 @@ pub(super) fn add_floor_uses(
         .map(|used| used.name.clone())
         .chain(required.iter().cloned())
         .collect();
-    for candidate in &candidates {
+    for candidate in candidates {
         if selected.len() >= minimum {
             break;
         }

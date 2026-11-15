@@ -109,7 +109,7 @@ mod tests {
         profile.knobs.insert(KNOB.into(), "full".into());
         profile
             .knob_sources
-            .insert(KNOB.into(), provenant_records::run::LimitSource::Launch);
+            .insert(KNOB.into(), provenant_records::LimitSource::Launch);
         let set = ResolvedCiScope::resolve(&profile);
         assert_eq!(
             (set.value, set.source),

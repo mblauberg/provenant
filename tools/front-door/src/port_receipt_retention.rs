@@ -1,19 +1,17 @@
 //! GC policy for content-free port command receipts.
 use provenant_config::{
-    ByteObservation, PortCommand, PortCommandReceiptCollectionLock, PortCommandReceiptEntry,
+    ByteObservation, PortCommandReceiptCollectionLock, PortCommandReceiptEntry,
     PortReceiptIssue, PortReceiptLifetime,
 };
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, Roots};
 use provenant_os::clock::SystemClock;
-use provenant_records::{CanonicalV1, PortSource};
+use provenant_records::CanonicalV1;
 use provenant_run::{ExecutionContext, Request, RunStore};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
-
-const ADMISSION_BINDING: &str = provenant_records::run::REPOSITORY_ADMISSION_BINDING_FIELD;
 
 #[derive(Serialize)]
 pub(crate) struct Report {
@@ -44,13 +42,6 @@ struct AttemptScope {
     lease_epoch: u64,
 }
 
-#[derive(Deserialize)]
-struct AdmissionBinding {
-    source: PortSource,
-    command: PortCommand,
-    command_digest: provenant_records::FileDigest,
-    lease_epoch: u64,
-}
 
 pub(crate) fn collect(roots: &Roots, dry_run: bool) -> Report {
     let mut report = Report::default();
@@ -214,11 +205,9 @@ fn attempt_release_proven(
     {
         return Ok(false);
     }
-    let Some(value) = record.extra.get(ADMISSION_BINDING) else {
+    let Some(binding) = &record.repository_admission_binding else {
         return Ok(false);
     };
-    let binding: AdmissionBinding =
-        serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
     if binding.lease_epoch != scope.lease_epoch {
         return Ok(false);
     }
@@ -325,7 +314,7 @@ fn attempt_scope(entry: &PortCommandReceiptEntry) -> Option<AttemptScope> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_records::{CanonicalV1, PortCommandDisposition, PortReceiptLifetime};
+    use provenant_records::{CanonicalV1, PortCommandDisposition, PortReceiptLifetime, PortSource};
 
     fn admission_entry(phase: &str) -> PortCommandReceiptEntry {
         let attempt = AttemptId::from_bytes([1; 16]);

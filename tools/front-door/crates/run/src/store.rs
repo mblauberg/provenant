@@ -833,7 +833,7 @@ impl RunStore {
             let queued: i64 = tx.query_row("SELECT COUNT(*) FROM admission WHERE active=0", [], |r| r.get(0))?;
             if queued >= sql_int(crate::admission::HOST_QUEUED)? { return Err(RunError::Capacity); }
             let attempt_id = input.attempt_id;
-            let attempt = AttemptRecord {extra: Default::default(),
+            let attempt = AttemptRecord {extra: Default::default(), peer: Default::default(),
                 budget_overrun: None, budget_wrap_up_refused: None,
                 repository_admission_binding: None,
                 key: key.clone(),

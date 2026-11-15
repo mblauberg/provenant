@@ -130,6 +130,7 @@ pub(super) fn trace_run(
             fresh_continuation: None,
             schema_version: 1,
             task: run::TaskRequest {
+                limit_extensions: Default::default(),
                 context: Some(provenant_records::run::WorkContext {
                     graph_id: Some(format!("lane-{attempt_id}")),
                     node_id: Some("node".into()),

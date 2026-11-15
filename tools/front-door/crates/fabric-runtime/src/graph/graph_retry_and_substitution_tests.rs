@@ -133,6 +133,7 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         required_verdict: None,
         require_findings: false,
         skip_without_findings: None,
+        ..Default::default()
     }]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([terminal(AttemptOutcome::TaskFailed)]),

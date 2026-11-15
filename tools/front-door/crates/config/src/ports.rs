@@ -1,5 +1,5 @@
 //! One sourced, versioned declaration for repository integration ports.
-use provenant_records::{CanonicalV1, FileDigest};
+use provenant_records::FileDigest;
 pub use provenant_records::{
     CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition, PortCommand,
     PortCommandBackend, PortCommandDisposition, PortCommandReceipt, PortReceiptLifetime,
@@ -465,7 +465,7 @@ impl PortEntry for LandPort {
     }
     fn valid(&self) -> bool {
         match &self.backend {
-            LandBackend::Command { command } => command.is_valid(),
+            LandBackend::Command { command } => command.valid(),
             LandBackend::Builtin | LandBackend::None => true,
         }
     }

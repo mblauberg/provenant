@@ -109,6 +109,7 @@ fn create_numbered_lane(rig: &TestRig, seed: u8) -> Result<Lane> {
                 fresh_continuation: None,
                 schema_version: 1,
                 task: run::TaskRequest {
+                    limit_extensions: Default::default(),
                     context: Some(provenant_records::run::WorkContext {
                         graph_id: Some(graph),
                         node_id: Some("node".into()),

@@ -809,6 +809,7 @@ pub(super) fn writer_run(
             fresh_continuation: None,
             schema_version: 1,
             task: provenant_run::TaskRequest {
+                limit_extensions: Default::default(),
                 context: Some(provenant_run::WorkContext {
                     graph_id: Some(format!("lane-{attempt}")),
                     node_id: Some("writer".into()),

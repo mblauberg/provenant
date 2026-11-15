@@ -704,7 +704,7 @@ fn review_behaviour_survives_brief_and_output_overrides() {
         assert_eq!(
             node.review_behaviour
                 .map(|value| serde_json::to_value(value).unwrap()),
-            Some(behaviour)
+            Some(serde_json::Value::from(behaviour))
         );
         assert!(node.require_findings);
         assert_eq!(node.required_verdict.as_deref(), Some("VERDICT: PASS"));

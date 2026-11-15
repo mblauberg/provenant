@@ -644,6 +644,7 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
                 fresh_continuation: None,
                 schema_version: 1,
                 task: run::TaskRequest {
+                    limit_extensions: Default::default(),
                     context: Some(provenant_records::run::WorkContext {
                         graph_id: Some("chair-lane".into()),
                         node_id: Some("node".into()),

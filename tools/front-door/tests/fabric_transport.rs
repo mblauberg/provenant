@@ -2214,6 +2214,8 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     // Match the receiver's submission identity, rather than relying on the
     // legacy by-reference fallback when no receiver graph is found.
     let key = provenant_fabric_runtime::graph::AttemptKey {
+        retry_generation: None,
+        previous_attempt_ref: None,
         extra: Default::default(),
         graph_id: "remote-graph".into(),
         node_id: "one".into(),

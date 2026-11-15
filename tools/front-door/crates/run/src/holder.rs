@@ -1951,8 +1951,9 @@ impl RunStore {
                     })
                 })
             };
-            handoff =
-                handoff.map(|handoff| crate::completion::attach_scope_report(attempt, &handoff));
+            handoff = handoff
+                .map(|handoff| crate::completion::attach_scope_report(attempt, &handoff))
+                .transpose()?;
             if let Some(bytes) = read_sealed(attempt, "budget-commit.json", RECORD_LIMIT)? {
                 let result: serde_json::Value = crate::db::decode(&bytes)?;
                 let note = result["note"]
@@ -3850,7 +3851,7 @@ mod writer_recovery_tests {
             if blocked {
                 // A blocked writer seals one typed stop.
                 let AttemptState::Terminal {
-                    terminal_note,
+                    terminal_cause,
                     stop,
                     ..
                 } = &finished.state
@@ -3911,7 +3912,6 @@ mod writer_recovery_tests {
             );
             let AttemptState::Terminal {
                 terminal_cause,
-                stop,
                 outcome,
                 reason,
                 ..

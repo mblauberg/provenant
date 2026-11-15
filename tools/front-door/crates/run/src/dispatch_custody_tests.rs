@@ -276,10 +276,10 @@ fn publication_holder_accepts_exit_zero_or_completed_host_budget() -> TestResult
                 reopened.settlement_reason,
                 Some(provenant_records::run::SettlementReason::CompletedBeforeBudget)
             );
-            let stop: provenant_records::Stop = serde_json::from_value(match &reopened.state {
+            let stop: provenant_records::Stop = match &reopened.state {
                 AttemptState::Terminal { stop, .. } => stop.clone().ok_or("stop")?,
                 _ => unreachable!(),
-            })?;
+            };
             assert_eq!(stop.cause(), provenant_records::StopCause::TokenBudget);
             assert_eq!(
                 stop.handoff().unwrap().status,

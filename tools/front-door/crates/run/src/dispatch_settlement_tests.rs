@@ -682,7 +682,7 @@ fn a_reply_to_a_late_notification_keeps_the_turn_ending_handoff() -> TestResult 
                 Some(provenant_records::run::SettlementReason::HandoffMalformed)
             );
             assert_eq!(
-                record.state.stop()?.unwrap().cause(),
+                record.state.stop().ok_or("stop")?.cause(),
                 provenant_records::StopCause::HandoffMalformed
             );
             assert_eq!(record.partial_signals, [PartialSignal::HandoffMalformed]);

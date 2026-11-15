@@ -192,7 +192,6 @@ mod tests {
         let mut task = crate::tests::input().request.task.clone();
         task.writer = Some(provenant_records::run::WriterRequest {
             extra: Default::default(),
-            limit_extensions: Default::default(),
             custody_project: Some(crate::tests::writer_project()),
             project: "/p".into(),
             worktree: "/p/lane".into(),

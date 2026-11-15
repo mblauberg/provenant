@@ -2497,6 +2497,7 @@ fn persisted_attempt_with(
             fresh_continuation: None,
             schema_version: 1,
             task: TaskRequest {
+                limit_extensions: Default::default(),
                 context: Some(provenant_records::run::WorkContext {
                     graph_id: Some(PERSISTED_GRAPH.into()),
                     node_id: Some(PERSISTED_NODE.into()),

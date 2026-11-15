@@ -1,9 +1,6 @@
 //! Host semantics have typed owners even when records preserve unknown extensions.
 use provenant_core::{ActorId, AttemptId, Digest, OperationId, ProjectId};
-use provenant_records::{
-    json::{DecodeError, Limits, decode},
-    run::OperationRecord,
-};
+use provenant_records::{DecodeError, Limits, decode, run::OperationRecord};
 use serde_json::json;
 
 #[test]

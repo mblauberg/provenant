@@ -1642,6 +1642,21 @@ pub struct NodeProgress {
     pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed_requirements: Vec<RemovedRequirement>,
+    /// Every direct child of this parent was cancelled with its subtree.
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub children_cancelled: bool,
+    /// A detached child keeps running when its graph is cancelled.
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub detached_from_graph_cancel: bool,
+    /// The parent whose subtree cancellation this child is settling under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtree_cancel: Option<String>,
+    /// A running child yielded its concurrency slot while it waits.
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub yielded_slot: bool,
+    /// The stop fence was observed; the node takes no further step.
+    #[serde(default, skip_serializing_if = "not_delivered")]
+    pub stop_fence: bool,
     /// Bounded planner JSON retained until admission succeeds, including across resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<String>,
