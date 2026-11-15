@@ -639,23 +639,6 @@ impl Context {
         })
     }
 
-    /// Open a registered project after adding its verified owner to the root
-    /// protection set. The common Git directory alone is not a checkout path.
-    pub fn open_for_project_in_workspace(
-        globals: &provenant_cli::Globals,
-        roots: Roots,
-        home: &Path,
-        binding: &provenant_config::ProjectBinding,
-    ) -> Result<Self, EdgeError> {
-        let project_root = Self::project_root_for_registered_project(&roots, binding)?;
-        let resolved = crate::roots::resolve(
-            globals,
-            crate::roots::Workspace::At(&project_root),
-            crate::roots::Product::Required,
-        )?;
-        Self::open_for_project(resolved.roots, home, binding)
-    }
-
     /// Resolve the stable allocation owner for an existing project binding.
     /// A linked checkout is never promoted to project owner by selection.
     pub fn project_root_for_registered_project(
@@ -671,6 +654,47 @@ impl Context {
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let executor = SystemExecutor::new(1)?;
         Ok(registered_project_roots(binding, &executor, &git, &CancelToken::new())?.0)
+    }
+
+    /// Resolve the allocation root and verified metadata boundary for a
+    /// peer locator before a missing project binding can be written.
+    pub fn workspace_for_common_location(
+        roots: &Roots,
+        common: &Path,
+        binding: Option<&provenant_config::ProjectBinding>,
+    ) -> Result<(PathBuf, Option<PathBuf>), EdgeError> {
+        let canonical_common = canonical(common)?;
+        if canonical_common != common {
+            return Err(EdgeError::Invalid);
+        }
+        if let Some(binding) = binding {
+            if binding.common_dir() != common {
+                return Err(EdgeError::Invalid);
+            }
+            let location = provenant_config::ProjectLocation::new(common.to_path_buf())?;
+            let registered =
+                provenant_config::lookup_project(roots, &location)?.ok_or(EdgeError::Invalid)?;
+            if registered.project_id() != binding.project_id() {
+                return Err(EdgeError::Invalid);
+            }
+            let root = Self::project_root_for_registered_project(roots, binding)?;
+            let metadata = has_git_common_layout(common).then(|| common.to_path_buf());
+            return Ok((root, metadata));
+        }
+        if !has_git_common_layout(common) {
+            return Ok((canonical_common, None));
+        }
+        let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
+        let executor = SystemExecutor::new(1)?;
+        let layout = provenant_confinement::worktrees::project_layout_for_common(
+            &executor,
+            common,
+            &git,
+            &provenant_confinement::worktrees::project_layout_git_environment(),
+            Duration::from_secs(5),
+            &CancelToken::new(),
+        )?;
+        Ok((layout.root().to_path_buf(), Some(common.to_path_buf())))
     }
     /// A configured remote home is the sole coordination owner.
     pub fn remote_home(&self) -> bool {
