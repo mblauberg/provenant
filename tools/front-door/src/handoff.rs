@@ -1539,10 +1539,15 @@ mod tests {
             &Free,
             |context, cancel| inspect_context(context, &facts, cancel),
         )?;
+        let primary_path = std::fs::canonicalize(&project)?;
+        let listed_paths: Vec<_> = inspected
+            .iter()
+            .map(|row| row.path.display().to_string())
+            .collect();
         let primary = inspected
             .iter()
-            .find(|row| row.path == project)
-            .ok_or("missing primary checkout")?;
+            .find(|row| row.path == primary_path)
+            .ok_or_else(|| format!("missing primary checkout; listed paths: {listed_paths:?}"))?;
         assert!(
             primary.primary,
             "the external metadata dir cannot hide primary identity"
