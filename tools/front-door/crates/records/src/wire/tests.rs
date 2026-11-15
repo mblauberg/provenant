@@ -130,6 +130,7 @@ fn lane_rows_validate_with_and_without_optional_members() {
             message_id: "6".repeat(32).parse().unwrap(),
         }],
         successor: Some("5".repeat(32).parse().unwrap()),
+        cause: None,
     });
     accepted(&schema, &full);
     let value = serde_json::to_value(&full).unwrap();
@@ -148,7 +149,17 @@ fn lane_rows_validate_with_and_without_optional_members() {
         "6".repeat(32)
     );
     assert_eq!(value["steering"]["successor"], "5".repeat(32));
+    assert!(value["steering"].get("cause").is_none());
     assert!(value["steering"].get("text").is_none());
+    let mut refused = full.clone();
+    refused.steering.as_mut().unwrap().state = crate::run::SteeringState::NotContinued;
+    refused.steering.as_mut().unwrap().successor = None;
+    refused.steering.as_mut().unwrap().cause = Some(crate::run::SteeringCause::SessionMismatch);
+    accepted(&schema, &refused);
+    assert_eq!(
+        serde_json::to_value(&refused).unwrap()["steering"]["cause"],
+        "session_mismatch"
+    );
     for cause in [
         crate::run::TerminalCause::Steered,
         crate::run::TerminalCause::EmptyWriterResult,

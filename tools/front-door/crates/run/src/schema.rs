@@ -23,5 +23,12 @@ provenant_sqlite::Schema {
                 sql: "CREATE TABLE IF NOT EXISTS provider_session_ready (attempt TEXT PRIMARY KEY REFERENCES attempts(id), generation INTEGER NOT NULL CHECK(generation>0), route_digest TEXT NOT NULL CHECK(length(route_digest)=64), session TEXT CHECK(session IS NULL OR length(session)>0), provider_boot TEXT NOT NULL CHECK(length(provider_boot)>0), provider_pid INTEGER NOT NULL CHECK(provider_pid>0), provider_start INTEGER NOT NULL CHECK(provider_start>0), identity_conflict INTEGER NOT NULL DEFAULT 0 CHECK(identity_conflict IN (0,1)), terminal_confirmed INTEGER NOT NULL DEFAULT 0 CHECK(terminal_confirmed IN (0,1)), CHECK(session IS NOT NULL OR identity_conflict=1)) STRICT",
             },
         },
+        provenant_sqlite::Step {
+            minor: 3,
+            kind: provenant_sqlite::StepKind::Table {
+                name: "steer_continuations",
+                sql: "CREATE TABLE IF NOT EXISTS steer_continuations (attempt TEXT PRIMARY KEY REFERENCES attempts(id), state TEXT NOT NULL CHECK(state IN ('resumed','not_continued')), cause TEXT CHECK(cause IN ('session_unavailable','session_mismatch','terminal_stop','continuation_refused')), successor TEXT REFERENCES attempts(id), CHECK((state='resumed' AND cause IS NULL AND successor IS NOT NULL) OR (state='not_continued' AND cause IS NOT NULL AND successor IS NULL))) STRICT",
+            },
+        },
     ],
 }

@@ -2338,6 +2338,40 @@ pub enum SteeringState {
     NotContinued,
 }
 
+/// Safe reason an accepted steering turn could not continue the provider
+/// session. This projection never carries provider text or local paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SteeringCause {
+    SessionUnavailable,
+    SessionMismatch,
+    TerminalStop,
+    ContinuationRefused,
+}
+
+impl SteeringCause {
+    /// Stable value persisted in the private RunStore outcome ledger.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionUnavailable => "session_unavailable",
+            Self::SessionMismatch => "session_mismatch",
+            Self::TerminalStop => "terminal_stop",
+            Self::ContinuationRefused => "continuation_refused",
+        }
+    }
+
+    /// Parse the bounded RunStore outcome value.
+    pub const fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "session_unavailable" => Some(Self::SessionUnavailable),
+            "session_mismatch" => Some(Self::SessionMismatch),
+            "terminal_stop" => Some(Self::TerminalStop),
+            "continuation_refused" => Some(Self::ContinuationRefused),
+            _ => None,
+        }
+    }
+}
+
 /// Stable identifiers for one accepted steering operation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SteeringOperation {
@@ -2351,6 +2385,8 @@ pub struct SteeringStatus {
     pub state: SteeringState,
     pub operations: Vec<SteeringOperation>,
     pub successor: Option<AttemptId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<SteeringCause>,
 }
 
 /// Encode the public form of an attempt, retaining all public extra metadata.

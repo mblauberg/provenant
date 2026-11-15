@@ -26,6 +26,7 @@ pub enum ControlSupport {
     /// Left in Fabric mail for the session to read.
     MailOnly,
     /// Saved for the next provider turn; it cannot inject at a live tool boundary.
+    #[serde(rename = "continuation")]
     ContinuationOnly,
     Unsupported,
 }
@@ -218,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn resumable_adapters_are_continuation_only_and_commands_are_unsupported() {
+    fn resumable_adapters_publish_continuation_and_commands_are_unsupported() {
         for row in control_capabilities()
             .iter()
             .filter(|row| row.launch == LaunchKind::Lane)
@@ -245,6 +246,14 @@ mod tests {
         assert_eq!(value["launch"], "lane");
         assert_eq!(value["support"], "continuation");
         assert_eq!(value["transport"], "provider_continuation");
+        assert_eq!(
+            serde_json::from_value::<ControlSupport>(serde_json::json!("continuation")).unwrap(),
+            ControlSupport::ContinuationOnly
+        );
+        assert!(
+            serde_json::from_value::<ControlSupport>(serde_json::json!("continuation_only"))
+                .is_err()
+        );
         let names: Vec<_> = value["actions"]
             .as_array()
             .unwrap()
