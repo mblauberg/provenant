@@ -820,7 +820,7 @@ fn pacing_profiles_warn_on_unknown_keys_and_list_accounts() -> Result {
     let stderr = String::from_utf8_lossy(&out.stderr.bytes);
     assert!(
         stderr.contains("domains.routing.pacing.accounts.pro.window")
-            && stderr.contains("unknown_key"),
+            && stderr.contains("unknown configuration key"),
         "{stderr}"
     );
     let output: Value = serde_json::from_slice(&out.stdout.bytes)?;
@@ -1043,7 +1043,7 @@ pools = { junior = [{ model = "codex/gpt-6-luna", weight = 101, effort = "high",
     assert_eq!(code(&out), 0);
     let stderr = String::from_utf8_lossy(&out.stderr.bytes);
     assert!(
-        stderr.contains("routing: ignored invalid configuration (unknown_key)"),
+        stderr.contains("routing") && stderr.contains("unknown configuration key"),
         "{stderr}"
     );
     Ok(())

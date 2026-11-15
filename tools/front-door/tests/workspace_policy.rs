@@ -27,14 +27,25 @@ const DIRECT: &[&str] = &[
 const LAYERS: &[(&str, &[&str])] = &[
     ("core", &[]),
     // Test-only helpers, reachable through dev-dependencies or optional fixture features.
-    ("test-support", &[]),
+    ("test-support", &["core"]),
     ("records", &["core"]),
     ("config", &["core", "records", "os"]),
     ("os", &["core"]),
-    ("supervisor", &["core", "records", "os"]),
+    // Port-plan tests read the default lane settings from config (a sibling
+    // layer), so the edge is acyclic.
+    ("supervisor", &["core", "records", "os", "config"]),
     (
         "confinement",
-        &["core", "records", "config", "os", "supervisor"],
+        // Worktree lifecycle tests open a real host store; fabric-store sits
+        // below confinement, so the edge stays acyclic.
+        &[
+            "core",
+            "records",
+            "config",
+            "os",
+            "supervisor",
+            "fabric-store",
+        ],
     ),
     (
         "providers",

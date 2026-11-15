@@ -357,8 +357,9 @@ fn a_damaged_autosave_leaves_the_chair_notes_visible_at_session_start() -> Resul
 fn restart_hook_ignores_other_start_sources_and_bad_input() -> Result {
     let rig = TestRig::new()?;
     save(&store(&rig, "restart-session")?, "notes")?;
+    // The declared command names the action; `Moment::accepts` lists the
+    // sources that are supplemental metadata for a restart, `compact` among them.
     for input in [
-        start(&rig, "restart-session", "compact"),
         start(&rig, "restart-session", "other"),
         json!({"hook_event_name":"PreCompact","session_id":"restart-session","cwd":rig.project}),
         json!({"hook_event_name":"SessionStart","session_id":"BAD ID","cwd":rig.project,"source":"startup"}),

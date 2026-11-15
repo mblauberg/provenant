@@ -606,9 +606,11 @@ fn unreadable_and_stalled_input_cannot_allow_bash() -> Result {
             ],
             None,
         )?;
+        // The answer guard only offers answers: input it cannot use abstains
+        // with a diagnostic, and must never grant a permission decision.
         assert_eq!(code(&output), 0);
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(output.stdout.bytes.is_empty(), "{output:?}");
+        assert!(!output.stderr.bytes.is_empty(), "{output:?}");
     }
     Ok(())
 }

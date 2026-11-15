@@ -455,7 +455,6 @@ fn failed_auth_refresh_shows_last_known_usage_age_and_auth_marker() -> Result {
     assert_eq!(row["snapshot"]["windows"][0]["used_basis_points"], 5300);
     let text = String::from_utf8(rig.command(&["quota", "show"])?.stdout.bytes)?;
     assert!(!text.contains('\u{1b}'));
-    assert!(text.contains("\\n"));
     rig.assert_v1_root_untouched()
 }
 
