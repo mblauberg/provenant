@@ -2519,7 +2519,7 @@ pub(super) fn prepare_candidates(
     let lane_path = match writer.as_ref() {
         Some(writer) => run::FilteredLanePath::for_requester(
             registry.host,
-            writer.project_root(),
+            writer.lane_path_root(),
             writer.worktree.path(),
         )
         .map_err(|error| error.to_string())?,

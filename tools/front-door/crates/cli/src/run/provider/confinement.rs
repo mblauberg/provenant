@@ -357,7 +357,8 @@ pub(super) fn confinement_request(
                 .chain(
                     writer
                         .into_iter()
-                        .flat_map(|writer| project_scratch_reads(writer.project_root())),
+                        .flat_map(|writer| writer.project_root().into_iter())
+                        .flat_map(project_scratch_reads),
                 )
                 .chain(access.read_roots.iter().map(|path| grant(path)))
                 .chain(access.attachments.iter().map(|path| PathGrant {
