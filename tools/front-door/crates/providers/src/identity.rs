@@ -168,8 +168,15 @@ impl Accounts {
         }
         for (index, account) in accounts.iter().enumerate() {
             if accounts.iter().skip(index + 1).any(|other| {
-                (account.adapter == other.adapter && account.key == other.key)
-                    || account_directories_overlap(&account.directory, &other.directory)
+                let same_identity = account.adapter == other.adapter && account.key == other.key;
+                let local_login = |account: &RegisteredAccount| {
+                    provenant_records::AdapterSpec::get(&account.adapter)
+                        .is_some_and(|spec| spec.is_unregistered_local(&account.key))
+                };
+                same_identity
+                    || (account_directories_overlap(&account.directory, &other.directory)
+                        && !(account.adapter == other.adapter
+                            && (local_login(account) || local_login(other))))
             }) {
                 return Err(crate::ProviderError::IdentityMismatch);
             }
@@ -198,5 +205,44 @@ impl Accounts {
             })?;
         account.validate_route(route)?;
         Ok(account)
+    }
+}
+
+#[cfg(test)]
+mod account_registry_tests {
+    use super::*;
+
+    // Spec: docs/specs/routing.md#accounts-and-credentials
+    #[test]
+    fn agy_home_login_can_coexist_with_an_isolated_registered_identity() {
+        let home = std::path::PathBuf::from("/fixture/home");
+        let local = RegisteredAccount::new("agy", "local", home.clone()).unwrap();
+        let isolated =
+            RegisteredAccount::new("agy", "agy-registered", home.join(".agy-work")).unwrap();
+        assert!(Accounts::new(vec![local, isolated]).is_ok());
+    }
+
+    #[test]
+    fn registered_account_roots_must_still_not_overlap_each_other() {
+        let home = std::path::PathBuf::from("/fixture/home");
+        let first = RegisteredAccount::new("agy", "agy-first", home.join(".agy-work")).unwrap();
+        let nested =
+            RegisteredAccount::new("agy", "agy-nested", home.join(".agy-work/nested")).unwrap();
+        assert!(matches!(
+            Accounts::new(vec![first, nested]),
+            Err(crate::ProviderError::IdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn local_login_does_not_hide_cross_provider_root_overlap() {
+        let home = std::path::PathBuf::from("/fixture/home");
+        let local = RegisteredAccount::new("agy", "local", home.clone()).unwrap();
+        let other_provider =
+            RegisteredAccount::new("codex", "work", home.join(".codex/work")).unwrap();
+        assert!(matches!(
+            Accounts::new(vec![local, other_provider]),
+            Err(crate::ProviderError::IdentityMismatch)
+        ));
     }
 }

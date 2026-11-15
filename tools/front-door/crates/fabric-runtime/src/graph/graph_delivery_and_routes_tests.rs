@@ -389,7 +389,7 @@ fn route_effort_is_checked_against_the_adapter_table() {
         ("codex", true),
         ("agy", true),
         ("opencode", true),
-        ("cursor", false),
+        ("cursor", true),
     ] {
         let mut leaf = route(adapter);
         leaf.effort = Some("high".into());

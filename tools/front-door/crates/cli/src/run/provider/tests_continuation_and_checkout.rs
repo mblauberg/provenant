@@ -708,6 +708,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                 policy: &launch_policy,
                 command: None,
                 route: &route,
+                provider_model: None,
                 confined: &plan,
                 prompt: &prompt,
                 continuation: Some(&continuation),

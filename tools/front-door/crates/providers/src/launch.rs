@@ -371,6 +371,9 @@ impl LaunchSpec {
 /// composition edge. Paths must be canonical: providers never resolve them.
 pub struct PrepareInput<'a> {
     pub route: &'a ResolvedRoute,
+    /// Provider-facing spelling for the invocation only. Route identity and
+    /// continuation validation always use the canonical `route.model`.
+    pub provider_model: Option<&'a str>,
     pub confined: &'a ConfinedPlan,
     pub prompt: &'a Prompt,
     /// Canonical image files already granted read access by the caller.

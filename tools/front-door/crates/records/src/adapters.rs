@@ -1851,14 +1851,14 @@ mod launch_tests {
 
     #[test]
     fn refusal_names_the_adapter_and_field() {
-        let error = AdapterSpec::get("cursor")
+        let error = AdapterSpec::get("command")
             .unwrap()
             .check_launch(&LaunchRequest {
                 effort: Some("low"),
                 ..Default::default()
             })
             .unwrap_err();
-        assert_eq!(error.adapter, "cursor");
+        assert_eq!(error.adapter, "command");
         assert_eq!(error.field, LaunchField::Effort);
     }
 

@@ -241,6 +241,9 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             warning.requested, warning.model, warning.source
         ));
     }
+    for warning in &route.diagnostics.launch_warnings {
+        text.push_str(&format!("{warning}\n"));
+    }
     for record in &preview.recorded_readiness {
         text.push_str(&format!(
             "recorded readiness {} [{}] for {}: {}\n",

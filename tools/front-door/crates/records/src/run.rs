@@ -652,6 +652,9 @@ pub struct RouteRecord {
     pub effort_warning: Option<crate::route_selection::EffortWarning>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability_warning: Option<String>,
+    /// Human-readable, host-generated warnings retained with the applied route.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch_warnings: Vec<String>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub provider: Option<String>,
@@ -1011,6 +1014,7 @@ impl RouteRecord {
             host_native: None,
             effort_warning: route.diagnostics.effort_warning.clone(),
             availability_warning: None,
+            launch_warnings: route.diagnostics.launch_warnings.clone(),
             provider: Some(route.adapter.clone()),
             model: Some(format!("{}/{}", route.adapter, route.model)),
             effort: route.effort.clone(),

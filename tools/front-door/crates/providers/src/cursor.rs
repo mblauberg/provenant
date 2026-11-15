@@ -187,8 +187,9 @@ fn prepare(
         })?;
         argv.extend(["--resume".into(), continuation.session().into()]);
     }
-    if !input.route.model.is_empty() {
-        argv.extend(["--model".into(), input.route.model.as_str().into()]);
+    let model = input.provider_model.unwrap_or(input.route.model.as_str());
+    if !model.is_empty() {
+        argv.extend(["--model".into(), model.into()]);
     }
     argv.extend(["--".into(), input.prompt.text().into()]);
     let mut package_omissions = Vec::new();

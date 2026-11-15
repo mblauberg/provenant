@@ -177,8 +177,12 @@ Unsandboxed lanes inherit the host environment. Their PATH comes from the
 requester of the run or retry, retained with the host graph execution for later
 advancement. Before lane preparation it is
 filtered to existing absolute directories outside the project and worktree,
-using the host delivery PATH rules. A remote peer records its own local agent
-PATH at ingress, since origin host directories need not exist on the peer.
+using the host delivery PATH rules. Named commands use the same filtered
+requester PATH for executable lookup and launch environment. A graph retry
+publishes its checkpoint and requester's PATH in one journal save, so a tick
+cannot advance it with the previous requester's tools. A remote peer records
+its own local agent PATH at ingress, since origin host directories need not
+exist on the peer.
 Provider preparation may select an account-specific home or redirect state and
 cache paths in either confinement mode; account selectors choose the registered account
 and its required credentials. Credential values stay in the live launch,

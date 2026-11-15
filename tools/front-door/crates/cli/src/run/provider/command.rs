@@ -85,8 +85,17 @@ pub(super) fn prepare_command(
     } else {
         source.clone()
     };
+    let path_project = task
+        .writer
+        .as_ref()
+        .map_or(source.as_path(), |writer| writer.project.as_path());
+    let lane_path =
+        super::preparation::filtered_requester_lane_path(registry.host, path_project, &cwd)?;
     let invocation = if program.contains('/') {
         cwd.join(program)
+    } else if let Some(path) = lane_path.as_deref() {
+        let search_path = std::env::split_paths(path).collect::<Vec<_>>();
+        find_command_on_path(program, &search_path).map_err(|_| executable_unavailable(program))?
     } else {
         locate(program).map_err(|_| executable_unavailable(program))?
     };
@@ -205,6 +214,7 @@ pub(super) fn prepare_command(
             images: &[],
             policy: &launch_policy,
             route: &route,
+            provider_model: None,
             command: Some(provenant_providers::command::Invocation {
                 argv: &command.argv,
                 runtimes: &runtimes,
@@ -220,6 +230,8 @@ pub(super) fn prepare_command(
             host_var: &|key| {
                 if key == provenant_core::consumer_env::SANDBOX {
                     Some(sandbox.env_value().into())
+                } else if key == "PATH" && lane_path.is_some() {
+                    lane_path.clone()
                 } else {
                     host_provider_var(registry, key)
                 }
@@ -244,16 +256,15 @@ pub(super) fn prepare_command(
     if let Some(alias) = &paths.temporary_alias {
         alias_temporary_env(&mut spec.env, &scratch, &alias.join(&scratch_name));
     }
-    if let Some(warning) =
+    let mut launch_warnings =
         super::preparation::image_input_warning(provider, &task.access.attachments)
-    {
-        use std::io::Write;
-        let _ = writeln!(std::io::stderr().lock(), "{warning}");
-    }
-    for warning in super::preparation::ignore_file_warnings(provider, task, roots.state.as_path()) {
-        use std::io::Write;
-        let _ = writeln!(std::io::stderr().lock(), "{warning}");
-    }
+            .into_iter()
+            .collect::<Vec<_>>();
+    launch_warnings.extend(super::preparation::ignore_file_warnings(
+        provider,
+        task,
+        roots.state.as_path(),
+    ));
     apply_lane_capabilities(&mut spec.profile.spec, &task.access);
     let common_git_path = repository
         .as_ref()
@@ -355,6 +366,7 @@ pub(super) fn prepare_command(
                 .map_err(|_| unavailable("invalid tool closure receipt".into()))?,
         ),
         discovery_warnings: Some(warnings),
+        launch_warnings,
         project_paths: Some(
             serde_json::from_value(project_paths)
                 .map_err(|_| unavailable("invalid project path receipt".into()))?,

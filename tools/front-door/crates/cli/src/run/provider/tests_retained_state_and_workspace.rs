@@ -657,6 +657,7 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
         policy: &launch_policy,
         command: None,
         route: &route,
+        provider_model: None,
         confined: &plan,
         prompt: &prompt,
         continuation: None,
