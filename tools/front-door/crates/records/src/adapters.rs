@@ -768,11 +768,12 @@ impl AdapterSpec {
         self.account_plan(plan)
             .is_some_and(|row| row.quota == AccountQuota::ObservedRefusals)
     }
+    /// A registered plan narrows the models an account serves. A missing or
+    /// unrecognised plan narrows nothing: the provider decides, and quota stays
+    /// unknown.
     pub fn account_serves_model(&self, plan: Option<&str>, model: &str) -> bool {
-        self.account_model_plans.is_empty()
-            || self
-                .account_plan(plan)
-                .is_some_and(|row| model.starts_with(row.model_prefix))
+        self.account_plan(plan)
+            .is_none_or(|row| model.starts_with(row.model_prefix))
     }
     /// Whether a quota window governs a model drawing on `model_pool`. Only
     /// adapters with grouped quota pools separate windows by their `group.`
@@ -1759,7 +1760,8 @@ mod account_plan_tests {
                     spec.is_free_plan(Some(plan.plan)),
                     plan.quota == super::AccountQuota::ObservedRefusals
                 );
-                assert!(!spec.account_serves_model(None, &model));
+                assert!(spec.account_serves_model(None, &model));
+                assert!(spec.account_serves_model(Some("unrecognised"), &model));
                 for other in spec
                     .account_model_plans
                     .iter()

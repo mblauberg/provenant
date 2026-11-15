@@ -342,6 +342,19 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> 
     )?)
 }
 
+/// Decode a host lifecycle receipt kept as an open JSON value. Its writer owns
+/// the shape and version, so this reader bounds the document but accepts any
+/// `schema_version` the writer recorded.
+pub(crate) fn decode_receipt(bytes: &[u8]) -> Result<serde_json::Value> {
+    Ok(provenant_records::decode(
+        bytes,
+        provenant_records::Limits {
+            max_bytes: RECORD_LIMIT,
+            ..Default::default()
+        },
+    )?)
+}
+
 /// Decode a record stored in its own column. The column fixes its shape, so the
 /// bytes carry no `schema_version` header.
 pub(crate) fn decode_column<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {

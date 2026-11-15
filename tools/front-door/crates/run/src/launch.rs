@@ -479,7 +479,7 @@ fn check_launch_policy(
                 "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"
             }
             // A generic refusal with no boundary is not evidence of disk pressure.
-            // Keep its typed outcome instead of letting a disk knob authorize it.
+            // Keep its typed outcome instead of letting a disk knob authorise it.
             provenant_records::diagnostic::BoundaryClass::None => return Err(refusal),
         }
     };

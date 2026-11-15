@@ -1085,7 +1085,7 @@ fn resolve_managed_writer_path(
     let expected = ports
         .managed_writer_path(branch)
         .map_err(WorktreeError::PortConfiguration)?;
-    if std::path::Path::new(path) == expected.as_path() {
+    if project_root.join(path) == project_root.join(&expected) {
         Ok(project_root.join(expected))
     } else {
         Err(WorktreeError::InvalidRequest)

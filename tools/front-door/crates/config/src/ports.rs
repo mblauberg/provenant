@@ -1029,12 +1029,12 @@ mod tests {
         let builtin = serde_json::to_value(PortTable::builtin()).unwrap();
 
         for &name in PortTable::PORT_NAMES {
-            for serialized_source in [None, Some(PortSource::Builtin)] {
+            for serialised_source in [None, Some(PortSource::Builtin)] {
                 let mut entry = builtin[name].clone();
                 entry["backend"] = serde_json::json!({"kind": "none"});
                 let object = entry.as_object_mut().unwrap();
                 object.remove("source");
-                if let Some(source) = serialized_source {
+                if let Some(source) = serialised_source {
                     object.insert("source".into(), serde_json::to_value(source).unwrap());
                 }
                 let mut overlay = serde_json::json!({"schema_version": PORTS_SCHEMA_VERSION});

@@ -487,7 +487,7 @@ impl ForgePort {
         if matches!(operation, ForgeOperation::Issue { .. })
             && dispatch_port_backend(&self.adapter.backend, || true, |_| false, || false)
         {
-            body = normalize_issue(&body)?;
+            body = normalise_issue(&body)?;
         }
         Ok(ForgeResponse {
             status,
@@ -889,7 +889,7 @@ struct IssueWire {
 struct IssueTypeWire {
     name: String,
 }
-fn normalize_issue(bytes: &[u8]) -> Result<Vec<u8>, PortError> {
+fn normalise_issue(bytes: &[u8]) -> Result<Vec<u8>, PortError> {
     let issue: IssueWire =
         serde_json::from_slice(bytes).map_err(|_| PortError::Response("invalid issue JSON"))?;
     serde_json::to_vec(&serde_json::json!({"body":issue.body,"state":issue.state,"kind":issue.kind.or_else(|| issue.issue_type.map(|kind| kind.name))}))

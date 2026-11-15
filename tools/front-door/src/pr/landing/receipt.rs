@@ -334,7 +334,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn receipt_keys_are_sanitized_and_empty_keys_refused() -> Result<(), LandingError> {
+    fn receipt_keys_are_sanitised_and_empty_keys_refused() -> Result<(), LandingError> {
         let dir = tempfile::tempdir().map_err(|e| failed("tmp", e))?;
         let hostile = receipt("../../evil", false);
         let path = receipt_path(dir.path(), &hostile.candidate, hostile.shadow)?;

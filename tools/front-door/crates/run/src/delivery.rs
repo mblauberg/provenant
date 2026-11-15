@@ -2982,7 +2982,7 @@ impl crate::RunStore {
         self.record(id, call)?;
         let attempt = self.attempt_dir(id, false)?;
         match attempt.read_stable(OsStr::new("worktree-settlement.json"), crate::RECORD_LIMIT) {
-            Ok(raw) => Ok(Some(crate::db::decode(&raw)?)),
+            Ok(raw) => Ok(Some(crate::db::decode_receipt(&raw)?)),
             Err(error) if error.is_not_found() => Ok(None),
             Err(error) => Err(error.into()),
         }
@@ -3019,7 +3019,7 @@ impl crate::RunStore {
         let prior: Option<serde_json::Value> = match attempt
             .read_stable(OsStr::new("worktree-settlement.json"), crate::RECORD_LIMIT)
         {
-            Ok(raw) => Some(crate::db::decode(&raw)?),
+            Ok(raw) => Some(crate::db::decode_receipt(&raw)?),
             Err(error) if error.is_not_found() => None,
             Err(error) => return Err(error.into()),
         };

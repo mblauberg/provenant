@@ -2323,7 +2323,7 @@ pub fn public_attempt_value(
 }
 
 /// Serialize an attempt for read-only owner and peer projections.
-pub fn serialize_public_attempt<S: serde::Serializer>(
+pub fn serialise_public_attempt<S: serde::Serializer>(
     record: &AttemptRecord,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {

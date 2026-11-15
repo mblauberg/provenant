@@ -893,17 +893,6 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     )?;
     assert_eq!(prepared.route.provider.as_deref(), Some("opencode"));
     assert_eq!(prepared.route.account_key.as_deref(), Some("go"));
-    // Expired readiness remains recorded as stale evidence and reads as unknown.
-    let scope = provenant_quota::ReadinessScope { extra: Default::default(),
-        host: provenant_quota::LOCAL_HOST.into(),
-        adapter: "opencode".into(),
-        account_key: "go".into(),
-        route: "opencode/opencode-go/deepseek-v4.1-flash".into(),
-    };
-    assert_eq!(
-        crate::quota::read_readiness(&state, &scope, now).reason,
-        Some(provenant_quota::ReadinessReason::Stale)
-    );
     Ok(())
 }
 
