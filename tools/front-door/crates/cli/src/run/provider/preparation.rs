@@ -2486,20 +2486,30 @@ pub(super) fn prepare_candidates(
     } else {
         source.clone()
     };
+    let fallback_cancel = provenant_core::CancelToken::new();
+    let cancel = registry.cancel.unwrap_or(&fallback_cancel);
+    let git_executor = provenant_os::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
     let requester_cwd = registry.cwd.unwrap_or(&source);
-    let same_source = writer.is_none() && canonical(requester_cwd)? == source;
-    let path_project = match task.writer.as_ref() {
-        Some(writer) => writer.project.clone(),
-        None => requester_path_project_root(requester_cwd)?,
+    let lane_path = match writer.as_ref() {
+        Some(writer) => {
+            let project = verified_project_root(
+                writer.worktree.repo().common_git_dir(),
+                &git,
+                &git_executor,
+                cancel,
+            )?;
+            run::FilteredLanePath::for_requester(registry.host, &project, writer.worktree.path())
+                .map_err(|error| error.to_string())?
+        }
+        None => crate::run::filtered_requester_lane_path(
+            registry.host,
+            requester_cwd,
+            &source,
+            &git,
+            &git_executor,
+            cancel,
+        )?,
     };
-    let path_worktree = match writer.as_ref() {
-        Some(writer) => writer.worktree.path().to_path_buf(),
-        None if same_source || source == path_project => path_project.clone(),
-        None => requester_path_project_root(&source)?,
-    };
-    let lane_path =
-        run::FilteredLanePath::for_requester(registry.host, &path_project, &path_worktree)
-            .map_err(|error| error.to_string())?;
     let locate = |name: &str| match locate_override {
         Some(locate) => locate(name),
         None => preparation_executable(&lane_path, name),
@@ -2542,12 +2552,11 @@ pub(super) fn prepare_candidates(
         .ok_or("current user identity is unavailable")?
         .name;
 
-    let executor = provenant_os::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
     // Nested attempts live in a lane-writable child store. Unconfined provider
     // commands, including status, version and token refresh, get a fresh cwd
     // under the host configuration root retained in the launch context.
     let executor =
-        provenant_providers::host::HostProbeExecutor::new(&executor, roots.state.as_path())
+        provenant_providers::host::HostProbeExecutor::new(&git_executor, roots.state.as_path())
             .map_err(|e| e.to_string())?
             .with_search_path(lane_path.path());
     let mut config = loaded_config
@@ -2590,8 +2599,6 @@ pub(super) fn prepare_candidates(
     // Hold shared fences throughout preparation. An exhausted wait never grants access.
     let clock = provenant_os::clock::SystemClock::new();
     use provenant_core::Clock;
-    let fallback_cancel = provenant_core::CancelToken::new();
-    let cancel = registry.cancel.unwrap_or(&fallback_cancel);
     let provider_leases =
         available_provider_leases(roots.state.as_path(), &eligible, wait, &clock, cancel)
             .map_err(|error| error.to_string())?;
