@@ -493,6 +493,13 @@ impl VerifiedRepo {
         Ok(Self::open_structure(path, false)?.common)
     }
 
+    /// Open only the checkout markers and directory identities. This handle
+    /// grants no Git operation until a UtilityRuntime has probed it; layout
+    /// discovery uses it only to verify an inventory path and common identity.
+    pub(crate) fn open_structure_only(path: impl AsRef<Path>) -> Result<Self, RepoError> {
+        Self::open_structure(path, false)
+    }
+
     /// Open and structurally verify the repository, then perform the supplied
     /// fixed Git safety probes before exposing it to callers.
     pub(crate) fn open<E>(

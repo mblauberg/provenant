@@ -16,6 +16,7 @@ pub use evidence::{
 };
 mod inventory;
 mod landed;
+mod layout;
 mod lifecycle;
 mod owner;
 mod refs;
@@ -38,6 +39,7 @@ pub use landed::{
     CommitGraph, IntegrationEdge, LandedBy, Landing, LandingTarget, RepoGraph, Unproven,
     commit_parents, landed,
 };
+pub use layout::{ProjectLayout, project_layout_for_common};
 pub use lifecycle::*;
 pub use owner::{
     WorktreeOrigin, WorktreeOwner, branch_ownership, load_owner, owned_worktree_paths, prune_owned,
