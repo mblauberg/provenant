@@ -94,6 +94,28 @@ pub(super) fn output_summary(
     target: Option<&crate::Target>,
 ) -> crate::Summary {
     let mut lines = Vec::new();
+    if headed && let Some(verdict) = data["selected"]["verdict"].as_str() {
+        lines.push(format!(
+            "review verdict: {}",
+            crate::bounded_text(verdict, 128)
+        ));
+    }
+    if headed && let Some(findings) = data["selected"]["findings"].as_array() {
+        let availability = match data["selected"]["findings_available"].as_bool() {
+            Some(true) => "available",
+            Some(false) => "incomplete",
+            None => "availability unknown",
+        };
+        lines.push(format!("findings: {} ({availability})", findings.len()));
+    }
+    if headed
+        && data.get("graph").is_some()
+        && data.get("node").is_some()
+        && data.get("attempt_id").is_none()
+        && data["complete"] == json!(false)
+    {
+        lines.push("declared result excerpt is incomplete".into());
+    }
     if headed && let Some(state) = data["state"].as_str() {
         let reason = data["reason"].as_str();
         lines.push(match reason {
