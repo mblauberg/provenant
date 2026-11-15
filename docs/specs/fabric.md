@@ -222,7 +222,7 @@ live session or process identity changes, or the terminal session disagrees
 with the bound expectation, status records the safe mismatch cause instead of
 starting a fresh session.
 
-Owner cancellation and same-session graph continuation admission serialize on
+Owner cancellation and same-session graph continuation admission serialise on
 the parent attempt's publication fence. A cancellation accepted before a child
 exists leaves a durable explicit-stop intent for the gate; if the child was
 already admitted, graph cancellation follows the validated continuation chain
