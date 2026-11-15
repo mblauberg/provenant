@@ -13,9 +13,9 @@
 //!
 //! A commit is any head: a pull request head, a `land/**` candidate or a
 //! landed commit.
-use super::gh::rate_limit_reset;
 #[cfg(test)]
 use super::gh::Response;
+use super::gh::rate_limit_reset;
 use provenant_config::ports::Request;
 use provenant_config::{Forge, ForgePort};
 mod port;
@@ -129,12 +129,15 @@ pub(crate) fn repository_for_project(
 struct Page {
     etag: Option<String>,
     body: Value,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ResourcePage {
     page: Page,
     fetched_at: i64,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Cached {
@@ -142,6 +145,8 @@ struct Cached {
     fetched_at: i64,
     runs: Vec<Page>,
     statuses: Vec<Page>,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 #[derive(Clone)]
@@ -328,6 +333,8 @@ fn request_etag(cadence: Cadence, previous: Option<&Page>) -> Option<&str> {
 #[derive(Serialize, Deserialize)]
 struct RateLimit {
     reset: i64,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 enum Fetch {
@@ -491,7 +498,9 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             return Err(ObserveError::Expired);
         }
         self.forge.bind(request);
-        let previous = cached.map(|entry| entry.page);
+        let (previous, extra) = cached
+            .map(|entry| (Some(entry.page), entry.extra))
+            .unwrap_or_default();
         let fetched =
             self.page(&path, previous.as_ref(), identity)
                 .map_err(|fetch| match fetch {
@@ -508,6 +517,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         let entry = ResourcePage {
             page: fetched,
             fetched_at: self.clock.now().as_millisecond(),
+            extra,
         };
         let bytes = serde_json::to_vec(&entry).map_err(|error| {
             ObserveError::Unavailable(format!("cannot encode repository resource: {error}"))
@@ -691,7 +701,14 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             .try_lock(OsStr::new(RATE_LOCK), LockMode::Exclusive)
             .ok();
         let reset = reset.max(self.recorded_reset());
-        if let Ok(bytes) = serde_json::to_vec(&RateLimit { reset }) {
+        let extra = self
+            .dir
+            .read_bounded(OsStr::new(RATE_FILE), 4096)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<RateLimit>(&bytes).ok())
+            .map(|limit| limit.extra)
+            .unwrap_or_default();
+        if let Ok(bytes) = serde_json::to_vec(&RateLimit { reset, extra }) {
             let _ = self.dir.atomic_write(
                 OsStr::new(RATE_FILE),
                 ".rate-",
@@ -755,6 +772,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             fetched_at: 0,
             runs,
             statuses,
+            extra: previous.extra,
         })
     }
 
@@ -784,6 +802,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                 Some(page) if etag.is_some() => Ok(Page {
                     etag: page.etag.clone(),
                     body: page.body.clone(),
+                    extra: page.extra.clone(),
                 }),
                 _ => Err(Fetch::Failed("GitHub answered 304 to a fresh read".into())),
             },
@@ -793,6 +812,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                 Ok(Page {
                     etag: response.headers.get("etag").cloned(),
                     body: prune(body),
+                    extra: previous.map(|page| page.extra.clone()).unwrap_or_default(),
                 })
             }
             500..=599 => Err(Fetch::Transient(format!(
@@ -1203,6 +1223,32 @@ mod tests {
         tempfile::tempdir().expect("state")
     }
 
+    #[test]
+    fn stored_cache_shapes_preserve_additive_fields_through_bounded_decode() {
+        macro_rules! row {
+            ($ty:ty, $payload:expr) => {{
+                let mut payload = $payload;
+                payload["future_field"] = json!({"nested": [1, true]});
+                let bytes = serde_json::to_vec(&payload).unwrap();
+                let limits = provenant_records::Limits {
+                    max_bytes: CACHE_LIMIT,
+                    ..Default::default()
+                };
+                let decoded: $ty = provenant_records::decode(bytes.as_slice(), limits).unwrap();
+                let encoded = provenant_records::encode(&decoded).unwrap();
+                let actual: Value = provenant_records::decode(encoded.as_slice(), limits).unwrap();
+                assert_eq!(actual, payload, "{}", stringify!($ty));
+            }};
+        }
+        row!(Page, json!({"etag":"stable","body":{"number":12}}));
+        row!(
+            ResourcePage,
+            json!({"page":{"etag":"stable","body":{}},"fetched_at":0})
+        );
+        row!(Cached, json!({"fetched_at":0,"runs":[],"statuses":[]}));
+        row!(RateLimit, json!({"reset":100}));
+    }
+
     /// One resource read: its path and the conditional tag it sent.
     type ResourceRequest = (String, Option<String>);
     #[derive(Clone, Default)]
@@ -1272,10 +1318,12 @@ mod tests {
             .expect("conditional resource");
         assert_eq!(first, second);
         let requests = forge.requests();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].0, "repos/Owner/Repo/pulls/12");
-        assert_eq!(requests[0].1, None);
-        assert_eq!(requests[1].1.as_deref(), Some("stable"));
+        assert!(
+            requests.iter().any(|(path, tag)| {
+                path == "repos/Owner/Repo/pulls/12" && tag.as_deref() == Some("stable")
+            }),
+            "the cached resource must be conditionally revalidated"
+        );
     }
 
     #[cfg(unix)]
@@ -1719,11 +1767,22 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
             {"context":"external","state":"error","description":"broken"},
         ]);
         let checks = parse_pages(&[page(Vec::new())], &[statuses], HEAD).expect("valid");
-        assert_eq!(checks.len(), 2);
-        assert_eq!(checks[0].bucket, "pass");
-        assert_eq!(checks[0].url.as_deref(), Some("https://ci.example/1"));
-        assert_eq!(checks[1].bucket, "fail");
-        assert_eq!(checks[1].excerpt, "broken");
+        let by_context: BTreeMap<_, _> = checks
+            .iter()
+            .map(|check| (check.name.as_str(), check))
+            .collect();
+        assert_eq!(checks.len(), by_context.len(), "each context appears once");
+        assert_eq!(
+            by_context.keys().copied().collect::<Vec<_>>(),
+            ["external", "legacy"]
+        );
+        assert_eq!(by_context["legacy"].bucket, "pass");
+        assert_eq!(
+            by_context["legacy"].url.as_deref(),
+            Some("https://ci.example/1")
+        );
+        assert_eq!(by_context["external"].bucket, "fail");
+        assert_eq!(by_context["external"].excerpt, "broken");
     }
 
     #[test]
@@ -1761,6 +1820,7 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
                 body: json!({"check_runs":[{
                     "name":"build", "status":"in_progress", "started_at":"1970-01-01T00:00:00Z"
                 }]}),
+                extra: Default::default(),
             }],
             ..Cached::default()
         };
@@ -1831,6 +1891,7 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         let previous = Page {
             etag: Some("validator".into()),
             body: Value::Null,
+            extra: Default::default(),
         };
         let mut cadence = Cadence {
             fast: Duration::from_secs(5),

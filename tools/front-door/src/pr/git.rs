@@ -334,10 +334,14 @@ mod resolve_commit_tests {
             .expect("3000 commits share a four-character prefix");
         let error = git
             .resolve_commit(temp.path(), &shared)
-            .expect_err("an ambiguous prefix must be refused")
-            .to_string();
-        assert!(error.contains("ambiguous"), "{error}");
-        assert!(error.contains("full ID"), "{error}");
+            .expect_err("an ambiguous prefix must be refused");
+        assert_eq!(
+            error
+                .downcast_ref::<super::super::wait::Failure>()
+                .unwrap()
+                .code,
+            "HEAD_UNRESOLVED"
+        );
         assert!(git.resolve_commit(temp.path(), "feedfacefeed").is_err());
     }
 }
