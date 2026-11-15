@@ -1416,7 +1416,10 @@ fn collect_impl(
             }
             let entry = entries
                 .iter()
-                .find(|entry| entry.path == lane.path)
+                .find(|entry| {
+                    entry.path == lane.path
+                        || canonicalize(&entry.path).ok().as_deref() == Some(lane.path.as_path())
+                })
                 .ok_or(WorktreeError::NotFound)?;
             if entry.locked || entry.prunable {
                 return Err(WorktreeError::GitEntryHeld {

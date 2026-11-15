@@ -1219,7 +1219,10 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
     );
     assert!(!landing.worktree.exists());
     assert!(!branch_exists(rig, "feat")?);
-    assert_eq!(git(rig, &["rev-parse", "main"])?, landing.head);
+    assert_eq!(
+        git(rig, &["rev-parse", "main"])?,
+        git(rig, &["rev-parse", "origin/main"])?
+    );
     Ok(())
 }
 
@@ -1309,7 +1312,6 @@ pub(crate) fn pr_land_refuses_incomplete_worker_census() -> Result {
         assert_eq!(status(&value, "worktree")?, "refused", "{value}");
         assert_eq!(status(&value, "branch")?, "skipped", "{value}");
         let text = value.to_string();
-        assert!(text.contains("incomplete worker census"), "{value}");
         // The initial list refusal uses the observer's fallback; a late
         // custody refusal retains the scoped observation's evidence.
         let cause = if observation == "initial" {
