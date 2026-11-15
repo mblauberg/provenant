@@ -450,15 +450,17 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
             .any(|g| g.path == Path::new("/fixture/scratch/bin"))
     );
     // Runtime roots are readable; no grant names a credentials file, and the
-    // compiler hard-denies Cargo credentials inside them.
-    assert!(
-        launch
-            .profile
-            .spec
-            .runtime_reads
-            .iter()
-            .any(|grant| grant.path == Path::new("/fixture/home/.cargo"))
-    );
+    // compiler hard-denies Cargo credentials inside them. The binding owns
+    // the exact host files that may be read.
+    let cargo_reads: Vec<_> = launch
+        .cargo_home()
+        .expect("host Cargo binding")
+        .reads()
+        .collect();
+    assert!(!cargo_reads.is_empty());
+    assert!(cargo_reads
+        .iter()
+        .all(|grant| launch.profile.spec.runtime_reads.contains(grant)));
     assert!(
         launch
             .profile

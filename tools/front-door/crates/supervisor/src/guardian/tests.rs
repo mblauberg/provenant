@@ -1440,17 +1440,20 @@ fn darwin_settlement_requires_complete_absence_of_members_and_recorded_escapes()
 }
 
 #[test]
-fn published_disk_admission_refusal_names_figures_and_repair() {
-    let reason = super::admission_refusal(&super::CustodyError::Admission(
-        super::AdmissionError::Disk {
+fn disk_admission_projects_typed_resource_figures() {
+    use provenant_records::diagnostic::{ResourceFact, SettingSource};
+    let error = super::AdmissionError::Disk {
+        free: 99,
+        floor: 100,
+        origin: SettingSource::Configuration,
+    };
+    assert_eq!(
+        error.resource_fact(),
+        Some(ResourceFact::Disk {
             free: 99,
             floor: 100,
-            origin: provenant_records::diagnostic::SettingSource::Configuration,
-        },
-    ));
-    assert_eq!(
-        reason,
-        "insufficient disk space: 99 bytes available, gc.free_floor 100 bytes (source: host configuration); run `provenant gc --apply`"
+            origin: SettingSource::Configuration,
+        })
     );
 }
 

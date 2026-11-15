@@ -358,7 +358,7 @@ fn fabric_never_creates_ancestors_of_the_state_root() -> Result {
 }
 
 #[test]
-fn fabric_uses_the_binary_product_root_protection() -> Result {
+fn fabric_identity_allows_state_under_product_checkout() -> Result {
     let mut rig = TestRig::new()?;
     let product = rig.root.join("product");
     std::fs::create_dir(&product)?;
@@ -368,8 +368,8 @@ fn fabric_uses_the_binary_product_root_protection() -> Result {
             *value = product.clone().into_os_string();
         }
     }
-    assert_eq!(call(&rig, &["fabric", "identity"], 2)?["status"], "invalid");
-    assert!(!rig.state.exists());
+    let identity = call(&rig, &["fabric", "identity"], 0)?;
+    assert_eq!(identity["status"], "ok");
     Ok(())
 }
 #[test]

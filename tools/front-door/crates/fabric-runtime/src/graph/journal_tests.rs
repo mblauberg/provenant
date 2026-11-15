@@ -1282,9 +1282,11 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
         assert_eq!(hydrated, checkpoint);
         assert_eq!(hydrated.bases, Some(bases));
         assert_eq!(journal.integration_base(), Some(integration));
+        let changed_integration = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();
+        let changed_bases = GraphBaseBinding::new(None, Some(changed_integration)).unwrap();
         assert!(matches!(
             journal.bind(GraphExecution {
-                bases: None,
+                bases: Some(changed_bases),
                 ..execution.clone()
             }),
             Err(JournalError::GraphMismatch)

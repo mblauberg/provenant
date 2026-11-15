@@ -766,7 +766,7 @@ fn inbox_outside_a_project_without_state_names_cause_and_repair() -> Result {
 }
 
 #[test]
-fn inbox_does_not_fall_back_when_project_discovery_fails() -> Result {
+fn inbox_does_not_fall_back_when_root_binding_fails() -> Result {
     let rig = TestRig::new()?;
     let file = draft(&rig, "decision")?;
     call(
@@ -778,8 +778,9 @@ fn inbox_does_not_fall_back_when_project_discovery_fails() -> Result {
     let broken = rig.root.join("broken");
     std::fs::create_dir(&broken)?;
     std::fs::write(broken.join(".git"), "gitdir: /definitely/missing/gitdir\n")?;
-    let failed = call_in(&rig, &broken, &["inbox"], 3)?;
-    assert_ne!(failed["error"]["code"], "no_project");
+    let failed = call_in(&rig, &broken, &["inbox"], 2)?;
+    assert_eq!(failed["error"]["code"], "INVALID");
+    assert!(failed["data"].is_null());
     Ok(())
 }
 
