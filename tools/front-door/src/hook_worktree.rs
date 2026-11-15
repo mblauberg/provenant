@@ -155,6 +155,8 @@ struct Ownership {
     branch: String,
     head: String,
     token: String,
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 /// The admin directory a linked worktree's `.git` file points at.
@@ -192,6 +194,7 @@ fn mark_owned(state: &Path, worktree: &Path, branch: &str, head: &str) -> Result
         branch: branch.to_owned(),
         head: head.to_owned(),
         token: random_token()?,
+        extra: Default::default(),
     };
     let text = serde_json::to_vec(&record)?;
     let stored = record_path(state, &canonical);
@@ -361,6 +364,26 @@ pub fn remove(globals: &Globals) -> u8 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn ownership_preserves_additive_fields_through_the_bounded_codec() {
+        let payload = serde_json::json!({
+            "path": "/fixture/worktree",
+            "branch": "fixture",
+            "head": "fixture-head",
+            "token": "fixture-token",
+            "future_owner_fact": {"revision": 1}
+        });
+        let bytes = provenant_records::encode(&payload).unwrap();
+        let ownership: super::Ownership =
+            provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())
+                .unwrap();
+        let encoded = provenant_records::encode(&ownership).unwrap();
+        let restored: serde_json::Value =
+            provenant_records::decode(encoded.as_slice(), provenant_records::Limits::default())
+                .unwrap();
+        assert_eq!(restored, payload);
+    }
 
     #[test]
     fn only_plain_slugs_become_branches() {

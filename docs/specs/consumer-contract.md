@@ -129,7 +129,7 @@ names another. The 1.x root `~/.local/share/provenant/v1` is never written by
 2.x, so reinstalling 1.x finds its state as it was left. This tier is evolving.
 
 - Why: two majors must be able to coexist and roll back without migration.
-- Test: `src/state_handoff.rs::tests::copies_only_owner_configuration_and_never_writes_the_old_root`;
+- Test: `src/state_handoff.rs::tests::copies_only_declared_owner_configuration_and_never_reads_receipts`;
   `crates/core/src/roots.rs::changing_the_candidate_preserves_all_captured_boundaries`
 - Owner: `crates/core/src/roots.rs`, `src/state_handoff.rs`
 

@@ -71,12 +71,10 @@ impl Error {
     }
 }
 #[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ReleaseCommandOutput {
     findings: Vec<ReleaseCommandFinding>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ReleaseCommandFinding {
     rule: String,
     path: PathWire,

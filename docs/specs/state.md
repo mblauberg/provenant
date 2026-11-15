@@ -188,7 +188,7 @@ Removal records preserve subject, tip, subsumed or landed predicate and evidence
   `crates/telemetry/src/ledger/tests.rs::concurrent_retries_count_an_attempt_once`;
   `crates/run/src/retention.rs::age_collection_keeps_unimported_git_until_custody_is_proven`;
   `crates/run/src/target_seed_gc.rs::tests::active_clone_lock_prevents_collection`
-- Test: `worktrees.rs::gc_preview_tests::retention_registry_settings_resolve_and_adapters_cover_every_class`;
+- Test: `src/worktrees.rs::gc_preview_tests::retention_registry_settings_resolve_and_adapters_cover_every_class`;
   `crates/fabric-runtime/src/graph/journal_tests.rs::interrupted_terminal_collection_resumes_derived_cleanup`
 - Owner: `crates/config/src/gc.rs`; `worktrees.rs`; `crates/run/src/retention.rs`
 

@@ -50,4 +50,4 @@ GitHub authority remains the user's. Credential selection has one host seam;
 a failed mint does not fall back, and token bytes are not recorded. Project
 GitHub policy is an advisory guard, not a security boundary.
 - Why: a lane must not gain authority through an implicit credential fallback.
-- Test: `crates/cli/src/run/provider/gh_auth.rs::selection_receipt_names_identity_source_delivery_and_mediation`
+- Test: `crates/cli/src/run/provider/gh_auth.rs::selection_drives_receipt_and_environment_without_disclosing_tokens`
