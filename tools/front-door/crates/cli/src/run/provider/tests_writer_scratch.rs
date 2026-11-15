@@ -1077,6 +1077,9 @@ printf 'agy 1.0.0\n'
     std::fs::write(&cargo, b"#!/bin/sh\n")?;
     std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o700))?;
     let codex_route = provenant_records::ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
         extra: Default::default(),
         adapter: "codex".into(),
         model: "fixture-model".into(),
@@ -1088,6 +1091,7 @@ printf 'agy 1.0.0\n'
         exclusions: Vec::new(),
         eligibility: provenant_records::RouteEligibility::Eligible,
         readiness: provenant_records::RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 100,

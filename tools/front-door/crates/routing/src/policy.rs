@@ -4,15 +4,7 @@ use provenant_config::SectionError;
 use provenant_core::WallTime;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Workload {
-    #[default]
-    General,
-    ReadHeavy,
-    EditHeavy,
-    Review,
-}
+pub use provenant_records::route_selection::Workload;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

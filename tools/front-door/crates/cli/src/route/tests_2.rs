@@ -352,9 +352,9 @@
                 let selected = resolve(&query)?;
                 assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
                 assert!(super::check_dispatch_candidate(&roots, &selected, super::REGISTRY).is_ok());
-                let warning = &selected.extra["account_load"]["warnings"];
-                assert!(warning.as_array().is_some_and(|rows| !rows.is_empty()));
-                assert!(warning.to_string().contains("source=config"));
+                let warnings = &selected.diagnostics.account_load.as_ref().ok_or("load")?.warnings;
+                assert!(!warnings.is_empty());
+                assert!(warnings.iter().any(|warning| warning.contains("source=config")));
             }
         }
         Ok(())
@@ -822,11 +822,15 @@
 
     fn resolved(adapter: &str, model: &str, roll: u64) -> ResolvedRoute {
         let readiness = RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 200,
         };
         ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
             extra: Default::default(),
             adapter: adapter.into(),
             model: model.into(),
@@ -843,9 +847,16 @@
                 evidence_ref: "fixture".into(),
             },
             pool_selection: Some(RouteSelectionReceipt {
+                selection_rule: provenant_records::route_selection::SelectionRule::WeightedDraw,
+                considered_exclusions: Vec::new(),
+                exploration: provenant_records::route_selection::Exploration {
+    extra: Default::default(), selected: false, percent: 0, enabled: false, source: "fixture".into() },
+                weight_source: provenant_records::route_selection::WeightSource::Catalogue,
+                account_load: None,
                 extra: Default::default(),
                 pool: "junior".into(),
                 candidates: vec![RouteSelectionCandidate {
+                    ranking: Default::default(),
                     extra: Default::default(),
                     pacing_detail: None,
                     model: format!("{adapter}/{model}"),

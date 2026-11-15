@@ -442,6 +442,9 @@ pub(super) fn with_alternative(
     alternative: &RouteAlternative,
 ) -> ResolvedRoute {
     ResolvedRoute {
+        selection_context: base.selection_context.clone(),
+        diagnostics: alternative.diagnostics.clone(),
+        user_skills: base.user_skills,
         extra: alternative.extra.clone(),
         adapter: alternative.adapter.clone(),
         model: alternative.model.clone(),

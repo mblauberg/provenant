@@ -912,6 +912,7 @@ pub(super) fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<D
                     let mut candidate = route.clone();
                     candidate.account_key = Some(row.account_key.clone());
                     candidate.readiness = RouteReadiness::Ready {
+                        availability_warning: None,
                         extra: Default::default(),
                         availability_ref: "preview".into(),
                         expires_unix_seconds: now.unix_seconds().saturating_add(60),

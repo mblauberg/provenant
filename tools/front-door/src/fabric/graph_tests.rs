@@ -929,6 +929,7 @@ mod graph_writer_admission_tests {
         pacing
             .skipped_routes
             .push(provenant_records::run::SkippedRoute {
+                skipped_accounts: Vec::new(),
                 extra: Default::default(),
                 route: "codex/gpt-6-luna".into(),
                 kind: provenant_records::run::SkipKind::Unavailable,

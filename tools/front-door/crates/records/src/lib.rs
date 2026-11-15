@@ -64,11 +64,11 @@ pub use command_result::{
 };
 
 mod resolved_route;
+pub mod route_selection;
 pub use resolved_route::{
     ResolvedRoute, RouteAlternative, RouteAlternatives, RouteConfidentiality, RouteEligibility,
     RouteExclusion, RouteExclusionReason, RouteReadiness, RouteSelectionCandidate,
-    RouteSelectionReceipt, RouteSelectionRedraw, SKIPPED_ACCOUNTS, SkippedAccount,
-    TooManyAlternatives,
+    RouteSelectionReceipt, RouteSelectionRedraw, SkippedAccount, TooManyAlternatives,
 };
 
 pub mod result_capture;

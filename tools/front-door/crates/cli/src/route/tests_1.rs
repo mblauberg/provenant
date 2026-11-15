@@ -178,6 +178,7 @@
     fn route_readiness_is_rendered_in_words() {
         use provenant_records::RouteExclusionReason;
         let ready = RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 120,
@@ -191,11 +192,13 @@
         let stale = super::readiness_text(&RouteReadiness::stale());
         assert!(stale.contains("unknown (observation expired"), "{stale}");
         let partial = RouteReadiness::Unavailable {
+            skipped_accounts: Vec::new(),
             extra: Default::default(),
             reason: RouteExclusionReason::UnknownPartialHeadroom,
         };
         assert!(super::readiness_text(&partial).starts_with("unknown (partial headroom"));
         let refused = RouteReadiness::Unavailable {
+            skipped_accounts: Vec::new(),
             extra: Default::default(),
             reason: RouteExclusionReason::AuthRequired,
         };

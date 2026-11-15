@@ -151,6 +151,7 @@ impl ReadinessRead {
         match (self.state, self.reason) {
             (ReadinessState::Ready, _) => match (&self.evidence_ref, self.expires_unix_seconds) {
                 (Some(availability_ref), Some(expires_unix_seconds)) => Receipt::Ready {
+                    availability_warning: None,
                     extra: Default::default(),
                     availability_ref: availability_ref.clone(),
                     expires_unix_seconds,
@@ -158,6 +159,7 @@ impl ReadinessRead {
                 _ => Receipt::unknown(),
             },
             (ReadinessState::Unavailable, reason) => Receipt::Unavailable {
+                skipped_accounts: Vec::new(),
                 extra: Default::default(),
                 reason: match reason {
                     Some(ReadinessReason::MissingExecutable) => Excluded::MissingExecutable,

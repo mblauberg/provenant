@@ -1,8 +1,13 @@
 //! Routing's immutable decision, shared with providers and run.
+use crate::route_selection::*;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedRoute {
+    pub selection_context: RouteAttemptContext,
+    #[serde(default = "user_skills_default")]
+    pub user_skills: bool,
+    pub diagnostics: RouteDiagnostics,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub adapter: String,
@@ -23,19 +28,15 @@ pub struct ResolvedRoute {
     pub pool_selection: Option<RouteSelectionReceipt>,
 }
 
+fn user_skills_default() -> bool {
+    true
+}
 impl ResolvedRoute {
-    /// Whether user skills discovery is enabled for this route (default: true).
     pub fn user_skills(&self) -> bool {
-        self.extra
-            .get("user_skills")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true)
+        self.user_skills
     }
-
-    /// Override user skills discovery for this route.
     pub fn set_user_skills(&mut self, enabled: bool) {
-        self.extra
-            .insert("user_skills".into(), serde_json::Value::Bool(enabled));
+        self.user_skills = enabled;
     }
 }
 
@@ -43,6 +44,11 @@ impl ResolvedRoute {
 /// with 10,000 representing 1.0.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteSelectionReceipt {
+    pub selection_rule: SelectionRule,
+    pub considered_exclusions: Vec<ExclusionRule>,
+    pub exploration: Exploration,
+    pub weight_source: WeightSource,
+    pub account_load: Option<AccountLoad>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub pool: String,
@@ -59,6 +65,7 @@ pub struct RouteSelectionReceipt {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteSelectionRedraw {
+    pub cause: Option<RouteExclusionReason>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub rejected_pick: String,
@@ -69,6 +76,7 @@ pub struct RouteSelectionRedraw {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteSelectionCandidate {
+    pub ranking: CandidateRanking,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub model: String,
@@ -85,6 +93,7 @@ pub struct RouteSelectionCandidate {
 /// primary. Run receives the decision, rather than reconstructing candidates.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteAlternative {
+    pub diagnostics: RouteDiagnostics,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub adapter: String,
@@ -131,12 +140,15 @@ pub enum RouteEligibility {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum RouteReadiness {
     Ready {
+        availability_warning: Option<String>,
         #[serde(flatten)]
         extra: crate::ExtraFields,
         availability_ref: String,
         expires_unix_seconds: i64,
     },
     Unavailable {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skipped_accounts: Vec<SkippedAccount>,
         #[serde(flatten)]
         extra: crate::ExtraFields,
         reason: RouteExclusionReason,
@@ -147,6 +159,7 @@ impl RouteReadiness {
     /// with an explicit unknown-availability reason.
     pub fn unknown() -> Self {
         Self::Unavailable {
+            skipped_accounts: Vec::new(),
             extra: Default::default(),
             reason: RouteExclusionReason::UnknownAvailability,
         }
@@ -154,6 +167,7 @@ impl RouteReadiness {
     /// Readiness whose evidence has expired; it projects like [`Self::unknown`].
     pub fn stale() -> Self {
         Self::Unavailable {
+            skipped_accounts: Vec::new(),
             extra: Default::default(),
             reason: RouteExclusionReason::StaleAvailability,
         }
@@ -187,9 +201,6 @@ pub struct RouteExclusion {
     pub model: String,
     pub reason: RouteExclusionReason,
 }
-/// Extra-field key for the accounts a route passed over when none was ready.
-pub const SKIPPED_ACCOUNTS: &str = "skipped_accounts";
-
 /// One account a route passed over, and why. Routing names the account by its
 /// opaque key; preparation replaces the key with the registered label before
 /// the reason reaches any message, so no sign-in identity is ever shown.
@@ -200,14 +211,6 @@ pub struct SkippedAccount {
 }
 
 impl SkippedAccount {
-    /// The typed list under [`SKIPPED_ACCOUNTS`], empty when absent or malformed.
-    pub fn read(extra: &crate::ExtraFields) -> Vec<Self> {
-        extra
-            .get(SKIPPED_ACCOUNTS)
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
-            .unwrap_or_default()
-    }
-
     /// `label: cause` for each account, for refusal messages.
     pub fn describe(accounts: &[Self]) -> String {
         accounts

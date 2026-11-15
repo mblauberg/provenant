@@ -707,9 +707,8 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     assert!(
         prepared
             .route
-            .extra
-            .get("availability_warning")
-            .and_then(|v| v.as_str())
+            .availability_warning
+            .as_deref()
             .is_some_and(|v| v.contains("Stale"))
     );
     Ok(())

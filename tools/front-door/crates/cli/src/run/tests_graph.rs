@@ -12,6 +12,7 @@ fn graph_quality_reports_missing_checkpoint_without_failing()
     let root = provenant_core::StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
     let project = ProjectId::from_bytes([3; 16]);
     let fact = AttemptFact {
+        routing_context: Some(Default::default()),
         context: Some(provenant_records::run::WorkContext {
             graph_id: Some("retired".into()),
             ..Default::default()

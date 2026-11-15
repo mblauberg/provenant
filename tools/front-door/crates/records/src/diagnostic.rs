@@ -726,6 +726,7 @@ mod tests {
             run::{SkipKind, SkippedRoute},
         };
         let mut route = SkippedRoute {
+            skipped_accounts: Vec::new(),
             extra: Default::default(),
             route: "fixture/model".into(),
             kind: SkipKind::Unavailable,

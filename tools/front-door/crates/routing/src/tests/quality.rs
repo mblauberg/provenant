@@ -21,10 +21,11 @@ fn outcome_priors_and_exploration_rank_eligible_members() -> Result<(), Box<dyn 
         confinement_ref: "grant",
     }];
     let evidence = SelectionEvidence {
-        role: Some("review".into()),
+        role: None,
         source: "fixture:route_outcomes".into(),
         priors: vec![
             RoutePrior {
+                extra: Default::default(),
                 model: ModelId::parse("codex/gpt-6.1-sol")?,
                 pool: "senior".into(),
                 role: "review".into(),
@@ -33,6 +34,7 @@ fn outcome_priors_and_exploration_rank_eligible_members() -> Result<(), Box<dyn 
                 source: "fixture:attributed".into(),
             },
             RoutePrior {
+                extra: Default::default(),
                 model: ModelId::parse("codex/gpt-6.1-terra")?,
                 pool: "senior".into(),
                 role: "review".into(),
@@ -53,12 +55,10 @@ fn outcome_priors_and_exploration_rank_eligible_members() -> Result<(), Box<dyn 
         let route = resolve_with_seed(&query, &ctx, "quality-invariant", seed)?;
         assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
         *picks.entry(route.model.clone()).or_default() += 1;
+        assert_eq!(route.selection_context.workload, query.intent.workload);
+        assert_eq!(route.selection_context.writes, query.intent.writes);
         let receipt = route.pool_selection.ok_or("receipt")?;
-        explorations += u64::from(
-            receipt.extra["exploration"]["selected"]
-                .as_bool()
-                .ok_or("exploration")?,
-        );
+        explorations += u64::from(receipt.exploration.selected);
         assert!(
             receipt
                 .candidates
@@ -66,15 +66,17 @@ fn outcome_priors_and_exploration_rank_eligible_members() -> Result<(), Box<dyn 
                 .all(|candidate| candidate.exclusion.is_none())
         );
         assert!(receipt.candidates.iter().all(|candidate| {
-            candidate.extra["ranking_factor_basis_points"]
-                .as_u64()
+            candidate
+                .ranking
+                .ranking_factor_basis_points
                 .is_some_and(|factor| factor > 0)
         }));
-        assert!(receipt.candidates.iter().all(|candidate| {
-            candidate.extra["outcome_prior"]["evidence_count"]
-                .as_u64()
-                .is_some()
-        }));
+        assert!(
+            receipt
+                .candidates
+                .iter()
+                .all(|candidate| { candidate.ranking.outcome_prior.is_some() })
+        );
     }
     assert!(picks["gpt-6.1-sol"] > picks["gpt-6-luna"]);
     assert!(
@@ -103,14 +105,24 @@ fn outcome_priors_and_exploration_rank_eligible_members() -> Result<(), Box<dyn 
         let route = resolve_with_seed(&query, &ctx, "only-general", seed)?;
         let receipt = route.pool_selection.ok_or("receipt")?;
         assert_eq!(
-            receipt.candidates[0].extra["outcome_prior"]["factor_basis_points"],
+            receipt.candidates[0]
+                .ranking
+                .outcome_prior
+                .as_ref()
+                .ok_or("prior")?
+                .factor_basis_points,
             10_000
         );
         assert_eq!(
-            receipt.candidates[0].extra["capability_preference"]["source"],
-            "config"
+            receipt.candidates[0]
+                .ranking
+                .capability_preference
+                .as_ref()
+                .ok_or("capability")?
+                .source,
+            provenant_records::route_selection::WeightSource::Config
         );
-        assert_eq!(receipt.extra["exploration"]["selected"], false);
+        assert!(!receipt.exploration.selected);
     }
     Ok(())
 }
@@ -166,11 +178,21 @@ fn account_ranking_uses_reset_adjusted_headroom_and_live_load_independent_of_ord
         ctx.selection_evidence = Some(&evidence);
         let route = resolve(&request("codex/test")?, &ctx)?;
         assert_eq!(route.account_key.as_deref(), Some("fast"));
-        assert_eq!(route.extra["account_load"]["reset_eta_seconds"], 100);
+        assert_eq!(
+            route
+                .diagnostics
+                .account_load
+                .as_ref()
+                .ok_or("load")?
+                .reset_eta_seconds,
+            Some(100)
+        );
         assert!(
-            route.extra["account_load"]["source"]
-                .as_str()
-                .is_some_and(|s| s.contains("host_active_lanes"))
+            route
+                .diagnostics
+                .account_load
+                .as_ref()
+                .is_some_and(|load| load.source.contains("host_active_lanes"))
         );
     }
     evidence

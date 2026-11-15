@@ -82,7 +82,7 @@ fn provider_account_and_model_selectors_remove_only_their_members()
     let receipt = serde_json::to_value(route.pool_selection.ok_or("receipt")?)?;
     assert_eq!(
         receipt["considered_exclusions"][0],
-        "source=flag selector=account codex/codex-key"
+        serde_json::json!({"source":"flag", "selector":"account codex/codex-key"})
     );
     assert!(
         receipt["candidates"]
@@ -478,9 +478,13 @@ fn expired_login_observation_warns_and_remains_selectable() -> Result<(), Box<dy
             ..context(&catalogue, &config, now()?)
         };
         let selected = resolve(&request("codex/gpt-6-luna")?, &context)?;
-        assert!(
-            matches!(selected.readiness, RouteReadiness::Ready { extra, .. } if extra.contains_key("availability_warning"))
-        );
+        assert!(matches!(
+            selected.readiness,
+            RouteReadiness::Ready {
+                availability_warning: Some(_),
+                ..
+            }
+        ));
     }
     Ok(())
 }
@@ -685,12 +689,17 @@ fn unavailable_account_moves_selection_to_an_alternate_account()
     assert!(matches!(chosen.readiness, RouteReadiness::Ready { .. }));
     // Every account refused leaves the route unavailable with the refusal.
     let none = pick(vec![refused("work", "*"), refused("review", "*")])?;
-    let RouteReadiness::Unavailable { reason, extra } = &none.readiness else {
+    let RouteReadiness::Unavailable {
+        reason,
+        skipped_accounts,
+        ..
+    } = &none.readiness
+    else {
         return Err("expected an unavailable route".into());
     };
     assert_eq!(reason, &RouteExclusionReason::ProviderRefused);
     // Each passed-over account keeps its own reason for the refusal message.
-    let mut skipped = provenant_records::SkippedAccount::read(extra);
+    let mut skipped = skipped_accounts.clone();
     skipped.sort_by(|a, b| a.account.cmp(&b.account));
     assert_eq!(
         skipped,

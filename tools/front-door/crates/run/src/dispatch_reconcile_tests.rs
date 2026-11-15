@@ -74,6 +74,9 @@ fn failed_fresh_preparation_leaves_no_short_alias()
 #[test]
 fn resolved_named_route_survives_launch_admission() -> TestResult {
     let resolved = provenant_records::ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
         extra: Default::default(),
         adapter: "codex".into(),
         model: "gpt-6.1-sol".into(),
@@ -146,6 +149,7 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
                 .into_iter()
                 .enumerate()
                 .map(|(index, cause)| SkippedRoute {
+                    skipped_accounts: Vec::new(),
                     extra: Default::default(),
                     route: format!("codex/example-{index}"),
                     kind: SkipKind::Unavailable,
@@ -236,6 +240,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
                     .then_some(provenant_records::run::PreparationFailure::AuthRequired),
                 skipped_routes: ["cursor/example", "codex/example"]
                     .map(|route| SkippedRoute {
+                        skipped_accounts: Vec::new(),
                         extra: Default::default(),
                         route: route.into(),
                         kind: if self.0 && route.starts_with("codex/") {

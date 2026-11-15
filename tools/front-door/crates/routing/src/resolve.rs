@@ -1,6 +1,10 @@
 use crate::*;
 use provenant_providers::{AvailabilityRecord, Registration};
 use provenant_quota::QuotaStatus;
+use provenant_records::route_selection::{
+    AllowanceWarning, CandidateRanking, CapabilityPreference, EffortWarning, Exploration,
+    OutcomePrior, PriorSource, RouteDiagnostics, SelectionRule, WeightSource,
+};
 use provenant_records::{
     RouteAlternative, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteExclusion,
     RouteExclusionReason, RouteReadiness, RouteSelectionCandidate, RouteSelectionReceipt,
@@ -1650,6 +1654,7 @@ fn account_load(
         }
     }
     AccountLoad {
+        extra: Default::default(),
         account_key: availability.account_key.clone(),
         account_source: availability.fixture_ref.clone(),
         headroom_basis_points: limiting.map(|(headroom, _)| headroom),
@@ -1800,26 +1805,13 @@ fn candidate(
         .collect();
     let readiness = match (reason, availability) {
         (Some(reason), _) => RouteReadiness::Unavailable {
-            extra: if skipped.is_empty() {
-                Default::default()
-            } else {
-                [(
-                    provenant_records::SKIPPED_ACCOUNTS.into(),
-                    serde_json::json!(skipped),
-                )]
-                .into_iter()
-                .collect()
-            },
+            skipped_accounts: skipped,
+            extra: Default::default(),
             reason,
         },
         (None, Some(a)) => RouteReadiness::Ready {
-            extra: uncertainty(model, a, context)
-                .map(|reason| {
-                    [("availability_warning".into(), serde_json::json!(reason))]
-                        .into_iter()
-                        .collect()
-                })
-                .unwrap_or_default(),
+            availability_warning: uncertainty(model, a, context),
+            extra: Default::default(),
             availability_ref: a.fixture_ref.clone(),
             // A stale observation is not renewed; this bounds the lifetime of
             // the routing decision that permits a launch despite uncertainty.
@@ -1830,21 +1822,35 @@ fn candidate(
             },
         },
         _ => RouteReadiness::Unavailable {
+            skipped_accounts: Vec::new(),
             extra: Default::default(),
             reason: RouteExclusionReason::UnknownAvailability,
         },
     };
-    let mut extra = provenant_records::ExtraFields::default();
+    let mut diagnostics = RouteDiagnostics::default();
     if let Some(value) = dropped_effort {
-        extra.insert("effort_warning".into(), serde_json::json!({
-            "requested": value, "applied": effort, "model": model.as_str(),
-            "source": "adapter:drop_unsupported_effort", "reason": "unsupported model effort dropped"
-        }));
+        diagnostics.effort_warning = Some(EffortWarning {
+            extra: Default::default(),
+            requested: value.into(),
+            applied: effort.map(str::to_owned),
+            model: model.as_str().into(),
+            source: "adapter:drop_unsupported_effort".into(),
+            reason: "unsupported model effort dropped".into(),
+        });
     }
     if availability.is_none()
         && let Err(warning) = check_go_allowance(model, context.config, context.catalogue)
     {
-        extra.insert("allowance_warning".into(), serde_json::json!({"warning":warning,"source":context.config.preference_sources.get("domains.routing.opencode_go.min_monthly_allowance_usd").map(String::as_str).unwrap_or("unresolved")}));
+        diagnostics.allowance_warning = Some(AllowanceWarning {
+            extra: Default::default(),
+            warning: warning.to_string(),
+            source: context
+                .config
+                .preference_sources
+                .get("domains.routing.opencode_go.min_monthly_allowance_usd")
+                .cloned()
+                .unwrap_or_else(|| "unresolved".into()),
+        });
     }
     if let Some(availability) = availability
         && effective_profile(context, model, availability.account_key.as_deref()).0
@@ -1893,20 +1899,16 @@ fn candidate(
             } else {
                 PacingSettingSource::ShippedDefault
             };
-            extra.insert(
-                "pacing_reserve_fact".into(),
-                serde_json::json!(ResourceFact::PacingReserve {
-                    percent: window.percent,
-                    setting,
-                    origin
-                }),
-            );
+            diagnostics.pacing_reserve_fact = Some(ResourceFact::PacingReserve {
+                percent: window.percent,
+                setting,
+                origin,
+            });
         }
     }
     if let Some(availability) = availability {
         let load = account_load(model, availability, context);
-        extra.insert("account_load".into(), serde_json::json!(load));
-        extra.insert("account_load_score".into(), load.score().into());
+        diagnostics.account_load = Some(load);
     }
     if evaluated.iter().all(|(_, reason, _)| reason.is_some()) && !evaluated.is_empty() {
         let details: Vec<_> = evaluated
@@ -1921,10 +1923,11 @@ fn candidate(
                 })
             })
             .collect();
-        extra.insert("account_exclusions".into(), serde_json::json!(details));
+        diagnostics.account_exclusions = details;
     }
     Ok(RouteAlternative {
-        extra,
+        diagnostics,
+        extra: Default::default(),
         adapter: model.adapter().into(),
         model: model.model().into(),
         effort: effort.map(str::to_owned),
@@ -2379,6 +2382,13 @@ fn resolve_inner(
         })
         .collect();
     Ok(ResolvedRoute {
+        selection_context: provenant_records::route_selection::RouteAttemptContext {
+            extra: Default::default(),
+            workload: request.intent.workload,
+            writes: request.intent.writes,
+        },
+        user_skills: true,
+        diagnostics: primary.diagnostics,
         extra: primary.extra,
         adapter: primary.adapter,
         model: primary.model,
@@ -2475,16 +2485,14 @@ fn classify_pool(
             .model(&member.model)
             .map(|model| model.capability)
             .unwrap_or_default();
-        let role = context
-            .selection_evidence
-            .map(|evidence| evidence.role(request.intent.workload, request.intent.writes))
-            .unwrap_or(if request.intent.workload == Workload::Review {
-                "review"
-            } else if request.intent.writes {
-                "writer"
-            } else {
-                "task"
-            });
+        let role_key = PriorKey::for_attempt(
+            request.intent.workload,
+            request.intent.writes,
+            context
+                .selection_evidence
+                .and_then(|evidence| evidence.role.as_deref()),
+        );
+        let role = role_key.as_str();
         let selector = if role == "review" || request.intent.workload == Workload::Review {
             "review"
         } else {
@@ -2494,10 +2502,10 @@ fn classify_pool(
             .config
             .capability_preferences
             .get(selector)
-            .map(|weights| (Some(weights), "config"))
+            .map(|weights| (Some(weights), WeightSource::Config))
             .unwrap_or((
                 context.catalogue.capability_preferences.get(selector),
-                "catalogue",
+                WeightSource::Catalogue,
             ));
         let capability_weight = preferences
             .and_then(|weights| weights.get(&capability))
@@ -2518,9 +2526,34 @@ fn classify_pool(
         let prior_factor = prior.map_or(10_000, RoutePrior::factor_basis_points);
         let evidence_count =
             observed_prior.map_or(0, |prior| prior.successes.saturating_add(prior.failures));
-        let mut ranking = provenant_records::ExtraFields::default();
-        ranking.insert("capability_preference".into(), serde_json::json!({"capability":capability,"weight":capability_weight,"selector":selector,"source":preference_source}));
-        ranking.insert("outcome_prior".into(), serde_json::json!({"enabled":context.config.outcome_priors.enabled,"role":role,"pool":name,"factor_basis_points":prior_factor,"evidence_count":evidence_count,"evidence":observed_prior,"source":if !context.config.outcome_priors.enabled {"config:disabled"} else if observed_prior.is_some() {"route_outcomes"} else {"no_evidence"}}));
+        let mut ranking = CandidateRanking {
+            capability_preference: Some(CapabilityPreference {
+                extra: Default::default(),
+                capability,
+                weight: capability_weight,
+                selector: selector.into(),
+                source: preference_source,
+            }),
+            outcome_prior: Some(OutcomePrior {
+                extra: Default::default(),
+                enabled: context.config.outcome_priors.enabled,
+                role: role.into(),
+                pool: name.into(),
+                factor_basis_points: prior_factor,
+                evidence_count,
+                evidence: observed_prior
+                    .cloned()
+                    .map(|prior| prior.map_model(|model| model.as_str().to_owned())),
+                source: if !context.config.outcome_priors.enabled {
+                    PriorSource::Disabled
+                } else if observed_prior.is_some() {
+                    PriorSource::RouteOutcomes
+                } else {
+                    PriorSource::NoEvidence
+                },
+            }),
+            ..Default::default()
+        };
         let spent = context
             .availability
             .iter()
@@ -2584,7 +2617,8 @@ fn classify_pool(
                 .exclusions
                 .push(format!("{}: {detail}", member.model.as_str()));
             classified.candidates.push(RouteSelectionCandidate {
-                extra: ranking.clone(),
+                ranking: ranking.clone(),
+                extra: Default::default(),
                 model: member.model.as_str().into(),
                 weight: member.weight,
                 factor_basis_points,
@@ -2623,9 +2657,7 @@ fn classify_pool(
             ) {
                 Ok(resolved) => {
                     effort = resolved.effort.clone();
-                    if let Some(warning) = resolved.extra.get("effort_warning") {
-                        ranking.insert("effort_warning".into(), warning.clone());
-                    }
+                    ranking.effort_warning = resolved.diagnostics.effort_warning.clone();
                     if let Some(family) = excluded_members.required_family
                         && matches!(&resolved.readiness, RouteReadiness::Unavailable { reason, .. } if reason.is_account_block())
                     {
@@ -2637,7 +2669,8 @@ fn classify_pool(
                             .exclusions
                             .push(format!("{}: {detail}", member.model.as_str()));
                         classified.candidates.push(RouteSelectionCandidate {
-                            extra: ranking.clone(),
+                            ranking: ranking.clone(),
+                            extra: Default::default(),
                             model: member.model.as_str().into(),
                             weight: member.weight,
                             factor_basis_points,
@@ -2666,7 +2699,8 @@ fn classify_pool(
                             .exclusions
                             .push(format!("{}: read-only model policy", member.model.as_str()));
                         classified.candidates.push(RouteSelectionCandidate {
-                            extra: ranking.clone(),
+                            ranking: ranking.clone(),
+                            extra: Default::default(),
                             model: member.model.as_str().into(),
                             weight: member.weight,
                             factor_basis_points,
@@ -2705,18 +2739,14 @@ fn classify_pool(
                         / 100_000_000)
                         .clamp(1, u128::from(u32::MAX))
                         as u32;
-                    ranking.insert(
-                        "ranking_factor_basis_points".into(),
-                        ranking_factor_basis_points.into(),
-                    );
-                    if let Some(load) = load {
-                        ranking.insert("account_load".into(), serde_json::json!(load));
-                    }
+                    ranking.ranking_factor_basis_points = Some(ranking_factor_basis_points);
+                    ranking.account_load = load;
                     if avoid_cooling
                         && cooling(&member.model, resolved.account_key.as_deref(), context)
                     {
                         classified.candidates.push(RouteSelectionCandidate {
-                            extra: ranking.clone(),
+                            ranking: ranking.clone(),
+                            extra: Default::default(),
                             model: member.model.as_str().into(),
                             weight: member.weight,
                             factor_basis_points,
@@ -2808,7 +2838,8 @@ fn classify_pool(
             }
         };
         classified.candidates.push(RouteSelectionCandidate {
-            extra: ranking,
+            ranking,
+            extra: Default::default(),
             model: member.model.as_str().into(),
             weight: member.weight,
             factor_basis_points,
@@ -2883,24 +2914,6 @@ fn draw_pool(
         roll,
         total_weight,
     })
-}
-
-fn selection_receipt(
-    name: &str,
-    classified: &ClassifiedPool,
-    draw: &PoolDraw,
-    route: &RouteAlternative,
-) -> RouteSelectionReceipt {
-    RouteSelectionReceipt {
-        extra: Default::default(),
-        pool: name.into(),
-        candidates: classified.candidates.clone(),
-        roll: draw.roll,
-        total_weight: draw.total_weight,
-        pick: format!("{}/{}", route.adapter, route.model),
-        reason: None,
-        redraws: Vec::new(),
-    }
 }
 
 fn classify_with_image_preference(
@@ -3055,48 +3068,62 @@ fn select_pool(
         .and_then(Option::as_ref)
         .cloned()
         .ok_or(RoutingError::Catalogue)?;
-    let mut receipt = selection_receipt(name, &classified, &draw, &route);
-    receipt.extra.insert(
-        "weight_source".into(),
-        if context.config.pools.contains_key(name) {
-            "config"
-        } else {
-            "catalogue"
-        }
-        .into(),
-    );
-    receipt.extra.insert("exploration".into(), serde_json::json!({"selected":draw.exploration,"percent":context.config.outcome_priors.exploration_percent,"enabled":context.config.outcome_priors.enabled,"source":context.config.preference_sources.get("domains.routing.outcome_priors.exploration_percent").map(String::as_str).unwrap_or("default")}));
-    if let Some(load) = route.extra.get("account_load") {
-        receipt.extra.insert("account_load".into(), load.clone());
-    }
-    let rule = if preferred_index.is_some() {
-        "model_choice_override"
-    } else if draw.exploration {
-        "exploration_draw"
-    } else if draw.total_weight > 0 {
-        "weighted_draw"
-    } else if classified.first_zero_ready == Some(draw.index) {
-        "first_zero_weight_ready"
-    } else if classified.first_standby_ready == Some(draw.index) {
-        "first_standby_ready"
-    } else if classified.first_recoverable_unavailable == Some(draw.index) {
-        "first_recoverable_unavailable"
+    let weight_source = if context.config.pools.contains_key(name) {
+        WeightSource::Config
     } else {
-        "first_unavailable"
+        WeightSource::Catalogue
     };
-    receipt.extra.insert("selection_rule".into(), rule.into());
-    if !excluded_members.rules.is_empty() {
-        receipt.extra.insert(
-            "considered_exclusions".into(),
-            excluded_members
-                .rules
-                .iter()
-                .map(|rule| format!("source={} selector={}", rule.source.as_str(), rule.selector))
-                .collect::<Vec<_>>()
-                .into(),
-        );
-    }
-    receipt.reason = reason.map(str::to_owned);
+    let exploration = Exploration {
+        extra: Default::default(),
+        selected: draw.exploration,
+        percent: context.config.outcome_priors.exploration_percent,
+        enabled: context.config.outcome_priors.enabled,
+        source: context
+            .config
+            .preference_sources
+            .get("domains.routing.outcome_priors.exploration_percent")
+            .cloned()
+            .unwrap_or_else(|| "default".into()),
+    };
+    let rule = if preferred_index.is_some() {
+        SelectionRule::ModelChoiceOverride
+    } else if draw.exploration {
+        SelectionRule::ExplorationDraw
+    } else if draw.total_weight > 0 {
+        SelectionRule::WeightedDraw
+    } else if classified.first_zero_ready == Some(draw.index) {
+        SelectionRule::FirstZeroWeightReady
+    } else if classified.first_standby_ready == Some(draw.index) {
+        SelectionRule::FirstStandbyReady
+    } else if classified.first_recoverable_unavailable == Some(draw.index) {
+        SelectionRule::FirstRecoverableUnavailable
+    } else {
+        SelectionRule::FirstUnavailable
+    };
+    let considered_exclusions = excluded_members
+        .rules
+        .iter()
+        .map(|rule| provenant_records::route_selection::ExclusionRule {
+            extra: Default::default(),
+            source: rule.source,
+            selector: rule.selector.to_string(),
+        })
+        .collect();
+    let receipt = RouteSelectionReceipt {
+        selection_rule: rule,
+        weight_source,
+        exploration,
+        considered_exclusions,
+        account_load: route.diagnostics.account_load.clone(),
+        extra: Default::default(),
+        pool: name.into(),
+        candidates: classified.candidates,
+        roll: draw.roll,
+        total_weight: draw.total_weight,
+        pick: format!("{}/{}", route.adapter, route.model),
+        reason: reason.map(str::to_owned),
+        redraws: Vec::new(),
+    };
     Ok(PoolPick { route, receipt })
 }
 

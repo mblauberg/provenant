@@ -70,9 +70,13 @@ fn stale_availability_is_selectable_but_current_account_wins()
     context.availability = &only_stale;
     let selected = resolve(&request("codex/gpt-6-luna")?, &context)?;
     assert_eq!(selected.account_key.as_deref(), Some("stale"));
-    assert!(
-        matches!(selected.readiness, RouteReadiness::Ready { extra, .. } if extra.contains_key("availability_warning"))
-    );
+    assert!(matches!(
+        selected.readiness,
+        RouteReadiness::Ready {
+            availability_warning: Some(_),
+            ..
+        }
+    ));
     let records = ["current", "stale"].map(|key| AvailabilityRecord {
         account_key: Some(key.into()),
         ..availability()
@@ -144,7 +148,7 @@ fn all_exhausted_accounts_have_individual_remedies() -> Result<(), Box<dyn std::
         ..context(&catalogue, &config, now()?)
     };
     let selected = resolve(&request("codex/gpt-6-luna")?, &context)?;
-    let details = selected.extra["account_exclusions"].to_string();
+    let details = selected.diagnostics.account_exclusions.join("; ");
     assert!(
         details.contains("one")
             && details.contains("two")
@@ -766,9 +770,11 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
         let route = resolve(&request("codex/test")?, &ctx)?;
         assert!(reason(&route).is_none());
         assert_eq!(
-            route.extra["account_load"]["warnings"]
-                .as_array()
-                .is_some_and(|warnings| !warnings.is_empty()),
+            route
+                .diagnostics
+                .account_load
+                .as_ref()
+                .is_some_and(|load| !load.warnings.is_empty()),
             excluded,
             "profile={profile}, overrides={overrides}"
         );

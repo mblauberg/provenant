@@ -51,6 +51,7 @@ fn prices() -> Result<PriceTable> {
 fn fact(number: u64, day: i64, model: &str, input: Option<u64>) -> Result<AttemptFact> {
     let finished = WallTime::from_micros(day * DAY + i64::try_from(number)?)?;
     Ok(AttemptFact {
+        routing_context: Some(Default::default()),
         context: None,
         attempt_id: AttemptId::from_bytes(u128::from(number).to_be_bytes()),
         key: WorkKey::new(

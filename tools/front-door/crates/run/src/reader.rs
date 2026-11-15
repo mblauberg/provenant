@@ -188,6 +188,10 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
             .unwrap_or(provenant_records::run::CauseSource::Unavailable),
     };
     Ok(AttemptFact {
+        routing_context: r
+            .resolved_route
+            .as_ref()
+            .and_then(|route| route.selection_context.clone()),
         context: r.context,
         attempt_id: r.attempt_id,
         key: r.key,
