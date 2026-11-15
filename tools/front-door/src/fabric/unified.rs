@@ -970,6 +970,28 @@ fn resolve_with_checkpoint(
     )
 }
 
+/// Resolve graph output from one status snapshot so declared root topology and
+/// checkpoint expansion ownership cannot come from different graph revisions.
+fn resolve_output_with_checkpoint(
+    factory: &Factory,
+    target: &provenant_cli::Target,
+) -> Result<(Resolved, provenant_fabric_runtime::graph::GraphCheckpoint), TargetFault> {
+    let mut read = None;
+    let resolved = provenant_cli::target::resolve_with_document(target, Want::Output, |name| {
+        let snapshot = FileJournal::read_status_snapshot(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            name,
+        )?;
+        read = snapshot.as_ref().map(|(_, checkpoint)| checkpoint.clone());
+        Ok(snapshot.map(|(execution, checkpoint)| (execution.document, checkpoint)))
+    })
+    .map_err(target_fault)?;
+    let checkpoint =
+        read.ok_or_else(|| target_fault(ResolveError::NotFound(target.to_string())))?;
+    Ok((resolved, checkpoint))
+}
+
 fn resolve_checkpoint(
     root: &provenant_core::StateRoot,
     project: provenant_core::ProjectId,
@@ -1884,19 +1906,18 @@ fn host_graph_output(
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<provenant_cli::run::Reply, Box<dyn std::error::Error>> {
-    let (resolved, checkpoint) =
-        match resolve_with_checkpoint(factory, &command.target, Want::Output) {
-            Ok(found) => found,
-            // A node that failed before it launched has no attempt to read;
-            // its failure and remedy are still the answer.
-            Err(fault) if command.target.attempt.is_none() && fault.code == "NOT_FOUND" => {
-                return match unlaunched_failure_output(command, factory, budget, cancel)? {
-                    Some(reply) => Ok(reply),
-                    None => Err(fault.into()),
-                };
-            }
-            Err(fault) => return Err(fault.into()),
-        };
+    let (resolved, checkpoint) = match resolve_output_with_checkpoint(factory, &command.target) {
+        Ok(found) => found,
+        // A node that failed before it launched has no attempt to read;
+        // its failure and remedy are still the answer.
+        Err(fault) if command.target.attempt.is_none() && fault.code == "NOT_FOUND" => {
+            return match unlaunched_failure_output(command, factory, budget, cancel)? {
+                Some(reply) => Ok(reply),
+                None => Err(fault.into()),
+            };
+        }
+        Err(fault) => return Err(fault.into()),
+    };
     let progress = checkpoint
         .nodes
         .iter()
@@ -2010,6 +2031,9 @@ fn composite_graph_output(
         "findings_available": outputs.findings_available,
         "partial": outputs.partial,
         "warnings": outputs.warnings,
+        "branch": outputs.branch,
+        "commit": outputs.commit,
+        "remaining": outputs.remaining,
     });
     let data = provenant_records::wire::OutputData::Composite(Box::new(
         provenant_records::wire::CompositeChunk {
@@ -2654,6 +2678,53 @@ mod tests {
     use provenant_fabric_runtime::graph::{
         GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
     };
+
+    #[test]
+    fn composite_output_preserves_every_public_typed_export() {
+        let commit = "1".repeat(40);
+        let progress: provenant_fabric_runtime::graph::NodeProgress =
+            serde_json::from_value(json!({
+                "id": "panel",
+                "state": "succeeded",
+                "worktree": null,
+                "children": ["writer"],
+                "outputs": {
+                    "schema_version": 2,
+                    "result": {
+                        "digest": "sha256:fixture",
+                        "excerpt": "result bytes",
+                        "truncated": false,
+                        "path": null
+                    },
+                    "verdict": "VERDICT: PASS",
+                    "findings": [],
+                    "findings_available": true,
+                    "branch": "feature/output",
+                    "commit": commit,
+                    "remaining": ["finish the export test"],
+                    "warnings": []
+                }
+            }))
+            .unwrap();
+        let command = provenant_cli::Output {
+            target: "typed-output/panel".parse().unwrap(),
+            part: provenant_cli::Part::Result,
+            to: None,
+            path: false,
+            offset: 0,
+            tail: None,
+            max_bytes: 64,
+        };
+        let reply = composite_graph_output(&command, "typed-output", &progress).unwrap();
+        assert_eq!(reply.result.data["selected"]["branch"], "feature/output");
+        assert_eq!(reply.result.data["selected"]["commit"], commit);
+        assert_eq!(
+            reply.result.data["selected"]["remaining"],
+            json!(["finish the export test"])
+        );
+        let schema = provenant_records::wire::data_schema("output").unwrap();
+        provenant_records::wire::schema::validate(&schema, &reply.result.data).unwrap();
+    }
 
     #[test]
     fn retry_brief_validates_the_resolved_target_and_single_node_before_input() {
