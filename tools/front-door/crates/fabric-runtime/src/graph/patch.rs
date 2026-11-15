@@ -654,6 +654,17 @@ fn retry_node_scope(
             break;
         }
     }
+    // A member retry also changes the enclosing composite's derived export.
+    // Settled external consumers must keep the composite generation they
+    // observed, alongside snapshots of the directly reset members.
+    let mut snapshot_ids = reset_ids.clone();
+    snapshot_ids.extend(
+        expanded
+            .nodes
+            .iter()
+            .filter(|node| node.composite.is_some() && affected.contains(&node.id))
+            .map(|node| node.id.clone()),
+    );
     for consumer in &mut candidate.nodes {
         if !reset_ids.contains(&consumer.id)
             && affected.contains(&consumer.id)
@@ -681,7 +692,8 @@ fn retry_node_scope(
                 snapshots.retain(|id, _| !is_composite_member(id));
             }
             for prior in graph.checkpoint.nodes.iter().filter(|node| {
-                reset_ids.contains(&node.id)
+                node.id != consumer.id
+                    && snapshot_ids.contains(&node.id)
                     && node.state.settled()
                     && !is_composite_member(&node.id)
             }) {
