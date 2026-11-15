@@ -350,11 +350,6 @@ fn prepare(
             link: data.join("auth.json"),
             target: host_data.join("auth.json"),
         },
-        SetupStep::CreateDir(bin.clone()),
-        SetupStep::Symlink {
-            link: bin.join("git"),
-            target: input.provenant.git.to_owned(),
-        },
     ];
     // Mirror ordinary provider settings as individual links. Lane-owned
     // instructions, hooks and skills use their own private paths.
