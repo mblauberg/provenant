@@ -277,8 +277,8 @@ fn a_condition_reads_a_template_parameter_before_a_launch_value() {
             r#"
 doc = "Two stages, the second optional."
 nodes = [
-  { id = "first", use = "task", brief = "First." },
-  { id = "second", use = "task", brief = "Second.", after = ["first"], when = { extra = true } },
+  { id = "first", use = "task", prompt = "First." },
+  { id = "second", use = "task", prompt = "Second.", after = ["first"], when = { extra = true } },
 ]
 [parameters.extra]
 type = "boolean"

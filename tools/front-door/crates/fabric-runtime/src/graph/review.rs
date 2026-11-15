@@ -244,7 +244,7 @@ pub(super) fn correct_verdict(
     let Some((index, node)) = plan.nodes.iter().enumerate().find(|(index, node)| {
         template::review_behaviour(node) == Some(template::ReviewBehaviour::Lens)
             && checkpoint.nodes[*index].state == NodeState::Failed
-            && !checkpoint.nodes[*index]
+            && checkpoint.nodes[*index]
                 .review_verdict_correction_refused
                 .is_none()
             && checkpoint.nodes[*index].advance_error_code.as_deref()

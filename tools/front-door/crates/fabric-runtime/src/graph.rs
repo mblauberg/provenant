@@ -2586,9 +2586,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         transitions::Admission::Ready => {}
                         transitions::Admission::WriterBusy => break,
                         transitions::Admission::PolicyRefused { code, detail } => {
+                            // The refused node is terminal; it has no next attempt.
                             transitions::fail_with(&mut checkpoint.nodes[node_index], code, detail);
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                            continue;
+                            break;
                         }
                         transitions::Admission::SaveAndWait => {
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;

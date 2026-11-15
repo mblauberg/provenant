@@ -587,7 +587,8 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
                 && prompt.contains("F2")
                 && prompt.contains("\"severity\":\"high\"")
                 && prompt.contains(&long_file)
-                && prompt.contains(&format!("\"trigger\":{trigger}"))
+                && prompt.contains("\"sequence\":\"run\"")
+                && prompt.contains("\"reach\":\"operator_mistake\"")
         );
         let stored = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
         journal.0 = Some(serde_json::from_slice(&stored).unwrap());

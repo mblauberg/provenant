@@ -1948,7 +1948,7 @@ mod alias_tests {
             partial.remaining.as_deref(),
             Some(["Finish the work".to_owned()].as_slice())
         );
-        assert_eq!(partial.extra["spec_concern_count"], 1);
+        assert_eq!(partial.spec_concern_count, Some(1));
         assert!(
             partial
                 .warnings

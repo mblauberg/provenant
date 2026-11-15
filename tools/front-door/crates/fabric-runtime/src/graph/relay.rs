@@ -620,7 +620,7 @@ fn child_patch(
     let mut node = Map::new();
     node.insert("id".into(), request.id.clone().into());
     node.insert("use".into(), request.template.clone().into());
-    node.insert("brief".into(), request.brief.clone().into());
+    node.insert("prompt".into(), request.brief.clone().into());
     if let Some(tier) = &request.tier {
         node.insert("tier".into(), tier.clone().into());
     }
@@ -649,7 +649,7 @@ fn child_patch(
                 message: "writer composite children require explicit per-node work bindings".into(),
             });
         }
-        node.remove("brief");
+        node.remove("prompt");
         node.remove("tier");
         if template.parameters.contains_key("brief") {
             node.insert("with".into(), serde_json::json!({"brief": request.brief}));

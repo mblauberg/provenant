@@ -1835,7 +1835,7 @@ mod tests {
                 "{wire_name} at its declared fence"
             );
 
-            value["protocol"] = PROTOCOL.into();
+            value["protocol"] = (protocol + 1).into();
             let refusal = protocol_refusal(&serde_json::to_vec(&value).unwrap())
                 .unwrap()
                 .unwrap();

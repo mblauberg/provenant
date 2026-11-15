@@ -1236,9 +1236,7 @@ fn live_child_patch_keeps_the_planners_final_fragment_envelope_reserve() {
     );
 
     let mut final_fragment = live.clone();
-    final_fragment
-        .extra
-        .insert("final_fragment".into(), true.into());
+    final_fragment.final_fragment = true;
     let closed_bound = envelope::checkpoint_bound(&document, &[final_fragment], &[], &plan);
     assert!(
         closed_bound < live_bound,

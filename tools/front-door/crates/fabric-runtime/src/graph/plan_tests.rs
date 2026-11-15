@@ -1106,7 +1106,7 @@ fn planner_prompt_uses_wire_kinds_and_required_field_names() {
     }
     for field in [
         "id",
-        "goal",
+        "prompt",
         "access",
         "acceptance_checks",
         "depends_on",
@@ -3408,7 +3408,7 @@ fn initial_submission_is_a_durable_revision_and_replays_template_evidence() {
     assert_eq!(expansion.uses[0].name, "task");
     assert_eq!(expansion.uses[0].nodes, vec!["work"]);
     assert_eq!(expansion.uses[1].nodes, vec!["then"]);
-    assert_eq!(expansion.uses[0].parameters["brief"], "Do the work");
+    assert_eq!(expansion.uses[0].parameters["prompt"], "Do the work");
     assert_eq!(run.checkpoint.nodes.len(), 2);
     assert!(journal.0.as_ref().unwrap().expansions[0].patch.is_some());
     let mut checkpoint = run.checkpoint;
@@ -3512,10 +3512,11 @@ fn initial_submission_envelope_counts_prompt_references_not_brief_copies() {
 #[test]
 fn continuation_fragment_resolves_the_host_review_panel() {
     let mut document = planner(8);
-    document.nodes[0].plan.as_mut().unwrap().extra.insert(
-        "resolvers".into(),
-        json!({"review-panel":["correctness","tests"]}),
-    );
+    document.nodes[0].plan.as_mut().unwrap().resolvers =
+        std::collections::BTreeMap::from([(
+            "review-panel".to_owned(),
+            vec!["correctness".to_owned(), "tests".to_owned()],
+        )]);
     let output = result(vec![json!({
         "id":"delta", "use":"review", "over":"@review-panel",
         "with":{"lens":"${item}"}, "acceptance_checks":["Review the repair delta"]

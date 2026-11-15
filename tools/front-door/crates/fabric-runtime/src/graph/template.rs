@@ -2239,7 +2239,9 @@ impl<'a> Compiler<'a> {
                 interpolate(&Value::String(tier.clone()), parameters)?,
             );
         }
-        leaf.insert(TEMPLATE_FIELD.into(), Value::String(name.to_owned()));
+        // A snapshotted node keeps the template it was compiled from.
+        leaf.entry(TEMPLATE_FIELD)
+            .or_insert_with(|| Value::String(name.to_owned()));
         leaf.insert(
             "access".into(),
             serde_json::to_value(template.access.unwrap_or(AccessMode::ReadOnly))
