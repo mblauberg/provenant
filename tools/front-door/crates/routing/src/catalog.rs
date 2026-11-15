@@ -268,6 +268,11 @@ pub struct RoutingConfig {
     pub launch_policy: provenant_records::policy::Policy,
     #[serde(skip, default = "provenant_config::provider_defaults")]
     pub provider_scopes: BTreeMap<String, provenant_config::ProviderSettings>,
+    /// Providers whose `models` restriction was supplied by the owner rather
+    /// than inherited from the compiled defaults. The composition edge derives
+    /// this from config origins; it is not persisted in routing documents.
+    #[serde(skip)]
+    pub explicit_provider_model_scopes: BTreeSet<String>,
     /// Exact models excluded from every pool while their schedule is active.
     pub model_exclusions: ModelExclusions,
     pub model_choices: Vec<ModelChoiceOverride>,
@@ -309,6 +314,26 @@ pub struct RoutingConfig {
 }
 
 impl RoutingConfig {
+    /// Whether an automatic choice is allowed by the provider's model policy.
+    /// Compiled provider defaults constrain only shipped pools. An owner-defined
+    /// pool, route or model preference remains an intentional override unless
+    /// the owner explicitly set `providers.<adapter>.models`.
+    pub fn permits_automatic_model(&self, model: &ModelId, source: AutomaticModelSource) -> bool {
+        let scope_is_explicit = self
+            .explicit_provider_model_scopes
+            .contains(model.adapter());
+        let apply_scope = source == AutomaticModelSource::ShippedPool || scope_is_explicit;
+        !apply_scope || self.model_in_provider_scope(model)
+    }
+
+    /// Whether a model matches the effective provider patterns, including the
+    /// compiled default. Explicit pins use this with `out_of_scope_pin`.
+    pub fn model_in_provider_scope(&self, model: &ModelId) -> bool {
+        self.provider_scopes
+            .get(model.adapter())
+            .is_none_or(|settings| settings.permits_model(model.model()))
+    }
+
     /// The last matching row wins; removing it revokes the preference.
     pub fn preferred_model(
         &self,
@@ -326,6 +351,14 @@ impl RoutingConfig {
             .find(|row| row.matches(risk_tier, task_kind, now))
             .map(|row| &row.preferred)
     }
+}
+
+/// Origin of an automatic route candidate, used to separate bundled pool
+/// membership from models a workspace owner deliberately configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutomaticModelSource {
+    ShippedPool,
+    OwnerConfiguration,
 }
 
 /// Settlement retries a lane may take; the run store seals at most this many
@@ -373,6 +406,7 @@ impl Default for RoutingConfig {
                 Self {
                     launch_policy: Default::default(),
                     provider_scopes: provenant_config::provider_defaults(),
+                    explicit_provider_model_scopes: BTreeSet::new(),
                     model_exclusions: asset.model_exclusions,
                     model_choices: asset.model_choices,
                     preference_sources: BTreeMap::new(),

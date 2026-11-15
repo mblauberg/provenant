@@ -13,8 +13,8 @@
 //! model policy or confidentiality removes is never a candidate, and readiness
 //! that was not observed is not ready.
 use crate::{
-    Catalogue, ExclusionRule, ExclusionSelector, FallbackOutcome, ModelId, RouteIntent,
-    RoutingConfig,
+    AutomaticModelSource, Catalogue, ExclusionRule, ExclusionSelector, FallbackOutcome, ModelId,
+    RouteIntent, RoutingConfig,
 };
 use provenant_config::SectionError;
 use provenant_core::WallTime;
@@ -285,7 +285,14 @@ fn same_model_other_account(input: &DepletionInput<'_>) -> Option<Handoff> {
         .facts
         .iter()
         .filter(|fact| fact.model == stopped.model && fact.account != stopped.account)
-        .find(|fact| eligible(input, &fact.model, fact.account.as_deref()))?
+        .find(|fact| {
+            eligible(
+                input,
+                &fact.model,
+                fact.account.as_deref(),
+                AutomaticModelSource::OwnerConfiguration,
+            )
+        })?
         .account
         .clone();
     Some(Handoff {
@@ -333,10 +340,9 @@ fn host_native(input: &DepletionInput<'_>) -> Option<Handoff> {
             name: native.name.clone(),
         };
         !input.tried.contains(&target)
-            && native
-                .model
-                .as_ref()
-                .is_none_or(|model| permitted(input, model, None))
+            && native.model.as_ref().is_none_or(|model| {
+                permitted(input, model, None, AutomaticModelSource::OwnerConfiguration)
+            })
     })?;
     Some(Handoff {
         rung: Rung::HostNative,
@@ -356,14 +362,24 @@ fn pool_handoff(
     qualifies: impl Fn(&ModelId) -> bool,
 ) -> Option<Handoff> {
     let members = pool(input.catalogue, input.config, tier)?;
+    let source = if input.config.pools.contains_key(tier) {
+        AutomaticModelSource::OwnerConfiguration
+    } else {
+        AutomaticModelSource::ShippedPool
+    };
     let mut order: Vec<_> = members.iter().collect();
     order.sort_by_key(|member| std::cmp::Reverse(member.weight));
     order
         .into_iter()
-        .filter(|member| member.model != input.stopped.model && qualifies(&member.model))
+        .filter(|member| {
+            member.model != input.stopped.model
+                && qualifies(&member.model)
+                && input.config.permits_automatic_model(&member.model, source)
+        })
         .find_map(|member| {
             let fact = input.facts.iter().find(|fact| {
-                fact.model == member.model && eligible(input, &fact.model, fact.account.as_deref())
+                fact.model == member.model
+                    && eligible(input, &fact.model, fact.account.as_deref(), source)
             })?;
             Some(Handoff {
                 rung,
@@ -406,7 +422,12 @@ fn stopped_tier(input: &DepletionInput<'_>) -> Option<String> {
 
 /// A route the ladder may offer: observed ready, not tried, not the account
 /// whose login failed, and permitted.
-fn eligible(input: &DepletionInput<'_>, model: &ModelId, account: Option<&str>) -> bool {
+fn eligible(
+    input: &DepletionInput<'_>,
+    model: &ModelId,
+    account: Option<&str>,
+    source: AutomaticModelSource,
+) -> bool {
     let stopped = input.stopped;
     let target = Target::Route {
         model: model.clone(),
@@ -429,12 +450,20 @@ fn eligible(input: &DepletionInput<'_>, model: &ModelId, account: Option<&str>) 
     let ready = input.facts.iter().any(|fact| {
         fact.model == *model && fact.account.as_deref() == account && fact.state == Readiness::Ready
     });
-    ready && permitted(input, model, account)
+    ready && permitted(input, model, account, source)
 }
 
 /// Exclusions, enforced model policy and confidentiality. None of them has an
 /// override: an excluded route is never a candidate.
-fn permitted(input: &DepletionInput<'_>, model: &ModelId, account: Option<&str>) -> bool {
+fn permitted(
+    input: &DepletionInput<'_>,
+    model: &ModelId,
+    account: Option<&str>,
+    source: AutomaticModelSource,
+) -> bool {
+    if !input.config.permits_automatic_model(model, source) {
+        return false;
+    }
     let adapter = model.adapter();
     let excluded_by_rule = input.exclusions.iter().any(|rule| match &rule.selector {
         ExclusionSelector::Provider(provider) => provider == adapter,
