@@ -66,14 +66,17 @@ fn row(
             cache_write_1h: None,
             output_excluding_reasoning: some,
             reasoning: some,
+            extra: Default::default(),
         },
         cost: cost.map(|(picodollars, complete)| Cost {
             picodollars,
             complete,
             subscription: false,
             prices: "fixture".into(),
+            extra: Default::default(),
         }),
         context_band: None,
+        extra: Default::default(),
     })
 }
 
