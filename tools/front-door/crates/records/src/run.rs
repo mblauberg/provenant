@@ -507,6 +507,21 @@ pub enum RequestedRoute {
     },
 }
 impl RequestedRoute {
+    pub fn workload(
+        &self,
+        profile: &HarnessProfile,
+    ) -> Result<crate::route_selection::Workload, serde_json::Error> {
+        if matches!(self, Self::Review { .. }) {
+            return Ok(crate::route_selection::Workload::Review);
+        }
+        profile
+            .knobs
+            .get("routing.workload")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map(|value| value.unwrap_or_default())
+    }
     pub fn projection(self) -> crate::RouteFact {
         match self {
             Self::Adapter { provider, .. } => crate::RouteFact {
@@ -540,6 +555,14 @@ impl RequestedRoute {
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_context: Option<crate::route_selection::RouteAttemptContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_native: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_warning: Option<crate::route_selection::EffortWarning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_warning: Option<String>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub provider: Option<String>,
@@ -561,15 +584,11 @@ impl RouteRecord {
         source: &str,
     ) -> Self {
         Self {
-            extra: route
-                .extra
-                .get("effort_warning")
-                .map(|warning| {
-                    [("effort_warning".into(), warning.clone())]
-                        .into_iter()
-                        .collect()
-                })
-                .unwrap_or_default(),
+            extra: Default::default(),
+            selection_context: Some(route.selection_context.clone()),
+            host_native: None,
+            effort_warning: route.diagnostics.effort_warning.clone(),
+            availability_warning: None,
             provider: Some(route.adapter.clone()),
             model: Some(format!("{}/{}", route.adapter, route.model)),
             effort: route.effort.clone(),
@@ -1027,6 +1046,8 @@ impl SkipKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkippedRoute {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_accounts: Vec<crate::SkippedAccount>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     /// `adapter/model`, or the adapter alone for an account-level skip.
@@ -1081,10 +1102,10 @@ impl SkippedRoute {
             reason.push_str("; ");
             reason.push_str(&next);
         }
-        let accounts = crate::SkippedAccount::read(&self.extra);
+        let accounts = &self.skipped_accounts;
         if !accounts.is_empty() {
             reason.push_str("; accounts skipped: ");
-            reason.push_str(&crate::SkippedAccount::describe(&accounts));
+            reason.push_str(&crate::SkippedAccount::describe(accounts));
         }
         reason
     }

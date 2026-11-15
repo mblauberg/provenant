@@ -447,6 +447,9 @@ fn every_recording_decodes_its_terminal_and_process_evidence() -> Result<(), Pro
 
 pub(super) fn route(adapter: &str, model: &str) -> ResolvedRoute {
     ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
         extra: Default::default(),
         adapter: adapter.into(),
         model: model.into(),
@@ -458,6 +461,7 @@ pub(super) fn route(adapter: &str, model: &str) -> ResolvedRoute {
         exclusions: Vec::new(),
         eligibility: provenant_records::RouteEligibility::Eligible,
         readiness: provenant_records::RouteReadiness::Unavailable {
+            skipped_accounts: Vec::new(),
             extra: Default::default(),
             reason: provenant_records::RouteExclusionReason::Disabled,
         },

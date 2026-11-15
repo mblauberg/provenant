@@ -357,6 +357,9 @@ struct Run {
 
 fn route(args: &Args, account_key: &str) -> ResolvedRoute {
     ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
         extra: Default::default(),
         adapter: args.adapter.clone(),
         model: args.model.clone(),
@@ -368,6 +371,7 @@ fn route(args: &Args, account_key: &str) -> ResolvedRoute {
         exclusions: Vec::new(),
         eligibility: provenant_records::RouteEligibility::Eligible,
         readiness: provenant_records::RouteReadiness::Unavailable {
+            skipped_accounts: Vec::new(),
             extra: Default::default(),
             reason: provenant_records::RouteExclusionReason::Disabled,
         },

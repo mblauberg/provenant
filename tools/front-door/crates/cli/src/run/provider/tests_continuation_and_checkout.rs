@@ -499,6 +499,9 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
     };
     for adapter in ["cursor", "opencode", "claude", "codex"] {
         let route = ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
             extra: Default::default(),
             adapter: adapter.into(),
             model: "fixture-model".into(),
@@ -510,6 +513,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
             exclusions: Vec::new(),
             eligibility: RouteEligibility::Eligible,
             readiness: RouteReadiness::Ready {
+                availability_warning: None,
                 extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: 100,

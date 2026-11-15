@@ -469,9 +469,11 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
     let selected = resolve(&explicit, &ctx)?;
     assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
     assert!(
-        selected.extra["account_load"]["warnings"]
-            .as_array()
-            .is_some_and(|warnings| !warnings.is_empty())
+        selected
+            .diagnostics
+            .account_load
+            .as_ref()
+            .is_some_and(|load| !load.warnings.is_empty())
     );
     let mut ctx = context(&catalogue, &config, now()?);
     ctx.availability = &availability;
@@ -607,6 +609,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
             let mut admitted_route = selected;
             // Check admission independently with a fresh readiness grant.
             admitted_route.readiness = RouteReadiness::Ready {
+                availability_warning: None,
                 extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: 120,

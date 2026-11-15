@@ -794,17 +794,17 @@ fn opencode_effort_normalisation_is_visible_in_exact_pool_and_launch_routes()
             let supported = entry.efforts.iter().any(|effort| effort == "high");
             assert_eq!(route.effort.as_deref(), supported.then_some("high"));
             if !supported {
-                let warning = &route.extra["effort_warning"];
-                assert_eq!(warning["requested"], "high");
-                assert_eq!(warning["applied"], serde_json::Value::Null);
-                assert!(
-                    warning["source"]
-                        .as_str()
-                        .is_some_and(|source| !source.is_empty())
-                );
+                let warning = route
+                    .diagnostics
+                    .effort_warning
+                    .as_ref()
+                    .ok_or("effort warning")?;
+                assert_eq!(warning.requested, "high");
+                assert!(warning.applied.is_none());
+                assert!(!warning.source.is_empty());
                 let record =
                     provenant_records::run::RouteRecord::from_resolved(&route, None, "fixture");
-                assert_eq!(record.extra["effort_warning"], *warning);
+                assert_eq!(record.effort_warning.as_ref(), Some(warning));
                 if let Some(receipt) = route.pool_selection {
                     assert!(
                         receipt

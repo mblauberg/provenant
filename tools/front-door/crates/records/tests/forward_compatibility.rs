@@ -97,18 +97,18 @@ fn confidentiality() -> Value {
     json!({"evidence_ref":"policy"})
 }
 fn candidate() -> Value {
-    json!({"model":"codex/model","weight":1,"factor_basis_points":10000,
+    json!({"ranking":serde_json::to_value(provenant_records::route_selection::CandidateRanking::default()).unwrap(),"model":"codex/model","weight":1,"factor_basis_points":10000,
         "effort":null,"readiness":readiness(),"exclusion":null})
 }
 fn redraw() -> Value {
     json!({"rejected_pick":"codex/other","roll":0,"total_weight":1,"reason":"stale"})
 }
 fn selection() -> Value {
-    json!({"pool":"senior","candidates":[candidate()],"roll":0,"total_weight":1,
+    json!({"selection_rule":"weighted_draw","considered_exclusions":[],"exploration":{"selected":false,"percent":10,"enabled":true,"source":"fixture"},"weight_source":"catalogue","account_load":null,"pool":"senior","candidates":[candidate()],"roll":0,"total_weight":1,
         "pick":"codex/model","redraws":[redraw()]})
 }
 fn alternative() -> Value {
-    json!({"adapter":"codex","model":"model","effort":null,"account_key":null,
+    json!({"diagnostics":serde_json::to_value(provenant_records::route_selection::RouteDiagnostics::default()).unwrap(),"adapter":"codex","model":"model","effort":null,"account_key":null,
         "host":"local","eligibility":"eligible","readiness":readiness(),"confidentiality":confidentiality()})
 }
 fn exclusion() -> Value {
@@ -116,6 +116,7 @@ fn exclusion() -> Value {
 }
 fn resolved_route() -> Value {
     let mut value = alternative();
+    value["selection_context"] = json!({"workload":"general","writes":false});
     value["catalogue_revision"] = json!("revision");
     value["alternatives"] = json!([alternative()]);
     value["exclusions"] = json!([exclusion()]);
@@ -123,7 +124,7 @@ fn resolved_route() -> Value {
     value
 }
 fn route_record() -> Value {
-    json!({"provider":"codex","model":"model","effort":null,
+    json!({"selection_context":{"workload":"general","writes":false},"provider":"codex","model":"model","effort":null,
         "account_label":null,"pool_selection":selection()})
 }
 fn terminal_state() -> Value {
@@ -463,4 +464,89 @@ fn recorded_changed_paths_survive_round_trip() -> TestResult {
     assert_eq!(decoded.changed_paths(), &["src/auth.rs"]);
     assert_eq!(serde_json::to_value(decoded)?, value);
     Ok(())
+}
+
+#[test]
+fn typed_route_selection_roundtrips_and_rejects_malformed_fields() {
+    use provenant_records::{ResolvedRoute, RouteSelectionReceipt, run::RouteRecord};
+    let mut wire = selection();
+    wire["account_load"] = json!({
+        "account_key":"account", "account_source":"fixture", "headroom_basis_points":5000,
+        "reset_eta_seconds":60, "live_lanes":2, "pacing":"pace", "pacing_factor_basis_points":10000,
+        "penalty_basis_points":10000, "source":"fixture", "warnings":[]
+    });
+    wire["future_selection_fact"] = json!({"value":true});
+    for rule in [
+        "weighted_draw",
+        "exploration_draw",
+        "model_choice_override",
+        "first_zero_weight_ready",
+        "first_standby_ready",
+        "first_recoverable_unavailable",
+        "first_unavailable",
+    ] {
+        for source in ["config", "catalogue"] {
+            for exclusion in ["config", "flag", "graph"] {
+                wire["selection_rule"] = json!(rule);
+                wire["exploration"]["selected"] = json!(rule == "exploration_draw");
+                wire["weight_source"] = json!(source);
+                wire["considered_exclusions"] =
+                    json!([{"source":exclusion,"selector":"model codex/other"}]);
+                let decoded: RouteSelectionReceipt = serde_json::from_value(wire.clone()).unwrap();
+                let encoded = serde_json::to_value(&decoded).unwrap();
+                let again: RouteSelectionReceipt = serde_json::from_value(encoded).unwrap();
+                assert_eq!(decoded, again);
+                assert_eq!(
+                    again.extra["future_selection_fact"],
+                    wire["future_selection_fact"]
+                );
+                assert!(!again.extra.contains_key("selection_rule"));
+            }
+        }
+    }
+    for (path, bad) in [
+        ("/selection_rule", json!(42)),
+        (
+            "/considered_exclusions",
+            json!(["source=config selector=x"]),
+        ),
+        ("/considered_exclusions/0/source", json!("unknown")),
+        ("/considered_exclusions/0/selector", json!(false)),
+        ("/exploration/selected", json!("yes")),
+        ("/exploration/percent", json!(-1)),
+        ("/exploration/enabled", json!(1)),
+        ("/exploration/source", json!([])),
+        ("/weight_source", json!("unknown")),
+        ("/account_load/live_lanes", json!("two")),
+        ("/account_load/pacing", json!(false)),
+        ("/candidates/0/ranking", json!([])),
+    ] {
+        let mut malformed = wire.clone();
+        *malformed.pointer_mut(path).unwrap() = bad;
+        assert!(
+            serde_json::from_value::<RouteSelectionReceipt>(malformed).is_err(),
+            "{path}"
+        );
+    }
+    let mut record = route_record();
+    record["host_native"] = json!("reviewer");
+    let decoded: RouteRecord = serde_json::from_value(record.clone()).unwrap();
+    assert_eq!(decoded.host_native.as_deref(), Some("reviewer"));
+    record["host_native"] = json!(7);
+    assert!(serde_json::from_value::<RouteRecord>(record).is_err());
+    let mut resolved = resolved_route();
+    resolved["selection_context"] = json!({"workload":"review","writes":true});
+    resolved["diagnostics"]["account_load"] = wire["account_load"].clone();
+    let decoded: ResolvedRoute = serde_json::from_value(resolved.clone()).unwrap();
+    let record = RouteRecord::from_resolved(&decoded, None, "fixture");
+    assert_eq!(
+        record.selection_context.as_ref(),
+        Some(&decoded.selection_context)
+    );
+    assert_eq!(
+        serde_json::from_value::<ResolvedRoute>(serde_json::to_value(&decoded).unwrap()).unwrap(),
+        decoded
+    );
+    resolved["diagnostics"]["account_load"]["headroom_basis_points"] = json!("unknown");
+    assert!(serde_json::from_value::<ResolvedRoute>(resolved).is_err());
 }

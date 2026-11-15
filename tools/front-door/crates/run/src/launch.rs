@@ -328,6 +328,7 @@ fn pacing_refusal_retains_the_selected_reserve_fact() {
         origin: PacingSettingSource::ShippedDefault,
     };
     let mut skipped = SkippedRoute {
+        skipped_accounts: Vec::new(),
         extra: Default::default(),
         route: "fixture/model".into(),
         kind: SkipKind::Unavailable,

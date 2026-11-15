@@ -1367,7 +1367,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         Some("claude/claude-sonnet-5-5")
     );
     assert_eq!(launch.route.effort.as_deref(), Some("medium"));
-    assert_eq!(launch.route.extra["host_native"], "ci-fixer");
+    assert_eq!(launch.route.host_native.as_deref(), Some("ci-fixer"));
     let argument = |flag| {
         launch
             .argv
@@ -2471,6 +2471,10 @@ fn persisted_attempt_with(
     let store = RunStore::open(&execution, &call)?;
     let attempt_id = AttemptId::from_bytes([24; 16]);
     let applied = RouteRecord {
+        selection_context: Default::default(),
+        host_native: None,
+        effort_warning: None,
+        availability_warning: None,
         extra: Default::default(),
         provider: Some(provider.into()),
         model: Some(model.into()),
@@ -3177,6 +3181,9 @@ fn opencode_free_pool_cools_second_model() -> Result {
     let now = quota_record.refusals[0].observed_unix_seconds;
 
     let second = ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
         extra: Default::default(),
         adapter: "opencode".into(),
         model: "opencode/glm-5.3-flash-free".into(),
@@ -3188,6 +3195,7 @@ fn opencode_free_pool_cools_second_model() -> Result {
         exclusions: vec![],
         eligibility: RouteEligibility::Eligible,
         readiness: RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture-preflight".into(),
             expires_unix_seconds: now + 300,
@@ -3232,6 +3240,9 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
     assert_eq!(refusal.resets_unix_seconds, Some(resets));
 
     let first = ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
         extra: Default::default(),
         adapter: "opencode".into(),
         model: "opencode/deepseek-v4.1-flash-free".into(),
@@ -3243,6 +3254,7 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
         exclusions: vec![],
         eligibility: RouteEligibility::Eligible,
         readiness: RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture-preflight".into(),
             expires_unix_seconds: resets + 300,
@@ -3349,6 +3361,9 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
     assert_eq!(refusal.resets_unix_seconds, Some(resets));
 
     let mut route = ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
         extra: Default::default(),
         adapter: "agy".into(),
         model: "gemini-3.8-flash".into(),
@@ -3360,6 +3375,7 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
         exclusions: vec![],
         eligibility: RouteEligibility::Eligible,
         readiness: RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture-preflight".into(),
             expires_unix_seconds: resets + 300,

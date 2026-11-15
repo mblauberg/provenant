@@ -167,6 +167,9 @@ pub(super) fn prepare_command(
         .name;
     let runtime = canonical(&std::env::current_exe().map_err(|error| error.to_string())?)?;
     let route = ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
         extra: [("name".into(), serde_json::Value::String(name.into()))]
             .into_iter()
             .collect(),
@@ -180,6 +183,7 @@ pub(super) fn prepare_command(
         exclusions: Vec::new(),
         eligibility: provenant_records::RouteEligibility::Eligible,
         readiness: provenant_records::RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: format!("domains.fabric.commands.{name}"),
             expires_unix_seconds: i64::MAX,
@@ -636,6 +640,7 @@ pub(super) fn skip(route: &str, kind: SkipKind, _detail: impl Into<String>) -> S
         diagnostic.next.unwrap_or_default()
     );
     SkippedRoute {
+        skipped_accounts: Vec::new(),
         extra: Default::default(),
         route: route.to_owned(),
         kind,

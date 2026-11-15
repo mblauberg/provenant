@@ -145,16 +145,20 @@ fn pacing_reserve_warns_without_excluding_accounts() -> Result<(), Box<dyn std::
             let route = resolve(&request("codex/test")?, &ctx)?;
             assert!(reason(&route).is_none());
             assert_eq!(
-                route.extra["account_load"]["warnings"]
-                    .as_array()
-                    .is_some_and(|warnings| !warnings.is_empty()),
+                route
+                    .diagnostics
+                    .account_load
+                    .as_ref()
+                    .is_some_and(|load| !load.warnings.is_empty()),
                 expected_setting.is_some() && policy == "pace"
             );
             if expected_setting.is_some() && policy == "pace" {
                 assert!(route.exclusions.is_empty());
                 assert!(serde_json::to_string(&route)?.contains("pacing_reserve"));
-                let fact: provenant_records::diagnostic::ResourceFact =
-                    serde_json::from_value(route.extra["pacing_reserve_fact"].clone())?;
+                let fact: provenant_records::diagnostic::ResourceFact = route
+                    .diagnostics
+                    .pacing_reserve_fact
+                    .ok_or("pacing reserve fact")?;
                 assert!(matches!(
                     fact,
                     provenant_records::diagnostic::ResourceFact::PacingReserve {
@@ -224,8 +228,10 @@ fn pacing_reserve_warns_without_excluding_accounts() -> Result<(), Box<dyn std::
         ctx.access = &access;
         ctx.quota = &observations;
         let route = resolve(&request("codex/test")?, &ctx)?;
-        let fact: provenant_records::diagnostic::ResourceFact =
-            serde_json::from_value(route.extra["pacing_reserve_fact"].clone())?;
+        let fact: provenant_records::diagnostic::ResourceFact = route
+            .diagnostics
+            .pacing_reserve_fact
+            .ok_or("pacing reserve fact")?;
         assert_eq!(
             fact,
             provenant_records::diagnostic::ResourceFact::PacingReserve {

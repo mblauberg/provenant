@@ -41,7 +41,7 @@ const LAYERS: &[(&str, &[&str])] = &[
         &["core", "records", "config", "confinement", "quota", "os"],
     ),
     ("quota", &["core", "records", "config"]),
-    ("telemetry", &["core", "records", "os"]),
+    ("telemetry", &["core", "records", "routing", "os"]),
     (
         "routing",
         &["core", "records", "config", "quota", "providers"],

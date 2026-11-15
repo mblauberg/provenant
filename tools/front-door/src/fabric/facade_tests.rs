@@ -1432,6 +1432,7 @@ fn fallback_cause_uses_only_unanimous_typed_facts() {
         run::{SkipKind, SkippedRoute},
     };
     let route = |cause| SkippedRoute {
+        skipped_accounts: Vec::new(),
         extra: Default::default(),
         route: "/private/token".into(),
         kind: SkipKind::Unavailable,

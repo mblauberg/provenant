@@ -3518,6 +3518,10 @@ mod tests {
             PublishMode::Replace,
         )?)?;
         let route = provenant_records::run::RouteRecord {
+            selection_context: Default::default(),
+            host_native: None,
+            effort_warning: None,
+            availability_warning: None,
             extra: Default::default(),
             provider: Some("claude".into()),
             model: None,

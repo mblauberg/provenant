@@ -896,6 +896,7 @@ fn skipped_fallback_candidates_are_recorded_on_the_attempt() -> TestResult {
     store.create(&run, &call)?;
     let id = run.attempt_id;
     let skipped = vec![SkippedRoute {
+        skipped_accounts: Vec::new(),
         extra: Default::default(),
         route: "claude".into(),
         kind: SkipKind::AuthRequired,

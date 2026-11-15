@@ -60,6 +60,7 @@ fn mixed_model_node_stays_unknown_instead_of_charging_the_final_model()
     use provenant_core::{AttemptId, ProjectId, WallTime};
     use provenant_records::{AttemptFact, AttemptOutcome, RouteFact, Usage};
     let mut fact = AttemptFact {
+        routing_context: Some(Default::default()),
         context: None,
         attempt_id: AttemptId::from_bytes([1; 16]),
         key: provenant_records::WorkKey::new(ProjectId::from_bytes([3; 16]), "graph", "node", 1)?,

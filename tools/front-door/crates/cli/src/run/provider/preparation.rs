@@ -1505,10 +1505,7 @@ pub(super) fn prepare_with_wait(
             name.into(),
         ]);
         launch.route.source = Some(format!("domains.fabric.host_native.{name}"));
-        launch
-            .route
-            .extra
-            .insert("host_native".into(), name.clone().into());
+        launch.route.host_native = Some(name.clone());
         return Ok(launch);
     }
     prepare_candidates(
@@ -1640,6 +1637,8 @@ mod stale_readiness_tests {
     #[test]
     fn model_outside_the_accounts_offered_list_is_refused_with_that_list() {
         let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
+            "selection_context":{"workload":"general","writes":false},
+            "diagnostics":serde_json::to_value(provenant_records::route_selection::RouteDiagnostics::default()).unwrap(),
             "adapter":"agy", "model":"gemini-3.8-pro", "effort":null,
             "catalogue_revision":"revision", "account_key":"account", "host":"local",
             "alternatives":[], "exclusions":[], "eligibility":"eligible",
@@ -1682,6 +1681,8 @@ mod stale_readiness_tests {
     #[test]
     fn stale_selected_account_is_reprobed_once_without_changing_route() {
         let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
+            "selection_context":{"workload":"general","writes":false},
+            "diagnostics":serde_json::to_value(provenant_records::route_selection::RouteDiagnostics::default()).unwrap(),
             "adapter":"claude", "model":"model", "effort":null,
             "catalogue_revision":"revision", "account_key":"account", "host":"local",
             "alternatives":[], "exclusions":[], "eligibility":"eligible",
@@ -1727,6 +1728,7 @@ mod stale_readiness_tests {
                     serde_json::json!("must not replace original"),
                 );
                 ready.readiness = provenant_records::RouteReadiness::Ready {
+                    availability_warning: None,
                     extra: Default::default(),
                     availability_ref: "installed/claude/version".into(),
                     expires_unix_seconds: 330,
@@ -1756,6 +1758,7 @@ mod stale_readiness_tests {
                 let mut other = route.clone();
                 other.account_key = Some("other".into());
                 other.readiness = provenant_records::RouteReadiness::Ready {
+                    availability_warning: None,
                     extra: Default::default(),
                     availability_ref: "installed/claude/version".into(),
                     expires_unix_seconds: 330,
@@ -1788,6 +1791,7 @@ mod stale_readiness_tests {
         assert_eq!(records[0], stale);
         let mut ready = route.clone();
         ready.readiness = provenant_records::RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "installed/claude/version".into(),
             expires_unix_seconds: 330,
@@ -1988,6 +1992,8 @@ mod stale_readiness_tests {
             scratch: temp.path(),
         };
         let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
+            "selection_context":{"workload":"general","writes":false},
+            "diagnostics":serde_json::to_value(provenant_records::route_selection::RouteDiagnostics::default()).unwrap(),
             "adapter":"claude", "model":"claude/example", "effort":null,
             "catalogue_revision":"revision", "account_key":key.clone(), "host":"local",
             "alternatives":[], "exclusions":[], "eligibility":"eligible",
@@ -2045,6 +2051,7 @@ mod stale_readiness_tests {
                 assert_eq!(records[0].account_key.as_deref(), Some(entry.key.as_str()));
                 let mut ready = route.clone();
                 ready.readiness = provenant_records::RouteReadiness::Ready {
+                    availability_warning: None,
                     extra: Default::default(),
                     availability_ref: records[0].fixture_ref.clone(),
                     expires_unix_seconds: records[0].expires_unix_seconds,
@@ -2114,11 +2121,15 @@ fn name_skipped_accounts(
     route: &provenant_records::ResolvedRoute,
     entries: &[provenant_providers::accounts::Registration],
 ) -> SkippedRoute {
-    let provenant_records::RouteReadiness::Unavailable { extra, .. } = &route.readiness else {
+    let provenant_records::RouteReadiness::Unavailable {
+        skipped_accounts, ..
+    } = &route.readiness
+    else {
         return skipped;
     };
-    let accounts: Vec<_> = provenant_records::SkippedAccount::read(extra)
-        .into_iter()
+    let accounts: Vec<_> = skipped_accounts
+        .iter()
+        .cloned()
         .map(|account| provenant_records::SkippedAccount {
             account: entries
                 .iter()
@@ -2138,10 +2149,7 @@ fn name_skipped_accounts(
         skipped.detail,
         provenant_records::SkippedAccount::describe(&accounts)
     );
-    skipped.extra.insert(
-        provenant_records::SKIPPED_ACCOUNTS.into(),
-        serde_json::json!(accounts),
-    );
+    skipped.skipped_accounts = accounts;
     skipped
 }
 
@@ -2165,9 +2173,8 @@ fn record_admission_redraws(
             }
             rejected.push(model);
             let cause = redraw
-                .extra
-                .get("cause")
-                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .cause
+                .clone()
                 .unwrap_or(provenant_records::RouteExclusionReason::AdmissionRefused);
             let mut skipped = skip(&redraw.rejected_pick, SkipKind::Unavailable, &redraw.reason);
             skipped.set_cause(cause);
@@ -2876,6 +2883,7 @@ pub(super) fn prepare_candidates(
                     {
                         candidate.readiness =
                             Some(provenant_records::RouteReadiness::Unavailable {
+                                skipped_accounts: Vec::new(),
                                 extra: Default::default(),
                                 reason: provenant_records::RouteExclusionReason::ProviderUpdating,
                             });
@@ -3240,13 +3248,12 @@ pub(super) fn prepare_candidates(
             if matches!(
                 reason,
                 provenant_records::RouteExclusionReason::PacingReserve
-            ) && let Some(fact) = route.extra.get("pacing_reserve_fact").and_then(|value| {
-                serde_json::from_value::<provenant_records::diagnostic::ResourceFact>(value.clone())
-                    .ok()
-            }) && matches!(
-                fact,
-                provenant_records::diagnostic::ResourceFact::PacingReserve { .. }
-            ) {
+            ) && let Some(fact) = route.diagnostics.pacing_reserve_fact
+                && matches!(
+                    fact,
+                    provenant_records::diagnostic::ResourceFact::PacingReserve { .. }
+                )
+            {
                 reason_resources.insert(
                     reasons.len(),
                     resolve_pacing_source(fact, &route.adapter, &config.origins),
@@ -4143,11 +4150,7 @@ pub(super) fn prepare_candidates(
             resume.is_some(),
             current_candidate > 0,
         );
-        if let Some(warning) = provider
-            .extra
-            .get("availability_warning")
-            .and_then(|v| v.as_str())
-        {
+        if let Some(warning) = provider.availability_warning.as_deref() {
             let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
         }
         provider.extra.insert(
@@ -4399,8 +4402,10 @@ fn launch_route_record(
         "named_route"
     };
     let mut record = RouteRecord::from_resolved(route, account_label, source);
-    if let provenant_records::RouteReadiness::Ready { extra, .. } = &route.readiness
-        && let Some(state) = extra.get("availability_warning").and_then(|v| v.as_str())
+    if let provenant_records::RouteReadiness::Ready {
+        availability_warning: Some(state),
+        ..
+    } = &route.readiness
     {
         let warning = format!(
             "account {} availability is {state}; the provider will check it",
@@ -4408,9 +4413,7 @@ fn launch_route_record(
                 .or(route.account_key.as_deref())
                 .unwrap_or("unknown")
         );
-        record
-            .extra
-            .insert("availability_warning".into(), warning.into());
+        record.availability_warning = Some(warning);
     }
     record
 }
@@ -4475,16 +4478,16 @@ mod receipt_tests {
         assert_eq!(wire["source"], "named_route");
         let mut uncertain = resolved.clone();
         uncertain.readiness = provenant_records::RouteReadiness::Ready {
-            extra: [("availability_warning".into(), serde_json::json!("Stale"))]
-                .into_iter()
-                .collect(),
+            availability_warning: Some("Stale".into()),
+            extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 99,
         };
         let warned = launch_route_record(&uncertain, Some("work"), &requested, false, false);
         assert!(
-            warned.extra["availability_warning"]
-                .as_str()
+            warned
+                .availability_warning
+                .as_deref()
                 .is_some_and(|warning| warning.contains("work") && warning.contains("Stale"))
         );
         let pinned = run::RequestedRoute::Model {
@@ -4676,6 +4679,9 @@ mod user_skills_tests {
                 },
             })?;
             let mut route = ResolvedRoute {
+                selection_context: Default::default(),
+                diagnostics: Default::default(),
+                user_skills: true,
                 extra: Default::default(),
                 adapter: adapter.name.into(),
                 model: "fixture".into(),
@@ -4687,6 +4693,7 @@ mod user_skills_tests {
                 exclusions: vec![],
                 eligibility: RouteEligibility::Eligible,
                 readiness: RouteReadiness::Ready {
+                    availability_warning: None,
                     extra: Default::default(),
                     availability_ref: "fixture".into(),
                     expires_unix_seconds: 100,
@@ -5013,6 +5020,9 @@ mod candidate_walk_regressions {
 
     fn route(model: &str, account: &str) -> ResolvedRoute {
         ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
             extra: Default::default(),
             adapter: "cursor".into(),
             model: model.into(),
@@ -5087,6 +5097,17 @@ mod candidate_walk_regressions {
     fn redraw_receipt_and_admission_error_survive_candidate_walk() -> Result<(), PrepareError> {
         let mut stale = route("stale", "pinned");
         stale.pool_selection = Some(RouteSelectionReceipt {
+            selection_rule: provenant_records::route_selection::SelectionRule::WeightedDraw,
+            considered_exclusions: Vec::new(),
+            exploration: provenant_records::route_selection::Exploration {
+                extra: Default::default(),
+                selected: false,
+                percent: 0,
+                enabled: false,
+                source: "fixture".into(),
+            },
+            weight_source: provenant_records::route_selection::WeightSource::Catalogue,
+            account_load: None,
             extra: Default::default(),
             pool: "fixture".into(),
             candidates: vec![],
@@ -5095,7 +5116,8 @@ mod candidate_walk_regressions {
             pick: "cursor/stale".into(),
             reason: None,
             redraws: vec![RouteSelectionRedraw {
-                extra: [("cause".into(), serde_json::json!("exhausted"))].into(),
+                cause: Some(provenant_records::RouteExclusionReason::Exhausted),
+                extra: Default::default(),
                 rejected_pick: "cursor/spent".into(),
                 roll: 0,
                 total_weight: 1,

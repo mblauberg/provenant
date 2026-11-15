@@ -333,13 +333,8 @@ fn model_choice_selects_only_eligible_pool_members_before_expiry()
         let route = resolve_with_seed(&query, &ctx, "preference", seed)?;
         assert_eq!(route.model, "gpt-6.1-sol");
         assert_eq!(
-            route
-                .pool_selection
-                .unwrap()
-                .extra
-                .get("selection_rule")
-                .and_then(serde_json::Value::as_str),
-            Some("model_choice_override")
+            route.pool_selection.unwrap().selection_rule,
+            provenant_records::route_selection::SelectionRule::ModelChoiceOverride
         );
     }
     let excluded = [ModelId::parse("codex/gpt-6.1-sol")?];
@@ -358,10 +353,8 @@ fn model_choice_selects_only_eligible_pool_members_before_expiry()
         resolve_with_seed(&query, &ctx, "preference", 0)?
             .pool_selection
             .unwrap()
-            .extra
-            .get("selection_rule")
-            .and_then(serde_json::Value::as_str),
-        Some("model_choice_override")
+            .selection_rule,
+        provenant_records::route_selection::SelectionRule::ModelChoiceOverride
     );
     query.choice = RouteChoice::Model(ModelId::parse("codex/gpt-6-luna")?);
     ctx.now = now()?;

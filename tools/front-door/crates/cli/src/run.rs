@@ -844,6 +844,10 @@ impl Registry<'_> {
             result: String::new(),
             complete: true,
             observed_route: observed_model.map(|model| run::RouteRecord {
+                selection_context: Default::default(),
+                host_native: None,
+                effort_warning: None,
+                availability_warning: None,
                 extra: Default::default(),
                 provider: Some(adapter.id().into()),
                 model: Some(if model.contains('/') {
@@ -1247,21 +1251,10 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
             network: Some(task.access.network(task.writer.is_some())),
             image_input: false,
             skill_location: task.profile.require_skill_location,
-            workload: if matches!(task.route, run::RequestedRoute::Review { .. }) {
-                provenant_routing::Workload::Review
-            } else {
-                match task
-                    .profile
-                    .knobs
-                    .get("routing.workload")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    Some("read_heavy") => provenant_routing::Workload::ReadHeavy,
-                    Some("edit_heavy") => provenant_routing::Workload::EditHeavy,
-                    Some("review") => provenant_routing::Workload::Review,
-                    _ => provenant_routing::Workload::General,
-                }
-            },
+            workload: task
+                .route
+                .workload(&task.profile)
+                .map_err(|error| error.to_string())?,
         },
         choice,
         effort,

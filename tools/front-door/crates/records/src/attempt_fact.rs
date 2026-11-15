@@ -91,6 +91,7 @@ pub struct TranscriptRef {
 /// implementation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AttemptFact {
+    pub routing_context: Option<crate::route_selection::RouteAttemptContext>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<crate::run::WorkContext>,
     pub attempt_id: AttemptId,

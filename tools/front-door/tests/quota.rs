@@ -951,6 +951,9 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
             pools: &[],
         };
         let mut route = ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
             extra: Default::default(),
             adapter: provider.into(),
             model: "fixture-model".into(),
@@ -962,6 +965,7 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
             exclusions: vec![],
             eligibility: RouteEligibility::Eligible,
             readiness: RouteReadiness::Ready {
+                availability_warning: None,
                 extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: at + 60,
