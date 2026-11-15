@@ -312,7 +312,7 @@ pub fn peer(
         )?;
         let home = host.home;
         if !in_process {
-            let state = host.roots.state;
+            let state = host.roots.state.clone();
             // Only an unreachable agent falls back; a sent request is never repeated.
             let reply =
                 match provenant_fabric_runtime::peer_agent::forward(state.as_path(), &bytes)? {
@@ -342,7 +342,7 @@ pub fn peer(
         let assets = host.assets;
         // An answer without an operation ID is refused below, after peer validation,
         // and must not initialise writable project state on its way there.
-        let context = Context::open_for_project(project_roots, &home, &binding)?;
+        let mut context = Context::open_for_project(project_roots, &home, &binding)?;
         let cwd = context.project_root.clone();
         request.validate(context.identity.host, &context.config, &home)?;
         if context.identity.federation.as_ref().map(|p| &p.key) != Some(&request.project.key) {
