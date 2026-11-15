@@ -52,7 +52,7 @@ pub mod landing;
 pub mod workflow;
 
 pub use install::{
-    AbsolutePath, BASELINE_STATE_FORMAT_VERSION, Harness, InstallReceipt, OwnedEntry, OwnedValue,
+    AbsolutePath, Harness, INSTALL_RECEIPT_SCHEMA_VERSION, InstallReceipt, OwnedEntry, OwnedValue,
     ReleaseFile, ReleaseManifest, ResolvedHarnessTarget, STATE_FORMAT_VERSION, VersionInfo,
 };
 

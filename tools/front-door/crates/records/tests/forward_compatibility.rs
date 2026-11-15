@@ -236,7 +236,7 @@ fn harness_target() -> Value {
     json!({"harness":"codex","skills_dir":absolute_path(),"config_file":absolute_path()})
 }
 fn install_receipt() -> Value {
-    json!({"schema_version":1,"state_format_version":1,"source_digest":source_digest(),"manifest_digest":digest(),
+    json!({"schema_version":INSTALL_RECEIPT_SCHEMA_VERSION,"state_format_version":2,"source_digest":source_digest(),"manifest_digest":digest(),
         "asset_digest":source_digest(),"target":"target","toolchain":"toolchain","bin_dir":absolute_path(),
         "harnesses":["codex"],"harness_targets":[harness_target()],"entries":[owned_entry()]})
 }
@@ -427,16 +427,6 @@ fn route_exclusion_reason_codes_round_trip() -> TestResult {
     }
     assert!(serde_json::from_value::<RouteReadiness>(json!({"status":"unknown"})).is_err());
     assert!(!serde_json::from_value::<RouteReadiness>(readiness())?.is_unknown());
-    Ok(())
-}
-
-#[test]
-fn older_install_receipt_defaults_state_format_version() -> TestResult {
-    let old = json!({"schema_version":1,"source_digest":source_digest(),"manifest_digest":digest(),
-        "asset_digest":source_digest(),"target":"target","toolchain":"toolchain","bin_dir":absolute_path(),
-        "harnesses":["codex"],"harness_targets":[harness_target()],"entries":[owned_entry()]});
-    let receipt: InstallReceipt = serde_json::from_value(old)?;
-    assert_eq!(receipt.state_format_version, BASELINE_STATE_FORMAT_VERSION);
     Ok(())
 }
 

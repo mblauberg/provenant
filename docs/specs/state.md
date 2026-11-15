@@ -25,16 +25,40 @@ The same declaration and decision apply before
 and after alias binding. Existing workspace `.agent-run` stores are captured
 as other-state boundaries; that name alone establishes no boundary.
 Reads create no state.
-The first 2.0 install validates a sibling staging root against the captured
-install root inputs, changing only the state candidate, before stopping 1.x
-agents. It seeds only `config.toml`, `host-id` and `install/receipt.json` into an
-absent or empty default root; the 1.x root remains untouched.
 - Why: a wrong root mixes or destroys another installation's state.
 - Test: `crates/core/src/roots.rs::protected_locations_enforce_only_their_declared_boundaries`;
   `crates/core/src/roots.rs::changing_the_candidate_preserves_all_captured_boundaries`;
-  `src/state_handoff.rs::tests::copies_only_owner_configuration_and_never_writes_the_old_root`;
   `tests/parser.rs::root_uses_release_location_and_explicit_state_without_creating_it`
 - Owner: `crates/core/src/roots.rs`, `src/roots.rs`
+
+### The first install uses a fresh root
+
+The first 2.0 install validates a sibling staging root against the captured
+install root inputs, changing only the state candidate. It validates the
+release and every staged target before stopping 1.x agents or publishing the
+new root. Into an absent or empty default root it copies only owner
+configuration (`config.toml` and `host-id`); 1.x state is not migrated, and
+install never reads a 1.x install receipt. A fresh custom root remains valid.
+If the selected root is identified as 1.x by its default v1 path or old-root
+markers and no handoff applies, install reports `STATE_FORMAT_BREAK`, names the
+old root, and directs the operator to the default v2 root for owner-config
+handoff or to a fresh custom root with configuration selected manually.
+The old root remains for the operator to inspect and remove after preserving
+anything needed.
+
+Install owns only its declared Provenant artifact names. It replaces or removes
+those names directly, including obsolete named LaunchAgents, without reading a
+1.x receipt. Unrecognised state and client configuration remain outside that
+ownership set; release notes give any required manual cleanup, and doctor may
+warn about recognised leftovers.
+- Why: the new root starts with one state format and install cannot infer
+  ownership from a legacy receipt.
+- Test: `src/state_handoff.rs::tests::copies_only_declared_owner_configuration_and_never_reads_receipts`;
+  `src/state_handoff.rs::tests::failed_staged_preflight_leaves_agents_running_and_root_unpublished`;
+  `crates/config/src/managed_tests.rs::first_install_cleans_declared_legacy_names_and_foreign_release_links`;
+  `tests/install.rs::first_install_at_a_fresh_root_copies_only_1x_configuration`;
+  `tests/install.rs::failed_first_install_verification_leaves_legacy_artifacts_and_v2_unpublished`
+- Owner: `src/state_handoff.rs`, `src/install.rs`, `crates/core/src/roots.rs`
 
 ### Identifiers have one spelling
 
@@ -59,23 +83,29 @@ collected name is not allocated to a later graph.
 
 ### A format major permits additive evolution
 
-`user_version` identifies a store's format major. Binaries with the same
-major can read and write the store regardless of release minor. Each owner
-declares one ordered list of additive steps, tagged with the release minor
-that added them; no minor counter is stored. Steps add tables and indexes
-with `IF NOT EXISTS`, or columns that are nullable or have a non-NULL constant
-default. They never rewrite, drop or rename existing objects. Every insert
-names its columns, so an older writer ignores columns added by a newer one.
+Each SQLite store has a fixed `user_version` base identifier within its
+containing state-root format major. The numeric identifier is local to that
+store and need not equal the root major; it is fixed for the life of that root
+major and cannot be bumped independently. Binaries for the same root major can
+read and write the store regardless of release minor. Each owner declares one
+ordered list of additive steps, tagged with the release minor that added them;
+no minor counter is stored. Steps add tables and indexes with `IF NOT EXISTS`,
+or columns that are nullable or have a non-NULL constant default. They never
+rewrite, drop or rename existing objects. Every insert names its columns, so
+an older writer ignores columns added by a newer one.
 
 A writable open creates the base and any missing steps atomically, or applies
 missing steps to an existing same-major store. Existence determines which
 steps are missing. A current store opens without a write; concurrent openers
 re-check under the same immediate transaction before applying steps. A reader
 ignores unknown objects, but refuses a missing known base table or a missing
-declared step. A missing step requires a writable open. A different major is
-refused without changing the store. Non-additive changes require a new major
-and the state reset procedure.
-- Why: additive changes during 2.0.x must preserve stored state and permit
+declared step. A missing step requires a writable open. A different root major
+is refused without changing the store. The sole bounded exception to the
+no-older-shape reader or migration rule is these additive SQLite steps within
+the same root major. A non-additive stored change requires a new root format
+major and a fresh root, with the owner-configuration handoff used for 1.x to
+2.0.
+- Why: additive changes within one root major must preserve stored state and permit
   binaries of different minors to share the same format.
 - Test: `crates/sqlite/src/schema_tests.rs::same_major_additions_are_bidirectionally_compatible_and_idempotent`;
   `crates/sqlite/src/schema_tests.rs::current_opens_do_not_take_a_write_lock_and_concurrent_upgrades_recheck`;

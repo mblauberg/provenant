@@ -55,6 +55,28 @@ fn get_selector(bytes: &[u8], sel: &str) -> Result<Option<Json>, InstallError> {
         }
         return Ok(found.first().map(|v| (*v).clone()));
     }
+    if let Some(path) = sel.strip_prefix("json:/") {
+        let path: Vec<_> = path.split('/').collect();
+        return crate::splice::get_with_limits(bytes, &path, limits);
+    }
+    if let Some(path) = sel.strip_prefix("toml:") {
+        let Some((parent, key)) = path.split_once('.') else {
+            return Err(InstallError::InvalidConfig("invalid TOML selector"));
+        };
+        if key.contains('.') {
+            return Err(InstallError::InvalidConfig("invalid TOML selector"));
+        }
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| InstallError::InvalidConfig("invalid TOML harness configuration"))?;
+        let document = text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| InstallError::InvalidConfig("invalid TOML harness configuration"))?;
+        return Ok(document
+            .get(parent)
+            .and_then(toml_edit::Item::as_table_like)
+            .filter(|table| table.contains_key(key))
+            .map(|_| json!("present")));
+    }
     Err(InstallError::InvalidConfig("unknown selector"))
 }
 fn set_selector(bytes: &[u8], sel: &str, value: Option<&Json>) -> Result<Vec<u8>, InstallError> {
@@ -81,7 +103,129 @@ fn set_selector(bytes: &[u8], sel: &str, value: Option<&Json>) -> Result<Vec<u8>
         }
         return Ok(bytes.to_vec());
     }
+    if let Some(path) = sel.strip_prefix("json:/") {
+        let path: Vec<_> = path.split('/').collect();
+        return crate::splice::set_with_limits(bytes, &path, value, limits);
+    }
+    if value.is_none()
+        && let Some(path) = sel.strip_prefix("toml:")
+    {
+        let Some((parent, key)) = path.split_once('.') else {
+            return Err(InstallError::InvalidConfig("invalid TOML selector"));
+        };
+        if key.contains('.') {
+            return Err(InstallError::InvalidConfig("invalid TOML selector"));
+        }
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| InstallError::InvalidConfig("invalid TOML harness configuration"))?;
+        let mut document = text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| InstallError::InvalidConfig("invalid TOML harness configuration"))?;
+        let removed = match document.get_mut(parent) {
+            Some(item) => item
+                .as_table_like_mut()
+                .ok_or(InstallError::InvalidConfig(
+                    "invalid TOML harness configuration",
+                ))?
+                .remove(key)
+                .is_some(),
+            None => false,
+        };
+        return Ok(if removed {
+            document.to_string().into_bytes()
+        } else {
+            bytes.to_vec()
+        });
+    }
     Err(InstallError::InvalidConfig("unknown selector"))
+}
+
+fn json_legacy_selector(harness: Harness, selector: &str) -> bool {
+    harness != Harness::Codex && selector.starts_with("json:/")
+}
+fn toml_legacy_selector(harness: Harness, selector: &str) -> bool {
+    harness == Harness::Codex && selector.starts_with("toml:")
+}
+
+fn remove_legacy_selectors(
+    harness: Harness,
+    bytes: &[u8],
+) -> Result<(Vec<u8>, Vec<SelectorChange>), InstallError> {
+    let mut updated = bytes.to_vec();
+    let mut changes = Vec::new();
+    for artifact in crate::LEGACY_1X_ARTIFACTS {
+        let crate::LegacyArtifact::HarnessSelector {
+            selector,
+            disposition: crate::ArtifactDisposition::Remove,
+        } = artifact
+        else {
+            continue;
+        };
+        if !json_legacy_selector(harness, selector) && !toml_legacy_selector(harness, selector) {
+            continue;
+        }
+        let Some(before) = get_selector(&updated, selector)? else {
+            continue;
+        };
+        updated = set_selector(&updated, selector, None)?;
+        changes.push(SelectorChange {
+            selector: (*selector).into(),
+            before: Some(before),
+            after: None,
+        });
+    }
+    Ok((updated, changes))
+}
+
+/// Inspect declared legacy MCP names in all default adapter configs and
+/// registered account configs. No receipt or 1.x state is opened.
+pub fn legacy_harness_selectors(
+    roots: &provenant_core::Roots,
+    home: &Path,
+    accounts: &[crate::AccountHome],
+) -> Result<Vec<(PathBuf, &'static str)>, InstallError> {
+    let harnesses: Vec<_> = provenant_records::ADAPTER_SPECS
+        .iter()
+        .map(|spec| spec.id)
+        .filter(|harness| !harness.spec().binary.is_empty())
+        .collect();
+    let mut targets = Targets::new(roots.clone(), home, &harnesses);
+    targets.accounts = accounts.to_vec();
+    let mut seen = BTreeSet::new();
+    let mut found = Vec::new();
+    for target in targets
+        .harnesses
+        .iter()
+        .cloned()
+        .chain(targets.accounts.iter().map(|account| account.target(home)))
+    {
+        if target.config_file.as_os_str().is_empty() || !seen.insert(target.config_file.clone()) {
+            continue;
+        }
+        let Some(Snapshot {
+            value: Value::File { bytes, .. },
+            ..
+        }) = managed::snapshot(&target.config_file)?
+        else {
+            continue;
+        };
+        for artifact in crate::LEGACY_1X_ARTIFACTS {
+            let crate::LegacyArtifact::HarnessSelector {
+                selector,
+                disposition: crate::ArtifactDisposition::Remove,
+            } = artifact
+            else {
+                continue;
+            };
+            if (json_legacy_selector(target.harness, selector)
+                || toml_legacy_selector(target.harness, selector))
+                && get_selector(&bytes, selector)?.is_some()
+            {
+                found.push((target.config_file.clone(), selector));
+            }
+        }
+    }
+    Ok(found)
 }
 fn file(snapshot: &Option<Snapshot>, path: &Path) -> Result<(Vec<u8>, u64), InstallError> {
     let limits = Limits::CONFIG;
@@ -128,6 +272,29 @@ pub(crate) fn capture(
     );
     for target in &targets.harnesses {
         let path = &target.config_file;
+        if !path.as_os_str().is_empty() {
+            let snap = capture_one(path, entries)?;
+            if let Some(Snapshot {
+                value: Value::File { bytes, mode },
+                ..
+            }) = &snap
+            {
+                let (updated, changes) = remove_legacy_selectors(target.harness, bytes)?;
+                if updated != *bytes {
+                    plan.files.insert(
+                        path.clone(),
+                        Value::File {
+                            bytes: updated,
+                            mode: *mode,
+                        },
+                    );
+                    plan.changes
+                        .entry(path.clone())
+                        .or_default()
+                        .extend(changes);
+                }
+            }
+        }
         // Hooks are one choice for every target of a harness. A target whose
         // account directory has none yet follows the targets that do.
         let inherited_hooks = !targets.remove_hooks
@@ -335,7 +502,10 @@ pub(crate) fn capture(
         }
         if target.harness == Harness::Opencode {
             let snap = capture_one(path, entries)?;
-            let (mut bytes, mode) = file(&snap, path)?;
+            let (mut bytes, mode) = match plan.files.get(path) {
+                Some(Value::File { bytes, mode }) => (bytes.clone(), *mode),
+                _ => file(&snap, path)?,
+            };
             let initial = bytes.clone();
             bytes = rewrite_instruction_array(&bytes, release, targets, previous, &mut plan, path)?;
             if let Some(array) = crate::splice::get(&bytes, &["instructions"])? {
@@ -462,16 +632,17 @@ fn rewrite_instruction_array(
     let array = array
         .as_array()
         .ok_or(InstallError::InvalidConfig("instructions must be an array"))?;
-    let assets = OPENCODE_INSTRUCTION_ASSETS.map(PathBuf::from);
     let old_root = previous
         .map(|receipt| managed::release_root(targets.roots.state.as_path(), receipt.source_digest));
     let mut out = bytes.to_vec();
     // Reverse order keeps recorded array indices valid for removals.
     for (i, value) in array.iter().enumerate().rev() {
-        let mut asset = None;
-        if let (Some(receipt), Some(old_root), Some(text)) =
-            (previous, old_root.as_ref(), value.as_str())
-            && receipt.entries.iter().any(|entry| {
+        let text = value.as_str();
+        let name_owned = text.and_then(|text| managed::release_instruction_asset(Path::new(text)));
+        let receipt_owned = text.and_then(|text| {
+            let receipt = previous?;
+            let old_root = old_root.as_ref()?;
+            if !receipt.entries.iter().any(|entry| {
                 entry
                     .path
                     .to_path_buf()
@@ -483,29 +654,30 @@ fn rewrite_instruction_array(
                             extra: Default::default(),
                             value: value.clone(),
                         })
-            })
-        {
-            if array.iter().filter(|candidate| *candidate == value).count() > 1 {
-                return Err(InstallError::InvalidConfig("duplicate owned instruction"));
+            }) {
+                return None;
             }
-            // Any owned instructions asset is recognised, including one a
-            // later release retired, so an upgrade can remove it.
-            asset = Path::new(text)
+            Path::new(text)
                 .strip_prefix(old_root)
                 .ok()
                 .filter(|relative| relative.parent() == Some(Path::new("instructions")))
-                .map(Path::to_path_buf);
-        }
-        if let Some(asset) = asset {
-            let retired = !release.files.contains_key(&asset);
-            if retired && assets.contains(&asset) {
-                return Err(InstallError::Manifest("missing instruction asset"));
+                .map(Path::to_path_buf)
+        });
+        if name_owned.is_some() || receipt_owned.is_some() {
+            if array.iter().filter(|candidate| *candidate == value).count() > 1 {
+                return Err(InstallError::InvalidConfig("duplicate owned instruction"));
             }
+        }
+        if let Some(asset) = name_owned.or(receipt_owned) {
+            let retired = !release.files.contains_key(&asset);
             let new_path = root.join(&asset);
             let new_text = new_path.to_str().ok_or(InstallError::InvalidConfig(
                 "instruction path requires UTF-8",
             ))?;
-            let duplicate_new = array
+            let current_array = crate::splice::get(&out, &["instructions"])?
+                .and_then(|array| array.as_array().cloned())
+                .ok_or(InstallError::InvalidConfig("instructions must be an array"))?;
+            let duplicate_new = current_array
                 .iter()
                 .enumerate()
                 .any(|(index, candidate)| index != i && candidate.as_str() == Some(new_text));

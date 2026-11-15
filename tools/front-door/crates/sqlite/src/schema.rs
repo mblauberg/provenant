@@ -1,12 +1,14 @@
 use rusqlite::Connection;
 use std::{cell::RefCell, collections::HashMap};
 
-/// A store's immutable format-major base and its ordered additive declarations.
+/// A store's immutable base within a root format major and its ordered additive
+/// declarations.
 #[derive(Clone, Copy, Debug)]
 pub struct Schema {
     /// Base DDL, ending in `PRAGMA user_version=<version>;`.
     pub sql: &'static str,
-    /// The format major, never a minor counter.
+    /// Per-store base identifier fixed within a state-root format major. It
+    /// advances only with the root major, never as an independent minor count.
     pub version: i64,
     pub steps: &'static [Step],
 }
@@ -52,7 +54,7 @@ impl std::fmt::Display for VersionError {
         match self {
             Self::Refused { found, expected } => write!(
                 f,
-                "{RESET_CODE}: store schema version {found} is not {expected}; move the store aside to start it fresh"
+                "{RESET_CODE}: store base version {found} is not {expected}; use a fresh state root"
             ),
             Self::MissingBaseTable { table } => {
                 write!(f, "{RESET_CODE}: store is missing known base table {table}")

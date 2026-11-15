@@ -11,6 +11,7 @@ mod edit;
 mod gc;
 mod github_policy;
 mod history;
+mod install_artifacts;
 mod schema;
 pub use gc::{
     ByteObservation, DiskLevel, DiskLimits, ForeignWorktrees, GcSettings, LaneBuildSettings,
@@ -23,6 +24,7 @@ pub use github_policy::{
     DEFAULT_GH_BUDGET, GH_INVOCATIONS_FILE, GithubPolicy, label_events_trigger_ci,
 };
 mod harness;
+pub use harness::legacy_harness_selectors;
 mod hooks;
 pub use hooks::{CLAUDE_HOOKS, claude_lane_settings};
 mod inspection;
@@ -69,6 +71,10 @@ pub use domains::{
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
+pub use install_artifacts::{
+    ArtifactDisposition, LEGACY_1X_ARTIFACTS, LegacyArtifact, STABLE_BINARY_NAME,
+    legacy_launch_agent_label, legacy_launch_agent_path,
+};
 pub use knobs::{KNOB_SOURCES, KnobEdit, KnobSource, KnobValue};
 pub use loader::{
     config_show, inspect_config, load, load_with_domains, read, read_knobs, read_with_domains,
@@ -289,8 +295,8 @@ pub use managed::{
     InstallContext, InstallError, InstallFinding, InstallInspection, InstallOutcome, InstallPlan,
     InstallReporter, ManualInclude, ReleaseSmoke, SelectorChange, Snapshots, Targets,
     inspect_accounts, inspect_install, install, installed_binary, peer_agent_plist,
-    plan_and_install, plan_install, private_directory, release_root, systemd_user_dir,
-    tick_agent_plist, tick_service_path, tick_timer_path, uninstall, user_dir_in,
+    plan_and_install, plan_install, private_directory, release_instruction_asset, release_root,
+    systemd_user_dir, tick_agent_plist, tick_service_path, tick_timer_path, uninstall, user_dir_in,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};
