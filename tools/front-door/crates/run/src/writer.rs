@@ -212,15 +212,14 @@ pub fn resolve_reader_source(state: &Path, cwd: &Path, path: &Path) -> Result<Pa
         if let Some(binding) = provenant_config::lookup_project_at_state(state, &location).map_err(
             error("read source project binding", Some(repo.common_git_dir())),
         )? {
-            let layout = worktrees::project_layout_for_binding(
+            worktrees::project_layout_for_binding(
                 &executor,
                 &binding,
                 utility.git_program_path(),
                 &worktrees::project_layout_git_environment(),
                 Duration::from_secs(5),
                 &CancelToken::new(),
-            )?;
-            layout
+            )?
         } else {
             let read_repo = utility
                 .open_read_repo(&executor, repo.root_path(), budget()?, &CancelToken::new())
@@ -228,14 +227,13 @@ pub fn resolve_reader_source(state: &Path, cwd: &Path, path: &Path) -> Result<Pa
                     "open read-only source repository",
                     Some(repo.root_path()),
                 ))?;
-            let layout = worktrees::project_layout_for_checkout(
+            worktrees::project_layout_for_checkout(
                 &executor,
                 &read_repo,
                 &utility,
                 budget()?,
                 &CancelToken::new(),
-            )?;
-            layout
+            )?
         };
     let project = layout.project().unwrap_or_else(|| repo.root_path());
     let selected = project.join(path);
@@ -350,8 +348,11 @@ impl WriterLaunch {
 
     /// Safe checkout to exclude from automatic tool lookup. Bare-backed
     /// writers use the verified selected linked checkout here.
-    pub fn lane_path_root(&self) -> &Path {
-        self.project_root().unwrap_or(&self.executor_root)
+    pub fn lane_path_roots(&self) -> Vec<&Path> {
+        self.project_root()
+            .into_iter()
+            .chain(std::iter::once(self.executor_root.as_path()))
+            .collect()
     }
 
     /// The verified branch head captured while preparing this writer.
@@ -990,10 +991,15 @@ fn prepare_writer_with_facts_and_clock(
             "writer custody project does not match its repository",
         ));
     }
-    match layout.project() {
-        Some(primary)
-            if primary == repo.root_path() && repo.private_git_dir() == repo.common_git_dir() => {}
-        None if repo.private_git_dir() != repo.common_git_dir() => {}
+    match (
+        repo.private_git_dir() == repo.common_git_dir(),
+        layout.project(),
+    ) {
+        (true, Some(primary)) if primary == repo.root_path() => {}
+        // The selected linked checkout remains the Git executor. Its verified
+        // inventory membership and the binding's common directory establish
+        // its relation to the separately owned project layout.
+        (false, _) => {}
         _ => return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into()),
     }
     let executor_root = repo.root_path().to_path_buf();
@@ -1977,7 +1983,7 @@ mod cargo_setup_tests {
         let project = root.join("project");
         let git_dir = root.join("unrelated/metadata/project.git");
         let caller = root.join("caller");
-        let writer = root.join("output/writer");
+        let writer = project.join(".worktrees/writer");
         let home = root.join("home");
         let state = root.join("state");
         for path in [
@@ -2052,14 +2058,35 @@ mod cargo_setup_tests {
             utility.project_location(&executor, &project, budget()?, &CancelToken::new())?;
         let binding = provenant_config::bind_project(&roots, discovered.location)?;
 
-        let request = resolve_writer(&state, &caller, Path::new("../output/writer"))?;
-        assert_eq!(request.project, project);
+        let request = resolve_writer(&state, &caller, Path::new(".worktrees/writer"))?;
+        assert_eq!(request.project, caller);
         assert_eq!(request.worktree, writer);
         assert_eq!(
-            resolve_reader_source(&state, &caller, Path::new("../output/writer"))?,
+            resolve_reader_source(&state, &caller, Path::new(".worktrees/writer"))?,
             writer
         );
         assert_eq!(binding.common_dir(), git_dir);
+        let launch = prepare_writer(&request, &state, binding.project_id())?;
+        assert_eq!(launch.project_root(), Some(project.as_path()));
+        assert_eq!(launch.managed_root(), project);
+
+        let primary_bin = project.join("tools");
+        let linked_bin = caller.join("tools");
+        let safe_bin = root.join("safe-tools");
+        for path in [&primary_bin, &linked_bin, &safe_bin] {
+            std::fs::create_dir_all(path)?;
+        }
+        let path = std::env::join_paths([&primary_bin, &linked_bin, &safe_bin])?;
+        let excluded = launch
+            .lane_path_roots()
+            .into_iter()
+            .chain(std::iter::once(launch.worktree.path()))
+            .collect::<Vec<_>>();
+        let filtered = crate::FilteredLanePath::from_path_excluding_roots(&path, &excluded)?;
+        assert_eq!(
+            std::env::split_paths(filtered.path()).collect::<Vec<_>>(),
+            vec![safe_bin]
+        );
         Ok(())
     }
 
@@ -2158,7 +2185,7 @@ mod cargo_setup_tests {
         let launch = prepare_writer(&request, &state, binding.project_id())?;
         assert_eq!(launch.project_root(), None);
         assert_eq!(launch.managed_root(), common);
-        assert_eq!(launch.lane_path_root(), source);
+        assert_eq!(launch.lane_path_roots(), vec![source.as_path()]);
         Ok(())
     }
 

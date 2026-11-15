@@ -2517,12 +2517,15 @@ pub(super) fn prepare_candidates(
     let project_binding = super::confinement::registered_project_binding(roots, project_id)?;
     let requester_cwd = registry.cwd.unwrap_or(&source);
     let lane_path = match writer.as_ref() {
-        Some(writer) => run::FilteredLanePath::for_requester(
-            registry.host,
-            writer.lane_path_root(),
-            writer.worktree.path(),
-        )
-        .map_err(|error| error.to_string())?,
+        Some(writer) => {
+            let excluded_roots = writer
+                .lane_path_roots()
+                .into_iter()
+                .chain(std::iter::once(writer.worktree.path()))
+                .collect::<Vec<_>>();
+            run::FilteredLanePath::for_requester_excluding_roots(registry.host, &excluded_roots)
+                .map_err(|error| error.to_string())?
+        }
         None => crate::run::filtered_requester_lane_path(
             registry.host,
             requester_cwd,
