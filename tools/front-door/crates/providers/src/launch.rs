@@ -633,6 +633,41 @@ pub(crate) fn admit(
 /// Provide fixed tool-search fallbacks and omit an optional entry that PATH
 /// cannot encode.
 pub(crate) const SYSTEM_TOOL_SEARCH_PATH: &str = "/usr/bin:/bin";
+pub(crate) const HOMEBREW_NODE_PREFIXES: [&str; 2] = ["/opt/homebrew", "/usr/local"];
+
+/// Resolve a Homebrew Node prefix only when the requester's PATH names its bin
+/// directory and both Node and npm resolve inside that prefix. Native package
+/// config lookup must not execute npm to discover its prefix.
+pub(crate) fn homebrew_node_prefix(host_var: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let path = host_var("PATH")?;
+    for directory in std::env::split_paths(&path) {
+        for prefix in HOMEBREW_NODE_PREFIXES.map(Path::new) {
+            let bin = prefix.join("bin");
+            if directory != bin || !bin.join("node").is_file() || !bin.join("npm").is_file() {
+                continue;
+            }
+            let Ok(canonical_prefix) = std::fs::canonicalize(prefix) else {
+                continue;
+            };
+            let Ok(canonical_bin) = std::fs::canonicalize(&bin) else {
+                continue;
+            };
+            let Ok(node) = std::fs::canonicalize(bin.join("node")) else {
+                continue;
+            };
+            let Ok(npm) = std::fs::canonicalize(bin.join("npm")) else {
+                continue;
+            };
+            if canonical_bin == canonical_prefix.join("bin")
+                && node.starts_with(&canonical_prefix)
+                && npm.starts_with(&canonical_prefix)
+            {
+                return Some(prefix.to_owned());
+            }
+        }
+    }
+    None
+}
 
 pub(crate) fn tool_search_path(
     home: &Path,
@@ -1018,6 +1053,9 @@ pub(crate) fn finalise_provider_env(
         ("TMPDIR".into(), scratch.into()),
         ("TMPPREFIX".into(), scratch.join("zsh").into()),
     ]);
+    if !input.sandboxed() {
+        crate::package_cache::bind_native(input.home, input.cwd, input.host_var, &mut spec.env);
+    }
     lane_instructions(input, spec)?;
     let hooks = lane_hooks(input, spec)?;
     let access = match input.confined.permissions().mode {
@@ -1846,7 +1884,7 @@ pub(crate) fn node_tools(
     requirements: &mut ToolRequirements,
     env: &mut Vec<(OsString, OsString)>,
 ) {
-    for prefix in ["/opt/homebrew", "/usr/local"].map(Path::new) {
+    for prefix in HOMEBREW_NODE_PREFIXES.map(Path::new) {
         if prefix.join("bin/node").exists() {
             homebrew_tools(prefix, requirements, env);
             let runtime_reads = &mut requirements.reads;

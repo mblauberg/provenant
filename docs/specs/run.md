@@ -44,14 +44,19 @@ seed generations.
 ## Cargo target seed
 
 A target seed store is shared across registered repositories on the host. Each
-generation records the canonical shared Git directory and verify-base commit,
-so linked checkouts share identity and one repository's newer generation does
-not force other repositories to rebuild.
-Lanes clone a seed only for a matching compiler and target; Cargo still checks
-the build fingerprints before reusing its artifacts. A published generation is
-immutable, and collection cannot race an active clone. When refresh fails, the
-next scheduled collection retries it at the normal daily cadence; a busy build
-is retried by the next tick.
+generation records a hash of the verified canonical shared Git directory and
+verify-base commit, so linked checkouts share identity and another repository's
+newer generation does not force a rebuild. A writer lane prefers the newest
+compatible generation for its verified project identity, then uses a compatible
+generation from another project if no own generation exists. Cargo still checks
+build fingerprints before reusing artifacts. Published generations are
+immutable, and collection cannot race an active clone. `max_generations` keeps
+history per project; `max_bytes` remains a host-wide allocated-byte limit and
+can evict a project's only generation under byte pressure. Failed refreshes
+retry at the next scheduled collection, while busy projects retry on the next
+tick without rebuilding other failed projects. Full requests supersede queued
+busy retries and reevaluate prior failures. Detached pending and active scopes
+survive process interruption and are retried after a minute.
 - Why: reuse must not introduce incompatible or partially collected build output.
 
 ## Publication order

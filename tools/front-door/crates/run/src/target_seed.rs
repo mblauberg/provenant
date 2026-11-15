@@ -2,6 +2,7 @@
 #[cfg(any(unix, test))]
 use crate::cargo_seed::codes;
 use provenant_os::fs::{Directory, LockGuard, LockMode};
+use sha2::{Digest, Sha256};
 use std::{
     ffi::OsStr,
     io,
@@ -20,6 +21,14 @@ pub struct Manifest {
     pub profile: String,
     pub features: Vec<String>,
     pub flags: Vec<String>,
+}
+
+/// Hash a verified repository handle's canonical common Git directory for
+/// stable host-seed ownership. Linked checkouts share that directory and key.
+pub fn project_key(common_git_dir: &Path) -> String {
+    provenant_core::hex(&Sha256::digest(
+        common_git_dir.as_os_str().as_encoded_bytes(),
+    ))
 }
 
 /// Select the project's Cargo build directory using the same workspace selector
