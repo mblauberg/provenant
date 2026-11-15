@@ -1896,6 +1896,8 @@ mod peer_project_root_tests {
                 ..Default::default()
             };
 
+            assert!(!state.join("projects").exists());
+            assert!(!state.join("host-id").exists());
             let refusal = prepare_peer_project_roots(
                 &globals,
                 roots,
@@ -1910,6 +1912,8 @@ mod peer_project_root_tests {
 
         let plain = base.join("plain-project");
         std::fs::create_dir_all(&plain)?;
+        git(&plain, &["init", "-q", "--initial-branch=main"])?;
+        let common = plain.join(".git");
         let state = plain.join("state");
         std::fs::create_dir_all(&state)?;
         std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
@@ -1924,11 +1928,11 @@ mod peer_project_root_tests {
         let (roots, binding) = prepare_peer_project_roots(
             &globals,
             roots,
-            &plain,
+            &common,
             false,
             crate::roots::Product::Optional,
         )?;
-        assert_eq!(binding.common_dir(), plain);
+        assert_eq!(binding.common_dir(), common);
         assert!(roots.state.as_path().join("projects").is_dir());
         assert!(roots.state.as_path().join("host-id").is_file());
         Ok(())
