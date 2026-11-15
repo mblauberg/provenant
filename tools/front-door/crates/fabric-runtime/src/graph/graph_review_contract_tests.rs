@@ -454,6 +454,35 @@ fn review_contract_accepts_verdict_followed_only_by_handoff() {
     assert_eq!(progress.advance_error_code, None);
 }
 
+// Spec: docs/specs/run-settlement.md#settlement
+#[test]
+fn review_contract_accepts_one_verdict_after_a_valid_closed_handoff() {
+    let mut node = review("review.tests", "review");
+    node.required_verdict = None;
+    let handoff = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"Reviewed\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+    let response = format!(
+        "{}\n{handoff}\nVERDICT: PASS\n",
+        answer(json!([]), "").trim_end()
+    );
+    let mut owner = FakeOwner {
+        observations: [terminal_with_result(AttemptOutcome::Succeeded, &response)].into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![node]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let progress = &run.checkpoint.nodes[0];
+    assert_eq!(progress.state, NodeState::Succeeded);
+    assert_eq!(
+        progress.outputs.as_ref().unwrap().verdict.as_deref(),
+        Some("VERDICT: PASS")
+    );
+    assert_eq!(progress.advance_error_code, None);
+}
+
 /// A long review ending in one verdict, a blank line and a pretty-printed
 /// handoff block is one verdict. Size alone (past the run store's head
 /// window) costs neither complete findings nor the verdict.

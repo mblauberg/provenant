@@ -35,6 +35,18 @@ Custody facts such as lost, unsettled or cancelled retain priority; the malforme
 handoff evidence still survives in their sealed stop.
 - Why: unfinished work must not appear complete or lose its handoff.
 
+The canonical review result order is a standalone verdict followed by the
+final handoff. As a narrow provider-order tolerance, a valid closed final
+handoff may be followed by exactly one recognized standalone verdict, and
+nothing else. ResultCapture owns verdict recognition and requires exactly one
+canonical verdict outside fenced blocks. Prose between the handoff and verdict,
+another verdict, or a repeated handoff remains malformed. Provider-turn
+boundaries still decide whether later tool work invalidates an earlier
+handoff. Settlement records an accepted order tolerance in the terminal
+reason; the sealed handoff payload keeps its existing schema.
+- Why: tolerate providers that append their verdict after the closed handoff
+  without broadening handoff completion authority.
+
 The handoff declaration owns its fields, per-field decoding and validation.
 Decoding a valid JSON object retains independently valid fields and forward
 fields, and drops an invalid declared field whole, even when only an array item

@@ -265,7 +265,12 @@ pub struct Decoded {
 impl Decoded {
     /// The lane's final handoff: the one rule for every provider.
     pub fn handoff(&self) -> provenant_records::handoff::HandoffResult {
-        provenant_records::handoff::Handoff::from_turns(&self.result, &self.turns)
+        self.handoff_report().handoff
+    }
+
+    /// The parsed handoff together with a bounded output-order diagnostic.
+    pub fn handoff_report(&self) -> provenant_records::handoff::HandoffParse {
+        provenant_records::handoff::Handoff::from_turns_report(&self.result, &self.turns)
     }
 }
 /// A task-local preparation refusal, retaining candidate classifications.
