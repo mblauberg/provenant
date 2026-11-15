@@ -856,6 +856,20 @@ pub(super) fn source_identity(path: &Path) -> Result<run::SourceIdentity, String
     })
 }
 
+/// Resolve the enclosing checkout used to exclude project executables from
+/// automatic PATH discovery. A subdirectory is never treated as its own root.
+pub(super) fn requester_path_project_root(path: &Path) -> Result<PathBuf, String> {
+    let path = canonical(path)?;
+    let Some(marker) = path
+        .ancestors()
+        .find(|ancestor| provenant_os::git::repository_marker(ancestor).is_some())
+    else {
+        return Ok(path);
+    };
+    provenant_os::git::repository_path(marker, provenant_os::git::RepositoryPath::Toplevel)
+        .map_err(|error| format!("cannot resolve requester PATH project root: {error}"))
+}
+
 /// Reopen the graph-bound checkout at launch, refusing a moved or replaced
 /// worktree rather than falling back to the daemon's checkout.
 #[derive(Debug, thiserror::Error)]

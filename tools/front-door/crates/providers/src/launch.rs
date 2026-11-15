@@ -658,7 +658,8 @@ pub(crate) fn tool_search_path(
 
 /// Native launches inherit the host environment in memory; provider selectors
 /// are applied by each adapter. Sandboxed launches use a minimal environment:
-/// the user's identity, a fixed search path and TMPDIR
+/// the user's identity, fixed tool directories followed by the filtered
+/// requester PATH, and TMPDIR
 /// under the attempt's private tmp directory. zsh ignores TMPDIR for the
 /// temporary files behind here-documents and here-strings and defaults
 /// TMPPREFIX to `/tmp/zsh`, which a lane cannot write, so TMPPREFIX points
@@ -669,7 +670,7 @@ pub(crate) fn base_env(
     input: &PrepareInput<'_>,
     scratch: &Path,
     path: impl AsRef<std::ffi::OsStr>,
-) -> Vec<(OsString, OsString)> {
+) -> Result<Vec<(OsString, OsString)>, ProviderError> {
     if !input.sandboxed() {
         let mut env: Vec<_> = std::env::vars_os()
             .filter(|(name, _)| name != provenant_core::consumer_env::SANDBOX && name != "HOME")
@@ -682,13 +683,22 @@ pub(crate) fn base_env(
         // Establish the host's selected home before an adapter may isolate it.
         env.push(("HOME".into(), input.home.into()));
         env.push((provenant_core::consumer_env::SANDBOX.into(), "off".into()));
-        return env;
+        return Ok(env);
     }
+    let wrappers = path.as_ref();
+    let path = match (input.host_var)("PATH") {
+        Some(requester) if requester.is_empty() => wrappers.to_owned(),
+        Some(requester) => std::env::join_paths(
+            std::env::split_paths(wrappers).chain(std::env::split_paths(&requester)),
+        )
+        .map_err(|_| ProviderError::InvalidPath)?,
+        None => wrappers.to_owned(),
+    };
     let mut env = vec![
         (provenant_core::consumer_env::SANDBOX.into(), "on".into()),
         ("HOME".into(), input.home.into()),
         ("USER".into(), input.user.into()),
-        ("PATH".into(), path.as_ref().to_owned()),
+        ("PATH".into(), path),
         ("TMPDIR".into(), scratch.into()),
         ("TMPPREFIX".into(), scratch.join("zsh").into()),
         ("LANG".into(), "en_US.UTF-8".into()),
@@ -697,7 +707,7 @@ pub(crate) fn base_env(
         input.provenant.git,
         input.cwd,
     ));
-    env
+    Ok(env)
 }
 
 /// Repository lanes use a complete private Git directory, including its index

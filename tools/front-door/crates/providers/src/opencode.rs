@@ -299,7 +299,7 @@ fn prepare(
             ));
         }
     };
-    let mut env = base_env(input, &plan.scratch.path, path);
+    let mut env = base_env(input, &plan.scratch.path, path)?;
     let xdg = |key, fallback| {
         (input.host_var)(key)
             .map(PathBuf::from)

@@ -14,6 +14,8 @@ use run::{RouteRecord, SkipKind, SkippedRoute};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+pub(super) type ExecutableLocator<'a> = dyn Fn(&str) -> Result<PathBuf, String> + 'a;
+
 mod command;
 pub(super) mod confinement;
 mod continuation;

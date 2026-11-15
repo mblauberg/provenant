@@ -1517,7 +1517,7 @@ fn prepare_inner(
     prompt_text: &str,
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
-    locate_override: Option<&dyn Fn(&str) -> Result<PathBuf, String>>,
+    locate_override: Option<&ExecutableLocator<'_>>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
@@ -2359,7 +2359,7 @@ pub(super) fn prepare_candidates(
     prompt_text: &str,
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
-    locate_override: Option<&dyn Fn(&str) -> Result<PathBuf, String>>,
+    locate_override: Option<&ExecutableLocator<'_>>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
@@ -2486,12 +2486,20 @@ pub(super) fn prepare_candidates(
     } else {
         source.clone()
     };
-    let path_project = task
-        .writer
-        .as_ref()
-        .map_or(source.as_path(), |writer| writer.project.as_path());
-    let lane_path = run::FilteredLanePath::for_requester(registry.host, path_project, &cwd)
-        .map_err(|error| error.to_string())?;
+    let requester_cwd = registry.cwd.unwrap_or(&source);
+    let same_source = writer.is_none() && canonical(requester_cwd)? == source;
+    let path_project = match writer.as_ref() {
+        Some(writer) => writer.project.clone(),
+        None => requester_path_project_root(requester_cwd)?,
+    };
+    let path_worktree = match writer.as_ref() {
+        Some(writer) => writer.worktree.path().to_path_buf(),
+        None if same_source || source == path_project => path_project.clone(),
+        None => requester_path_project_root(&source)?,
+    };
+    let lane_path =
+        run::FilteredLanePath::for_requester(registry.host, &path_project, &path_worktree)
+            .map_err(|error| error.to_string())?;
     let locate = |name: &str| match locate_override {
         Some(locate) => locate(name),
         None => preparation_executable(&lane_path, name),
@@ -2540,7 +2548,8 @@ pub(super) fn prepare_candidates(
     // under the host configuration root retained in the launch context.
     let executor =
         provenant_providers::host::HostProbeExecutor::new(&executor, roots.state.as_path())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .with_search_path(lane_path.path());
     let mut config = loaded_config
         .ok_or("routing context is unavailable")?
         .map_err(|error| error.to_string())?;

@@ -1027,6 +1027,46 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
 }
 
 #[test]
+fn sandbox_launch_path_keeps_private_tools_and_adds_requester_path_without_grants()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir()?;
+    let requester_bin = temp.path().join("requester-bin");
+    std::fs::create_dir(&requester_bin)?;
+    let helper = requester_bin.join("helper");
+    std::fs::write(&helper, "#!/bin/sh\nexit 0\n")?;
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))?;
+    let requester_path = std::env::join_paths([requester_bin.as_path()])?;
+    let host_var = |name: &str| match name {
+        "PATH" => Some(requester_path.clone()),
+        name if name == provenant_core::consumer_env::SANDBOX => Some("on".into()),
+        _ => None,
+    };
+    let prompt = Prompt::new("fixture".into());
+    let route = route("codex", "fixture-model");
+    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.host_var = &host_var;
+    let spec = codex::Codex.prepare(input)?;
+    let path = spec
+        .env
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, path)| path)
+        .expect("sandbox PATH");
+    let entries = std::env::split_paths(path).collect::<Vec<_>>();
+    assert!(entries.contains(&std::path::PathBuf::from("/fixture/home/.cargo/bin")));
+    assert!(entries.contains(&std::path::PathBuf::from("/usr/bin")));
+    assert!(entries.contains(&std::path::PathBuf::from("/bin")));
+    assert!(entries.contains(&requester_bin));
+    assert!(spec.profile.spec.tool_exec_roots.iter().all(|grant| {
+        !grant.path.starts_with(&requester_bin)
+    }));
+    Ok(())
+}
+
+#[test]
 fn native_provider_preparation_uses_requester_path_without_supervisor_rustup()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
