@@ -608,10 +608,7 @@ mod tests {
 
         let cache = Path::new("/fixture/xdg/cache");
         let local_app_data = Path::new("/fixture/local-app-data");
-        let host = host_vars(&[
-            ("XDG_CACHE_HOME", cache),
-            ("LOCALAPPDATA", local_app_data),
-        ]);
+        let host = host_vars(&[("XDG_CACHE_HOME", cache), ("LOCALAPPDATA", local_app_data)]);
         let host_var = |name: &str| host.get(name).cloned();
         assert_eq!(
             corepack_home(home, &host_var),
