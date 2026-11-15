@@ -1,5 +1,5 @@
 use crate::ProviderError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ProviderEvent {
     Text(String),
@@ -78,7 +78,7 @@ pub struct ExitObservation {
     pub code: Option<i64>,
     pub timed_out: bool,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutcomeStatus {
     Success,
     Failed,
@@ -86,6 +86,39 @@ pub enum OutcomeStatus {
     Partial,
     Malformed,
 }
+impl OutcomeStatus {
+    pub const ALL: &'static [Self] = &[
+        Self::Success,
+        Self::Failed,
+        Self::Refused,
+        Self::Partial,
+        Self::Malformed,
+    ];
+}
+
+#[cfg(test)]
+#[test]
+fn outcome_status_declaration_covers_the_wire_variants() {
+    let mut names = std::collections::BTreeSet::new();
+    for status in OutcomeStatus::ALL {
+        // The exhaustive match forces new variants to extend the wire table.
+        let name = match status {
+            OutcomeStatus::Success => "Success",
+            OutcomeStatus::Failed => "Failed",
+            OutcomeStatus::Refused => "Refused",
+            OutcomeStatus::Partial => "Partial",
+            OutcomeStatus::Malformed => "Malformed",
+        };
+        assert!(names.insert(name));
+        let encoded = provenant_records::encode(status).unwrap();
+        assert_eq!(serde_json::from_slice::<String>(&encoded).unwrap(), name);
+        let decoded: OutcomeStatus =
+            provenant_records::decode(encoded.as_slice(), provenant_records::Limits::default())
+                .unwrap();
+        assert_eq!(decoded, *status);
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ProviderOutcome {
     adapter: &'static str,
