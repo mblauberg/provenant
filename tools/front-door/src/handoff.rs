@@ -177,10 +177,11 @@ fn inspect_context(
     let mut trees = Vec::with_capacity(observations.len());
     for observation in observations {
         let info = observation;
-        let verified = provenant_confinement::verify_worktree(context.repo, &info.path)?;
-        // The selected worktree's verified private/common identity identifies
-        // the primary checkout even when its common directory is elsewhere.
-        let primary = verified.repo().private_git_dir() == verified.repo().common_git_dir();
+        // `list` resolves the primary against the context's verified project
+        // root and verifies linked worktrees separately. Do not pass the
+        // primary back through `verify_worktree`, which admits linked writers
+        // only and correctly refuses the primary checkout.
+        let primary = info.primary;
         let branch = info.branch.as_deref().map(short_branch);
         let (upstream, pushed) = match branch.as_deref() {
             Some(branch) => {
@@ -1555,6 +1556,8 @@ mod tests {
             .iter()
             .find(|row| row.path == tree.path)
             .ok_or("missing lane")?;
+        assert!(!row.primary, "a linked writer is not the primary checkout");
+        assert!(!unsafe_wip(row));
         assert_eq!(row.upstream.as_deref(), Some(tree.head.as_str()));
         assert!(row.pushed);
         let observed = crate::worktrees::with_context(

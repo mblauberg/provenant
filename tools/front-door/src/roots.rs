@@ -282,6 +282,40 @@ pub fn project_layout(
     )
 }
 
+/// Resolve a project layout without allocating a binding or updating its
+/// saved primary hint. Unbound checkouts use Git's verified inventory only.
+pub fn project_layout_read_only(
+    roots: &Roots,
+    selected: &Path,
+) -> Result<provenant_confinement::worktrees::ProjectLayout, Box<dyn std::error::Error>> {
+    let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
+    let utility = provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())?;
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+    let discovered = utility.project_location(&executor, selected, budget, &cancel)?;
+    let environment = provenant_confinement::worktrees::project_layout_git_environment();
+    let repo = utility.open_read_repo(&executor, selected, budget, &cancel)?;
+    if let Some(binding) = provenant_config::lookup_project(roots, &discovered.location)? {
+        let layout = provenant_confinement::worktrees::project_layout_for_binding(
+            &executor,
+            &binding,
+            utility.git_program_path(),
+            &environment,
+            Duration::from_secs(5),
+            &cancel,
+        )?;
+        if layout.project().is_some() || repo.private_git_dir() != repo.common_git_dir() {
+            return Ok(layout);
+        }
+    }
+    Ok(
+        provenant_confinement::worktrees::project_layout_for_checkout(
+            &executor, &repo, &utility, budget, &cancel,
+        )?,
+    )
+}
+
 /// Resolve a new state candidate with every captured root input intact.
 pub fn state_candidate(context: &Roots, candidate: PathBuf) -> Result<Roots, RootError> {
     let roots = context.with_state_dir(candidate, &provenant_os::fs::SystemPathResolver)?;
@@ -355,9 +389,13 @@ mod tests {
         provenant_os::fixture::run_git(&checkout, &["add", "tracked.txt"])?;
         provenant_os::fixture::run_git(&checkout, &["commit", "-qm", "base"])?;
 
-        let primary = project_layout(&roots, &checkout)?;
+        let primary = project_layout_read_only(&roots, &checkout)?;
         assert_eq!(primary.project(), Some(checkout.as_path()));
         assert_eq!(primary.root(), checkout);
+        assert!(provenant_config::registered_projects(&roots)?.is_empty());
+
+        let primary = project_layout(&roots, &checkout)?;
+        assert_eq!(primary.project(), Some(checkout.as_path()));
         provenant_os::fixture::run_git(
             &checkout,
             &[
