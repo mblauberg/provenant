@@ -53,15 +53,19 @@ preference always expires.
 
 ## Provider model scope
 
-Provider model patterns constrain automatic pool draws, named routes and their
-fallbacks. An explicit pin outside the scope follows the provider's configured
-`out_of_scope_pin` policy: warn once and launch, refuse, or allow silently.
-Provider model names are matched against literal patterns with `*` as a wildcard.
-Scope describes the requested model ID, not an underlying model selected by a
-provider's automatic mode. `Catalogue::launch_model` applies a recorded effort
-suffix only to a catalogued model with that supported effort; Cursor receives
-that spelling at its argv boundary while route and continuation identity retain
-the canonical model and effort.
+Compiled provider model patterns constrain automatic choices from shipped
+pools. Owner-configured pools, routes and model preferences may select other
+catalogued models. When the owner explicitly sets
+`providers.<adapter>.models`, that restriction applies to automatic choices
+from both shipped and owner-configured pools, routes, preferences, fallbacks and
+depletion hand-offs. An explicit pin outside the effective scope follows the
+provider's `out_of_scope_pin` policy: warn once and launch, refuse, or allow
+silently. Provider model names are matched against literal patterns with `*` as
+a wildcard. Scope describes the requested model ID, not an underlying model
+selected by a provider's automatic mode. `Catalogue::launch_model` applies a
+recorded effort suffix only to a catalogued model with that supported effort;
+Cursor receives that spelling at its argv boundary while route and
+continuation identity retain the canonical model and effort.
 
 ## Capability and selection preferences
 

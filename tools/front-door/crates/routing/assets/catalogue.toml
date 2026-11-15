@@ -4,7 +4,7 @@
 # Pool metadata is migrated from the legacy routing catalogue; exact execution
 # support still depends on each provider's current availability observation.
 schema_version = 1
-revision = "route-pools-20261115-cursor"
+revision = "route-pools-20261115-owner-overrides"
 
 [[models]]
 model = "claude/claude-haiku-4-5-20251001"
@@ -30,6 +30,12 @@ evidence_ref = "Cursor CLI model listing, user observed 2026-11-15"
 model = "cursor/composer-2.5"
 efforts = []
 evidence_ref = "Cursor CLI model listing and one-line probe, user observed 2026-11-15"
+
+[[models]]
+model = "cursor/gpt-5.3-codex-low"
+efforts = []
+evidence_ref = "tests/fixtures/model-listings/cursor-models.txt@82daaf40aaae5c17a9ccb74815e64f4d76c2dbcc; captured 2026-10-23"
+trains_on_prompts = false
 
 # Go plan limits: https://opencode.ai/v2/docs/console/go/ accessed 2026-10-28.
 
