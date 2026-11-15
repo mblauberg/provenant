@@ -909,12 +909,11 @@ pub fn launch_resolvers_at_roots(
         Some(Ok(diff)) => ReviewDiffSelection::Captured(vec![diff]),
         Some(Err(_)) => ReviewDiffSelection::Incomplete(Vec::new()),
     };
-    launch_resolvers_at_roots_with_selection(roots, cwd, review, document, pinned_diff)
+    launch_resolvers_at_roots_with_selection(roots, review, document, pinned_diff)
 }
 
 fn launch_resolvers_at_roots_with_selection(
     roots: &provenant_core::Roots,
-    cwd: &std::path::Path,
     review: &provenant_routing::ReviewConfig,
     document: &provenant_fabric_runtime::graph::GraphDocument,
     pinned_diff: ReviewDiffSelection,
@@ -938,7 +937,7 @@ fn launch_resolvers_for_relay(
     subjects: &[Option<provenant_fabric_runtime::graph::SourceBinding>],
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
     let pinned_diff = relay_review_diffs(cwd, checkpoint, subjects);
-    launch_resolvers_at_roots_with_selection(roots, cwd, review, document, pinned_diff)
+    launch_resolvers_at_roots_with_selection(roots, review, document, pinned_diff)
 }
 
 fn relay_child_review_subjects(
