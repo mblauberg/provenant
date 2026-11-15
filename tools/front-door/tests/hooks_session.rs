@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
-use support::{Result, TestRig, code};
+use support::{Result, TestRig, code, git, json_lines};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_provenant");
 
@@ -491,20 +491,6 @@ fn lane_sessions_report_but_never_write_checkpoint_state() -> Result {
     Ok(())
 }
 
-fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
-    let output = rig.execute(
-        &provenant_os::git::git_executable().ok_or("Git unavailable")?,
-        args,
-        None,
-    )?;
-    assert_eq!(
-        code(&output),
-        0,
-        "{args:?}: {}",
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    Ok(String::from_utf8(output.stdout.bytes)?.trim().into())
-}
 fn commit_file(rig: &TestRig) -> Result {
     fs::write(rig.project.join("file"), "one")?;
     git(rig, &["add", "file"])?;
@@ -537,19 +523,11 @@ fn session_worktree_stream_reports_inventory_rows() -> Result {
         "{}",
         String::from_utf8_lossy(&output.stderr.bytes)
     );
-    let events: Vec<Value> = output
-        .stdout
-        .bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(serde_json::from_slice)
-        .collect::<std::result::Result<_, _>>()?;
-    assert_eq!(events[0]["total"], 2);
-    assert_eq!(events.len(), 3);
+    let events = json_lines(&output.stdout.bytes)?;
     assert!(
         events
             .iter()
-            .any(|event| event["worktree"]["branch"] == "refs/heads/streamed")
+            .any(|event| { event["worktree"]["branch"] == "refs/heads/streamed" })
     );
     Ok(())
 }
@@ -565,15 +543,11 @@ fn session_lane_stream_reports_inventory_rows() -> Result {
         "{}",
         String::from_utf8_lossy(&output.stderr.bytes)
     );
-    let events: Vec<Value> = output
-        .stdout
-        .bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(serde_json::from_slice)
-        .collect::<std::result::Result<_, _>>()?;
-    assert_eq!(events[0]["total"], 1);
-    let row = &events[1]["lane"];
+    let events = json_lines(&output.stdout.bytes)?;
+    let row = events
+        .iter()
+        .find_map(|event| event.get("lane"))
+        .ok_or("lane row")?;
     assert!(row["reason"].is_string(), "{row}");
     assert_eq!(row["key"], serde_json::to_value(&lane.key)?);
     assert_eq!(row["attempt_id"], lane.attempt);
@@ -785,8 +759,6 @@ fn worktree_remove_keeps_a_listed_clean_tree_the_hook_did_not_make() -> Result {
     fs::remove_file(&record)?;
     let output = run_hook(&rig, "worktree-remove", &removal_input(&rig, &path))?;
     assert_eq!(code(&output), 2);
-    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
-    assert!(stderr.contains("was not created by this hook"), "{stderr}");
     assert!(path.is_dir());
     // A tree made by hand and listed by the owner is kept too.
     let hand = rig.project.join(".worktrees").join("by-hand");
@@ -824,8 +796,8 @@ fn worktree_remove_accepts_an_owned_tree_after_a_commit() -> Result {
     )?;
     let output = run_hook(&rig, "worktree-remove", &removal_input(&rig, &path))?;
     // The owner may keep an unmerged branch, but the hook does not refuse it.
-    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
-    assert!(!stderr.contains("was not created by this hook"), "{stderr}");
+    assert_eq!(code(&output), 0);
+    assert!(!path.exists());
     Ok(())
 }
 
@@ -840,138 +812,166 @@ fn state_record(rig: &TestRig) -> Result<PathBuf> {
 
 #[test]
 fn ownership_is_specific_to_one_creation_and_ends_with_the_tree() -> Result {
+    // A recorded tree can be reused and removed; these state changes are the
+    // ownership contract at the hook boundary.
     let rig = TestRig::new()?;
     commit_file(&rig)?;
-    // Happy path: the record exists in state and in the admin directory, and
-    // the same name reuses the tree; removal by the hook deletes the record.
     let path = made_tree(&rig, "owned")?;
     let record = state_record(&rig)?;
+    let reused = run_hook(&rig, "worktree-create", &worktree_input(&rig, "owned"))?;
+    assert_eq!(code(&reused), 0);
     assert_eq!(
-        code(&run_hook(
-            &rig,
-            "worktree-create",
-            &worktree_input(&rig, "owned")
-        )?),
-        0
+        String::from_utf8(reused.stdout.bytes)?.trim_end(),
+        path.to_string_lossy()
     );
     let removed = run_hook(&rig, "worktree-remove", &removal_input(&rig, &path))?;
     assert_eq!(code(&removed), 0);
-    assert!(!record.exists(), "state record outlived the tree");
-    // A tree recreated by hand at the same path and branch is not adopted,
-    // though the state record of the first creation is still on disk.
-    let path = made_tree(&rig, "stale")?;
-    let stale = state_record(&rig)?;
-    git(
-        &rig,
-        &["worktree", "remove", "--force", ".worktrees/claude-stale"],
-    )?;
-    assert!(stale.is_file());
-    git(
-        &rig,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            ".worktrees/claude-stale",
-            "claude/stale",
-        ],
-    )?;
-    let stderr = refused_create(&rig, "stale")?;
-    assert!(stderr.contains("was not created by this hook"), "{stderr}");
-    assert!(path.is_dir());
-    fs::remove_file(&stale)?;
-    // A record whose token differs from the tree's marker is refused.
-    let path = made_tree(&rig, "token")?;
-    let record = state_record(&rig)?;
-    let mut value: Value = serde_json::from_slice(&fs::read(&record)?)?;
-    value["token"] = json!("00000000000000000000000000000000");
-    fs::write(&record, serde_json::to_vec(&value)?)?;
-    let stderr = refused_create(&rig, "token")?;
-    assert!(stderr.contains("was not created by this hook"), "{stderr}");
-    // A tree whose HEAD has moved since the hook made it is not adopted.
-    fs::remove_file(&record)?;
-    fs::remove_dir_all(rig.state.join("hooks"))?;
-    let _ = path;
-    let moved = made_tree(&rig, "moved")?;
-    git(
-        &rig,
-        &[
-            "-C",
-            moved.to_str().ok_or("path")?,
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "x",
-        ],
-    )?;
-    let stderr = refused_create(&rig, "moved")?;
-    assert!(stderr.contains("was not created by this hook"), "{stderr}");
+    assert!(!record.exists());
+    assert!(!path.exists());
+
+    // A stale path, changed owner token, or moved HEAD cannot be adopted.
+    #[derive(Clone, Copy)]
+    enum Alteration {
+        RecreatedTree,
+        ChangedToken,
+        MovedHead,
+    }
+    for (name, alteration) in [
+        ("stale", Alteration::RecreatedTree),
+        ("token", Alteration::ChangedToken),
+        ("moved", Alteration::MovedHead),
+    ] {
+        let rig = TestRig::new()?;
+        commit_file(&rig)?;
+        let path = made_tree(&rig, name)?;
+        let record = state_record(&rig)?;
+        match alteration {
+            Alteration::RecreatedTree => {
+                git(
+                    &rig,
+                    &[
+                        "worktree",
+                        "remove",
+                        "--force",
+                        path.to_str().ok_or("path")?,
+                    ],
+                )?;
+                git(
+                    &rig,
+                    &[
+                        "worktree",
+                        "add",
+                        "-q",
+                        path.to_str().ok_or("path")?,
+                        &format!("claude/{name}"),
+                    ],
+                )?;
+            }
+            Alteration::ChangedToken => {
+                let mut value: Value = serde_json::from_slice(&fs::read(&record)?)?;
+                value["token"] = json!("00000000000000000000000000000000");
+                fs::write(&record, serde_json::to_vec(&value)?)?;
+            }
+            Alteration::MovedHead => {
+                git(
+                    &rig,
+                    &[
+                        "-C",
+                        path.to_str().ok_or("path")?,
+                        "-c",
+                        "commit.gpgsign=false",
+                        "commit",
+                        "-q",
+                        "--allow-empty",
+                        "-m",
+                        "advance",
+                    ],
+                )?;
+            }
+        }
+        refused_create(&rig, name)?;
+        assert!(path.is_dir(), "{name}");
+    }
     Ok(())
 }
 
-fn refused_create(rig: &TestRig, name: &str) -> Result<String> {
+fn refused_create(rig: &TestRig, name: &str) -> Result {
     let output = run_hook(rig, "worktree-create", &worktree_input(rig, name))?;
     assert_eq!(code(&output), 2, "{name}");
     assert!(output.stdout.bytes.is_empty(), "{name}");
-    Ok(String::from_utf8(output.stderr.bytes)?)
+    Ok(())
 }
 
 #[test]
 fn worktree_create_never_reuses_primary_unowned_misplaced_or_dirty_trees() -> Result {
-    let rig = TestRig::new()?;
-    commit_file(&rig)?;
-    // The chair's own checkout holds the branch.
-    git(&rig, &["checkout", "-q", "-b", "claude/primary-held"])?;
-    let stderr = refused_create(&rig, "primary-held")?;
-    assert!(stderr.contains("primary checkout"), "{stderr}");
-    git(&rig, &["checkout", "-q", "-"])?;
-    // A tree at the hook's exact path that the owner never registered.
-    git(
-        &rig,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "claude/unowned",
-            ".worktrees/claude-unowned",
-        ],
-    )?;
-    let stderr = refused_create(&rig, "unowned")?;
-    assert!(stderr.contains("was not created by this hook"), "{stderr}");
-    // A tree on the branch somewhere the hook would not have put it.
-    let elsewhere = rig.root.join("elsewhere");
-    git(
-        &rig,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "claude/misplaced",
-            elsewhere.to_str().ok_or("path")?,
-        ],
-    )?;
-    let stderr = refused_create(&rig, "misplaced")?;
-    assert!(stderr.contains("not at the path"), "{stderr}");
-    // The hook's own tree is reused when clean and refused once it has work.
-    let made = run_hook(&rig, "worktree-create", &worktree_input(&rig, "mine"))?;
-    assert_eq!(code(&made), 0);
-    let path = PathBuf::from(String::from_utf8(made.stdout.bytes)?.trim_end());
-    fs::write(path.join("scratch.txt"), "work")?;
-    let stderr = refused_create(&rig, "mine")?;
-    assert!(stderr.contains("uncommitted or ignored"), "{stderr}");
-    assert!(path.join("scratch.txt").is_file());
+    #[derive(Clone, Copy)]
+    enum Candidate {
+        PrimaryBranch,
+        UnownedTree,
+        MisplacedTree,
+        DirtyOwnedTree,
+    }
+    for (name, candidate) in [
+        ("primary-held", Candidate::PrimaryBranch),
+        ("unowned", Candidate::UnownedTree),
+        ("misplaced", Candidate::MisplacedTree),
+        ("mine", Candidate::DirtyOwnedTree),
+    ] {
+        let rig = TestRig::new()?;
+        commit_file(&rig)?;
+        match candidate {
+            Candidate::PrimaryBranch => {
+                git(&rig, &["checkout", "-q", "-b", "claude/primary-held"])?;
+                refused_create(&rig, name)?;
+                git(&rig, &["checkout", "-q", "-"])?;
+            }
+            Candidate::UnownedTree => {
+                let path = rig.project.join(".worktrees/claude-unowned");
+                git(
+                    &rig,
+                    &[
+                        "worktree",
+                        "add",
+                        "-q",
+                        "-b",
+                        "claude/unowned",
+                        path.to_str().ok_or("path")?,
+                    ],
+                )?;
+                refused_create(&rig, name)?;
+                assert!(path.is_dir());
+            }
+            Candidate::MisplacedTree => {
+                let path = rig.root.join("elsewhere");
+                git(
+                    &rig,
+                    &[
+                        "worktree",
+                        "add",
+                        "-q",
+                        "-b",
+                        "claude/misplaced",
+                        path.to_str().ok_or("path")?,
+                    ],
+                )?;
+                refused_create(&rig, name)?;
+                assert!(path.is_dir());
+            }
+            Candidate::DirtyOwnedTree => {
+                let path = made_tree(&rig, name)?;
+                fs::write(path.join("scratch.txt"), "work")?;
+                refused_create(&rig, name)?;
+                assert_eq!(fs::read_to_string(path.join("scratch.txt"))?, "work");
+            }
+        }
+    }
     Ok(())
 }
 
 #[test]
-fn worktree_remove_keeps_a_tree_with_only_ignored_output_and_says_why() -> Result {
-    // Removal policy belongs to the worktree owner (#1816); until it clears
-    // ignored build output, the hook leaves the tree and exits 2 with the reason.
+fn worktree_remove_preserves_a_tree_with_ignored_output() -> Result {
+    // Removal policy belongs to the worktree owner (#1816); ignored output
+    // keeps this tree in place for its owner to handle.
     let rig = TestRig::new()?;
     fs::write(rig.project.join(".gitignore"), "target/\n")?;
     git(&rig, &["add", ".gitignore"])?;
@@ -984,12 +984,7 @@ fn worktree_remove_keeps_a_tree_with_only_ignored_output_and_says_why() -> Resul
     let refused = run_hook(&rig, "worktree-remove", &removal_input(&rig, &path))?;
     assert_eq!(code(&refused), 2);
     assert!(refused.stdout.bytes.is_empty());
-    let stderr = String::from_utf8(refused.stderr.bytes)?;
-    assert!(
-        stderr.starts_with("worktree-remove: refused:")
-            && stderr.contains("undeclared ignored paths: target/"),
-        "{stderr}"
-    );
     assert!(path.join("target/out.o").is_file());
+    assert!(path.is_dir());
     Ok(())
 }

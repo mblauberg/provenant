@@ -45,9 +45,44 @@ port table or settings, never a name compiled into a reader.
 A command is stable only when a stable entry on this page names it: today
 `provenant process-tree --json`. Every other command, and the JSON envelope of
 commands other than `process-tree`, is evolving. Human output, including printed
-next-step command lines, is evolving: scripts read `--json`. A removed spelling exits 2 with one line
-naming its replacement and is never an alias; 2.0 replaced `provenant
-dispatch` with `provenant run TEMPLATE BRIEF`.
+next-step command lines, is evolving: scripts read `--json`. A removed command or option exits 2 with one line naming its replacement and is never an alias. The complete migration list follows.
+
+<!-- REMOVED_CLI_START -->
+| Removed spelling | Replacement |
+|---|---|
+| `provenant dispatch` | provenant run TEMPLATE BRIEF |
+| `provenant lanes` | provenant status |
+| `provenant resume` | provenant retry NAME/NODE |
+| `provenant cancel` | provenant stop NAME |
+| `provenant continue` | provenant retry NAME/NODE#N |
+| `provenant redo` | provenant retry NAME/NODE |
+| `provenant preset` | provenant templates |
+| `provenant review` | provenant run review BRIEF |
+| `provenant stats` | provenant telemetry cost --by node |
+| `provenant pr land` | provenant land NUMBER --wait |
+| `provenant fabric graph` | provenant status NAME |
+| `provenant fabric mcp` | provenant fabric |
+| `provenant fabric_graph` | provenant run TEMPLATE BRIEF |
+| `provenant quota usage` | provenant telemetry cost --by account |
+| `provenant config migrate` | provenant config check |
+| `provenant resume --no-fallback` | provenant retry NAME/NODE#N |
+| `provenant retry --no-fallback` | provenant retry NAME/NODE#N |
+| `provenant land --batch` | provenant land NUMBER [NUMBER ...] |
+| `provenant run --use` | provenant run TEMPLATE BRIEF |
+| `provenant run --wait` | provenant wait NAME |
+| `provenant status --wait` | provenant wait NAME |
+| `provenant status --until` | provenant wait NAME --any |
+| `provenant status --follow` | provenant wait NAME --follow |
+| `provenant status --by` | provenant telemetry cost NAME --by node |
+| `provenant status --id` | provenant status NAME |
+| `provenant stop --operation-id` | provenant stop NAME |
+| `provenant stop --wait` | provenant wait NAME |
+| `provenant retry --node` | provenant retry NAME/NODE |
+| `provenant retry --wait` | provenant wait NAME |
+| `provenant output --trace` | provenant trace NAME |
+| `provenant reconcile --id` | provenant reconcile NAME |
+| `provenant pr status --wait` | provenant pr watch NUMBER |
+<!-- REMOVED_CLI_END -->
 
 - Why: a script that drives Provenant needs a fixed grammar and one parseable form.
 - Owner: `crates/cli/src/grammar.rs`, `crates/config/src/removed.rs`

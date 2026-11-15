@@ -60,6 +60,7 @@ fn quota_route_and_doctor_share_account_readiness_fixture() -> Result {
     fs::create_dir(&directory)?;
     support::register_account(&rig, "codex", "work", "fixture-key", &directory)?;
     let account = AccountRecord::empty(AccountScope {
+        extra: Default::default(),
         adapter: "codex".into(),
         account_key: "fixture-key".into(),
         label: "work".into(),

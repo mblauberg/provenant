@@ -28,3 +28,31 @@ pub use prices::{
 };
 pub use reducer::*;
 pub use trace::{Hosts, trace};
+
+/// Decode one persisted telemetry record through the shared bounded JSON
+/// decoder while preserving fields introduced by later compatible writers.
+pub(crate) fn decode_record<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    max_bytes: u64,
+) -> Result<T, provenant_records::DecodeError> {
+    provenant_records::decode(
+        bytes,
+        provenant_records::Limits {
+            max_bytes,
+            ..provenant_records::Limits::default()
+        },
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn assert_record_round_trip<T>(record: serde_json::Value)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let bytes = provenant_records::encode(&record).expect("fixture is valid JSON");
+    let decoded: T = decode_record(&bytes, bytes.len() as u64).expect("bounded decode");
+    let rewritten = provenant_records::encode(&decoded).expect("stored record encodes");
+    let rewritten: serde_json::Value =
+        serde_json::from_slice(&rewritten).expect("encoded record is JSON");
+    assert_eq!(rewritten, record);
+}

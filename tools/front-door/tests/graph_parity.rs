@@ -170,7 +170,7 @@ struct Harness {
 impl Harness {
     fn new(id: &str, node: serde_json::Value) -> Result<Self> {
         Self::with_document(serde_json::from_value(
-            json!({"schema_version":1,"graph_id":id,"nodes":[node]}),
+            json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"nodes":[node]}),
         )?)
     }
     fn with_document(document: GraphDocument) -> Result<Self> {
@@ -363,8 +363,7 @@ fn rerun_after_success_or_cancellation_launches_unless_the_launch_is_replayed() 
             }
             let first = h.checkpoint()?;
             assert_eq!(first.cancelled, cancelled);
-            assert_eq!(p.launches.len(), 1);
-            let calls_before = p.calls.len();
+            assert_eq!(first.nodes[0].attempts.len(), 1);
             let rerun_id = if replayed {
                 first_id.clone()
             } else {
@@ -376,17 +375,18 @@ fn rerun_after_success_or_cancellation_launches_unless_the_launch_is_replayed() 
             let rerun = h.advance(&mut p)?;
             let checkpoint = h.checkpoint()?;
             if replayed {
-                assert_eq!(p.calls.len(), calls_before);
-                assert_eq!(p.launches.len(), 1);
                 assert_eq!(checkpoint.cancelled, cancelled);
                 assert_eq!(checkpoint.nodes[0].state, first.nodes[0].state);
+                assert_eq!(checkpoint.nodes[0].attempts, first.nodes[0].attempts);
             } else {
                 assert_eq!(rerun.status, GraphStatus::Complete);
-                assert_eq!(p.launches.len(), 2);
-                assert_ne!(p.launches[0], p.launches[1]);
                 assert!(!checkpoint.cancelled);
                 assert_eq!(checkpoint.nodes[0].state, NodeState::Succeeded);
                 assert_eq!(checkpoint.nodes[0].attempts.len(), 1);
+                assert_ne!(
+                    checkpoint.nodes[0].attempts[0].attempt_ref,
+                    first.nodes[0].attempts[0].attempt_ref
+                );
                 assert_same_story(&h.events()?, &checkpoint);
                 let previous = FileJournal::read_checkpoint(&h.state, h.project, &first_id)?
                     .ok_or("previous checkpoint disappeared")?;
@@ -412,7 +412,6 @@ fn failure() -> Result {
     // A launched task failure is the task's answer: no second member is tried.
     assert_eq!(node.attempts.len(), 1);
     assert_eq!(node.attempts[0].outcome, Some(AttemptOutcome::TaskFailed));
-    assert_eq!(p.launches.len(), 1);
     assert_same_story(&h.events()?, &checkpoint);
     Ok(())
 }

@@ -121,29 +121,93 @@ pub fn trigger_for_readiness(
         _ => trigger,
     })
 }
+#[derive(Clone, Copy, Debug)]
+struct BackoffRule {
+    failure: ProbeFailure,
+    first_seconds: u64,
+    cap_seconds: u64,
+}
+
+const RETRY_AFTER_CAP_SECONDS: u64 = 3600;
+const BACKOFF_RULES: &[BackoffRule] = &[
+    BackoffRule {
+        failure: ProbeFailure::Network,
+        first_seconds: 15,
+        cap_seconds: 300,
+    },
+    BackoffRule {
+        failure: ProbeFailure::RateLimited,
+        first_seconds: 120,
+        cap_seconds: 3600,
+    },
+    BackoffRule {
+        failure: ProbeFailure::RefreshDeferred,
+        first_seconds: 15,
+        cap_seconds: 15,
+    },
+    BackoffRule {
+        failure: ProbeFailure::Auth,
+        first_seconds: 900,
+        cap_seconds: 900,
+    },
+    BackoffRule {
+        failure: ProbeFailure::LoginExpired,
+        first_seconds: 900,
+        cap_seconds: 900,
+    },
+    BackoffRule {
+        failure: ProbeFailure::AccountMismatch,
+        first_seconds: 900,
+        cap_seconds: 900,
+    },
+    BackoffRule {
+        failure: ProbeFailure::IsolatedKeychainUnavailable,
+        first_seconds: 3600,
+        cap_seconds: 3600,
+    },
+    BackoffRule {
+        failure: ProbeFailure::MissingCli,
+        first_seconds: 86400,
+        cap_seconds: 86400,
+    },
+    BackoffRule {
+        failure: ProbeFailure::ProbeDirectory,
+        first_seconds: 120,
+        cap_seconds: 120,
+    },
+    BackoffRule {
+        failure: ProbeFailure::Disabled,
+        first_seconds: 86400,
+        cap_seconds: 86400,
+    },
+    BackoffRule {
+        failure: ProbeFailure::Malformed,
+        first_seconds: 120,
+        cap_seconds: 120,
+    },
+];
+
 pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option<u64>) -> u64 {
-    let base = match failure {
-        ProbeFailure::RefreshDeferred => 15,
-        ProbeFailure::Network | ProbeFailure::RateLimited => {
-            let (first, cap) = if failure == ProbeFailure::Network {
-                (15, 300)
-            } else {
-                (120, 3600)
-            };
-            Backoff::new(
-                std::time::Duration::from_secs(first),
-                2,
-                std::time::Duration::from_secs(cap),
-            )
-            .delay(failures.saturating_sub(1))
-            .as_secs()
-        }
-        ProbeFailure::Auth | ProbeFailure::LoginExpired | ProbeFailure::AccountMismatch => 900,
-        ProbeFailure::IsolatedKeychainUnavailable => 3600,
-        ProbeFailure::MissingCli | ProbeFailure::Disabled => 86400,
-        ProbeFailure::Malformed | ProbeFailure::ProbeDirectory => 120,
+    let rule = BACKOFF_RULES
+        .iter()
+        .find(|rule| rule.failure == failure)
+        .expect("every probe failure declares a backoff rule");
+    let base = if rule.first_seconds == rule.cap_seconds {
+        rule.first_seconds
+    } else {
+        Backoff::new(
+            std::time::Duration::from_secs(rule.first_seconds),
+            2,
+            std::time::Duration::from_secs(rule.cap_seconds),
+        )
+        .delay(failures.saturating_sub(1))
+        .as_secs()
     };
-    base.max(retry_after_seconds.unwrap_or(0).min(3600))
+    base.max(
+        retry_after_seconds
+            .unwrap_or(0)
+            .min(RETRY_AFTER_CAP_SECONDS),
+    )
 }
 pub fn reserve(
     policies: &[QuotaPolicy],
@@ -169,22 +233,23 @@ pub fn reserve(
     {
         return Err(QuotaError::Conflict);
     }
-    let stored_account = record.account.clone();
-    record.account = account.clone();
+    let stored_account = record.account.updated_from(account);
+    record.account = stored_account.clone();
     if let Some(snapshot) = record.snapshot.as_mut() {
-        snapshot.account = account.clone();
+        snapshot.account = snapshot.account.updated_from(&stored_account);
     }
     for refusal in &mut record.refusals {
-        refusal.account = account.clone();
+        refusal.account = refusal.account.updated_from(&stored_account);
     }
     for cooldown in &mut record.capacity_cooldowns {
-        cooldown.account = account.clone();
+        cooldown.account = cooldown.account.updated_from(&stored_account);
     }
     record.revision = record
         .revision
         .checked_add(1)
         .ok_or(QuotaError::NumberOutOfRange)?;
     record.claim = Some(RefreshClaim {
+        extra: Default::default(),
         token: token.into(),
         deadline_unix_seconds: add(now, TICK_BUDGET_SECONDS as u64)?,
     });
@@ -225,13 +290,29 @@ pub fn complete(
     match outcome {
         Ok(mut snapshot) => {
             snapshot.validate()?;
-            if snapshot.account != current.account
+            if !snapshot.account.same_scope(&current.account)
                 || snapshot.observed_unix_seconds > now
                 || current
                     .last_attempt_unix_seconds
                     .is_some_and(|at| snapshot.observed_unix_seconds < at)
             {
                 return Err(QuotaError::Invalid("probe observation"));
+            }
+            if let Some(previous) = &current.snapshot {
+                snapshot.extra.extend(previous.extra.clone());
+                snapshot.account = snapshot.account.updated_from(&previous.account);
+                if let (Some(previous_details), Some(details)) =
+                    (&previous.details, &mut snapshot.details)
+                {
+                    details.extra.extend(previous_details.extra.clone());
+                }
+                for window in &mut snapshot.windows {
+                    if let Some(previous) =
+                        previous.windows.iter().find(|row| row.pool == window.pool)
+                    {
+                        window.extra.extend(previous.extra.clone());
+                    }
+                }
             }
             snapshot.revision = next.revision;
             next.snapshot = Some(snapshot);
@@ -691,6 +772,7 @@ mod tests {
         );
         record.backoff_until_unix_seconds = Some(250);
         record.claim = Some(RefreshClaim {
+            extra: Default::default(),
             token: "fixture".into(),
             deadline_unix_seconds: 280,
         });
@@ -726,6 +808,7 @@ mod tests {
     }
     fn account() -> AccountScope {
         AccountScope {
+            extra: Default::default(),
             adapter: "claude".into(),
             account_key: "opaque".into(),
             label: "work".into(),
@@ -773,6 +856,7 @@ mod tests {
         r.last_attempt_unix_seconds = Some(100);
         r.backoff_until_unix_seconds = Some(400);
         r.claim = Some(RefreshClaim {
+            extra: Default::default(),
             token: "old".into(),
             deadline_unix_seconds: 155,
         });
@@ -854,6 +938,7 @@ mod tests {
             .is_ok()
         );
         record.claim = Some(RefreshClaim {
+            extra: Default::default(),
             token: "active".into(),
             deadline_unix_seconds: 155,
         });
@@ -943,6 +1028,7 @@ mod tests {
             "second",
             180,
             Ok(QuotaSnapshot {
+                extra: Default::default(),
                 schema_version: 1,
                 account: agy.clone(),
                 revision: 0,
@@ -1139,31 +1225,39 @@ mod tests {
     }
     #[test]
     fn backoff_has_bounded_exponential_and_retry_after_floor() {
-        assert_eq!(backoff(ProbeFailure::Network, 1, None), 15);
-        assert_eq!(backoff(ProbeFailure::Network, 2, None), 30);
-        assert_eq!(backoff(ProbeFailure::Network, 3, None), 60);
-        assert_eq!(backoff(ProbeFailure::Network, 4, None), 120);
-        assert_eq!(backoff(ProbeFailure::Network, 5, None), 240);
-        assert_eq!(backoff(ProbeFailure::Network, 6, None), 300);
-        assert_eq!(backoff(ProbeFailure::Network, 50, None), 300);
-        assert_eq!(backoff(ProbeFailure::RateLimited, 50, None), 3600);
-        assert_eq!(backoff(ProbeFailure::Network, 1, Some(999999)), 3600);
-        assert_eq!(backoff(ProbeFailure::Auth, 1, None), 900);
-        assert_eq!(backoff(ProbeFailure::MissingCli, 1, None), 86400);
-        assert_eq!(backoff(ProbeFailure::ProbeDirectory, 1, None), 120);
-        assert_eq!(backoff(ProbeFailure::Disabled, 1, None), 86400);
-        assert_eq!(backoff(ProbeFailure::Network, 1, None), 15);
-        assert_eq!(backoff(ProbeFailure::Auth, 1, None), 900);
-        for failure in [
-            ProbeFailure::Network,
-            ProbeFailure::RateLimited,
-            ProbeFailure::Auth,
-            ProbeFailure::AccountMismatch,
-            ProbeFailure::IsolatedKeychainUnavailable,
-            ProbeFailure::Malformed,
-            ProbeFailure::ProbeDirectory,
-        ] {
-            assert!(backoff(failure, 100, Some(u64::MAX)) < 86400);
+        assert_eq!(BACKOFF_RULES.len(), ProbeFailure::ALL.len());
+        for failure in ProbeFailure::ALL {
+            assert_eq!(
+                BACKOFF_RULES
+                    .iter()
+                    .filter(|rule| rule.failure == *failure)
+                    .count(),
+                1,
+                "missing or duplicate rule for {failure:?}"
+            );
+        }
+        for rule in BACKOFF_RULES {
+            let encoded = provenant_records::encode(&rule.failure).unwrap();
+            let decoded: ProbeFailure =
+                provenant_records::decode(&encoded, provenant_records::Limits::CONFIG).unwrap();
+            assert_eq!(decoded, rule.failure);
+            for attempt in [1, 2, 5, 50] {
+                let exponent = attempt.saturating_sub(1) as u32;
+                let expected_base = rule
+                    .first_seconds
+                    .saturating_mul(2u64.saturating_pow(exponent))
+                    .min(rule.cap_seconds);
+                for retry_after in [None, Some(0), Some(RETRY_AFTER_CAP_SECONDS), Some(u64::MAX)] {
+                    let expected =
+                        expected_base.max(retry_after.unwrap_or(0).min(RETRY_AFTER_CAP_SECONDS));
+                    assert_eq!(
+                        backoff(rule.failure, attempt, retry_after),
+                        expected,
+                        "failure={:?} attempt={attempt} retry_after={retry_after:?}",
+                        rule.failure
+                    );
+                }
+            }
         }
     }
     #[test]
@@ -1200,11 +1294,52 @@ mod tests {
         let a = account();
         let mut renamed = a.clone();
         renamed.label = "renamed".into();
-        let r = record_capacity_cooldown(None, &a, "claude/model", 100, 600)
+        let mut r = record_capacity_cooldown(None, &a, "claude/model", 100, 600)
             .unwrap()
             .unwrap()
             .replacement
             .unwrap();
+        let future = serde_json::json!({"value": true});
+        r.extra.insert("future_record".into(), future.clone());
+        r.account
+            .extra
+            .insert("future_scope".into(), future.clone());
+        r.capacity_cooldowns[0]
+            .extra
+            .insert("future_cooldown".into(), future.clone());
+        r.capacity_cooldowns[0]
+            .account
+            .extra
+            .insert("future_cooldown_scope".into(), future.clone());
+        let mut snapshot = QuotaSnapshot::test_snapshot(
+            a.clone(),
+            QuotaStatus::Available,
+            100,
+            vec![crate::QuotaWindow {
+                extra: Default::default(),
+                pool: "claude-5h".into(),
+                window_seconds: Some(18_000),
+                used_basis_points: 100,
+                resets_unix_seconds: Some(900),
+            }],
+        );
+        snapshot
+            .extra
+            .insert("future_snapshot".into(), future.clone());
+        snapshot
+            .account
+            .extra
+            .insert("future_snapshot_scope".into(), future.clone());
+        snapshot.windows[0]
+            .extra
+            .insert("future_window".into(), future.clone());
+        let mut details = crate::QuotaDetails::default();
+        details.extra.insert("future_details".into(), future);
+        snapshot.details = Some(details);
+        r.snapshot = Some(snapshot);
+        let before_record = r.extra.clone();
+        let before_account = r.account.extra.clone();
+        let before_cooldown = r.capacity_cooldowns[0].clone();
         let intent = reserve(
             crate::source::TEST_POLICIES,
             Some(&r),
@@ -1217,18 +1352,56 @@ mod tests {
         .unwrap();
         intent.check(Some(&r)).unwrap();
         let reserved = intent.replacement.unwrap();
-        assert_eq!(reserved.account, renamed);
+        let before_snapshot = reserved.snapshot.clone().unwrap();
+        assert_eq!(reserved.account.adapter, renamed.adapter);
+        assert_eq!(reserved.account.account_key, renamed.account_key);
+        assert_eq!(reserved.account.label, renamed.label);
+        assert_eq!(reserved.account.extra, before_account);
         assert_eq!(reserved.capacity_cooldowns.len(), 1);
-        assert_eq!(reserved.capacity_cooldowns[0].account, renamed);
+        assert_eq!(reserved.capacity_cooldowns[0].account.label, renamed.label);
+        assert_eq!(reserved.capacity_cooldowns[0].extra, before_cooldown.extra);
+        assert_eq!(
+            reserved.capacity_cooldowns[0].account.extra,
+            before_cooldown.account.extra
+        );
         assert_eq!(reserved.capacity_cooldowns[0].expires_unix_seconds, 700);
-        let done = complete(&reserved, "claim", 420, Err(ProbeFailure::Auth), None).unwrap();
-        assert_eq!(done.replacement.unwrap().account, renamed);
+        let replacement = QuotaSnapshot::test_snapshot(
+            renamed,
+            QuotaStatus::Available,
+            410,
+            vec![crate::QuotaWindow {
+                extra: Default::default(),
+                pool: "claude-5h".into(),
+                window_seconds: Some(18_000),
+                used_basis_points: 200,
+                resets_unix_seconds: Some(900),
+            }],
+        );
+        let done = complete(&reserved, "claim", 420, Ok(replacement), None).unwrap();
+        let completed = done.replacement.unwrap();
+        assert_eq!(completed.extra, before_record);
+        assert_eq!(completed.account.extra, before_account);
+        let completed_snapshot = completed.snapshot.unwrap();
+        assert_eq!(completed_snapshot.extra, before_snapshot.extra);
+        assert_eq!(
+            completed_snapshot.account.extra,
+            before_snapshot.account.extra
+        );
+        assert_eq!(
+            completed_snapshot.windows[0].extra,
+            before_snapshot.windows[0].extra
+        );
+        assert_eq!(
+            completed_snapshot.details.unwrap().extra,
+            before_snapshot.details.unwrap().extra
+        );
     }
     #[test]
     fn completion_rejects_late_claim_and_keeps_good_snapshot_on_failure() {
         let a = account();
         let mut r = AccountRecord::empty(a.clone());
         r.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: a.clone(),
             revision: 0,
@@ -1322,6 +1495,7 @@ mod tests {
             record.last_error = Some(failure);
             record.failures = 1;
             record.auth_state = Some(AuthState {
+                extra: Default::default(),
                 access_token_expiry_unix_seconds: Some(expiry),
                 signed_in: Some(signed_in),
                 refresh_pending: pending,
@@ -1353,6 +1527,7 @@ mod tests {
             let a = account();
             let mut record = AccountRecord::empty(a.clone());
             record.snapshot = Some(QuotaSnapshot {
+                extra: Default::default(),
                 schema_version: 1,
                 account: a.clone(),
                 revision: 0,
@@ -1408,6 +1583,7 @@ mod tests {
         let mut record = AccountRecord::empty(scope.clone());
         record.last_error = Some(ProbeFailure::LoginExpired);
         record.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: scope.clone(),
             revision: 0,
@@ -1416,6 +1592,7 @@ mod tests {
             source_ref: "fixture".into(),
             authority_ref: None,
             windows: vec![crate::QuotaWindow {
+                extra: Default::default(),
                 pool: "weekly_scoped:fixture".into(),
                 window_seconds: Some(604800),
                 used_basis_points: 10_000,
@@ -1456,6 +1633,7 @@ mod tests {
         let a = account();
         let mut r = AccountRecord::empty(a.clone());
         r.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: a.clone(),
             revision: 0,
@@ -1545,6 +1723,7 @@ mod transition_tests {
     use super::*;
     fn account(adapter: &str, key: &str) -> AccountScope {
         AccountScope {
+            extra: Default::default(),
             adapter: adapter.into(),
             account_key: key.into(),
             label: "work".into(),
@@ -1621,24 +1800,56 @@ mod transition_tests {
             100,
         )
         .unwrap();
-        assert_eq!(plan.drops.len(), 1);
-        assert_eq!(
-            plan.batches.iter().map(Vec::len).collect::<Vec<_>>(),
-            [3, 1, 1]
+        assert!(plan.drops.iter().any(|drop| {
+            drop.account.adapter == "claude"
+                && drop.account.account_key == "old"
+                && drop.replacement.is_none()
+        }));
+        assert!(
+            !plan
+                .drops
+                .iter()
+                .any(|drop| { drop.account.adapter == "agy" && drop.account.account_key == "old" })
         );
-        assert_eq!(plan.deadline_unix_seconds, 155);
+        let settings = Settings::default();
+        let expected_accounts = detected
+            .iter()
+            .flat_map(|detection| detection.accounts.iter().flatten())
+            .map(|account| (account.adapter.clone(), account.account_key.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        let scheduled_accounts = plan
+            .batches
+            .iter()
+            .flatten()
+            .map(|account| (account.adapter.clone(), account.account_key.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(scheduled_accounts, expected_accounts);
+        for batch in &plan.batches {
+            assert!(batch.len() <= settings.max_parallel as usize);
+            if batch.iter().any(|account| {
+                crate::source::TEST_POLICIES
+                    .iter()
+                    .any(|policy| policy.adapter == account.adapter && policy.solo)
+            }) {
+                assert_eq!(batch.len(), 1);
+            }
+        }
+        assert_eq!(
+            plan.deadline_unix_seconds,
+            100 + settings.wall_budget_seconds as i64
+        );
         let low = QuotaTick {
             power: Power::Low,
             ..tick
         };
-        assert!(
-            plan_tick(crate::source::TEST_POLICIES, &records, &detected, &low, 100)
-                .unwrap()
-                .batches
+        let low_plan =
+            plan_tick(crate::source::TEST_POLICIES, &records, &detected, &low, 100).unwrap();
+        assert!(low_plan.batches.iter().flatten().all(|account| {
+            crate::source::TEST_POLICIES
                 .iter()
-                .flatten()
-                .all(|a| a.adapter != "agy")
-        );
+                .find(|policy| policy.adapter == account.adapter)
+                .is_some_and(|policy| policy.low_power)
+        }));
     }
     #[test]
     fn competing_claims_and_stale_completions_cannot_overwrite() {
@@ -1712,6 +1923,7 @@ mod transition_tests {
             reserve(
                 crate::source::TEST_POLICIES,
                 Some(&AccountRecord {
+                    extra: Default::default(),
                     revision: u64::MAX,
                     ..r.clone()
                 }),
@@ -1728,6 +1940,7 @@ mod transition_tests {
     fn expired_claim_is_not_rendered_refreshing_and_bad_state_is_rejected() {
         let mut record = AccountRecord::empty(account("claude", "work"));
         record.claim = Some(RefreshClaim {
+            extra: Default::default(),
             token: "old".into(),
             deadline_unix_seconds: 100,
         });
@@ -1812,214 +2025,137 @@ mod transition_tests {
         assert!(plan.drops[0].replacement.is_none());
     }
     #[test]
-    fn auth_required_adapter_with_registered_account_shows_stale_cached_reading() {
-        let live = account("claude", "live");
-        let mut record = AccountRecord::empty(live.clone());
-        record.revision = 1;
-        record.snapshot = Some(QuotaSnapshot {
-            schema_version: 1,
-            account: live.clone(),
-            revision: 1,
-            status: QuotaStatus::Available,
-            observed_unix_seconds: 100,
-            source_ref: "fixture".into(),
-            authority_ref: None,
-            windows: vec![],
-            details: None,
-        });
-        let detections = [Detection {
-            adapter: "claude".into(),
-            accounts: Some(vec![live.clone()]),
-            status: QuotaStatus::AuthRequired,
-        }];
-        let rep = report(
-            crate::source::TEST_POLICIES,
-            &[record.clone()],
-            &detections,
-            &QuotaQuery { adapter: None },
-            500,
-            "report.json".into(),
-        )
-        .unwrap();
-        assert_eq!(rep.accounts.len(), 1);
-        assert_eq!(rep.accounts[0].account, live);
-        assert_eq!(rep.accounts[0].status, QuotaStatus::AuthRequired);
-        assert!(rep.accounts[0].snapshot.is_some());
-        assert_eq!(rep.coverage.known, 0);
-        assert_eq!(rep.coverage.total, 1);
+    fn ambient_auth_status_uses_each_accounts_freshness_and_probe_failure() {
+        let now = 1_000;
+        let claude = crate::source::TEST_POLICIES
+            .iter()
+            .find(|policy| policy.adapter == "claude")
+            .unwrap();
+        let stale_age = claude.timer_seconds as i64;
+        let cases = [
+            (
+                vec!["single"],
+                stale_age,
+                vec![],
+                vec![("single", QuotaStatus::AuthRequired)],
+                vec![],
+            ),
+            (
+                vec!["single"],
+                0,
+                vec![],
+                vec![("single", QuotaStatus::AuthRequired)],
+                vec![],
+            ),
+            (
+                vec!["first", "second"],
+                0,
+                vec![],
+                vec![
+                    ("first", QuotaStatus::Available),
+                    ("second", QuotaStatus::Available),
+                ],
+                vec!["first", "second"],
+            ),
+            (
+                vec!["first", "second"],
+                0,
+                vec!["first"],
+                vec![
+                    ("first", QuotaStatus::AuthRequired),
+                    ("second", QuotaStatus::Available),
+                ],
+                vec!["first", "second"],
+            ),
+        ];
 
-        let tick = QuotaTick {
-            adapter: None,
-            trigger: Trigger::Manual,
-            power: Power::Ac,
-        };
-        let plan = plan_tick(
-            crate::source::TEST_POLICIES,
-            &[record],
-            &detections,
-            &tick,
-            500,
-        )
-        .unwrap();
-        assert!(plan.drops.is_empty());
-        assert!(plan.batches.is_empty());
-    }
-    #[test]
-    fn auth_required_adapter_with_fresh_snapshot_shows_auth_required_and_not_current() {
-        let live = account("claude", "live");
-        let mut record = AccountRecord::empty(live.clone());
-        record.revision = 1;
-        record.snapshot = Some(QuotaSnapshot {
-            schema_version: 1,
-            account: live.clone(),
-            revision: 1,
-            status: QuotaStatus::Available,
-            observed_unix_seconds: 100,
-            source_ref: "fixture".into(),
-            authority_ref: None,
-            windows: vec![],
-            details: None,
-        });
-        let detections = [Detection {
-            adapter: "claude".into(),
-            accounts: Some(vec![live.clone()]),
-            status: QuotaStatus::AuthRequired,
-        }];
-        let rep = report(
-            crate::source::TEST_POLICIES,
-            &[record],
-            &detections,
-            &QuotaQuery { adapter: None },
-            110,
-            "report.json".into(),
-        )
-        .unwrap();
-        assert_eq!(rep.accounts.len(), 1);
-        assert_eq!(rep.accounts[0].account, live);
-        assert_eq!(rep.accounts[0].status, QuotaStatus::AuthRequired);
-        assert!(rep.accounts[0].snapshot.is_some());
-        assert_eq!(rep.coverage.known, 0);
-        assert_eq!(rep.coverage.total, 1);
-    }
-    #[test]
-    fn multi_account_ambient_auth_required_keeps_fresh_rows_available_and_known() {
-        let first = account("claude", "first");
-        let second = account("claude", "second");
-        let mut r1 = AccountRecord::empty(first.clone());
-        r1.revision = 1;
-        r1.snapshot = Some(QuotaSnapshot {
-            schema_version: 1,
-            account: first.clone(),
-            revision: 1,
-            status: QuotaStatus::Available,
-            observed_unix_seconds: 100,
-            source_ref: "fixture".into(),
-            authority_ref: None,
-            windows: vec![],
-            details: None,
-        });
-        let mut r2 = AccountRecord::empty(second.clone());
-        r2.revision = 1;
-        r2.snapshot = Some(QuotaSnapshot {
-            schema_version: 1,
-            account: second.clone(),
-            revision: 1,
-            status: QuotaStatus::Available,
-            observed_unix_seconds: 100,
-            source_ref: "fixture".into(),
-            authority_ref: None,
-            windows: vec![],
-            details: None,
-        });
-        let detections = [Detection {
-            adapter: "claude".into(),
-            accounts: Some(vec![first.clone(), second.clone()]),
-            status: QuotaStatus::AuthRequired,
-        }];
-        let rep = report(
-            crate::source::TEST_POLICIES,
-            &[r1.clone(), r2.clone()],
-            &detections,
-            &QuotaQuery { adapter: None },
-            110,
-            "report.json".into(),
-        )
-        .unwrap();
-        assert_eq!(rep.accounts.len(), 2);
-        assert_eq!(rep.accounts[0].status, QuotaStatus::Available);
-        assert_eq!(rep.accounts[1].status, QuotaStatus::Available);
-        assert_eq!(rep.coverage.known, 2);
-        assert_eq!(rep.coverage.total, 2);
+        for (keys, age, auth_errors, expected_rows, expected_probes) in cases {
+            let records = keys
+                .iter()
+                .map(|key| {
+                    let account = account("claude", key);
+                    let mut record = AccountRecord::empty(account.clone());
+                    record.snapshot = Some(QuotaSnapshot::test_snapshot(
+                        account,
+                        QuotaStatus::Available,
+                        now - age,
+                        Vec::new(),
+                    ));
+                    if auth_errors.contains(key) {
+                        record.last_error = Some(ProbeFailure::Auth);
+                    }
+                    record
+                })
+                .collect::<Vec<_>>();
+            let detections = [Detection {
+                adapter: "claude".into(),
+                accounts: Some(
+                    records
+                        .iter()
+                        .map(|record| record.account.clone())
+                        .collect(),
+                ),
+                status: QuotaStatus::AuthRequired,
+            }];
+            let report = report(
+                crate::source::TEST_POLICIES,
+                &records,
+                &detections,
+                &QuotaQuery { adapter: None },
+                now,
+                "report.json".into(),
+            )
+            .unwrap();
+            let observed = report
+                .accounts
+                .iter()
+                .map(|row| (row.account.account_key.as_str(), row.status))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            let expected = expected_rows
+                .into_iter()
+                .collect::<std::collections::BTreeMap<_, _>>();
+            assert_eq!(observed, expected);
+            assert_eq!(
+                report.coverage.known,
+                expected
+                    .values()
+                    .filter(|status| {
+                        matches!(
+                            status,
+                            QuotaStatus::Available
+                                | QuotaStatus::CreditOnly
+                                | QuotaStatus::Exhausted
+                        )
+                    })
+                    .count() as u64
+            );
+            assert_eq!(report.coverage.total, expected.len() as u64);
 
-        // Multi-account adapter with ambient AuthRequired is still batched for probing.
-        let tick = QuotaTick {
-            adapter: None,
-            trigger: Trigger::Manual,
-            power: Power::Ac,
-        };
-        let plan = plan_tick(
-            crate::source::TEST_POLICIES,
-            &[r1, r2],
-            &detections,
-            &tick,
-            500,
-        )
-        .unwrap();
-        assert_eq!(plan.batches.len(), 1);
-        assert_eq!(plan.batches[0].len(), 2);
-    }
-    #[test]
-    fn multi_account_ambient_auth_required_marks_only_account_with_auth_error() {
-        let first = account("claude", "first");
-        let second = account("claude", "second");
-        let mut r1 = AccountRecord::empty(first.clone());
-        r1.revision = 1;
-        r1.last_error = Some(ProbeFailure::Auth);
-        r1.snapshot = Some(QuotaSnapshot {
-            schema_version: 1,
-            account: first.clone(),
-            revision: 1,
-            status: QuotaStatus::Available,
-            observed_unix_seconds: 100,
-            source_ref: "fixture".into(),
-            authority_ref: None,
-            windows: vec![],
-            details: None,
-        });
-        let mut r2 = AccountRecord::empty(second.clone());
-        r2.revision = 1;
-        r2.snapshot = Some(QuotaSnapshot {
-            schema_version: 1,
-            account: second.clone(),
-            revision: 1,
-            status: QuotaStatus::Available,
-            observed_unix_seconds: 100,
-            source_ref: "fixture".into(),
-            authority_ref: None,
-            windows: vec![],
-            details: None,
-        });
-        let detections = [Detection {
-            adapter: "claude".into(),
-            accounts: Some(vec![first.clone(), second.clone()]),
-            status: QuotaStatus::AuthRequired,
-        }];
-        let rep = report(
-            crate::source::TEST_POLICIES,
-            &[r1, r2],
-            &detections,
-            &QuotaQuery { adapter: None },
-            110,
-            "report.json".into(),
-        )
-        .unwrap();
-        assert_eq!(rep.accounts.len(), 2);
-        assert_eq!(rep.accounts[0].account, first);
-        assert_eq!(rep.accounts[0].status, QuotaStatus::AuthRequired);
-        assert_eq!(rep.accounts[1].account, second);
-        assert_eq!(rep.accounts[1].status, QuotaStatus::Available);
-        assert_eq!(rep.coverage.known, 1);
-        assert_eq!(rep.coverage.total, 2);
+            let plan = plan_tick(
+                crate::source::TEST_POLICIES,
+                &records,
+                &detections,
+                &QuotaTick {
+                    adapter: None,
+                    trigger: Trigger::Manual,
+                    power: Power::Ac,
+                },
+                now,
+            )
+            .unwrap();
+            let observed_probes = plan
+                .batches
+                .iter()
+                .flatten()
+                .map(|account| account.account_key.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                observed_probes,
+                expected_probes
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+            );
+        }
     }
 }
 
@@ -2030,6 +2166,7 @@ mod zen_tests {
     fn registered_record(account: AccountScope, plan: &str, observed: i64) -> AccountRecord {
         let mut record = AccountRecord::empty(account.clone());
         record.snapshot = Some(crate::QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account,
             revision: 0,
@@ -2049,7 +2186,21 @@ mod zen_tests {
     #[test]
     fn free_refusal_reporting_follows_registered_plan_not_account_key() {
         let spec = provenant_records::AdapterSpec::get("opencode").unwrap();
-        for now in [101, 3700] {
+        let prototype = crate::Refusal {
+            extra: Default::default(),
+            account: AccountScope {
+                extra: Default::default(),
+                adapter: spec.name.into(),
+                account_key: "identity".into(),
+                label: "fixture".into(),
+            },
+            model: "opencode/beam-free".into(),
+            pool: spec.free_pool.map(str::to_owned),
+            observed_unix_seconds: 100,
+            resets_unix_seconds: None,
+        };
+        let expiry = prototype.expires_unix_seconds().unwrap();
+        for now in [expiry - 1, expiry] {
             for error in [None, Some(ProbeFailure::Auth)] {
                 let records: Vec<_> = spec
                     .account_model_plans
@@ -2057,6 +2208,7 @@ mod zen_tests {
                     .enumerate()
                     .map(|(index, plan)| {
                         let account = AccountScope {
+                            extra: Default::default(),
                             adapter: spec.name.into(),
                             account_key: format!("identity-{index}"),
                             label: plan.plan.into(),
@@ -2064,12 +2216,8 @@ mod zen_tests {
                         let mut record = registered_record(account.clone(), plan.plan, now);
                         record.last_error = error;
                         record.refusals.push(crate::Refusal {
-                            extra: Default::default(),
                             account,
-                            model: "opencode/beam-free".into(),
-                            pool: spec.free_pool.map(str::to_owned),
-                            observed_unix_seconds: 100,
-                            resets_unix_seconds: None,
+                            ..prototype.clone()
                         });
                         record
                     })
@@ -2103,7 +2251,7 @@ mod zen_tests {
                         .unwrap()
                         .plan
                         .as_deref();
-                    let refused = spec.is_free_plan(plan) && now == 101;
+                    let refused = spec.is_free_plan(plan) && expiry > now;
                     assert_eq!(row.free_pool_refusal, refused);
                     assert_eq!(
                         row.status,
@@ -2124,6 +2272,7 @@ mod zen_tests {
     #[test]
     fn account_usage_limit_reads_exhausted_until_its_reset() {
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "claude".into(),
             account_key: "work".into(),
             label: "work".into(),
@@ -2165,6 +2314,7 @@ mod zen_tests {
     #[test]
     fn zen_quota_row_carries_the_recorded_refusal_expiry_as_rfc3339() {
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "zen".into(),
             label: "zen".into(),
@@ -2230,6 +2380,7 @@ mod zen_tests {
     #[test]
     fn scoped_refusal_is_reported_without_exhausting_the_account() {
         let account = AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             label: "go".into(),

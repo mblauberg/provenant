@@ -13,14 +13,73 @@ use std::{
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// Parse every JSON record in a command stream and return its final envelope.
-/// Event-producing commands retain their summary as the last record.
-pub fn last_json_record(bytes: &[u8]) -> Result<serde_json::Value> {
+// Current graph format, mirrored here because the validator/journal do not
+// expose their version declarations to integration fixtures.
+pub const GRAPH_DOCUMENT_SCHEMA_VERSION: u32 = 2;
+pub const GRAPH_CHECKPOINT_SCHEMA_VERSION: u64 = 2;
+
+pub fn rig() -> Result<TestRig> {
+    TestRig::new()
+}
+
+pub fn json(output: &ExecOutcome) -> Result<serde_json::Value> {
+    last_json_record(&output.stdout.bytes)
+}
+
+pub fn json_lines(bytes: &[u8]) -> Result<Vec<serde_json::Value>> {
     bytes
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
-        .map(serde_json::from_slice::<serde_json::Value>)
-        .collect::<std::result::Result<Vec<_>, _>>()?
+        .map(|line| serde_json::from_slice(line).map_err(Into::into))
+        .collect()
+}
+
+pub fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<serde_json::Value> {
+    call_with_stdin(rig, args, None, expected)
+}
+
+pub fn call_with_stdin(
+    rig: &TestRig,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    expected: i64,
+) -> Result<serde_json::Value> {
+    let mut words = vec![
+        "--state-dir",
+        rig.state.to_str().ok_or("state path")?,
+        "--json",
+    ];
+    words.extend_from_slice(args);
+    let binary = option_env!("CARGO_BIN_EXE_provenant")
+        .ok_or("production binary path is only available to integration targets")?;
+    let output = rig.execute(Path::new(binary), &words, stdin)?;
+    assert_eq!(
+        code(&output),
+        expected,
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout.bytes),
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    json(&output)
+}
+
+pub fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
+    let program = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let output = rig.execute(&program, args, None)?;
+    if code(&output) != 0 {
+        return Err(format!(
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        )
+        .into());
+    }
+    Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+}
+
+/// Parse every JSON record in a command stream and return its final envelope.
+/// Event-producing commands retain their summary as the last record.
+pub fn last_json_record(bytes: &[u8]) -> Result<serde_json::Value> {
+    json_lines(bytes)?
         .pop()
         .ok_or_else(|| "command emitted no JSON records".into())
 }
@@ -545,7 +604,7 @@ impl TestRig {
         Ok(serde_json::to_value(checkpoint)?)
     }
 
-    pub fn assert_legacy_unchanged(&self) -> Result {
+    pub fn assert_v1_root_untouched(&self) -> Result {
         for tail in [
             ".agents/sentinel",
             ".local/state/agent-harness/sentinel",

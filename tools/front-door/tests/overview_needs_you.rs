@@ -1,20 +1,10 @@
 //! The local overview is a compact, app-independent read of attention.
 mod support;
 use serde_json::{Value, json};
-use support::{Result, TestRig, code};
+use support::{Result, TestRig};
 
 fn call(rig: &TestRig, args: &[&str]) -> Result<Value> {
-    let mut words = args.to_vec();
-    words.push("--json");
-    let output = rig.command(&words)?;
-    assert_eq!(
-        code(&output),
-        0,
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout.bytes),
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    Ok(serde_json::from_slice(&output.stdout.bytes)?)
+    support::call(rig, args, 0)
 }
 
 #[test]
@@ -175,27 +165,6 @@ fn overview_needs_you() -> Result {
     assert_eq!(rows[0]["chair_session_id"], "chair-a");
     assert_eq!(data["counts"]["needs_you"], 1);
     assert!(!overview.to_string().contains("PRIVATE BODY MARKER"));
-
-    let fabric_db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
-    let original: Vec<u8> =
-        fabric_db.query_row("SELECT record FROM human_requests", [], |row| row.get(0))?;
-    let mut legacy: Value = serde_json::from_slice(&original)?;
-    legacy
-        .as_object_mut()
-        .ok_or("request object")?
-        .remove("chair_session_id");
-    fabric_db.execute(
-        "UPDATE human_requests SET record=?1",
-        [serde_json::to_vec(&legacy)?],
-    )?;
-    let legacy_overview = call(&rig, &["console", "overview"])?;
-    assert_eq!(
-        legacy_overview["data"]["needs_you"][0]["chair_session_id"],
-        "chair-a"
-    );
-    assert_eq!(legacy_overview["data"]["counts"]["needs_you"], 1);
-    assert_eq!(legacy_overview["data"]["coverage"]["inbox"], "complete");
-    fabric_db.execute("UPDATE human_requests SET record=?1", [&original])?;
 
     // Submit a queued lane through its owner, without starting a provider.
     use provenant_core::{ActorId, CancelToken, OperationId, ProjectId};

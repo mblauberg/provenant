@@ -2,21 +2,7 @@
 mod support;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use support::{Result, TestRig, code};
-
-fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<Value> {
-    let mut words = args.to_vec();
-    words.push("--json");
-    let output = rig.command(&words)?;
-    assert_eq!(
-        code(&output),
-        expected,
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout.bytes),
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    Ok(serde_json::from_slice(&output.stdout.bytes)?)
-}
+use support::{Result, TestRig, call, code};
 
 fn snapshot(path: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> {
     let mut items = Vec::new();

@@ -28,6 +28,7 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 provenant-os = { workspace = true, features = ["fixture"] }
+provenant-test-support = { path = "../test-support" }
 tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

@@ -1,29 +1,8 @@
 //! Human requests through the app-independent installed command.
 mod support;
 use serde_json::{Value, json};
-use support::{Result, TestRig, code};
+use support::{Result, TestRig, call_with_stdin as call, code};
 
-fn call(rig: &TestRig, args: &[&str], stdin: Option<&[u8]>, expected: i64) -> Result<Value> {
-    let mut words = vec![
-        "--state-dir",
-        rig.state.to_str().ok_or("state path")?,
-        "--json",
-    ];
-    words.extend_from_slice(args);
-    let output = rig.execute(
-        std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &words,
-        stdin,
-    )?;
-    assert_eq!(
-        code(&output),
-        expected,
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout.bytes),
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    Ok(serde_json::from_slice(&output.stdout.bytes)?)
-}
 fn draft(rig: &TestRig, kind: &str) -> Result<String> {
     let path = rig.root.join(format!("{kind}.json"));
     std::fs::write(

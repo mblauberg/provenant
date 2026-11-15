@@ -190,6 +190,7 @@ fn cooling_free_route_falls_back_to_another_junior_member() -> Result<(), Box<dy
     let cooldowns = [provenant_quota::CapacityCooldown {
         extra: Default::default(),
         account: provenant_quota::AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "zen".into(),
             label: "test".into(),
@@ -227,6 +228,7 @@ fn usage_limited_free_route_falls_back_to_another_junior_member()
     let records = opencode_accounts();
     let access = opencode_access();
     let scope = provenant_quota::AccountScope {
+        extra: Default::default(),
         adapter: "opencode".into(),
         account_key: "zen".into(),
         label: "test".into(),
@@ -329,57 +331,77 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
         ..RoutingConfig::default()
     };
     let context = context(&catalogue, &config, now()?);
+    enum Expected {
+        Adapter,
+        Effort {
+            model: &'static str,
+            effort: &'static str,
+        },
+        Resolved(Option<&'static str>),
+    }
     let fixtures = [
         (
             r#"{"choice":{"kind":"model","value":"invented/id"},"effort":"bad effort"}"#,
-            Err("unknown adapter"),
+            Expected::Adapter,
         ),
         (
             r#"{"choice":{"kind":"model","value":"codex/unlisted"},"effort":"high"}"#,
-            Ok(Some("high")),
+            Expected::Resolved(Some("high")),
         ),
         (
             r#"{"choice":{"kind":"model","value":"codex/gpt-6.1-sol"},"effort":"bad effort"}"#,
-            Err("unsupported effort"),
+            Expected::Effort {
+                model: "codex/gpt-6.1-sol",
+                effort: "bad effort",
+            },
         ),
         (
             r#"{"choice":{"kind":"model","value":"codex/gpt-6.1-sol"},"effort":null,"fallback":{"kind":"models","models":["invented/id"]}}"#,
-            Err("unknown adapter"),
+            Expected::Adapter,
         ),
         (
             r#"{"choice":{"kind":"named_route","value":"review"},"effort":null,"fallback":{"kind":"models","models":["codex/gpt-6-luna"]}}"#,
-            Err("unsupported effort"),
+            Expected::Effort {
+                model: "codex/gpt-6.1-sol",
+                effort: "max",
+            },
         ),
         (
             r#"{"choice":{"kind":"named_route","value":"review"},"effort":"high","fallback":{"kind":"models","models":["codex/gpt-6-luna"]}}"#,
-            Ok(Some("high")),
+            Expected::Resolved(Some("high")),
         ),
         (
             r#"{"choice":{"kind":"model","value":"codex/gpt-6.1-sol"},"effort":null,"fallback":{"kind":"models","models":["codex/gpt-6-luna"]}}"#,
-            Ok(None),
+            Expected::Resolved(None),
         ),
         (
             r#"{"choice":{"kind":"named_route","value":"fixture-effort"},"effort":null,"fallback":{"kind":"models","models":["codex/gpt-6-luna"]}}"#,
-            Ok(Some("high")),
+            Expected::Resolved(Some("high")),
         ),
     ];
     for (wire, expected) in fixtures {
         let query = serde_json::from_str(wire)?;
-        let actual = resolve(&query, &context)
-            .map(|route| {
+        match (resolve(&query, &context), expected) {
+            (Ok(route), Expected::Resolved(effort)) => {
                 for alternative in route.alternatives.as_slice() {
                     assert_eq!(alternative.effort, route.effort, "{wire}");
                 }
-                route.effort
-            })
-            .map_err(|error| match error {
-                RoutingError::UnsupportedEffort { .. } => "unsupported effort".to_owned(),
-                error => error.to_string(),
-            });
-        let expected = expected
-            .map(|effort| effort.map(str::to_owned))
-            .map_err(str::to_owned);
-        assert_eq!(actual, expected, "{wire}");
+                assert_eq!(route.effort.as_deref(), effort, "{wire}");
+            }
+            (Err(RoutingError::UnknownAdapter), Expected::Adapter) => {}
+            (
+                Err(RoutingError::UnsupportedEffort { model, effort, .. }),
+                Expected::Effort {
+                    model: expected_model,
+                    effort: expected_effort,
+                },
+            ) => {
+                assert_eq!(model, expected_model, "{wire}");
+                assert_eq!(effort, expected_effort, "{wire}");
+            }
+            (Err(error), _) => panic!("unexpected routing error code {} for {wire}", error.code()),
+            (Ok(_), _) => panic!("unexpected successful route for {wire}"),
+        }
     }
     let context = RoutingContext {
         registry: &[],
@@ -410,9 +432,13 @@ fn required_provider_family_filters_pool_and_records_exclusions()
         ]}
     }))?;
     let records = [
-        availability(),
+        AvailabilityRecord {
+            observed_models: vec!["gpt-6-luna".into()],
+            ..availability()
+        },
         AvailabilityRecord {
             adapter: "claude".into(),
+            observed_models: vec!["claude-haiku-5-5".into()],
             ..availability()
         },
     ];
@@ -440,18 +466,21 @@ fn required_provider_family_filters_pool_and_records_exclusions()
             Some("openai"),
         )?;
         assert_eq!(constrained.adapter, "codex");
-        assert!(
-            constrained
-                .pool_selection
-                .unwrap()
-                .candidates
-                .iter()
-                .any(|candidate| candidate.model.starts_with("claude/")
-                    && candidate
-                        .exclusion
-                        .as_deref()
-                        .is_some_and(|reason| reason.contains("required family openai count 1")))
-        );
+        let candidates = &constrained
+            .pool_selection
+            .as_ref()
+            .ok_or("receipt")?
+            .candidates;
+        let codex_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.model.starts_with("codex/"))
+            .ok_or("eligible provider candidate")?;
+        let claude_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.model.starts_with("claude/"))
+            .ok_or("other-family provider candidate")?;
+        assert!(codex_candidate.exclusion.is_none());
+        assert!(claude_candidate.exclusion.is_some());
         let old =
             resolve_for_account_with_seed_excluding(&query, &ctx, None, "family", seed, &[], &[])?;
         let unchanged = resolve_for_account_with_seed_excluding_family(
@@ -498,12 +527,12 @@ fn required_provider_family_filters_pool_and_records_exclusions()
         &[],
         Some("openai"),
     )
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("openai"), "{error}");
-    assert!(error.contains("count 1"), "{error}");
-    assert!(error.contains("admission rejected"), "{error}");
-    assert!(error.contains("candidate family anthropic"), "{error}");
+    .unwrap_err();
+    assert_eq!(error.code(), "no_eligible_pool_member");
+    assert!(matches!(
+        error,
+        RoutingError::NoEligiblePoolMember { exclusions } if !exclusions.is_empty()
+    ));
     // Exact routes are constrained too, and cannot escape through a fallback.
     query.choice = RouteChoice::Model(ModelId::parse("codex/gpt-6-luna")?);
     query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse(

@@ -1,26 +1,10 @@
 //! End-to-end Fabric commands use the isolated binary rig, never real state.
 mod support;
 use serde_json::{Value, json};
-use support::{Result, TestRig, code};
-fn call(rig: &TestRig, args: &[&str], expected: i64) -> Result<Value> {
-    let mut args = args.to_vec();
-    args.push("--json");
-    let output = rig.command(&args)?;
-    assert_eq!(
-        code(&output),
-        expected,
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout.bytes),
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(value["schema_version"], 1);
-    assert_eq!(value.as_object().ok_or("object")?.len(), 5);
-    Ok(value)
-}
+use support::{Result, TestRig, call, code};
 #[test]
 fn identity_mail_tasks_and_events_use_durable_scoped_receipts() -> Result {
-    let rig = TestRig::new()?;
+    let rig = support::rig()?;
     let identity = call(&rig, &["fabric", "identity"], 0)?;
     assert_eq!(identity["data"]["inbox"]["agent"], "fixture");
     assert_eq!(
@@ -98,7 +82,7 @@ fn identity_mail_tasks_and_events_use_durable_scoped_receipts() -> Result {
         2,
     )?;
     assert_eq!(conflict["status"], "invalid");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn custody_claim_adoption_and_release_share_the_mine_view() -> Result {
@@ -158,7 +142,7 @@ fn custody_claim_adoption_and_release_share_the_mine_view() -> Result {
             .iter()
             .any(|item| item["subject"]["id"] == "3078" && item["state"]["state"] == "released")
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn malformed_operations_and_waits_fail_before_state_creation() -> Result {
@@ -186,7 +170,7 @@ fn malformed_operations_and_waits_fail_before_state_creation() -> Result {
             .any(|v| v["command"] == "provenant fabric claim list")
     );
     assert!(!rig.state.exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn domain_config_accepts_typed_peers_and_only_lower_limits() -> Result {
@@ -227,7 +211,7 @@ fn domain_config_accepts_typed_peers_and_only_lower_limits() -> Result {
         !rig.state.join("fabric/fabric.sqlite3").exists()
             || call(&rig, &["fabric", "mail", "read"], 0)?["data"]["page"]["items"] == json!([])
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -282,7 +266,7 @@ fn linked_worktrees_share_projects_and_ignore_git_redirects() -> Result {
     let non_git = call(&rig, &["fabric", "identity"], 0)?;
     assert_ne!(primary["data"]["project"], non_git["data"]["project"]);
     assert_eq!(non_git["data"]["federation"], Value::Null);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -323,7 +307,7 @@ fn non_git_directories_beneath_home_stay_local_and_remote_homes_refuse_local_wri
     )?;
     assert_eq!(refused["error"]["code"], "home_unavailable");
     assert!(!rig.state.join("fabric/fabric.sqlite3").exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]

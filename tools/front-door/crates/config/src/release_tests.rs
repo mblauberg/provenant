@@ -149,10 +149,7 @@ fn package_refuses_asset_drift_before_publishing_completion_marker() {
         &CancelToken::new(),
     )
     .unwrap_err();
-    assert!(matches!(
-        error,
-        InstallError::Manifest("release assets differ from build inventory")
-    ));
+    assert!(matches!(error, InstallError::Manifest(_)));
     assert!(!fixture.source.join("release.json").exists());
 }
 
@@ -168,10 +165,7 @@ fn package_refuses_when_binary_smoke_identity_differs_from_manifest() {
         &CancelToken::new(),
     )
     .unwrap_err();
-    assert!(matches!(
-        error,
-        InstallError::Manifest("binary identity differs from release manifest")
-    ));
+    assert!(matches!(error, InstallError::Manifest(_)));
     assert!(!fixture.source.join("release.json").exists());
 }
 

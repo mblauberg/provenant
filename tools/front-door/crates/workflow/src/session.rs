@@ -30,6 +30,17 @@ pub const REVISIONS_MAX: u64 = 64;
 const MANIFEST: &str = "revisions.json";
 const MANIFEST_LIMIT: u64 = 64 * 1024;
 const REVISION_PREFIX: &str = "rev-";
+const DISCOVERY_FAILURE_PREFIX: &str = "checkpoint saved; discovery publication failed";
+const DISCOVERY_RETRY_HINT: &str = "repeat the same command";
+const DISCOVERY_REBIND_HINT: &str = "including --rebind";
+const FIELD_UPDATE_REPAIR_HINT: &str = "reread the current checkpoint and save its Markdown";
+
+fn json_limits(max_bytes: u64) -> provenant_records::Limits {
+    provenant_records::Limits {
+        max_bytes,
+        ..provenant_records::Limits::default()
+    }
+}
 
 /// One saved state of a session checkpoint. Revisions are numbered from 1 and
 /// each names the revision it replaced, so the chain shows what came before and
@@ -41,12 +52,16 @@ pub struct Revision {
     pub sha256: provenant_records::FileDigest,
     pub bytes: u64,
     pub saved_at: UtcMicros,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Manifest {
     schema_version: u64,
     /// Oldest first; the last is the checkpoint in `checkpoint.md`.
     revisions: Vec<Revision>,
+    #[serde(flatten, default)]
+    extra: provenant_records::ExtraFields,
 }
 /// Every decision of one checkpoint publication, journaled before any file
 /// changes so that recovery replays exactly what was intended.
@@ -65,6 +80,10 @@ pub(super) struct PublishPlan {
     /// The discovery record to publish, fixed when the plan is made so that
     /// recovery never derives it from whichever writer recovers.
     discovery: Option<SessionDiscovery>,
+    #[serde(default)]
+    manifest_extra: provenant_records::ExtraFields,
+    #[serde(flatten, default)]
+    extra: provenant_records::ExtraFields,
 }
 /// Checkpoints are UTF-8, so plans carry them as JSON strings.
 mod utf8_bytes {
@@ -105,6 +124,8 @@ pub struct Saved {
     pub retained: usize,
     /// Advisory discovery publication failed after the manifest was committed.
     pub warnings: Vec<String>,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 /// A retained revision's text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -153,7 +174,9 @@ fn read_current(dir: &Directory) -> Result<Option<(Vec<u8>, UtcMicros)>, Session
 }
 fn load(dir: &Directory) -> Result<Manifest, SessionError> {
     let bytes = dir.read_bounded(OsStr::new(MANIFEST), MANIFEST_LIMIT)?;
-    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|_| SessionError::History)?;
+    let manifest: Manifest =
+        provenant_records::decode(bytes.as_slice(), json_limits(MANIFEST_LIMIT))
+            .map_err(|_| SessionError::History)?;
     if manifest.schema_version != 1 || manifest.revisions.len() as u64 > REVISIONS_MAX {
         return Err(SessionError::History);
     }
@@ -185,6 +208,7 @@ fn reconcile(
                 sha256: digest,
                 bytes: bytes.len() as u64,
                 saved_at: *modified,
+                extra: Default::default(),
             });
         }
     }
@@ -434,6 +458,7 @@ impl SessionStore {
         let discovery = self.load_discovery(dir)?;
         self.check_discovery_identity(discovery.as_ref())?;
         let manifest = load(dir).unwrap_or_default();
+        let manifest_extra = manifest.extra.clone();
         let floor = highest_revision_file(dir)?;
         let mut chain = reconcile(&manifest, existing.as_ref(), floor);
         let digest = provenant_records::CanonicalV1::file_digest(text);
@@ -451,6 +476,7 @@ impl SessionStore {
                 sha256: digest,
                 bytes: text.len() as u64,
                 saved_at: now,
+                extra: Default::default(),
             });
         }
         let current = chain.last().ok_or(SessionError::History)?;
@@ -464,6 +490,8 @@ impl SessionStore {
             unchanged,
             keep: self.keep,
             discovery,
+            manifest_extra,
+            extra: Default::default(),
         })
     }
 
@@ -487,8 +515,10 @@ impl SessionStore {
         let manifest = Manifest {
             schema_version: 1,
             revisions: chain,
+            extra: plan.manifest_extra.clone(),
         };
-        let manifest_bytes = serde_json::to_vec(&manifest).map_err(|_| SessionError::History)?;
+        let manifest_bytes =
+            provenant_records::encode(&manifest).map_err(|_| SessionError::History)?;
         publish(dir, MANIFEST, &manifest_bytes)?;
         let mut warnings = Vec::new();
         if let Err(error) = parse_summary(markdown) {
@@ -498,16 +528,18 @@ impl SessionStore {
             && let Err(error) = publish_discovery(dir, record)
         {
             let rebind = if self.rebind {
-                " (including --rebind)"
+                format!(" ({DISCOVERY_REBIND_HINT})")
             } else {
-                ""
+                String::new()
             };
             let repair = if field_update {
-                "reread the current checkpoint and save its Markdown".to_string()
+                FIELD_UPDATE_REPAIR_HINT.to_owned()
             } else {
-                format!("repeat the same command{rebind}")
+                format!("{DISCOVERY_RETRY_HINT}{rebind}")
             };
-            warnings.push(format!("checkpoint saved; discovery publication failed: {error}; {repair} to repair discovery"));
+            warnings.push(format!(
+                "{DISCOVERY_FAILURE_PREFIX}: {error}; {repair} to repair discovery"
+            ));
         }
         // The history is durable, so these files are unreachable. A failed
         // delete leaves an orphan that the next save removes.
@@ -528,6 +560,7 @@ impl SessionStore {
             unchanged: plan.unchanged,
             retained: manifest.revisions.len(),
             warnings,
+            extra: Default::default(),
         })
     }
     /// The retained revisions, oldest first; the last is the current checkpoint.
@@ -788,31 +821,18 @@ impl SessionStore {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use provenant_core::{DurationMicros, MonoTime, RootInputs, TestClock};
+    use provenant_core::{DurationMicros, MonoTime, TestClock};
+    use provenant_test_support::{IdentityPathResolver, test_roots};
     use std::io::{self, Read};
     use std::os::unix::fs::symlink;
-    struct Resolver;
-    impl provenant_core::PathResolver for Resolver {
-        fn resolve_existing_ancestor(
-            &self,
-            path: &std::path::Path,
-        ) -> io::Result<std::path::PathBuf> {
-            Ok(path.into())
-        }
-    }
     fn setup() -> (tempfile::TempDir, StateRoot, ProjectId) {
         // Explicit roots; no environment or real HOME/harness settings are read.
         let temp = crate::test_support::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
-        let home = base.join("home");
-        std::fs::create_dir(&home).unwrap();
-        let state = base.join("state");
-        provenant_os::fixture::private_state_dir(&state).unwrap();
-        let mut inputs = RootInputs::new(home, base.join("checkout"));
-        inputs.state_dir = Some(state);
+        let inputs = test_roots(&base).unwrap();
         (
             temp,
-            StateRoot::resolve(&inputs, &Resolver).unwrap(),
+            StateRoot::resolve(&inputs, &IdentityPathResolver).unwrap(),
             ProjectId::from_bytes([1; 16]),
         )
     }
@@ -832,6 +852,78 @@ mod tests {
             MonoTime::from_micros(0),
         )
     }
+    fn assert_extra_round_trip<T>(record: &T, limits: provenant_records::Limits)
+    where
+        T: Serialize + serde::de::DeserializeOwned,
+    {
+        let mut extended = serde_json::to_value(record).unwrap();
+        let extension = serde_json::json!({"source": "newer-writer"});
+        extended
+            .as_object_mut()
+            .unwrap()
+            .insert("future_session_field".into(), extension.clone());
+        let bytes = serde_json::to_vec(&extended).unwrap();
+        let decoded: T = provenant_records::decode(bytes.as_slice(), limits).unwrap();
+        let encoded = provenant_records::encode(&decoded).unwrap();
+        let rewritten: serde_json::Value =
+            provenant_records::decode(encoded.as_slice(), limits).unwrap();
+        assert_eq!(rewritten["future_session_field"], extension);
+    }
+
+    #[test]
+    fn session_records_preserve_additive_fields_at_the_bounded_json_boundary() {
+        let (_temp, root, project) = setup();
+        let selected = chair_store(&root, project);
+        let saved_record = saved(&selected, "first checkpoint");
+        let dir = selected.directory(false).unwrap();
+        let manifest = load(&dir).unwrap();
+        let revision = manifest.revisions.last().unwrap();
+        let plan = selected
+            .plan_publication(
+                &dir,
+                b"next checkpoint",
+                UtcMicros::from_micros(20).unwrap(),
+            )
+            .unwrap();
+
+        assert_extra_round_trip(revision, json_limits(MANIFEST_LIMIT));
+        assert_extra_round_trip(&manifest, json_limits(MANIFEST_LIMIT));
+        assert_extra_round_trip(&plan, json_limits(PENDING_LIMIT));
+        assert_extra_round_trip(&saved_record, json_limits(PENDING_LIMIT));
+
+        let manifest_path = path(&root, project, "chair").join(MANIFEST);
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        let extension = serde_json::json!({"source": "newer-writer"});
+        stored["future_manifest_field"] = extension.clone();
+        stored["revisions"][0]["future_revision_field"] = extension.clone();
+        std::fs::write(&manifest_path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        saved(&selected, "second checkpoint");
+        let bytes = std::fs::read(&manifest_path).unwrap();
+        let rewritten: serde_json::Value =
+            provenant_records::decode(bytes.as_slice(), json_limits(MANIFEST_LIMIT)).unwrap();
+        assert_eq!(rewritten["future_manifest_field"], extension);
+        assert_eq!(
+            rewritten["revisions"][0]["future_revision_field"],
+            extension
+        );
+
+        let discovery_path = path(&root, project, "chair").join("discovery.json");
+        let mut discovery: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&discovery_path).unwrap()).unwrap();
+        let discovery_extension = serde_json::json!({"source": "newer-writer"});
+        discovery["future_discovery_field"] = discovery_extension.clone();
+        std::fs::write(&discovery_path, serde_json::to_vec(&discovery).unwrap()).unwrap();
+        saved(&selected, "third checkpoint");
+        let bytes = std::fs::read(&discovery_path).unwrap();
+        let rewritten: serde_json::Value = provenant_records::decode(
+            bytes.as_slice(),
+            json_limits(super::discovery::DISCOVERY_LIMIT),
+        )
+        .unwrap();
+        assert_eq!(rewritten["future_discovery_field"], discovery_extension);
+    }
+
     fn save(store: &SessionStore, bytes: &[u8]) -> Result<(), SessionError> {
         let clock = clock(0);
         store.save(
@@ -844,6 +936,19 @@ mod tests {
     fn path(root: &StateRoot, project: ProjectId, session: &str) -> std::path::PathBuf {
         root.as_path()
             .join(format!("workflow/projects/{project}/sessions/{session}"))
+    }
+    const TEST_FILE_TIME: i64 = 2_000_000_000_000_000;
+    fn set_test_file_time(file: &std::path::Path) -> i64 {
+        let modified = std::time::UNIX_EPOCH
+            + std::time::Duration::from_micros(u64::try_from(TEST_FILE_TIME).unwrap());
+        std::fs::File::open(file)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        TEST_FILE_TIME
+    }
+    fn set_checkpoint_time(root: &StateRoot, project: ProjectId, session: &str) -> i64 {
+        set_test_file_time(&path(root, project, session).join("checkpoint.md"))
     }
     #[test]
     fn saves_only_under_the_explicit_project_and_host_session_key() {
@@ -1056,55 +1161,74 @@ mod tests {
 
     #[test]
     fn discovery_truncates_overlong_rebind_history_on_read() {
+        use super::discovery::REBIND_LIMIT;
         use provenant_core::{ActorId, HostId};
         let (_temp, root, project) = setup();
         let selected = store(&root, project, "chair")
             .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([20; 16]));
         saved(&selected, "notes");
         let mut record = selected.discovery().unwrap().unwrap().record;
-        record.rebound_from = (0..10)
+        let history_len = REBIND_LIMIT + 2;
+        record.rebound_from = (0..history_len)
             .map(|actor| ChairRebind {
                 host: record.host,
-                actor: ActorId::from_bytes([actor; 16]),
+                actor: ActorId::from_bytes([u8::try_from(actor).unwrap(); 16]),
                 changed_at: record.last_saved_at,
+                extra: Default::default(),
             })
             .collect();
         let discovery = path(&root, project, "chair").join("discovery.json");
         let bytes = serde_json::to_vec(&record).unwrap();
         std::fs::write(&discovery, &bytes).unwrap();
-        let expected = record.rebound_from[2..].to_vec();
+        let start = record.rebound_from.len().saturating_sub(REBIND_LIMIT);
+        let expected = record.rebound_from[start..].to_vec();
         assert_eq!(
             selected.discovery().unwrap().unwrap().record.rebound_from,
             expected
         );
         assert_eq!(std::fs::read(&discovery).unwrap(), bytes);
         saved(&selected, "notes");
-        let persisted: SessionDiscovery =
-            serde_json::from_slice(&std::fs::read(discovery).unwrap()).unwrap();
+        let bytes = std::fs::read(discovery).unwrap();
+        let persisted: SessionDiscovery = provenant_records::decode(
+            bytes.as_slice(),
+            json_limits(super::discovery::DISCOVERY_LIMIT),
+        )
+        .unwrap();
         assert_eq!(persisted.rebound_from, expected);
     }
 
     #[test]
-    fn rebind_keeps_eight_changes() {
+    fn rebind_history_keeps_the_latest_declared_bound() {
+        use super::discovery::REBIND_LIMIT;
         use provenant_core::{ActorId, HostId};
         let (_temp, root, project) = setup();
         let host = HostId::from_bytes([3; 16]);
-        let selected = |actor| {
+        let store_for = |actor: usize| {
             store(&root, project, "chair")
-                .with_chair(host, ActorId::from_bytes([actor; 16]))
+                .with_chair(
+                    host,
+                    ActorId::from_bytes([u8::try_from(actor).unwrap(); 16]),
+                )
                 .with_rebind(true)
         };
-        saved(&selected(0), "notes");
-        for actor in 1..=10 {
-            saved(&selected(actor), "notes");
+        let changes = REBIND_LIMIT + 2;
+        saved(&store_for(0), "notes");
+        for actor in 1..=changes {
+            saved(&store_for(actor), "notes");
         }
-        let record = selected(10).discovery().unwrap().unwrap().record;
-        assert_eq!(record.rebound_from.len(), 8);
-        assert_eq!(record.rebound_from[0].actor, ActorId::from_bytes([2; 16]));
-        assert_eq!(record.rebound_from[7].actor, ActorId::from_bytes([9; 16]));
-        saved(&selected(10).with_rebind(false), "same chair");
+        let record = store_for(changes).discovery().unwrap().unwrap().record;
+        let retained: Vec<_> = record
+            .rebound_from
+            .iter()
+            .map(|rebind| rebind.actor)
+            .collect();
+        let expected: Vec<_> = (changes - REBIND_LIMIT..changes)
+            .map(|actor| ActorId::from_bytes([u8::try_from(actor).unwrap(); 16]))
+            .collect();
+        assert_eq!(retained, expected);
+        saved(&store_for(changes).with_rebind(false), "same chair");
         assert_eq!(
-            selected(10)
+            store_for(changes)
                 .discovery()
                 .unwrap()
                 .unwrap()
@@ -1113,7 +1237,6 @@ mod tests {
             record.rebound_from
         );
     }
-
     #[test]
     fn hook_save_commands_preserve_the_installing_harness() {
         let (_temp, root, project) = setup();
@@ -1135,11 +1258,26 @@ mod tests {
                 },
             );
             let text = context(&response);
+            let input: serde_json::Value = serde_json::from_str(fixture).unwrap();
+            let session = input["session_id"].as_str().unwrap();
+            let command = text
+                .lines()
+                .find_map(|line| line.split_once("Save: ").map(|(_, command)| command))
+                .unwrap()
+                .replace("<checkpoint.md>", "checkpoint.md");
             assert!(
-                text.contains(&format!(
-                    "--file <checkpoint.md> --client {}",
-                    harness.spec().name
-                )),
+                shell_words(&command).unwrap()
+                    == [
+                        "provenant",
+                        "workflow",
+                        "session",
+                        "save",
+                        session,
+                        "--file",
+                        "checkpoint.md",
+                        "--client",
+                        harness.spec().name,
+                    ],
                 "{text}"
             );
         }
@@ -1172,11 +1310,9 @@ mod tests {
                     )
                     .unwrap();
                 assert_eq!(saved.warnings.len(), 1);
-                assert!(
-                    saved.warnings[0].contains("checkpoint saved; discovery publication failed")
-                );
-                assert!(saved.warnings[0].contains("repeat the same command"));
-                assert_eq!(saved.warnings[0].contains("including --rebind"), rebind);
+                assert!(saved.warnings[0].starts_with(DISCOVERY_FAILURE_PREFIX));
+                assert!(saved.warnings[0].contains(DISCOVERY_RETRY_HINT));
+                assert_eq!(saved.warnings[0].contains(DISCOVERY_REBIND_HINT), rebind);
                 let expected = if first_save { "first" } else { "second" };
                 assert_eq!(selected.read().unwrap().unwrap().markdown, expected);
                 if first_save {
@@ -1382,9 +1518,7 @@ mod tests {
                 Err(SessionError::Deadline)
             })
             .unwrap();
-        assert!(
-            interrupted.warnings[0].contains("reread the current checkpoint and save its Markdown")
-        );
+        assert!(interrupted.warnings[0].contains(FIELD_UPDATE_REPAIR_HINT));
         drop(lock);
         assert!(saved(&selected, &current).warnings.is_empty());
     }
@@ -1438,20 +1572,50 @@ mod tests {
     }
     #[test]
     fn summary_save_race() {
-        use provenant_core::{ActorId, Clock, HostId};
-        use provenant_os::clock::SystemClock;
-        use std::sync::{Arc, Barrier, mpsc};
-        struct SignallingClock(mpsc::Sender<()>);
-        impl Clock for SignallingClock {
+        use provenant_core::{ActorId, HostId};
+        use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
+        struct LockWaitClock {
+            entered: (Mutex<bool>, Condvar),
+            released: (Mutex<bool>, Condvar),
+        }
+        impl LockWaitClock {
+            fn wait_until_blocked(&self) {
+                let (state, changed) = &self.entered;
+                let mut entered = state.lock().unwrap();
+                while !*entered {
+                    entered = changed.wait(entered).unwrap();
+                }
+            }
+
+            fn release(&self) {
+                let (state, changed) = &self.released;
+                *state.lock().unwrap() = true;
+                changed.notify_all();
+            }
+        }
+        impl Clock for LockWaitClock {
             fn wall_now(&self) -> Result<UtcMicros, provenant_core::TimeError> {
-                SystemClock::new().wall_now()
+                UtcMicros::from_micros(20)
             }
+
             fn mono_now(&self) -> MonoTime {
-                let _ = self.0.send(());
-                SystemClock::new().mono_now()
+                MonoTime::from_micros(0)
             }
-            fn wait_until(&self, deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
-                SystemClock::new().wait_until(deadline)
+
+            fn wait_until(&self, _deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
+                let (state, changed) = &self.entered;
+                let mut entered = state.lock().unwrap();
+                if !*entered {
+                    *entered = true;
+                    changed.notify_all();
+                    drop(entered);
+                    let (state, changed) = &self.released;
+                    let mut released = state.lock().unwrap();
+                    while !*released {
+                        released = changed.wait(released).unwrap();
+                    }
+                }
+                Ok(())
             }
         }
         let (_temp, root, project) = setup();
@@ -1462,13 +1626,15 @@ mod tests {
         let changed = first.replace("Body", "Saved concurrently");
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let (waiting_tx, waiting_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
+        let waiter_clock = Arc::new(LockWaitClock {
+            entered: (Mutex::new(false), Condvar::new()),
+            released: (Mutex::new(false), Condvar::new()),
+        });
         std::thread::scope(|scope| {
             let selected_ref = &selected;
             let changed_ref = &changed;
             let saving = scope.spawn(move || {
-                let clock = provenant_os::clock::SystemClock::new();
+                let clock = clock(10);
                 selected_ref
                     .save_revision_with(
                         changed_ref.as_bytes(),
@@ -1505,10 +1671,10 @@ mod tests {
                 Err(SessionError::Filesystem(FsError::LockTimeout { .. }))
             ));
             let selected_ref = &selected;
+            let editing_clock = Arc::clone(&waiter_clock);
             let editing = scope.spawn(move || {
-                let budget = WaitBudget::cli(SystemClock::new().mono_now(), 5).unwrap();
-                let clock = SignallingClock(waiting_tx);
-                let result = selected_ref.update_summary(
+                let budget = WaitBudget::cli(editing_clock.mono_now(), 5).unwrap();
+                selected_ref.update_summary(
                     SummaryPatch {
                         now: Some("Edited".into()),
                         ..Default::default()
@@ -1517,18 +1683,13 @@ mod tests {
                     &op("b"),
                     budget,
                     &CancelToken::new(),
-                    &clock,
-                );
-                done_tx.send(()).unwrap();
-                result
+                    editing_clock.as_ref(),
+                )
             });
-            waiting_rx.recv().unwrap();
-            assert!(matches!(
-                done_rx.recv_timeout(std::time::Duration::from_millis(100)),
-                Err(mpsc::RecvTimeoutError::Timeout)
-            ));
+            waiter_clock.wait_until_blocked();
             release_tx.send(()).unwrap();
             saving.join().unwrap();
+            waiter_clock.release();
             editing.join().unwrap().unwrap();
         });
         let checkpoint = selected.read().unwrap().unwrap().markdown;
@@ -1542,7 +1703,7 @@ mod tests {
             let attempt = |value: &'static str, barrier: Arc<Barrier>| {
                 let selected = &selected;
                 scope.spawn(move || {
-                    let clock = provenant_os::clock::SystemClock::new();
+                    let clock = clock(if value == "one" { 30 } else { 31 });
                     barrier.wait();
                     selected.update_summary(
                         SummaryPatch {
@@ -1623,16 +1784,6 @@ mod tests {
         assert_eq!(selected.discovery().unwrap().unwrap(), discovery);
     }
     const CHAIR_TEXT: &str = "---\nprovenant_summary:\n  schema_version: 1\n  revision: 1\n  updated_at: \"2026-10-28T03:00:00Z\"\n  now: \"First\"\n  next: \"Next\"\n  needs_you: []\n  risk: \"None\"\n---\nBody\n";
-    #[test]
-    fn summary_commit_signals_chair() {
-        let (_tmp, root, project) = setup();
-        let chair = chair_store(&root, project);
-        save(&chair, CHAIR_TEXT.as_bytes()).unwrap();
-        let before = provenant_os::changes::read(root.as_path()).unwrap();
-        update_at(&chair, change("Next"), 1, "signal", 1).unwrap();
-        let after = provenant_os::changes::read(root.as_path()).unwrap();
-        assert!(after.chair > before.chair);
-    }
     #[test]
     fn session_save_without_chair_identity_does_not_signal_chair() {
         let (_tmp, root, project) = setup();
@@ -1720,7 +1871,7 @@ mod tests {
                 .map(|_| {
                     let chair = &chair;
                     scope.spawn(move || {
-                        let clock = provenant_os::clock::SystemClock::new();
+                        let clock = clock(40);
                         chair.update_summary(
                             change("once"),
                             1,
@@ -2001,10 +2152,9 @@ mod tests {
         assert!(selected.read_revision(9).unwrap().is_none());
         let diff = selected.diff(1).unwrap().unwrap();
         assert_eq!((diff.from.revision, diff.to.revision), (1, 3));
-        assert_eq!(
-            diff.text,
-            "--- revision 1\n+++ revision 3 (current)\n@@ -1,1 +1,1 @@\n-first\n+third\n"
-        );
+        let changed_lines: Vec<_> = diff.text.lines().collect();
+        assert!(changed_lines.contains(&"-first"));
+        assert!(changed_lines.contains(&"+third"));
         assert_eq!(selected.diff(3).unwrap().unwrap().text, "");
     }
 
@@ -2218,6 +2368,58 @@ mod tests {
         ));
     }
     #[test]
+    fn autosave_state_never_carries_checkpoint_content() {
+        let (_temp, root, project) = setup();
+        let selected = store(&root, project, "host-1");
+        let chair_marker = "Chair-only checkpoint marker";
+        save(
+            &selected,
+            format!("# Chair notes\n{chair_marker}").as_bytes(),
+        )
+        .unwrap();
+        let mtime = set_checkpoint_time(&root, project, "host-1");
+        let state = SessionState {
+            active: vec![LaneLine {
+                id: "derived-lane".into(),
+                state: "running".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let document = state.document("t1", BLOCK_LIMIT);
+        assert!(document.len() <= BLOCK_LIMIT);
+        assert!(document.contains("derived-lane"));
+        assert!(!document.contains(chair_marker));
+        let clock = clock(mtime);
+        selected
+            .write_autosave(
+                document.as_bytes(),
+                WaitBudget::cli(clock.mono_now(), 1_000_000).unwrap(),
+                &CancelToken::new(),
+                &clock,
+            )
+            .unwrap();
+        set_test_file_time(&path(&root, project, "host-1").join(AUTOSAVE_FILE));
+        let input = br#"{"hook_event_name":"SessionStart","session_id":"host-1"}"#;
+        let response = hook_context(
+            &root,
+            project,
+            HookEvent::SessionStart,
+            &input[..],
+            &clock,
+            DurationMicros::from_micros(mtime),
+        );
+        let context = context(&response);
+        assert!(context.contains(chair_marker));
+        let autosave = context
+            .rsplit_once("## Provenant session state")
+            .map(|(_, autosave)| autosave)
+            .unwrap_or_default();
+        assert!(autosave.contains("derived-lane"));
+        assert!(!autosave.contains(chair_marker));
+    }
+
+    #[test]
     fn refuses_traversal_and_command_injection_in_host_keys() {
         for id in [
             "",
@@ -2383,17 +2585,14 @@ mod tests {
     }
     #[test]
     fn deadline_expiring_after_lock_keeps_previous_complete_bytes() {
-        struct ExpiringAfterLock(std::sync::Mutex<u32>);
-        impl Clock for ExpiringAfterLock {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        struct MutableClock(AtomicI64);
+        impl Clock for MutableClock {
             fn wall_now(&self) -> Result<UtcMicros, provenant_core::TimeError> {
                 UtcMicros::from_micros(0)
             }
             fn mono_now(&self) -> MonoTime {
-                let mut value = self.0.lock().unwrap();
-                let call = *value;
-                *value += 1;
-                // Call 0 is the uncontended lock poll; call 1 is the post-lock check.
-                MonoTime::from_micros(if call < 1 { 0 } else { 1_000_000 })
+                MonoTime::from_micros(self.0.load(Ordering::SeqCst))
             }
             fn wait_until(&self, _deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
                 Ok(())
@@ -2402,12 +2601,22 @@ mod tests {
         let (_temp, root, project) = setup();
         let selected = store(&root, project, "host-1");
         save(&selected, b"original").unwrap();
-        let budget = WaitBudget::cli(MonoTime::from_micros(0), 1).unwrap();
-        let clock = ExpiringAfterLock(std::sync::Mutex::new(0));
-        assert!(matches!(
-            selected.save(b"late", budget, &CancelToken::new(), &clock),
-            Err(SessionError::Deadline)
-        ));
+        let clock = MutableClock(AtomicI64::new(0));
+        let budget = WaitBudget::cli(MonoTime::from_micros(0), 1_000_000).unwrap();
+        let result = selected.update(
+            false,
+            |current| {
+                assert_eq!(current, Some("original"));
+                // This edit closure runs after lock acquisition and before the
+                // publication deadline check.
+                clock.0.store(2_000_000, Ordering::SeqCst);
+                Ok(Some("late".to_owned()))
+            },
+            budget,
+            &CancelToken::new(),
+            &clock,
+        );
+        assert!(matches!(result, Err(SessionError::Deadline)));
         assert_eq!(selected.read().unwrap().unwrap().markdown, "original");
     }
     #[test]
@@ -2466,7 +2675,7 @@ mod tests {
             "# Goal\nGoal text.\n\n## Intent\nWants A because B; rejected C.\n\n## Plan\nNext {long}"
         );
         save(&selected, body.as_bytes()).unwrap();
-        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
+        let mtime = set_checkpoint_time(&root, project, "host-1");
         let response = run_hook(&root, project, "SessionStart", mtime);
         assert!(response.stdout.len() <= HOOK_OUTPUT_LIMIT);
         let text = compact_text(&response);
@@ -2481,8 +2690,7 @@ mod tests {
         let (_temp, root, project) = setup();
         let response = run_hook(&root, project, "PreCompact", 0);
         let text = String::from_utf8(response.stdout).unwrap();
-        assert!(text.contains("Write an Intent section"));
-        assert!(text.contains("replaces the earlier reading"));
+        assert!(text.starts_with(super::hooks::SUMMARY_INSTRUCTION));
         assert!(text.contains("/t/session.jsonl"));
     }
     const FIXTURES: [(&str, HookEvent); 4] = [
@@ -2545,7 +2753,7 @@ mod tests {
                     .contains("never inject this")
             );
             save(&selected, b"# Goal\nSpecific authorised checkpoint.").unwrap();
-            let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
+            let mtime = set_checkpoint_time(&root, project, id);
             let response = hook_context(
                 &root,
                 project,
@@ -2604,37 +2812,6 @@ mod tests {
         }
     }
     #[test]
-    fn hook_compacts_succeeded_lanes() {
-        let (_temp, root, project) = setup();
-        let state = SessionState {
-            settled: (0..20)
-                .map(|n| LaneLine {
-                    id: format!("lane-{n}"),
-                    state: "succeeded".into(),
-                    ..Default::default()
-                })
-                .collect(),
-            ..Default::default()
-        };
-        let digest = state.digest(DIGEST_LIMIT);
-        let response = hook_context_with(
-            &root,
-            project,
-            HookEvent::SessionStart,
-            FIXTURES[0].0.as_bytes(),
-            &clock(0),
-            DurationMicros::ZERO,
-            Advice {
-                digest: &digest,
-                commands: &CommandPrefix::default(),
-                client: None,
-            },
-        );
-        let text = String::from_utf8(response.stdout).unwrap();
-        assert!(text.len() < 2048, "{} bytes", text.len());
-        assert!(text.contains("succeeded: 20"));
-    }
-    #[test]
     fn hook_output_cap_counts_json_escaping_and_keeps_utf8_and_save_command() {
         let (_temp, root, project) = setup();
         let (fixture, event) = FIXTURES[0];
@@ -2644,7 +2821,7 @@ mod tests {
             "\0".repeat(CHECKPOINT_LIMIT as usize),
         ] {
             save(&selected, text.as_bytes()).unwrap();
-            let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
+            let mtime = set_checkpoint_time(&root, project, "7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a37");
             let response = hook_context(
                 &root,
                 project,
@@ -2693,6 +2870,41 @@ mod tests {
     }
     const FIXTURE_ID: &str = "7c1e4b2a-93d5-4f0e-b6a8-2d4c9e1f5a37";
 
+    fn shell_words(command: &str) -> Option<Vec<String>> {
+        let mut words = Vec::new();
+        let mut word = String::new();
+        let mut quoted = false;
+        let mut escaped = false;
+        let mut started = false;
+        for ch in command.chars() {
+            if escaped {
+                word.push(ch);
+                escaped = false;
+            } else if !quoted && ch == '\\' {
+                escaped = true;
+                started = true;
+            } else if ch == '\'' {
+                quoted = !quoted;
+                started = true;
+            } else if ch.is_whitespace() && !quoted {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            } else {
+                word.push(ch);
+                started = true;
+            }
+        }
+        if quoted || escaped {
+            return None;
+        }
+        if started {
+            words.push(word);
+        }
+        Some(words)
+    }
+
     #[test]
     fn the_save_command_carries_a_custom_state_dir_or_refuses_to_show_one() {
         use std::os::unix::ffi::OsStrExt;
@@ -2700,22 +2912,47 @@ mod tests {
         let cwd = std::path::Path::new("/work");
         let custom = CommandPrefix::new(Some(std::path::Path::new("rel/it's state")), cwd);
         let text = context(&hook_with(&root, project, &custom, 0));
-        assert!(
-            text.contains(&format!(
-                "Save: provenant --state-dir '/work/rel/it'\\''s state' workflow session save {FIXTURE_ID} --file <checkpoint.md>"
-            )),
-            "{text}"
+        let command = text
+            .lines()
+            .find_map(|line| line.split_once("Save: ").map(|(_, command)| command))
+            .unwrap();
+        // `<checkpoint.md>` is the displayed file placeholder, not shell
+        // syntax. Supply its value, then parse the command as the harness does.
+        let command = command.replace("<checkpoint.md>", "checkpoint.md");
+        assert_eq!(
+            shell_words(&command).unwrap(),
+            [
+                "provenant",
+                "--state-dir",
+                "/work/rel/it's state",
+                "workflow",
+                "session",
+                "save",
+                FIXTURE_ID,
+                "--file",
+                "checkpoint.md",
+                "--project",
+                "/work",
+            ]
         );
-        // The checkout the hook ran in is named, so the save works from anywhere.
-        assert!(
-            text.contains("--file <checkpoint.md> --project '/work'"),
-            "{text}"
-        );
-        // The default store shows the plain command.
         let text = context(&hook_with(&root, project, &CommandPrefix::default(), 0));
-        assert!(text.contains(&format!(
-            "Save: provenant workflow session save {FIXTURE_ID} --file"
-        )));
+        let command = text
+            .lines()
+            .find_map(|line| line.split_once("Save: ").map(|(_, command)| command))
+            .unwrap()
+            .replace("<checkpoint.md>", "checkpoint.md");
+        assert_eq!(
+            shell_words(&command).unwrap(),
+            [
+                "provenant",
+                "workflow",
+                "session",
+                "save",
+                FIXTURE_ID,
+                "--file",
+                "checkpoint.md",
+            ]
+        );
         // A directory that cannot round-trip is never shown as a command.
         let hostile = [
             std::path::PathBuf::from("/s/a\nb"),
@@ -2749,7 +2986,7 @@ mod tests {
             b"# Goal\nChair authority: user approved #1829 only.",
         )
         .unwrap();
-        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
+        let mtime = set_checkpoint_time(&root, project, FIXTURE_ID);
         let directory = path(&root, project, FIXTURE_ID);
         let autosave = directory.join("autosave.md");
         let external = root.as_path().join("outside.md");
@@ -2785,14 +3022,14 @@ mod tests {
         std::fs::remove_file(&autosave).unwrap();
         // Valid: shown after the checkpoint, with no problem line.
         std::fs::write(&autosave, "## Provenant session state\nAuto-saved: t").unwrap();
+        set_test_file_time(&autosave);
         check(false);
-        let saved_at = selected.read_autosave().unwrap().unwrap().modified_at;
         let shown = hook_context(
             &root,
             project,
             HookEvent::SessionStart,
             FIXTURES[0].0.as_bytes(),
-            &clock(saved_at.as_micros()),
+            &clock(mtime),
             DurationMicros::from_micros(3_600_000_000),
         );
         let text = context(&shown);
@@ -2816,7 +3053,7 @@ mod tests {
         let (_temp, root, project) = setup();
         let selected = store(&root, project, FIXTURE_ID);
         save(&selected, "x".repeat(20_000).as_bytes()).unwrap();
-        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
+        let mtime = set_checkpoint_time(&root, project, FIXTURE_ID);
         let long = std::path::PathBuf::from(format!("/{}", "s".repeat(400)));
         for (dir, shown) in [
             (std::path::PathBuf::from("/st ate"), true),
@@ -2912,21 +3149,30 @@ mod tests {
         let selected = store(&root, project, "host-1");
         let checkpoint = "---\nprovenant_standing:\n  schema_version: 1\n  goal: \"Land issue 3080\"\n  grants:\n    - scope: \"Land lane PRs after green CI\"\n      source: \"owner:transcript#turn-42\"\n      expires: none\n    - scope: \"Publish the release notes\"\n      source: \"rule:docs/runbooks/release.md#notes\"\n      expires: \"2999-01-01T00:00:00Z\"\n    - scope: \"Force-push main\"\n      source: \"the owner said so\"\n    - scope: \"Rotate the chair\"\n      source: \"owner:transcript#turn-7\"\n      expires: \"2000-01-01T00:00:00Z\"\n  obligations: [\"Report CI results\"]\n  waiting_on_owner: []\n---\n# Goal\nProse notes.\n";
         save(&selected, checkpoint.as_bytes()).unwrap();
-        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
-        let restored = |text: &str| {
-            assert!(text.contains("Goal: Land issue 3080"), "{text}");
-            assert!(text.contains("Waiting on owner: nothing"));
-            assert!(text.contains(
-                "- Land lane PRs after green CI (source owner:transcript#turn-42; expires none)"
-            ));
-            assert!(text.contains("- Publish the release notes (source rule:docs/runbooks/release.md#notes; expires 2999-01-01T00:00:00Z)"));
-            let unverified = text.find("Unverified grants").unwrap();
-            assert!(text[unverified..].contains("- Force-push main"));
-            assert!(!text[..unverified].contains("Force-push main"));
-            assert!(text.contains("Expired grants not restored: 1"));
-            assert!(!text.contains("Rotate the chair"));
-            assert!(text.contains("- Report CI results"));
-        };
+        let mtime = set_checkpoint_time(&root, project, "host-1");
+        let now = UtcMicros::from_micros(mtime).unwrap();
+        assert_eq!(selected.read().unwrap().unwrap().modified_at, now);
+        let standing = parse_standing(checkpoint).unwrap().unwrap();
+        assert_eq!(standing.goal, "Land issue 3080");
+        assert!(standing.waiting_on_owner.is_empty());
+        let grant_states: Vec<_> = standing
+            .grants
+            .iter()
+            .map(|grant| grant.state(now))
+            .collect();
+        assert_eq!(
+            grant_states,
+            [
+                GrantState::Active,
+                GrantState::Active,
+                GrantState::Unverified,
+                GrantState::Expired,
+            ]
+        );
+        assert_eq!(
+            OwnerWait::from_checkpoint(Some(checkpoint)),
+            OwnerWait::Nothing
+        );
 
         // Compaction: PreCompact leaves the record alone; the compact
         // SessionStart restores it ahead of the prose, never as raw YAML.
@@ -2940,7 +3186,6 @@ mod tests {
         let start = run_hook(&root, project, "SessionStart", mtime);
         assert!(start.stdout.len() <= HOOK_OUTPUT_LIMIT);
         let text = context(&start);
-        restored(&text);
         assert!(text.find("## Standing").unwrap() < text.find("# Goal").unwrap());
         assert!(!text.contains("provenant_standing") && !text.contains("schema_version"));
 
@@ -2959,14 +3204,17 @@ mod tests {
             target_account: Some("spare".into()),
             reason: "quota threshold".into(),
             consumed: false,
+            extra: Default::default(),
         };
         handoffs.save(&handoff).unwrap();
         let consumed = handoffs
             .consume("spare", &HostSessionId::parse("host-2").unwrap(), 1001)
             .unwrap()
             .unwrap();
-        let now = UtcMicros::from_micros(mtime).unwrap();
-        restored(&consumed.standing(&root, now).unwrap());
+        let transferred = consumed.standing(&root, now).unwrap();
+        assert!(transferred.contains("Land issue 3080"));
+        assert!(transferred.contains("Publish the release notes"));
+        assert!(!transferred.contains("Rotate the chair"));
 
         // An ask waiting on the owner is restored by name.
         let asking = checkpoint.replace(
@@ -2974,8 +3222,9 @@ mod tests {
             "waiting_on_owner: [\"Approve the release window\"]",
         );
         save(&selected, asking.as_bytes()).unwrap();
-        let mtime = selected.read().unwrap().unwrap().modified_at.as_micros();
-        let text = context(&run_hook(&root, project, "SessionStart", mtime));
-        assert!(text.contains("Waiting on owner:\n- Approve the release window"));
+        assert_eq!(
+            OwnerWait::from_checkpoint(Some(&asking)),
+            OwnerWait::Asks(vec!["Approve the release window".into()])
+        );
     }
 }

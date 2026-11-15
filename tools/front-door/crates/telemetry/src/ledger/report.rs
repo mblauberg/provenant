@@ -173,14 +173,17 @@ mod tests {
                 cache_write_1h: None,
                 output_excluding_reasoning: token,
                 reasoning: token,
+                extra: Default::default(),
             },
             cost: cost.map(|(picodollars, complete)| Cost {
                 picodollars,
                 complete,
                 subscription: false,
                 prices: "p".into(),
+                extra: Default::default(),
             }),
             context_band: None,
+            extra: Default::default(),
         }
     }
 
@@ -191,13 +194,24 @@ mod tests {
             row("b", Some("work"), None),
         ];
         let total = totals(&rows).expect("totals");
-        assert_eq!(total.usd.as_deref(), Some("2.000000"));
+        assert_eq!(total.microdollars, Some(2_000_000));
         assert_eq!((total.priced_attempts, total.unpriced_attempts), (1, 1));
         assert!(!total.complete);
         let none = totals(&rows[1..]).expect("totals");
         assert_eq!((none.microdollars, none.usd), (None, None));
         assert!(!none.complete);
         assert_eq!(totals(&[]).expect("totals").usd, None);
+    }
+
+    #[test]
+    fn ledger_record_retains_additive_fields_at_each_typed_level() {
+        let mut record =
+            serde_json::to_value(row("attempt", Some("work"), Some((1_000_000, true))))
+                .expect("fixture serialises");
+        record["future_row"] = serde_json::json!({"value": 1});
+        record["tokens"]["future_tokens"] = serde_json::json!(2);
+        record["cost"]["future_cost"] = serde_json::json!(3);
+        crate::assert_record_round_trip::<Row>(record);
     }
 
     #[test]

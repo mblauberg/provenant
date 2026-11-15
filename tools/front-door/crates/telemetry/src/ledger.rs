@@ -65,6 +65,8 @@ pub struct Tokens {
     pub cache_write_1h: Option<u64>,
     pub output_excluding_reasoning: Option<u64>,
     pub reasoning: Option<u64>,
+    #[serde(default, flatten)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 /// API-equivalent cost at settlement, from the bundled price table.
@@ -78,6 +80,8 @@ pub struct Cost {
     pub subscription: bool,
     /// The price table's identity.
     pub prices: String,
+    #[serde(default, flatten)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 /// One terminal attempt.
@@ -101,6 +105,8 @@ pub struct Row {
     pub cost: Option<Cost>,
     /// Context band floor in tokens, when the provider reported one per attempt.
     pub context_band: Option<u64>,
+    #[serde(default, flatten)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 impl Row {
@@ -156,6 +162,7 @@ pub fn row(
                 complete: !priced.missing_cost,
                 subscription: priced.subscription,
                 prices: prices.identity.id.clone(),
+                extra: Default::default(),
             })
         })
         .transpose()?;
@@ -185,9 +192,11 @@ pub fn row(
             cache_write_1h: usage.cache_write_1h,
             output_excluding_reasoning: usage.output_excluding_reasoning,
             reasoning: usage.reasoning,
+            extra: Default::default(),
         },
         cost,
         context_band: None,
+        extra: Default::default(),
     })
 }
 
@@ -397,14 +406,12 @@ fn lines<'a>(
 }
 
 fn parse(line: &[u8]) -> Result<Row, String> {
-    let value: serde_json::Value =
-        serde_json::from_slice(line).map_err(|_| "not a JSON object".to_owned())?;
-    match value.get("format").and_then(|format| format.as_str()) {
-        Some(FORMAT) => {}
-        Some(other) => return Err(format!("unrecognised format {other:?}")),
-        None => return Err("no format".into()),
+    let row: Row =
+        crate::decode_record(line, SEGMENT_CAP).map_err(|_| "not a JSON object".to_owned())?;
+    if row.format != FORMAT {
+        return Err(format!("unrecognised format {:?}", row.format));
     }
-    serde_json::from_value(value).map_err(|error| format!("invalid {FORMAT} row: {error}"))
+    Ok(row)
 }
 
 pub mod report;

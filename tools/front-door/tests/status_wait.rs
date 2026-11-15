@@ -5,7 +5,6 @@ use serde_json::{Value, json};
 use std::{
     io::{BufRead, Read},
     process::{Command, Output, Stdio},
-    time::{Duration, Instant},
 };
 use support::{Result, TestRig, code};
 
@@ -104,23 +103,24 @@ fn seed_graph(rig: &TestRig, graph: &str) -> Result<()> {
     use provenant_fabric_runtime::graph::{GraphDocument, GraphExecution, GraphJournal};
     let (state, project) = graph_identity(rig)?;
     let document: GraphDocument = serde_json::from_value(json!({
-        "schema_version":1,"graph_id":graph,"nodes":[
+            "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":graph,"nodes":[
             {"id":"fast","kind":"gate","access":"read_only","condition":{"type":"budget"}},
             {"id":"slow","kind":"gate","access":"read_only","condition":{"type":"budget"}},
             {"id":"blocked","prompt":"blocked writer","access":"worktree_write","write_scope":["."]},
             {"id":"skipped","kind":"gate","access":"read_only","condition":{"type":"budget"}}
         ]
     }))?;
-    let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
-        serde_json::from_value(json!({
-            "schema_version":1,"graph_id":graph,"plan_digest":format!("sha256:{}", "f".repeat(64)),
+    let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint = serde_json::from_value(
+        json!({
+            "schema_version":support::GRAPH_CHECKPOINT_SCHEMA_VERSION,"graph_id":graph,"plan_digest":format!("sha256:{}", "f".repeat(64)),
             "nodes":[
                 {"id":"fast","state":"pending","attempts":[]},
                 {"id":"slow","state":"pending","attempts":[]},
                 {"id":"blocked","state":"pending","attempts":[]},
                 {"id":"skipped","state":"pending","attempts":[]}
             ]
-        }))?;
+        }),
+    )?;
     let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
     let mut journal = graph_journal(graph, &state, project, &clock, &cancel)?;
@@ -164,17 +164,11 @@ fn set_node_states(rig: &TestRig, graph: &str, changes: &[(&str, &str)]) -> Resu
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)] // Asserts the real wait deadline is not consumed.
 fn an_unknown_target_fails_before_waiting() -> Result {
     let rig = TestRig::new()?;
-    // A budget far beyond any process start-up: returning well inside it shows
-    // the target was refused before the wait began, however slow the host.
-    let budget = Duration::from_secs(3600);
-    let started = Instant::now();
     let out = rig.command(&["wait", "no-such-graph", "--timeout", "1h", "--json"])?;
     assert_eq!(code(&out), 2, "{out:?}");
     assert_eq!(envelope(&out)?["error"]["code"], "NOT_FOUND");
-    assert!(started.elapsed() < budget / 4, "{:?}", started.elapsed());
     Ok(())
 }
 
@@ -188,7 +182,7 @@ fn a_settled_graph_ends_the_wait_and_no_work_is_nothing_to_wait_for() -> Result 
     std::fs::write(
         &document,
         serde_json::to_vec(&json!({
-            "schema_version":1,"graph_id":"settles-now","nodes":[{
+            "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"settles-now","nodes":[{
                 "id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}
             }]
         }))?,

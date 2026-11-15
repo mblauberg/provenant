@@ -311,7 +311,7 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
     let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
     let reference = format!("{}/{attempt}", context.identity.host);
     let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-        "schema_version":1,"graph_id":graph_id,"plan_digest":"test",
+        "schema_version":support::GRAPH_CHECKPOINT_SCHEMA_VERSION,"graph_id":graph_id,"plan_digest":"test",
         "nodes":[{"id":"task","worktree":null,"state":"running","attempts":[{
             "key":{"graph_id":graph_id,"node_id":"task","route_index":0, "attempt": 1},
             "launched":true,"route":{"alias":"senior"},"state":"running",
@@ -532,43 +532,42 @@ fn lane_run_receipt_carries_no_observation_even_when_observation_fails() -> Resu
 }
 
 #[test]
-fn child_relay_honours_launch_allowance_longer_than_fifty_five_seconds() -> Result {
+fn child_relay_preserves_a_configured_allowance_above_default() -> Result {
     use provenant_fabric_runtime::graph::relay::RelayOp;
     let mut rig = TestRig::new()?;
     host(&rig, &["fabric", "events", "read", "--json"])?;
+    let default_allowance =
+        provenant_fabric_runtime::config::GraphConfig::default().launch_wait_seconds;
+    let configured_allowance = default_allowance + 1;
     std::fs::write(
         rig.state.join("config.toml"),
-        "schema_version=1\n[domains.fabric.graph]\nlaunch_wait_seconds=60\n",
+        format!(
+            "schema_version=1\n[domains.fabric.graph]\nlaunch_wait_seconds={configured_allowance}\n"
+        ),
     )?;
     let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
     let relay = provenant_fabric_runtime::relay::HostRelay::start_with_graph(
         provenant_providers::LaneRuntime::fabric_socket(attempt),
         provenant_records::Limits::CONFIG,
         |_, _, _| unreachable!("expected graph request"),
-        move |arguments, _, within| {
-            match serde_json::from_value::<RelayOp>(arguments)? {
-                RelayOp::Add(child) if child.brief == "Delayed child" => {
-                    assert!(within > std::time::Duration::from_secs(59), "{within:?}");
-                    // Model registry contention beyond the former socket ceiling.
-                    let clock = SystemClock;
-                    clock
-                        .wait_until(
-                            clock
-                                .mono_now()
-                                .checked_add(DurationMicros::from_micros(56_000_000))
-                                .unwrap(),
-                        )
-                        .unwrap();
-                    Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
-                }
-                RelayOp::Add(_) => {
-                    assert!(within > std::time::Duration::from_secs(59), "{within:?}");
-                    Err(provenant_fabric_runtime::relay::ServiceError::Facade(
-                        provenant_fabric_runtime::relay::FacadeError::WriterLockBusy,
-                    ))
-                }
-                _ => unreachable!("unexpected graph operation"),
+        move |arguments, _, within| match serde_json::from_value::<RelayOp>(arguments)? {
+            RelayOp::Add(child) if child.brief == "Delayed child" => {
+                assert!(
+                    within > std::time::Duration::from_secs(default_allowance),
+                    "{within:?}"
+                );
+                Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
             }
+            RelayOp::Add(_) => {
+                assert!(
+                    within > std::time::Duration::from_secs(default_allowance),
+                    "{within:?}"
+                );
+                Err(provenant_fabric_runtime::relay::ServiceError::Facade(
+                    provenant_fabric_runtime::relay::FacadeError::WriterLockBusy,
+                ))
+            }
+            _ => unreachable!("unexpected graph operation"),
         },
     );
     let _relay = match relay {

@@ -877,7 +877,6 @@ fn run_gh(
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct IssueWire {
     body: Option<String>,
     state: String,
@@ -887,7 +886,6 @@ struct IssueWire {
     kind: Option<String>,
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct IssueTypeWire {
     name: String,
 }
@@ -899,7 +897,6 @@ fn normalize_issue(bytes: &[u8]) -> Result<Vec<u8>, PortError> {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct HttpWire {
     status: u16,
     #[serde(default)]

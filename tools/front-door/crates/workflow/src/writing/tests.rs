@@ -96,13 +96,15 @@ fn legal_structural_blockers_and_quoted_examples_are_data() {
     let m = matcher(RuleSet::Legal);
     let text = "Prose.\n# Heading\n\n<!-- /Users/example/private -->\n\n> TODO\n";
     let hits = m.scan(Path::new("filing.md"), text).unwrap();
+    let heading = text.find("# Heading").unwrap();
+    let private_path = text.find("/Users/example/private").unwrap();
     assert!(
         hits.iter()
-            .any(|f| f.rule == "legal.heading-gap" && f.severity == Severity::Blocker)
+            .any(|f| f.start <= heading && heading < f.end && f.severity == Severity::Blocker)
     );
     assert!(
         hits.iter()
-            .any(|f| f.rule == "legal.comment.3" && f.severity == Severity::Blocker)
+            .any(|f| f.start == private_path && f.severity == Severity::Blocker)
     );
     let examples = m
         .scan(
@@ -110,7 +112,11 @@ fn legal_structural_blockers_and_quoted_examples_are_data() {
             text,
         )
         .unwrap();
-    assert_eq!(examples.len(), 1);
+    assert!(
+        examples
+            .iter()
+            .any(|f| { f.start <= heading && heading < f.end && f.severity == Severity::Blocker })
+    );
     let long = format!("{}end.", "word ".repeat(61));
     assert!(
         m.scan(Path::new("filing.md"), &long)
@@ -155,11 +161,20 @@ fn quoted_example_path_prefix_requires_a_path_component_boundary() {
     let mut m = matcher(RuleSet::Legal);
     m.quoted_paths = vec!["docs/ex".into()];
     let source = "<!-- /Users/example/private -->";
+    let expected_start = source.find("/Users/example/private").unwrap();
+    let matching_prefix = m.scan(Path::new("docs/ex/draft.md"), source).unwrap();
+    let sibling_prefix = m
+        .scan(Path::new("docs/examples-x/draft.md"), source)
+        .unwrap();
     assert!(
-        m.scan(Path::new("docs/examples-x/draft.md"), source)
-            .unwrap()
+        !matching_prefix
             .iter()
-            .any(|finding| finding.rule == "legal.comment.3")
+            .any(|finding| finding.start == expected_start)
+    );
+    assert!(
+        sibling_prefix
+            .iter()
+            .any(|finding| finding.start == expected_start)
     );
 }
 
@@ -222,13 +237,13 @@ fn ordinary_legal_files_report_blockers_inside_markdown() {
     let source =
         "See `.work/notes.md`. A dash `—`.\n\n```\nTODO fix\n```\n\n<!-- `/Users/me/secret` -->";
     let hits = m.scan(Path::new("filing.md"), source).unwrap();
-    for id in [
-        "legal.blocker.013",
-        "legal.blocker.001",
-        "legal.blocker.016",
-        "legal.comment.3",
-    ] {
-        assert!(hits.iter().any(|f| f.rule == id), "{id}");
+    for text in [".work", "—", "TODO", "/Users/me/secret"] {
+        let matched = source.find(text).unwrap();
+        assert!(
+            hits.iter().any(|f| {
+                f.start <= matched && matched < f.end && f.severity == Severity::Blocker
+            })
+        );
     }
     assert!(
         m.scan(
@@ -242,13 +257,17 @@ fn ordinary_legal_files_report_blockers_inside_markdown() {
 
 #[test]
 fn match_start_controls_exclusions_even_when_a_url_is_inside_the_match() {
+    let source = "The protection order at https://x.au/o proves domestic violence.";
+    let expected_start = source.find("protection order").unwrap();
     let hits = matcher(RuleSet::Legal)
         .scan(
             Path::new("skills/legal-writing/references/draft.md"),
-            "The protection order at https://x.au/o proves domestic violence.",
+            source,
         )
         .unwrap();
-    assert!(hits.iter().any(|f| f.rule == "legal.blocker.022"));
+    assert!(hits.iter().any(|f| {
+        f.start <= expected_start && expected_start < f.end && f.severity == Severity::Blocker
+    }));
 }
 
 #[test]
@@ -263,11 +282,8 @@ fn legal_crlf_line_endings_preserve_end_anchored_blockers() {
         )),
     )
     .unwrap();
-    std::fs::write(
-        temp.path().join("draft.md"),
-        b"Draft notes in .work\r\nNext line.\r\n",
-    )
-    .unwrap();
+    let source = "Draft notes in .work\r\nNext line.\r\n";
+    std::fs::write(temp.path().join("draft.md"), source).unwrap();
     let scan = inspect(
         temp.path(),
         temp.path(),
@@ -275,9 +291,10 @@ fn legal_crlf_line_endings_preserve_end_anchored_blockers() {
         RuleSet::Legal,
     )
     .unwrap();
+    let expected_start = source.find(".work").unwrap();
     assert!(
         scan.findings
             .iter()
-            .any(|f| f.finding.rule == "legal.blocker.013")
+            .any(|f| { f.finding.start <= expected_start && expected_start < f.finding.end })
     );
 }

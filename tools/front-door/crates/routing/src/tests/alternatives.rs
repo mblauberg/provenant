@@ -129,6 +129,7 @@ fn all_exhausted_accounts_have_individual_remedies() -> Result<(), Box<dyn std::
         let mut reading =
             quota("codex/gpt-6-luna", key, QuotaStatus::Exhausted, 1, 50, 120).unwrap();
         reading.snapshot.windows = vec![QuotaWindow {
+            extra: Default::default(),
             pool: "secondary".into(),
             window_seconds: Some(604_800),
             used_basis_points: 10_000,
@@ -148,14 +149,24 @@ fn all_exhausted_accounts_have_individual_remedies() -> Result<(), Box<dyn std::
         ..context(&catalogue, &config, now()?)
     };
     let selected = resolve(&request("codex/gpt-6-luna")?, &context)?;
-    let details = selected.diagnostics.account_exclusions.join("; ");
+    let RouteReadiness::Unavailable {
+        reason: RouteExclusionReason::ProviderRefused,
+        skipped_accounts,
+        ..
+    } = &selected.readiness
+    else {
+        return Err("all exhausted accounts project to provider refusal".into());
+    };
+    let skipped = skipped_accounts
+        .iter()
+        .map(|account| account.account.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(skipped, ["one", "two"].into_iter().collect());
     assert!(
-        details.contains("one")
-            && details.contains("two")
-            && details.contains("exhausted")
-            && details.contains("reset")
+        skipped_accounts
+            .iter()
+            .all(|account| account.reason == RouteExclusionReason::ProviderRefused)
     );
-    assert!(!details.contains("UnknownAvailability"));
     Ok(())
 }
 
@@ -301,34 +312,10 @@ fn availability_gates_disclosure_and_rejects_duplicates() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
--> Result<(), Box<dyn std::error::Error>> {
-    #[derive(Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Domains {
-        routing: RoutingConfig,
-    }
-    static ENTRIES: [provenant_config::DomainSection; 1] = [SECTION];
-    let sections = DomainSections::<Domains>::new(&ENTRIES);
-    // Config's loader owns root validation; tests inject an isolated, non-I/O reader.
-    struct Resolver;
-    impl provenant_core::PathResolver for Resolver {
-        fn resolve_existing_ancestor(
-            &self,
-            path: &std::path::Path,
-        ) -> std::io::Result<std::path::PathBuf> {
-            Ok(path.into())
-        }
-    }
-    let mut inputs =
-        provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/assets".into());
-    inputs.state_dir = Some("/fixture/state".into());
-    let roots = inputs.resolve(&Resolver)?;
-    let model_policy_config = provenant_config::load_with_domains(
-        &roots,
-        Some("schema_version=1\n[domains.routing.model_policy.defaults.cache]\nread_share_target=0.95\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\n[domains.routing.model_policy.rules.schedule]\nexpires='1970-01-01T00:03:20Z'\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=40\n".as_bytes()),
-        &sections,
-    )?;
+fn routing_domain_loads_model_policy_and_named_routes() -> Result<(), Box<dyn std::error::Error>> {
+    let model_policy_config = load_routing(
+        "schema_version=1\n[domains.routing.model_policy.defaults.cache]\nread_share_target=0.95\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\n[domains.routing.model_policy.rules.schedule]\nexpires='1970-01-01T00:03:20Z'\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=40\n",
+    )??;
     assert_eq!(
         model_policy_config
             .domains
@@ -339,14 +326,9 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
             .read_share_target,
         Some(0.95)
     );
-    let cfg = provenant_config::load_with_domains(
-        &roots,
-        Some(
-            "schema_version=1\n[domains.routing.routes.review]\nmodel='codex/gpt-6.1-sol'\n"
-                .as_bytes(),
-        ),
-        &sections,
-    )?;
+    let cfg = load_routing(
+        "schema_version=1\n[domains.routing.routes.review]\nmodel='codex/gpt-6.1-sol'\n",
+    )??;
     assert_eq!(
         cfg.domains
             .routing
@@ -355,48 +337,67 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
             .map(|r| r.model.model()),
         Some("gpt-6.1-sol")
     );
-    let layered = provenant_config::load_with_domains(
-        &roots,
-        Some("schema_version=1\n[domains.routing.review.shapes.quick]\nreviewers=[{pool='senior',count=1}]\n[domains.routing.review.select.by_risk]\nmedium='deep'\n".as_bytes()),
-        &sections,
-    )?;
+    Ok(())
+}
+
+#[test]
+fn review_configuration_inherits_and_overrides_shipped_defaults()
+-> Result<(), Box<dyn std::error::Error>> {
+    let shipped = {
+        #[derive(Deserialize)]
+        struct Defaults {
+            review: crate::ReviewConfig,
+        }
+        toml_edit::de::from_str::<Defaults>(include_str!("../../assets/review-defaults.toml"))?
+            .review
+    };
+    let layered = load_routing(
+        "schema_version=1\n[domains.routing.review.shapes.quick]\nreviewers=[{pool='senior',count=1}]\n[domains.routing.review.select.by_risk]\nmedium='deep'\n",
+    )??;
     assert_eq!(
         layered.domains.routing.review.shapes["quick"].reviewers[0].pool,
         "senior"
     );
-    assert!(!layered.domains.routing.review.shapes["quick"].frame);
-    assert_eq!(layered.domains.routing.review.shapes["quick"].verifiers, 0);
+    assert_eq!(
+        layered.domains.routing.review.shapes["quick"].frame,
+        shipped.shapes["quick"].frame
+    );
+    assert_eq!(
+        layered.domains.routing.review.shapes["quick"].verifiers,
+        shipped.shapes["quick"].verifiers
+    );
     assert_eq!(
         layered.domains.routing.review.shapes["quick"].synthesis,
-        crate::ReviewSynthesis::Reduce
+        shipped.shapes["quick"].synthesis
     );
     assert_eq!(
         layered.domains.routing.review.shapes["standard"].reviewers[0].count,
-        5
+        shipped.shapes["standard"].reviewers[0].count
     );
     assert_eq!(
         layered.domains.routing.review.select.by_risk["routine"],
-        "quick"
+        shipped.select.by_risk["routine"]
     );
     assert_eq!(
         layered.domains.routing.review.select.by_risk["medium"],
         "deep"
     );
-    let customised = provenant_config::load_with_domains(
-        &roots,
-        Some(
-            "schema_version=1\n[domains.routing.review.shapes.quick]\nsynthesis='model'\n[domains.routing.review.floors.security]\ntier='substantial'\n"
-                .as_bytes(),
-        ),
-        &sections,
-    )?;
+
+    let customised = load_routing(
+        "schema_version=1\n[domains.routing.review.shapes.quick]\nsynthesis='model'\n[domains.routing.review.floors.security]\ntier='substantial'\n",
+    )??;
+    static SECTIONS: [provenant_config::DomainSection; 1] = [SECTION];
+    let sections = DomainSections::<RoutingDomains>::new(&SECTIONS);
     let schema = provenant_config::schema(&customised, &sections, String::new())?;
     let synthesis = schema
         .fields
         .iter()
         .find(|field| field.path == "domains.routing.review.shapes.quick.synthesis")
-        .unwrap();
-    assert_eq!(synthesis.default, "reduce");
+        .ok_or("review synthesis schema field")?;
+    assert_eq!(
+        synthesis.default,
+        format!("{:?}", shipped.shapes["quick"].synthesis).to_lowercase()
+    );
     assert_eq!(synthesis.value, "model");
     assert_eq!(synthesis.source, provenant_config::Layer::User);
     assert_eq!(synthesis.values, ["model", "reduce"]);
@@ -404,34 +405,58 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
         .fields
         .iter()
         .find(|field| field.path == "domains.routing.review.floors.security.tier")
-        .unwrap();
-    assert_eq!(floor.default, "crucial");
+        .ok_or("security floor schema field")?;
+    assert_eq!(floor.default, shipped.floors["security"].tier);
     assert_eq!(floor.value, "substantial");
     assert_eq!(floor.source, provenant_config::Layer::User);
-    let layered = provenant_config::load_with_domains(
-        &roots,
-        Some("schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers=[{pool='senior',count=1}]\n[domains.routing.review.select]\nby_risk={medium='custom'}\n".as_bytes()),
-        &sections,
-    )?;
-    assert!(layered.domains.routing.review.shapes.contains_key("custom"));
-    assert!(layered.domains.routing.review.shapes["custom"].frame);
-    assert_eq!(layered.domains.routing.review.shapes["custom"].verifiers, 1);
+
+    let extensible = load_routing(
+        "schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers=[{pool='senior',count=1}]\n[domains.routing.review.select]\nby_risk={medium='custom'}\n",
+    )??;
+    assert!(
+        extensible
+            .domains
+            .routing
+            .review
+            .shapes
+            .contains_key("custom")
+    );
+    assert!(extensible.domains.routing.review.shapes["custom"].frame);
     assert_eq!(
-        layered.domains.routing.review.shapes["custom"].synthesis,
+        extensible.domains.routing.review.shapes["custom"].verifiers,
+        1
+    );
+    assert_eq!(
+        extensible.domains.routing.review.shapes["custom"].synthesis,
         crate::ReviewSynthesis::Model
     );
-    assert!(layered.domains.routing.review.shapes.contains_key("quick"));
+    assert!(
+        extensible
+            .domains
+            .routing
+            .review
+            .shapes
+            .contains_key("quick")
+    );
     assert_eq!(
-        layered.domains.routing.review.select.by_risk["routine"],
+        extensible.domains.routing.review.select.by_risk["routine"],
         "quick"
     );
     assert_eq!(
-        layered.domains.routing.review.select.by_risk["medium"],
+        extensible.domains.routing.review.select.by_risk["medium"],
         "custom"
     );
-    // Review shapes are tuning, not authority: invalid input recovers to the
-    // bundled shapes with a warning naming the offending key.
-    for (invalid, key) in [
+    Ok(())
+}
+
+#[test]
+fn unknown_routing_keys_warn_once_with_the_user_config_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (text, key) in [
+        (
+            "schema_version=1\n[domains.routing]\npreferences=true\n",
+            "domains.routing.preferences",
+        ),
         (
             "schema_version=1\n[domains.routing.review.select]\ntypo=true\n",
             "domains.routing.review.select.typo",
@@ -444,33 +469,38 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
             "schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers=[{pool='junior',count=1}]\ntypo=true\n",
             "domains.routing.review.shapes.custom.typo",
         ),
-        (
-            "schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers='wrong'\n",
-            "domains.routing.review.shapes.custom",
-        ),
     ] {
-        let config =
-            provenant_config::load_with_domains(&roots, Some(invalid.as_bytes()), &sections)?;
-        assert!(
-            config
-                .warnings
-                .iter()
-                .any(|warning| warning.message.starts_with(key)),
-            "{invalid}: {:?}",
-            config.warnings
-        );
+        let config = load_routing(text)??;
+        assert_eq!(config.warnings.len(), 1, "{text}");
+        let warning = &config.warnings[0];
+        assert_eq!(warning.rule, "unknown_key", "{text}");
+        assert_eq!(warning.path.as_path_text(), Some("config.toml"), "{text}");
+        assert!(warning.message.contains(key), "{text}");
         assert_eq!(
             config.domains.routing.review.select.by_risk["routine"],
             "quick"
         );
-        assert_eq!(
-            config.domains.routing.review.shapes["quick"].reviewers[0].pool,
-            RoutingConfig::default().review.shapes["quick"].reviewers[0].pool
-        );
     }
+    Ok(())
+}
 
-    // An enforced restriction survives an invalid sibling, and the warning
-    // names the sibling, not its parent.
+#[test]
+fn invalid_review_value_recovers_from_the_shipped_default() -> Result<(), Box<dyn std::error::Error>>
+{
+    let config = load_routing(
+        "schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers='wrong'\n",
+    )??;
+    assert!(!config.warnings.is_empty());
+    assert_eq!(
+        config.domains.routing.review.shapes["quick"].reviewers[0].pool,
+        RoutingConfig::default().review.shapes["quick"].reviewers[0].pool
+    );
+    Ok(())
+}
+
+#[test]
+fn invalid_policy_siblings_cannot_lift_enforced_restrictions()
+-> Result<(), Box<dyn std::error::Error>> {
     let write = crate::RouteIntent {
         workload: crate::Workload::General,
         writes: true,
@@ -481,7 +511,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
         "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nread_only=true\n[domains.routing.model_policy.defaults.cache]\nread_heavy_weight=11\n",
         "schema_version=1\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\n[domains.routing.model_policy.rules.policy.lane]\nread_only=true\n[domains.routing.model_policy.rules.policy.cache]\nread_heavy_weight=11\n",
     ] {
-        let config = provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &sections)?;
+        let config = load_routing(text)??;
         let policy = config
             .domains
             .routing
@@ -489,22 +519,25 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
             .effective(
                 &model,
                 None,
-                provenant_core::WallTime::from_unix_seconds(0).expect("valid policy instant"),
+                provenant_core::WallTime::from_unix_seconds(0)?,
             )
             .policy;
         assert_eq!(policy.lane.read_only, Some(true), "{text}");
         assert_ne!(policy.cache.read_heavy_weight, Some(11), "{text}");
         assert!(!policy.permits(write), "{text}");
-        assert_eq!(config.warnings.len(), 1, "{text}");
         assert!(
-            config.warnings[0]
-                .message
-                .contains(".cache.read_heavy_weight:"),
-            "{}",
-            config.warnings[0].message
+            config
+                .warnings
+                .iter()
+                .any(|warning| { warning.message.contains(".cache.read_heavy_weight:") })
         );
     }
-    // Input whose recovery would lift an enforced restriction refuses.
+    Ok(())
+}
+
+#[test]
+fn invalid_model_policy_inputs_that_can_lift_a_restriction_are_refused()
+-> Result<(), Box<dyn std::error::Error>> {
     for text in [
         "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nmax_context=0\n",
         "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nmax_turns=0\n",
@@ -513,35 +546,19 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
         "schema_version=1\n[[domains.routing.model_policy.rules]]\nadapter='codex'\nmodel='claude/claude-opus-5-5'\n[domains.routing.model_policy.rules.policy.lane]\nread_only=true\n",
         "schema_version=1\n[[domains.routing.model_policy.rules]]\nschedule={ starts='1970-01-01T00:00:10Z', expires='1970-01-01T00:00:05Z' }\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=4\n",
     ] {
-        let error = provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &sections)
-            .err()
-            .ok_or(text)?;
-        assert!(
-            error.to_string().contains("model_policy"),
-            "{text}: {error}"
-        );
+        let error = load_routing(text)?.err().ok_or(text)?;
+        assert!(matches!(
+            error,
+            provenant_config::ConfigError::Domain { source, .. }
+                if source.field.contains("model_policy") && !source.code.is_empty()
+        ));
     }
-    // A malformed rule that restricts nothing is dropped whole, with a warning.
-    let config = provenant_config::load_with_domains(
-        &roots,
-        Some("schema_version=1\n[[domains.routing.model_policy.rules]]\nschedule={ starts='1970-01-01T00:00:10Z', expires='1970-01-01T00:00:05Z' }\n[domains.routing.model_policy.rules.policy.cache]\nprice_multiplier=2.0\n".as_bytes()),
-        &sections,
-    )?;
-    assert!(config.domains.routing.model_policy.rules.is_empty());
-    assert!(
-        config.warnings[0]
-            .message
-            .starts_with("domains.routing.model_policy.rules.0")
-    );
-    let cfg: RoutingConfig = toml_edit::de::from_str(
-        "[routes.review]\nmodel = 'opencode/opencode/glm-5.3-flash-free'\n",
-    )?;
-    assert!(cfg.validate().is_empty());
-    assert_eq!(
-        cfg.routes.get("review").map(|r| r.model.model()),
-        Some("opencode/glm-5.3-flash-free")
-    );
-    assert!(toml_edit::de::from_str::<RoutingConfig>("preferences = true\n[routes]").is_err());
+
+    let malformed_rule = load_routing(
+        "schema_version=1\n[[domains.routing.model_policy.rules]]\nschedule={ starts='1970-01-01T00:00:10Z', expires='1970-01-01T00:00:05Z' }\n[domains.routing.model_policy.rules.policy.cache]\nprice_multiplier=2.0\n",
+    )??;
+    assert!(malformed_rule.domains.routing.model_policy.rules.is_empty());
+    assert!(!malformed_rule.warnings.is_empty());
     Ok(())
 }
 
@@ -718,6 +735,7 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
         120,
     )?;
     observation.snapshot.windows = vec![QuotaWindow {
+        extra: Default::default(),
         pool: "primary".into(),
         window_seconds: Some(18_000),
         used_basis_points: 9_500,
@@ -805,6 +823,7 @@ fn rolling_window_limits_go_despite_monthly_headroom() -> Result<(), Box<dyn std
     let mut observation = quota(model, "go", QuotaStatus::Available, 1, 80, 120)?;
     observation.snapshot.account.adapter = "opencode".into();
     observation.snapshot.details = Some(provenant_quota::QuotaDetails {
+        extra: Default::default(),
         plan: Some("go".into()),
         source: Some("fixture-authoritative".into()),
         coverage: Some("complete".into()),
@@ -812,38 +831,44 @@ fn rolling_window_limits_go_despite_monthly_headroom() -> Result<(), Box<dyn std
     });
     observation.snapshot.windows = vec![
         QuotaWindow {
+            extra: Default::default(),
             pool: "five_hour".into(),
             window_seconds: Some(18_000),
             used_basis_points: 7_000,
             resets_unix_seconds: Some(18_100),
         },
         QuotaWindow {
+            extra: Default::default(),
             pool: "seven_day".into(),
             window_seconds: Some(604_800),
             used_basis_points: 2_000,
             resets_unix_seconds: Some(604_900),
         },
         QuotaWindow {
+            extra: Default::default(),
             pool: "thirty_day".into(),
             window_seconds: Some(2_592_000),
             used_basis_points: 1_000,
             resets_unix_seconds: Some(2_592_100),
         },
     ];
-    let observations = [observation];
     let mut ctx = context(&catalogue, &config, now()?);
     ctx.registry = &registry;
     ctx.availability = &records;
     ctx.access = &access;
-    ctx.quota = &observations;
     let mut query = request(model)?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
-    let route = resolve_with_seed(&query, &ctx, "rolling", 0)?;
-    let receipt = serde_json::to_value(route)?;
-    assert_eq!(
-        receipt["pool_selection"]["candidates"][0]["factor_basis_points"],
-        3_000
-    );
-    assert!(receipt.to_string().contains("five_hour"));
+    let high_observations = [observation.clone()];
+    ctx.quota = &high_observations;
+    let high_route = resolve_with_seed(&query, &ctx, "rolling", 0)?;
+    let high_pressure =
+        high_route.pool_selection.ok_or("receipt")?.candidates[0].factor_basis_points;
+    observation.snapshot.windows[0].used_basis_points = 1_000;
+    let lower_observations = [observation];
+    ctx.quota = &lower_observations;
+    let lower_route = resolve_with_seed(&query, &ctx, "rolling", 0)?;
+    let lower_pressure =
+        lower_route.pool_selection.ok_or("receipt")?.candidates[0].factor_basis_points;
+    assert!(lower_pressure > high_pressure);
     Ok(())
 }

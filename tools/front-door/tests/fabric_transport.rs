@@ -82,7 +82,7 @@ fn peer_health_advertises_graph_submission() -> Result {
     assert_eq!(health["execution"], true, "{health}");
     assert_eq!(health["run_capabilities"]["submit"], true, "{health}");
     assert!(!rig.state.join("attempts").exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -124,7 +124,7 @@ fn peer_doctor_returns_the_local_report() -> Result {
     let report = &response["result"]["data"];
     assert!(report["claude"].is_array(), "{report}");
     assert!(report["peer_agent"].is_string(), "{report}");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn hosts_doctor_uses_the_configured_peer_transport() -> Result {
     let request: Value = serde_json::from_slice(&std::fs::read(request)?)?;
     assert_eq!(request["action"], json!({"action": "doctor"}), "{request}");
     assert_eq!(request["protocol"], DOCTOR_PROTOCOL, "{request}");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn hosts_doctor_unknown_peer_refuses_with_unknown_host() -> Result {
     let (status, output) = json_command(&rig, &["hosts", "doctor", "nowhere", "--json"])?;
     assert_ne!(status, 0);
     assert_eq!(output["error"]["code"], "UNKNOWN_HOST", "{output}");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -267,7 +267,7 @@ fn hosts_doctor_rejects_untrusted_peer_reports() -> Result {
         );
         assert!(output["error"]["code"].as_str().is_some(), "{output}");
     }
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -305,7 +305,7 @@ fn peer_run_statuses_refuses_more_than_one_page() -> Result {
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(response["result"]["result"], "error");
     assert_eq!(response["result"]["data"]["error"]["code"], "invalid_input");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -349,7 +349,7 @@ fn peer_console_inbox_is_read_only_and_refuses_an_oversized_page() -> Result {
     // A peer on the previous feature fence is refused before the action decodes.
     let old = ask(CONSOLE_DETAIL_PROTOCOL, 50)?;
     assert_eq!(old["result"]["data"]["error"]["code"], "peer_version");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -392,7 +392,7 @@ fn peer_wait_refuses_remote_fanout() -> Result {
         response["result"]["data"]["error"]["code"],
         "confinement_refused"
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn peer_ingress_refuses_protocol_before_decoding_or_running_mutations() -> Result {
@@ -425,7 +425,7 @@ fn peer_ingress_refuses_protocol_before_decoding_or_running_mutations() -> Resul
             assert!(!rig.state.join("fabric/fabric.sqlite3").exists());
         }
     }
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -440,7 +440,7 @@ fn peer_ingress_rejects_wrong_host_before_coordination_mutation() -> Result {
     assert_eq!(code(&output), 3);
     assert!(output.stdout.bytes.is_empty());
     assert!(!rig.state.join("fabric/fabric.sqlite3").exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -478,7 +478,7 @@ fn peer_ingress_refuses_the_target_host_as_source() -> Result {
             .contains("peer source host must be a configured peer other than this host")
     );
     assert!(!rig.state.join("fabric/fabric.sqlite3").exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -511,7 +511,7 @@ fn peer_ingress_refuses_a_trace_naming_another_host_than_the_sender() -> Result 
     assert_eq!(code(&served), 0, "{:?}", served.stderr.bytes);
     let reply: Value = serde_json::from_slice(&served.stdout.bytes)?;
     assert_eq!(reply["result"]["result"], "health", "{reply}");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -558,7 +558,7 @@ fn peer_replays_a_home_mutation_once_with_the_original_actor() -> Result {
     let items = events["data"]["page"]["items"].as_array().ok_or("events")?;
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["record"]["detail"], "remote note");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -614,7 +614,7 @@ fn peer_frames_a_local_run_event_failure() -> Result {
             ..
         }
     ));
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -657,12 +657,14 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                     .as_secs(),
             )?;
             let scope = provenant_quota::AccountScope {
+                extra: Default::default(),
                 adapter: "claude".into(),
                 account_key: key.clone(),
                 label: "pro".into(),
             };
             let mut record = provenant_quota::AccountRecord::empty(scope.clone());
             record.snapshot = Some(provenant_quota::QuotaSnapshot {
+                extra: Default::default(),
                 schema_version: 1,
                 account: scope,
                 revision: 0,
@@ -671,6 +673,7 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                 source_ref: "fixture".into(),
                 authority_ref: None,
                 windows: vec![provenant_quota::QuotaWindow {
+                    extra: Default::default(),
                     pool: "five_hour".into(),
                     window_seconds: Some(18_000),
                     used_basis_points: 10_000,
@@ -692,7 +695,7 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         std::fs::write(
             rig.project.join("graph.json"),
             serde_json::to_vec(&json!({
-                "schema_version":1,"graph_id":"typed-refusal","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[
+                "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"typed-refusal","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[
                     {"adapter":"claude","model":"claude/claude-sonnet-5-5","account":"pro"},
                     {"adapter":"fixture","model":"two","account":"pro"}
                 ]}]
@@ -853,7 +856,7 @@ fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result
     std::fs::write(
         rig.project.join("graph.json"),
         serde_json::to_vec(
-            &json!({"schema_version":1,"graph_id":"lost","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[{"adapter":"fixture","model":"one"}]}]}),
+            &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"lost","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[{"adapter":"fixture","model":"one"}]}]}),
         )?,
     )?;
     let run = rig.command(&["run", "--file", "graph.json", "--json"])?;
@@ -901,7 +904,7 @@ fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result
             .any(|row| row["kind"] == "graph" && row["state"] == "cancelled"),
         "{cancelled}"
     );
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }
@@ -920,7 +923,7 @@ fn submitted_policy(
     std::fs::write(
         rig.project.join("graph.json"),
         serde_json::to_vec(&json!({
-            "schema_version":1,"graph_id":operation,"nodes":[{
+            "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":operation,"nodes":[{
                 "id":"task","title":"Review fixture","prompt":"fixture","access":"read_only",
                 "route":route,"deadline_seconds":60
             }]
@@ -982,7 +985,7 @@ fn submission_preserves_explicit_named_route_tier() -> Result {
             effort: None,
         }
     );
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }
@@ -998,7 +1001,7 @@ fn submission_stamps_the_local_host_on_its_trace() -> Result {
         submitted_policy(&rig, "trace-host", json!({"kind":"named","name":"senior"}))?;
     assert_eq!(attempt["trace"]["host"], identity["data"]["host"]);
     assert_eq!(attempt["trace"]["attempt"], attempt["attempt_id"]);
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }
@@ -1025,7 +1028,7 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
     assert!(!plan.silent(1999, Some(0)));
     assert!(plan.silent(2000, Some(0)));
     assert!(!plan.silent(2000, Some(2000)));
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }
@@ -1209,35 +1212,33 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
     std::fs::write(&lost, "")?;
     // Observe the lost receipt before a waited submission advances its due retry.
     let (_, unknown) = launch(&rig, "probe-failure-retry", false)?;
-    assert!(unknown.to_string().contains("LAUNCH_UNKNOWN"), "{unknown}");
+    assert_eq!(unknown["error"]["code"], "LAUNCH_UNKNOWN", "{unknown}");
     let after_loss: std::collections::HashSet<_> = std::fs::read_dir(&peer_attempts)?
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
     assert_eq!(after_loss.difference(&existing).count(), 1, "{unknown}");
-    // A lost receipt must remain recoverable after unrelated legacy work appears
-    // at the receiver. Replay observes its sealed operation rather than admitting
-    // a new launch, and must leave that legacy work untouched.
-    let legacy_directory = rig
+    // Replay must leave unrelated bytes in the receiver and origin state alone.
+    let unrelated = b"unrelated graph-directory bytes";
+    let peer_directory = rig
         .root
         .join("peer-state/fabric/graphs/11111111111111111111111111111111");
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(&legacy_directory)?;
-    let legacy_path = legacy_directory.join("graph-old-pending-fixture.json");
-    let legacy = include_bytes!("fixtures/install/old-pending-checkpoint.json");
-    std::fs::write(&legacy_path, legacy)?;
-    std::fs::set_permissions(&legacy_path, std::fs::Permissions::from_mode(0o600))?;
-    let origin_legacy_directory = rig
+        .create(&peer_directory)?;
+    let peer_unrelated = peer_directory.join("unrelated.bin");
+    std::fs::write(&peer_unrelated, unrelated)?;
+    std::fs::set_permissions(&peer_unrelated, std::fs::Permissions::from_mode(0o600))?;
+    let origin_directory = rig
         .state
         .join("fabric/graphs/11111111111111111111111111111111");
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(&origin_legacy_directory)?;
-    let origin_legacy_path = origin_legacy_directory.join("graph-old-pending-fixture.json");
-    std::fs::write(&origin_legacy_path, legacy)?;
-    std::fs::set_permissions(&origin_legacy_path, std::fs::Permissions::from_mode(0o600))?;
+        .create(&origin_directory)?;
+    let origin_unrelated = origin_directory.join("unrelated.bin");
+    std::fs::write(&origin_unrelated, unrelated)?;
+    std::fs::set_permissions(&origin_unrelated, std::fs::Permissions::from_mode(0o600))?;
     rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
     rig.env
         .push(("PROVENANT_AGENT_LABEL".into(), "replacement-runner".into()));
@@ -1265,9 +1266,9 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
     assert_eq!(replayed, after);
-    assert_eq!(std::fs::read(&legacy_path)?, legacy);
-    assert_eq!(std::fs::read(&origin_legacy_path)?, legacy);
-    rig.assert_legacy_unchanged()?;
+    assert_eq!(std::fs::read(&peer_unrelated)?, unrelated);
+    assert_eq!(std::fs::read(&origin_unrelated)?, unrelated);
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }
@@ -1298,7 +1299,7 @@ fn peer_dispatch_set_host_reaches_the_peer_attempt() -> Result {
         std::fs::read_dir(rig.root.join("peer-state/attempts"))?.count(),
         1
     );
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }
@@ -1353,7 +1354,7 @@ fn peer_dispatch_refuses_an_oversized_frame_before_contact() -> Result {
     }
     assert!(!rig.root.join("peer-stderr").exists());
     assert!(!rig.root.join("peer-state/attempts").exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -1405,16 +1406,15 @@ fn peer_dispatch_refuses_misplaced_writers_and_unknown_hosts_before_contact() ->
     }
     assert!(!contacted.exists());
     assert!(!rig.root.join("peer-state/attempts").exists());
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)] // Exercise the real wait deadline.
-fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
+fn unanswered_peer_submission_is_recorded_as_launch_uncertainty() -> Result {
     let mut rig = TestRig::new()?;
     let host = loopback_peer(&mut rig)?;
     // Answer the read-only health preflight, then lose the mutating
-    // submission's reply so the deadline exercises actual launch uncertainty.
+    // submission's reply after it reaches the remote command boundary.
     let identity = federated_identity(&mut rig)?;
     let health = rig.root.join("peer-health.json");
     std::fs::write(
@@ -1431,22 +1431,15 @@ fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
     std::fs::write(
         rig.root.join("ssh"),
         format!(
-            "#!/bin/sh\nrequest=$(cat)\ncase \"$request\" in *'\"action\":\"submit\"'*) : > '{}'; exec /usr/bin/tail -f /dev/null ;; esac\ncat '{}'\n",
+            "#!/bin/sh\nrequest=$(cat)\ncase \"$request\" in *'\"action\":\"submit\"'*) : > '{}'; exit 1 ;; esac\ncat '{}'\n",
             submitted.display(),
             health.display()
         ),
     )?;
     std::fs::set_permissions(rig.root.join("ssh"), std::fs::Permissions::from_mode(0o700))?;
-    // `run` has no wait flag, so the peer exchange bound is what ends an
-    // unanswered submission.
-    let config = rig.state.join("config.toml");
-    let text = std::fs::read_to_string(&config)?;
-    std::fs::write(
-        &config,
-        format!("{text}[domains.fabric.limits]\npeer_seconds=5\n"),
-    )?;
-    let start = std::time::Instant::now();
-    let (_, launched) = json_command(
+    // The SSH boundary loses its reply immediately after the peer may have
+    // accepted the operation; the mutation outcome must stay uncertain.
+    let (launch_status, launched) = json_command(
         &rig,
         &[
             "run",
@@ -1461,21 +1454,11 @@ fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
             "--json",
         ],
     )?;
-    let result = json!({"launch": launched});
-    // Health and submission share the five-second peer bound; the rest is
-    // process start on a loaded host.
-    assert!(
-        start.elapsed() < std::time::Duration::from_secs(20),
-        "{result}"
-    );
+    assert_ne!(launch_status, 0, "{launched}");
+    assert_eq!(launched["error"]["code"], "LAUNCH_UNKNOWN", "{launched}");
     assert!(
         submitted.exists(),
-        "the mutating submission must reach the peer: {result}"
-    );
-    assert!(result.to_string().contains("LAUNCH_UNKNOWN"), "{result}");
-    assert!(
-        !result.to_string().contains("home_unavailable"),
-        "a deadline is not an unavailable home: {result}"
+        "the mutating submission must reach the peer"
     );
     assert!(!rig.root.join("peer-state/attempts").exists());
     Ok(())
@@ -1571,7 +1554,7 @@ fn peer_dispatch_launches_a_large_argv_prompt() -> Result {
         reference
     );
     assert_eq!(std::fs::read_dir(&attempts)?.count(), launched, "{replay}");
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }
@@ -2252,7 +2235,7 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 30)?;
     let document: GraphDocument = serde_json::from_value(
-        json!({"schema_version":1,"graph_id":"remote-graph","nodes":[{"id":"one","access":"read_only","prompt":"fixture","route":{"alias":"senior"}}]}),
+        json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"remote-graph","nodes":[{"id":"one","access":"read_only","prompt":"fixture","route":{"alias":"senior"}}]}),
     )?;
     struct AcceptedPeer {
         actor: String,
@@ -2299,7 +2282,7 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
         .resolve(&provenant_os::fs::SystemPathResolver)?
         .state;
     let receiver_document: GraphDocument = serde_json::from_value(json!({
-        "schema_version":1, "graph_id":receiver_graph,
+        "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION, "graph_id":receiver_graph,
         "peer_origin_work_key":origin_key,
         "nodes":[{"id":"one","access":"read_only","prompt":"fixture","route":{"alias":"senior"}}]
     }))?;
@@ -2437,7 +2420,7 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
         Some(format!("{peer}/{attempt}").as_str())
     );
 
-    rig.assert_legacy_unchanged()?;
+    rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())
 }

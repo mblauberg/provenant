@@ -73,8 +73,10 @@ mod tests {
     use crate::{AccountScope, QuotaWindow};
     fn snapshot(five: u64, week: u64) -> QuotaSnapshot {
         QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: AccountScope {
+                extra: Default::default(),
                 adapter: "claude".into(),
                 account_key: "account".into(),
                 label: "account".into(),
@@ -88,6 +90,7 @@ mod tests {
             windows: [("five_hour", 18000, five), ("seven_day", 604800, week)]
                 .into_iter()
                 .map(|(pool, seconds, used)| QuotaWindow {
+                    extra: Default::default(),
                     pool: pool.into(),
                     window_seconds: Some(seconds),
                     used_basis_points: used,

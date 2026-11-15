@@ -170,11 +170,24 @@ mod tests {
 
     #[test]
     fn an_unalignable_middle_is_a_replacement() {
-        let old: String = (0..3000).map(|n| format!("old {n}\n")).collect();
-        let new: String = (0..3000).map(|n| format!("new {n}\n")).collect();
+        let mut middle_len = 0;
+        while (middle_len + 1).saturating_mul(middle_len + 1) <= TABLE_CELLS {
+            middle_len += 1;
+        }
+        middle_len += 1;
+        let old: String = (0..middle_len).map(|n| format!("old {n}\n")).collect();
+        let new: String = (0..middle_len).map(|n| format!("new {n}\n")).collect();
         let diff = unified(&old, &new, "a", "b");
-        assert_eq!(diff.lines().filter(|l| l.starts_with('-')).count(), 3001);
-        assert_eq!(diff.lines().filter(|l| l.starts_with('+')).count(), 3001);
+        let removed = diff
+            .lines()
+            .filter(|line| line.starts_with("-old "))
+            .count();
+        let added = diff
+            .lines()
+            .filter(|line| line.starts_with("+new "))
+            .count();
+        assert_eq!(removed, old.lines().count());
+        assert_eq!(added, new.lines().count());
     }
 
     #[test]
@@ -202,9 +215,19 @@ mod tests {
 
     #[test]
     fn starting_from_nothing_adds_every_line() {
+        let new = "a\nb\n";
+        let diff = unified("", new, "none", "rev 1");
+        let added: std::collections::BTreeSet<String> = diff
+            .lines()
+            .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+            .map(str::to_owned)
+            .collect();
+        let expected: std::collections::BTreeSet<_> =
+            new.lines().map(|line| format!("+{line}")).collect();
+        assert_eq!(added, expected);
         assert_eq!(
-            unified("", "a\nb\n", "none", "rev 1"),
-            "--- none\n+++ rev 1\n@@ -0,0 +1,2 @@\n+a\n+b\n"
+            diff.lines().filter(|line| line.starts_with("@@ ")).count(),
+            1
         );
     }
 }

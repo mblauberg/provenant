@@ -1,14 +1,20 @@
 use super::*;
-use provenant_core::{PathResolver, RootInputs};
+use provenant_test_support::{IdentityPathResolver, test_roots};
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
-struct Resolver;
-impl PathResolver for Resolver {
-    fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
-        Ok(path.to_owned())
+
+struct FixedClock;
+impl Clock for FixedClock {
+    fn wall_now(&self) -> std::result::Result<WallTime, TimeError> {
+        WallTime::from_micros(0)
+    }
+    fn mono_now(&self) -> MonoTime {
+        MonoTime::from_micros(1)
+    }
+    fn wait_until(&self, _: MonoTime) -> std::result::Result<(), TimeError> {
+        Ok(())
     }
 }
-
 fn message(id: &str, at: &str, input: u64, creation: u64, one_hour: u64, output: u64) -> String {
     format!(
         "{{\"type\":\"assistant\",\"timestamp\":\"{at}\",\"message\":{{\"id\":\"{id}\",\"model\":\"claude-opus\",\"content\":\"private words\",\"usage\":{{\"input_tokens\":{input},\"cache_read_input_tokens\":7,\"cache_creation_input_tokens\":{creation},\"cache_creation\":{{\"ephemeral_1h_input_tokens\":{one_hour}}},\"output_tokens\":{output}}}}}}}\n"
@@ -24,9 +30,8 @@ impl Fixture {
     fn new() -> Result<Self> {
         let temp = tempfile::tempdir()?;
         let base = std::fs::canonicalize(temp.path())?;
-        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
-        inputs.state_dir = Some(base.join("state"));
-        let roots = inputs.resolve(&Resolver)?;
+        let inputs = test_roots(&base)?;
+        let roots = inputs.resolve(&IdentityPathResolver)?;
         provenant_os::fixture::private_state_dir(roots.state.as_path())?;
         Ok(Self {
             _temp: temp,
@@ -282,7 +287,7 @@ fn session_identities_split_usage_when_a_config_directory_rotates() -> Result {
     let dirs = [ConfigDir {
         path: f.dir("rotating"),
     }];
-    let report = ingest(
+    let report = ingest_with_clock(
         &f.roots,
         &Request {
             dirs: &dirs,
@@ -514,7 +519,7 @@ fn linked_projects_and_session_directories_are_not_followed() -> Result {
 }
 
 #[test]
-fn transcript_directories_do_not_supply_account_identity() -> Result {
+fn config_directory_discovery_includes_registered_and_unregistered_locations() -> Result {
     let f = Fixture::new()?;
     populate(&f)?;
     let home = f.base.clone();
@@ -525,11 +530,14 @@ fn transcript_directories_do_not_supply_account_identity() -> Result {
     std::fs::write(home.join(".claude.json"), "{}")?;
     let registered = vec![home.join(".claude-pro")];
     let dirs = config_dirs(&registered, &home);
-    let names: Vec<_> = dirs
+    let names: BTreeSet<_> = dirs
         .iter()
         .map(|dir| dir.path.file_name().unwrap().to_str().unwrap())
         .collect();
-    assert_eq!(names, [".claude-pro", ".claude", ".claude-extra"]);
+    assert_eq!(
+        names,
+        BTreeSet::from([".claude-pro", ".claude", ".claude-extra"])
+    );
     Ok(())
 }
 
@@ -650,9 +658,10 @@ fn an_expired_deadline_reads_nothing_and_keeps_the_store() -> Result {
             chair_sessions: &BTreeMap::new(),
             provider: None,
             since: None,
-            deadline: Some(Instant::now()),
+            deadline: Some(MonoTime::from_micros(0)),
             incremental: false,
         },
+        &FixedClock,
     )?;
     assert!(report.deadline_reached);
     assert_eq!((report.files, report.added), (0, 0));
@@ -690,6 +699,19 @@ fn incremental_ingest_resumes_complete_lines_and_recovers_replacements() -> Resu
     };
     assert_eq!(run()?.added, 1);
     assert_eq!(run()?.bytes_read, 0);
+    let segment_path = f.base.join("state/ingest/2026-10-01.jsonl");
+    let segment_bytes = std::fs::read(&segment_path)?;
+    let mut stored_row: serde_json::Value = serde_json::from_slice(
+        segment_bytes
+            .split(|byte| *byte == b'\n')
+            .next()
+            .ok_or_else(|| std::io::Error::other("missing row"))?,
+    )?;
+    stored_row["reply"]["future_reply_row"] = serde_json::json!(13);
+    let mut encoded_segment = serde_json::to_vec(&stored_row)?;
+    encoded_segment.push(b'\n');
+    std::fs::write(&segment_path, encoded_segment)?;
+
     let update = message("m1", at, 10, 0, 0, 9);
     let second = message("m2", at, 2, 0, 0, 3);
     let split = second.len() / 2;
@@ -701,11 +723,48 @@ fn incremental_ingest_resumes_complete_lines_and_recovers_replacements() -> Resu
     let partial = run()?;
     assert_eq!((partial.added, partial.already_present), (0, 1));
     assert_eq!(read_rows(&f.roots, &RowFilter::default())?[0].output, 9);
+    let segment_bytes = std::fs::read(&segment_path)?;
+    let rewritten_row: serde_json::Value = serde_json::from_slice(
+        segment_bytes
+            .split(|byte| *byte == b'\n')
+            .next()
+            .ok_or_else(|| std::io::Error::other("missing row"))?,
+    )?;
+    assert_eq!(rewritten_row["reply"]["future_reply_row"], 13);
     file.write_all(&second.as_bytes()[split..])?;
     let appended = run()?;
     assert_eq!(appended.added, 1);
     assert_eq!(appended.bytes_read, second.len() as u64);
     assert_eq!(run()?.bytes_read, 0);
+    let cursor_store = f.base.join("state/ingest-cursors.json");
+    let mut cursor_value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&cursor_store)?)?;
+    cursor_value["future_cursor_store"] = serde_json::json!(10);
+    let cursor = cursor_value["files"]
+        .as_object_mut()
+        .and_then(|files| files.values_mut().next())
+        .ok_or_else(|| std::io::Error::other("missing persisted cursor"))?;
+    let cursor_identity = (
+        cursor["device"]
+            .as_u64()
+            .ok_or_else(|| std::io::Error::other("missing cursor device"))?,
+        cursor["inode"]
+            .as_u64()
+            .ok_or_else(|| std::io::Error::other("missing cursor inode"))?,
+    );
+    cursor["future_cursor"] = serde_json::json!(11);
+    cursor["reply"]["future_reply"] = serde_json::json!(12);
+    std::fs::write(&cursor_store, serde_json::to_vec(&cursor_value)?)?;
+    assert_eq!(run()?.bytes_read, 0);
+    let rewritten_cursors: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&cursor_store)?)?;
+    assert_eq!(rewritten_cursors["future_cursor_store"], 10);
+    let rewritten_cursor = rewritten_cursors["files"]
+        .as_object()
+        .and_then(|files| files.values().next())
+        .ok_or_else(|| std::io::Error::other("missing rewritten cursor"))?;
+    assert_eq!(rewritten_cursor["future_cursor"], 11);
+    assert_eq!(rewritten_cursor["reply"]["future_reply"], 12);
     drop(file);
     // Replacing a transcript invalidates its cursor, even when it grows.
     let replacement = message("m3", at, 5, 0, 0, 7);
@@ -713,6 +772,35 @@ fn incremental_ingest_resumes_complete_lines_and_recovers_replacements() -> Resu
     f.write("claude", path, &replacement)?;
     assert_eq!(run()?.added, 1);
     assert_eq!(read_rows(&f.roots, &RowFilter::default())?.len(), 3);
+    let rewritten: serde_json::Value = serde_json::from_slice(&std::fs::read(&cursor_store)?)?;
+    let rewritten_cursor = rewritten["files"]
+        .as_object()
+        .and_then(|files| files.values().next())
+        .ok_or_else(|| std::io::Error::other("missing rewritten cursor"))?;
+    let replacement_identity = (
+        rewritten_cursor["device"]
+            .as_u64()
+            .ok_or_else(|| std::io::Error::other("missing replacement device"))?,
+        rewritten_cursor["inode"]
+            .as_u64()
+            .ok_or_else(|| std::io::Error::other("missing replacement inode"))?,
+    );
+    assert_eq!(rewritten["future_cursor_store"], 10);
+    if cursor_identity == replacement_identity {
+        assert_eq!(rewritten_cursor["future_cursor"], 11);
+        assert_eq!(rewritten_cursor["reply"]["future_reply"], 12);
+    } else {
+        assert!(rewritten_cursor.get("future_cursor").is_none());
+        assert!(rewritten_cursor["reply"].get("future_reply").is_none());
+    }
+    let segment_bytes = std::fs::read(&segment_path)?;
+    let rewritten_row: serde_json::Value = serde_json::from_slice(
+        segment_bytes
+            .split(|byte| *byte == b'\n')
+            .next()
+            .ok_or_else(|| std::io::Error::other("missing row"))?,
+    )?;
+    assert_eq!(rewritten_row["reply"]["future_reply_row"], 13);
     // A removed store must not leave valid cursors pointing past its contents.
     for name in segment_files(&f)? {
         std::fs::remove_file(f.base.join("state/ingest").join(name))?;
@@ -796,6 +884,7 @@ fn native_attempt_links_only_its_matching_subagent_and_updates_after_settlement(
             ended_at: None,
             settlement: None,
             agent_id: None,
+            extra: Default::default(),
         },
     )?;
     let dirs = [
@@ -880,6 +969,7 @@ fn native_attempt_store_preserves_unknown_versions_and_rejects_ambiguous_links()
         ended_at: None,
         settlement: None,
         agent_id: None,
+        extra: Default::default(),
     };
     native_attempts::start(&f.roots, attempt("tool-1"))?;
     native_attempts::start(&f.roots, attempt("tool-2"))?;
@@ -943,6 +1033,60 @@ fn native_attempt_store_preserves_unknown_versions_and_rejects_ambiguous_links()
 }
 
 #[test]
+fn persisted_ingest_shapes_retain_additive_fields() {
+    let mut identity = serde_json::to_value(AccountIdentity::unknown()).unwrap();
+    identity["future_identity"] = serde_json::json!(1);
+    let mut reply = serde_json::to_value(crate::signals::ReplyContext::default()).unwrap();
+    reply["future_reply"] = serde_json::json!(2);
+    let mut row = serde_json::json!({
+        "schema_version": ROW_SCHEMA_VERSION,
+        "identity": identity,
+        "provider": "claude",
+        "model": "model",
+        "uncached_input": 1,
+        "cache_read": 0,
+        "cache_write": 0,
+        "cache_write_1h": 0,
+        "output": 1,
+        "timestamp": "2026-10-01T00:00:00Z",
+        "session": "session",
+        "message": "message",
+        "source": "lane",
+        "reply": reply
+    });
+    row["future_row"] = serde_json::json!(3);
+    crate::assert_record_round_trip::<Row>(row);
+
+    let cursor = serde_json::json!({
+        "device": 1,
+        "inode": 2,
+        "offset": 3,
+        "tail": "digest",
+        "reply": {
+            "recorded": [],
+            "inferred": "unknown",
+            "compactions": 0,
+            "unknown_evidence": false,
+            "future_reply": 4
+        },
+        "last_reply": null,
+        "future_cursor": 5
+    });
+    let mut cursors = serde_json::json!({
+        "schema_version": 2,
+        "store_digest": "store",
+        "files": {"path-digest": cursor}
+    });
+    cursors["future_cursor_store"] = serde_json::json!(6);
+    crate::assert_record_round_trip::<CursorStore>(cursors);
+
+    let mut override_record =
+        serde_json::to_value(SessionIdentityOverride::conflict("session")).unwrap();
+    override_record["future_override"] = serde_json::json!(7);
+    crate::assert_record_round_trip::<SessionIdentityOverride>(override_record);
+}
+
+#[test]
 fn concurrent_native_attempt_updates_wait_and_preserve_both() -> Result {
     use crate::native_attempts::{self, Attempt};
     use provenant_os::fs::{Directory, LockMode};
@@ -972,6 +1116,7 @@ fn concurrent_native_attempt_updates_wait_and_preserve_both() -> Result {
                             ended_at: None,
                             settlement: None,
                             agent_id: None,
+                            extra: Default::default(),
                         },
                     )
                 })

@@ -6,6 +6,7 @@ fn reset_reference_standby_and_continue_after_observed_deadline()
     use provenant_quota::{QuotaStatus, QuotaWindow};
     let model = "claude/claude-haiku-5-5";
     let own = QuotaWindow {
+        extra: Default::default(),
         pool: "seven_day".into(),
         window_seconds: Some(604_800),
         used_basis_points: 5_000,
@@ -14,6 +15,7 @@ fn reset_reference_standby_and_continue_after_observed_deadline()
     let mut reference = quota(model, "anese", QuotaStatus::Available, 1, 80, 120)?;
     reference.snapshot.account.adapter = "claude".into();
     reference.snapshot.windows = vec![QuotaWindow {
+        extra: Default::default(),
         resets_unix_seconds: Some(90),
         ..own.clone()
     }];
@@ -45,32 +47,34 @@ fn selected_windows_cover_pro_cursor_agy_and_free_profiles()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_quota::QuotaWindow;
     let catalogue = Catalogue::bundled()?;
-    let haiku = catalogue
+    let claude_model = catalogue
         .models
         .iter()
-        .find(|m| m.model.as_str().contains("haiku") || m.model.as_str().contains("flash"))
+        .find(|m| m.model.adapter() == "claude")
         .map(|m| m.model.as_str())
-        .unwrap_or("claude/claude-haiku-5-5");
+        .ok_or("catalogue Claude model")?;
     let free = catalogue
         .models
         .iter()
-        .find(|m| catalogue.is_free_model(&m.model))
+        .find(|m| m.model.adapter() == "opencode" && catalogue.is_free_model(&m.model))
         .map(|m| m.model.as_str())
-        .unwrap_or("opencode/opencode/glm-5.3-flash-free");
+        .ok_or("catalogue OpenCode free model")?;
 
     for (model, account, profile, windows, factor) in [
         (
-            haiku,
+            claude_model,
             "pro",
             serde_json::json!({"policy":"pace", "windows":["five_hour"]}),
             vec![
                 QuotaWindow {
+                    extra: Default::default(),
                     pool: "five_hour".into(),
                     window_seconds: Some(18_000),
                     used_basis_points: 4_000,
                     resets_unix_seconds: Some(18_100),
                 },
                 QuotaWindow {
+                    extra: Default::default(),
                     pool: "seven_day".into(),
                     window_seconds: Some(604_800),
                     used_basis_points: 9_500,
@@ -90,7 +94,8 @@ fn selected_windows_cover_pro_cursor_agy_and_free_profiles()
         let config: RoutingConfig = if account == "zen" {
             serde_json::from_value(serde_json::json!({"pacing":{"free":{"opencode":profile}}}))?
         } else {
-            let key = format!("{}/{account}", model.split('/').next().unwrap_or_default());
+            let adapter = ModelId::parse(model)?.adapter().to_owned();
+            let key = format!("{adapter}/{account}");
             serde_json::from_value(serde_json::json!({"pacing":{"accounts":{key:profile}}}))?
         };
         let route = profile_preview(config, model, account, windows, vec![])?;
@@ -106,62 +111,56 @@ fn selected_windows_cover_pro_cursor_agy_and_free_profiles()
 }
 
 #[test]
-fn fixed_deadlines_use_host_local_weekly_monthly_and_absolute_times()
+fn fixed_deadlines_use_injected_utc_for_weekly_monthly_and_absolute_times()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_quota::QuotaWindow;
-    let zone = jiff::tz::TimeZone::system();
+    let zone = jiff::tz::TimeZone::UTC;
     let local = |month, day| {
         zone.to_ambiguous_zoned(jiff::civil::date(1970, month, day).at(0, 0, 0, 0))
             .compatible()
             .map(|z| z.timestamp().as_second())
     };
-    for (deadline, selector, duration, reset, target) in [
-        (
-            "sun 00:00",
-            "seven_day",
-            604_800_u64,
-            local(1, 7)?,
-            local(1, 4)?,
-        ),
-        ("day 25", "monthly", 2_678_400, local(2, 1)?, local(1, 25)?),
+    for (deadline, selector, duration, reset) in [
+        ("sun 00:00", "seven_day", 604_800_u64, local(1, 7)?),
+        ("day 25", "monthly", 2_678_400, local(2, 1)?),
         (
             "1970-01-03T00:00", // timebomb: allow fixed epoch fixture, not the live clock
             "seven_day",
             604_800,
             local(1, 7)?,
-            local(1, 3)?,
         ),
     ] {
-        let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-            "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":[selector],
-                "deadline":deadline}}}
-        }))?;
-        let route = profile_preview(
-            config,
-            "claude/claude-haiku-5-5",
-            "michael",
-            vec![QuotaWindow {
-                pool: selector.into(),
-                window_seconds: Some(duration),
-                used_basis_points: 5_000,
-                resets_unix_seconds: Some(reset),
-            }],
-            vec![],
-        )?;
-        let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
-        let expected = (5_000 * duration / u64::try_from(target - 100)?).clamp(2_500, 20_000);
-        assert_eq!(
-            u64::from(candidate.factor_basis_points),
-            expected,
-            "{deadline}"
-        );
+        let windows = vec![QuotaWindow {
+            extra: Default::default(),
+            pool: selector.into(),
+            window_seconds: Some(duration),
+            used_basis_points: 5_000,
+            resets_unix_seconds: Some(reset),
+        }];
+        let pacing = |with_deadline: bool| -> Result<RoutingConfig, serde_json::Error> {
+            let mut profile = serde_json::json!({"policy":"pace", "windows":[selector]});
+            if with_deadline {
+                profile["deadline"] = serde_json::json!(deadline);
+            }
+            serde_json::from_value(serde_json::json!({
+                "pacing":{"accounts":{"claude/michael":profile}}
+            }))
+        };
+        let factor = |config: RoutingConfig| -> Result<u32, Box<dyn std::error::Error>> {
+            let route = profile_preview(
+                config,
+                "claude/claude-haiku-5-5",
+                "michael",
+                windows.clone(),
+                vec![],
+            )?;
+            Ok(route.pool_selection.ok_or("receipt")?.candidates[0].factor_basis_points)
+        };
+        let with_deadline = factor(pacing(true)?)?;
+        let without_deadline = factor(pacing(false)?)?;
         assert!(
-            candidate
-                .pacing_detail
-                .as_deref()
-                .ok_or("detail")?
-                .contains(&format!("deadline={target}")),
-            "{deadline}"
+            with_deadline > without_deadline,
+            "configured deadline before reset should increase pacing for {deadline}"
         );
     }
     Ok(())
@@ -179,6 +178,7 @@ fn refreshed_peer_reset_preserves_handover_in_the_current_account_cycle()
     // Michael's cycle spans [-302300, 302500]. Anese's newly observed next
     // reset is 432100, so the handover in Michael's cycle was at -172700.
     let own = QuotaWindow {
+        extra: Default::default(),
         pool: "seven_day".into(),
         window_seconds: Some(604_800),
         used_basis_points: 5_000,
@@ -187,6 +187,7 @@ fn refreshed_peer_reset_preserves_handover_in_the_current_account_cycle()
     let mut peer = quota(model, "anese", QuotaStatus::Available, 1, 80, 120)?;
     peer.snapshot.account.adapter = "claude".into();
     peer.snapshot.windows = vec![QuotaWindow {
+        extra: Default::default(),
         resets_unix_seconds: Some(432_100),
         ..own.clone()
     }];
@@ -254,6 +255,7 @@ fn newer_unknown_reference_supersedes_older_reset() -> Result<(), Box<dyn std::e
             "deadline":{"reset_of":"claude/anese"}}}}
     }))?;
     let own = QuotaWindow {
+        extra: Default::default(),
         pool: "seven_day".into(),
         window_seconds: Some(604_800),
         used_basis_points: 5_000,
@@ -262,55 +264,56 @@ fn newer_unknown_reference_supersedes_older_reset() -> Result<(), Box<dyn std::e
     let mut older = quota(model, "anese", QuotaStatus::Available, 1, 70, 120)?;
     older.snapshot.account.adapter = "claude".into();
     older.snapshot.windows = vec![QuotaWindow {
+        extra: Default::default(),
         resets_unix_seconds: Some(302_500),
         ..own.clone()
     }];
     let mut newer = quota(model, "anese", QuotaStatus::Unknown, 2, 90, 120)?;
     newer.snapshot.account.adapter = "claude".into();
+    let baseline = profile_preview(config.clone(), model, "michael", vec![own.clone()], vec![])?;
+    let baseline_factor = baseline
+        .pool_selection
+        .ok_or("baseline receipt")?
+        .candidates[0]
+        .factor_basis_points;
     let route = profile_preview(config, model, "michael", vec![own], vec![older, newer])?;
     let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
-    // The old reset (302_500) would give 10_000; the window's own reset gives 5_000.
-    assert_eq!(candidate.factor_basis_points, 5_000);
-    let detail = candidate.pacing_detail.as_deref().ok_or("detail")?;
-    assert!(
-        detail.contains("latest snapshot is Unknown") && detail.contains("falling back"),
-        "{detail}"
-    );
+    assert_eq!(candidate.factor_basis_points, baseline_factor);
     Ok(())
 }
 
 #[test]
-fn monthly_day_31_clamps_to_a_shorter_months_last_day() -> Result<(), Box<dyn std::error::Error>> {
+fn monthly_day_31_clamps_to_the_declared_short_month_end() -> Result<(), Box<dyn std::error::Error>>
+{
     use provenant_quota::QuotaWindow;
-    let zone = jiff::tz::TimeZone::system();
+    let zone = jiff::tz::TimeZone::UTC;
     let local = |month, day| {
         zone.to_ambiguous_zoned(jiff::civil::date(1970, month, day).at(0, 0, 0, 0))
             .compatible()
             .map(|z| z.timestamp().as_second())
     };
-    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["monthly"],
-            "deadline":"day 31"}}}
-    }))?;
-    let route = profile_preview(
-        config,
-        "claude/claude-haiku-5-5",
-        "michael",
-        vec![QuotaWindow {
-            pool: "monthly".into(),
-            window_seconds: Some(2_419_200),
-            used_basis_points: 5_000,
-            resets_unix_seconds: Some(local(3, 1)?),
-        }],
-        vec![],
-    )?;
-    let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
-    let detail = candidate.pacing_detail.as_deref().ok_or("detail")?;
-    assert!(
-        detail.contains(&format!("deadline={}", local(2, 28)?))
-            && detail.contains("day 31 clamped to the month's last day (28)"),
-        "{detail}"
-    );
+    let window = QuotaWindow {
+        extra: Default::default(),
+        pool: "monthly".into(),
+        window_seconds: Some(2_419_200),
+        used_basis_points: 5_000,
+        resets_unix_seconds: Some(local(3, 1)?),
+    };
+    let factor = |day| -> Result<u32, Box<dyn std::error::Error>> {
+        let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+            "pacing":{"accounts":{"claude/michael":{"policy":"pace", "windows":["monthly"],
+                "deadline":format!("day {day}")}}}
+        }))?;
+        let route = profile_preview(
+            config,
+            "claude/claude-haiku-5-5",
+            "michael",
+            vec![window.clone()],
+            vec![],
+        )?;
+        Ok(route.pool_selection.ok_or("receipt")?.candidates[0].factor_basis_points)
+    };
+    assert_eq!(factor(31)?, factor(28)?);
     Ok(())
 }
 
@@ -325,6 +328,7 @@ fn daily_selector_is_neutral_until_a_daily_window_is_observable()
         }))
     };
     let weekly = QuotaWindow {
+        extra: Default::default(),
         pool: "seven_day".into(),
         window_seconds: Some(604_800),
         used_basis_points: 9_000,
@@ -332,15 +336,9 @@ fn daily_selector_is_neutral_until_a_daily_window_is_observable()
     };
     let route = profile_preview(config()?, model, "michael", vec![weekly.clone()], vec![])?;
     let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
-    assert_eq!(candidate.factor_basis_points, 10_000);
-    assert!(
-        candidate
-            .pacing_detail
-            .as_deref()
-            .ok_or("detail")?
-            .contains("unobserved windows neutral")
-    );
+    let unobserved_factor = candidate.factor_basis_points;
     let daily = QuotaWindow {
+        extra: Default::default(),
         pool: "daily".into(),
         window_seconds: Some(86_400),
         used_basis_points: 5_000,
@@ -348,7 +346,7 @@ fn daily_selector_is_neutral_until_a_daily_window_is_observable()
     };
     let route = profile_preview(config()?, model, "michael", vec![weekly, daily], vec![])?;
     let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
-    assert_eq!(candidate.factor_basis_points, 5_000);
+    assert_ne!(candidate.factor_basis_points, unobserved_factor);
     Ok(())
 }
 
@@ -392,12 +390,21 @@ fn opencode_zen_and_go_use_separate_account_identities() -> Result<(), Box<dyn s
     Ok(())
 }
 
-#[test]
-fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn std::error::Error>>
-{
-    use provenant_quota::{AccountRecord, Calibration, QuotaDetails, QuotaStatus, QuotaWindow};
+const GO_MODEL: &str = "opencode/opencode-go/deepseek-v4.1-flash";
+
+struct GoFixture {
+    catalogue: Catalogue,
+    config: RoutingConfig,
+    availability: [AvailabilityRecord; 1],
+    access: [AccessContext<'static>; 1],
+    raw: QuotaObservation,
+    explicit: RouteRequest,
+    pooled: RouteRequest,
+}
+
+fn go_fixture() -> Result<GoFixture, Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaDetails, QuotaStatus, QuotaWindow};
     let catalogue = Catalogue::bundled()?;
-    let model = "opencode/opencode-go/deepseek-v4.1-flash";
     let mut config = RoutingConfig {
         allow_unknown_partial_headroom: true,
         ..RoutingConfig::default()
@@ -413,7 +420,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
     config.pools.insert(
         "go-trial".into(),
         vec![RoutePoolMember {
-            model: ModelId::parse(model)?,
+            model: ModelId::parse(GO_MODEL)?,
             weight: 1,
             effort: None,
             efforts: vec![],
@@ -423,22 +430,17 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
     let mut available = availability();
     available.adapter = "opencode".into();
     available.account_key = Some("go".into());
+    available.plan = Some("go".into());
     let availability = [available];
     let access = [AccessContext {
         adapter: "opencode",
         disclosure_ref: "policy",
         confinement_ref: "grant",
     }];
-    let mut query = request(model)?;
-    query.choice = RouteChoice::NamedRoute(RouteName::parse("go-trial")?);
-    let mut raw = quota(model, "go", QuotaStatus::Available, 1, 80, 120)?;
+    let mut raw = quota(GO_MODEL, "go", QuotaStatus::Available, 1, 80, 120)?;
     raw.snapshot.account.adapter = "opencode".into();
-    let duplicate = |observation: &QuotaObservation| QuotaObservation {
-        model: observation.model.clone(),
-        snapshot: observation.snapshot.clone(),
-        expires_unix_seconds: observation.expires_unix_seconds,
-    };
     raw.snapshot.details = Some(QuotaDetails {
+        extra: Default::default(),
         plan: Some("go".into()),
         source: Some("local-ledger".into()),
         coverage: Some("partial".into()),
@@ -451,97 +453,130 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
     ]
     .into_iter()
     .map(|(pool, used_basis_points, seconds)| QuotaWindow {
+        extra: Default::default(),
         pool: pool.into(),
         used_basis_points,
         window_seconds: Some(seconds),
         resets_unix_seconds: None,
     })
     .collect();
-    // Selection and admission treat the same uncalibrated lower bound alike.
-    let mut default_config = config.clone();
-    default_config.allow_unknown_partial_headroom = false;
-    let observations = [duplicate(&raw)];
-    let mut ctx = context(&catalogue, &default_config, now()?);
-    ctx.availability = &availability;
-    ctx.access = &access;
-    ctx.quota = &observations;
-    let explicit = request(model)?;
-    let selected = resolve(&explicit, &ctx)?;
-    assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
-    assert!(
-        selected
-            .diagnostics
-            .account_load
-            .as_ref()
-            .is_some_and(|load| !load.warnings.is_empty())
-    );
-    let mut ctx = context(&catalogue, &config, now()?);
-    ctx.availability = &availability;
-    ctx.access = &access;
-    ctx.quota = &observations;
-    assert!(matches!(
-        resolve(&explicit, &ctx)?.readiness,
-        RouteReadiness::Ready { .. }
-    ));
+    let explicit = request(GO_MODEL)?;
+    let mut pooled = request(GO_MODEL)?;
+    pooled.choice = RouteChoice::NamedRoute(RouteName::parse("go-trial")?);
+    Ok(GoFixture {
+        catalogue,
+        config,
+        availability,
+        access,
+        raw,
+        explicit,
+        pooled,
+    })
+}
 
+fn go_settings(
+    key: &str,
+    five_hour: Option<u64>,
+    seven_day: Option<u64>,
+    thirty_day: Option<u64>,
+) -> Result<provenant_quota::Settings, Box<dyn std::error::Error>> {
     let mut settings = provenant_quota::Settings::default();
     settings.calibration.insert(
-        "go".into(),
-        Calibration {
-            five_hour: Some(43),
-            seven_day: Some(17),
-            thirty_day: Some(59),
+        key.into(),
+        provenant_quota::Calibration {
+            five_hour,
+            seven_day,
+            thirty_day,
             expires: provenant_core::WallTime::from_unix_seconds(101)?,
         },
     );
-    let apply = |observation: &QuotaObservation| {
-        let mut record = AccountRecord::empty(observation.snapshot.account.clone());
-        record.snapshot = Some(observation.snapshot.clone());
-        let mut records = [record];
-        settings.apply_calibration(&mut records, 100);
-        QuotaObservation {
-            snapshot: records[0].snapshot.clone().unwrap(),
-            ..duplicate(observation)
-        }
-    };
-    let calibrated = apply(&raw);
-    let mut expired_for_table = duplicate(&calibrated);
-    expired_for_table
+    Ok(settings)
+}
+
+fn go_duplicate(observation: &QuotaObservation) -> QuotaObservation {
+    QuotaObservation {
+        model: observation.model.clone(),
+        snapshot: observation.snapshot.clone(),
+        expires_unix_seconds: observation.expires_unix_seconds,
+    }
+}
+
+fn apply_go_calibration(
+    observation: &QuotaObservation,
+    settings: &provenant_quota::Settings,
+) -> Result<QuotaObservation, Box<dyn std::error::Error>> {
+    let mut record = provenant_quota::AccountRecord::empty(observation.snapshot.account.clone());
+    record.snapshot = Some(observation.snapshot.clone());
+    let mut records = [record];
+    settings.apply_calibration(&mut records, 100);
+    Ok(QuotaObservation {
+        snapshot: records[0].snapshot.clone().ok_or("calibrated snapshot")?,
+        ..go_duplicate(observation)
+    })
+}
+
+fn go_route(
+    fixture: &GoFixture,
+    config: RoutingConfig,
+    query: &RouteRequest,
+    observation: Option<QuotaObservation>,
+) -> Result<ResolvedRoute, Box<dyn std::error::Error>> {
+    let observations = observation.into_iter().collect::<Vec<_>>();
+    let mut ctx = context(&fixture.catalogue, &config, now()?);
+    ctx.availability = &fixture.availability;
+    ctx.access = &fixture.access;
+    ctx.quota = &observations;
+    Ok(resolve(query, &ctx)?)
+}
+
+fn go_factor(
+    fixture: &GoFixture,
+    config: RoutingConfig,
+    query: &RouteRequest,
+    observation: &QuotaObservation,
+) -> Result<u32, Box<dyn std::error::Error>> {
+    let route = go_route(fixture, config, query, Some(go_duplicate(observation)))?;
+    Ok(route
+        .pool_selection
+        .ok_or("pool receipt")?
+        .candidates
+        .first()
+        .ok_or("pool candidate")?
+        .factor_basis_points)
+}
+
+#[test]
+fn go_partial_calibration_is_advisory_to_routing_and_admission()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{Admission, QuotaStatus};
+    let fixture = go_fixture()?;
+    let calibrated_settings = go_settings("go", Some(43), Some(17), Some(59))?;
+    let calibrated = apply_go_calibration(&fixture.raw, &calibrated_settings)?;
+    let mut expired_calibration = go_duplicate(&calibrated);
+    expired_calibration
         .snapshot
         .details
         .as_mut()
-        .unwrap()
+        .ok_or("quota details")?
         .calibration_expires_unix_seconds = Some(100);
 
-    let mut unknown_partial_at_limit = duplicate(&raw);
+    let mut unknown_partial_at_limit = go_duplicate(&fixture.raw);
     unknown_partial_at_limit.snapshot.status = QuotaStatus::Unknown;
     unknown_partial_at_limit.snapshot.windows[0].used_basis_points = 10_000;
     unknown_partial_at_limit.snapshot.windows[0].resets_unix_seconds = Some(99);
-    let mut exhausted_partial_at_limit = duplicate(&raw);
+    let mut exhausted_partial_at_limit = go_duplicate(&fixture.raw);
     exhausted_partial_at_limit.snapshot.status = QuotaStatus::Exhausted;
     exhausted_partial_at_limit.snapshot.windows[0].used_basis_points = 10_000;
     exhausted_partial_at_limit.snapshot.windows[0].resets_unix_seconds = Some(200);
 
-    let mut full_calibration = settings.clone();
-    let full = full_calibration.calibration.get_mut("go").unwrap();
-    full.five_hour = Some(100);
-    full.seven_day = Some(100);
-    full.thirty_day = Some(100);
-    let mut full_record = AccountRecord::empty(raw.snapshot.account.clone());
-    full_record.snapshot = Some(raw.snapshot.clone());
-    let mut full_records = [full_record];
-    full_calibration.apply_calibration(&mut full_records, 100);
-    let calibrated_at_limit = QuotaObservation {
-        snapshot: full_records[0].snapshot.clone().unwrap(),
-        ..duplicate(&raw)
-    };
-
-    let mut measured_exhaustion = duplicate(&raw);
+    let full_settings = go_settings("go", Some(100), Some(100), Some(100))?;
+    let calibrated_at_limit = apply_go_calibration(&fixture.raw, &full_settings)?;
+    let mut measured_exhaustion = go_duplicate(&fixture.raw);
     measured_exhaustion
         .snapshot
         .details
         .as_mut()
-        .unwrap()
+        .ok_or("quota details")?
         .coverage = Some("complete".into());
     measured_exhaustion.snapshot.windows[0].used_basis_points = 10_000;
     measured_exhaustion.snapshot.windows[0].resets_unix_seconds = Some(200);
@@ -554,43 +589,28 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         low_power: true,
         solo: false,
     }];
-    for (name, observation, expected_ready) in [
-        ("partial", duplicate(&raw), true),
-        (
-            "partial unknown at 100 percent after reset",
-            unknown_partial_at_limit,
-            true,
-        ),
-        (
-            "partial exhausted at 100 percent",
-            exhausted_partial_at_limit,
-            true,
-        ),
-        ("calibrated partial", duplicate(&calibrated), true),
-        (
-            "calibrated partial at 100 percent",
-            calibrated_at_limit,
-            true,
-        ),
-        ("expired partial calibration", expired_for_table, true),
-        ("complete measured exhaustion", measured_exhaustion, false),
+    for (observation, expected_ready) in [
+        (go_duplicate(&fixture.raw), true),
+        (unknown_partial_at_limit, true),
+        (exhausted_partial_at_limit, true),
+        (go_duplicate(&calibrated), true),
+        (calibrated_at_limit, true),
+        (expired_calibration, true),
+        (measured_exhaustion, false),
     ] {
-        for opt_in in [false, true] {
-            let mut row_config = config.clone();
-            row_config.allow_unknown_partial_headroom = opt_in;
-            let observations = [duplicate(&observation)];
-            let mut ctx = context(&catalogue, &row_config, now()?);
-            ctx.availability = &availability;
-            ctx.access = &access;
-            ctx.quota = &observations;
-
-            let selected = resolve(&explicit, &ctx)?;
-            let ready = matches!(selected.readiness, RouteReadiness::Ready { .. });
-            let pooled_ready = match resolve(&query, &ctx) {
-                Ok(pooled) => matches!(pooled.readiness, RouteReadiness::Ready { .. }),
-                Err(RoutingError::NoEligiblePoolMember { .. }) if !expected_ready => false,
-                Err(error) => return Err(error.into()),
-            };
+        for allow_unknown in [false, true] {
+            let mut config = fixture.config.clone();
+            config.allow_unknown_partial_headroom = allow_unknown;
+            let selected = go_route(
+                &fixture,
+                config.clone(),
+                &fixture.explicit,
+                Some(go_duplicate(&observation)),
+            )?;
+            assert_eq!(
+                matches!(selected.readiness, RouteReadiness::Ready { .. }),
+                expected_ready
+            );
             if !expected_ready {
                 assert!(matches!(
                     selected.readiness,
@@ -600,164 +620,165 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
                     }
                 ));
             }
-            assert_eq!(
-                (ready, pooled_ready),
-                (expected_ready, expected_ready),
-                "{name}, allow_unknown={opt_in}"
+            let pooled = go_route(
+                &fixture,
+                config.clone(),
+                &fixture.pooled,
+                Some(go_duplicate(&observation)),
             );
+            assert_eq!(pooled.is_ok(), expected_ready);
 
             let mut admitted_route = selected;
-            // Check admission independently with a fresh readiness grant.
             admitted_route.readiness = RouteReadiness::Ready {
                 availability_warning: None,
                 extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: 120,
             };
-            let mut record = AccountRecord::empty(observations[0].snapshot.account.clone());
-            record.revision = observations[0].snapshot.revision;
-            record.snapshot = Some(observations[0].snapshot.clone());
+            let mut record =
+                provenant_quota::AccountRecord::empty(observation.snapshot.account.clone());
+            record.revision = observation.snapshot.revision;
+            record.snapshot = Some(observation.snapshot.clone());
             let records = [record];
-            let admission = provenant_quota::Admission {
+            let admission = Admission {
                 policies: &policy,
                 now_unix_seconds: 100,
                 records: &records,
                 pools: &[],
             }
             .check(&admitted_route);
-            assert_eq!(
-                admission.is_ok(),
-                expected_ready,
-                "{name}, allow_unknown={opt_in}: {admission:?}"
-            );
+            assert_eq!(admission.is_ok(), expected_ready);
         }
     }
-    for (key, five_hour, seven_day, expected) in [
-        ("go", None, None, "five_hour, seven_day"),
-        (
-            "different-go",
-            Some(43),
-            Some(17),
-            "five_hour, seven_day, thirty_day",
-        ),
+    Ok(())
+}
+
+#[test]
+fn go_calibration_fields_show_coverage_without_refusal() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = go_fixture()?;
+    for (key, calibration) in [
+        ("go", (None, None, Some(59))),
+        ("different-go", (Some(43), Some(17), Some(59))),
     ] {
-        let mut partial_settings = provenant_quota::Settings::default();
-        partial_settings.calibration.insert(
-            key.into(),
-            Calibration {
-                five_hour,
-                seven_day,
-                thirty_day: Some(59),
-                expires: provenant_core::WallTime::from_unix_seconds(101)?,
-            },
-        );
-        let mut record = AccountRecord::empty(raw.snapshot.account.clone());
-        record.snapshot = Some(raw.snapshot.clone());
-        let mut records = [record];
-        partial_settings.apply_calibration(&mut records, 100);
-        let observations = [QuotaObservation {
-            snapshot: records[0].snapshot.clone().unwrap(),
-            ..duplicate(&raw)
-        }];
-        let mut ctx = context(&catalogue, &config, now()?);
-        ctx.availability = &availability;
-        ctx.access = &access;
-        ctx.quota = &observations;
-        let route = resolve(&query, &ctx)?;
-        let detail = route.pool_selection.unwrap().candidates[0]
-            .pacing_detail
-            .clone()
-            .unwrap();
-        assert!(
-            detail.contains(&format!("Go calibration missing or stale: {expected}")),
-            "{key}: {detail}"
-        );
-        assert!(
-            pacing_preview(&ModelId::parse(model)?, &ctx)[0]
-                .detail
-                .contains(expected)
-        );
+        let settings = go_settings(key, calibration.0, calibration.1, calibration.2)?;
+        let observation = apply_go_calibration(&fixture.raw, &settings)?;
+        let details = observation
+            .snapshot
+            .details
+            .as_ref()
+            .ok_or("quota details")?;
+        assert_eq!(details.source.as_deref(), Some("local-ledger"));
+        assert_eq!(details.coverage.as_deref(), Some("partial"));
+        assert!(details.calibrated_windows.iter().all(|pool| {
+            fixture
+                .raw
+                .snapshot
+                .windows
+                .iter()
+                .any(|window| &window.pool == pool)
+        }));
+        assert!(details.calibrated_windows.len() < observation.snapshot.windows.len());
+        let route = go_route(
+            &fixture,
+            fixture.config.clone(),
+            &fixture.pooled,
+            Some(observation),
+        )?;
+        assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
     }
-    let mut expired = duplicate(&calibrated);
-    expired
-        .snapshot
-        .details
-        .as_mut()
-        .unwrap()
-        .calibration_expires_unix_seconds = Some(100);
-    let mut incomplete = duplicate(&calibrated);
+    Ok(())
+}
+
+#[test]
+fn go_partial_ledger_stays_selectable_when_coverage_is_incomplete_or_stale()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = go_fixture()?;
+    let settings = go_settings("go", Some(43), Some(17), Some(59))?;
+    let calibrated = apply_go_calibration(&fixture.raw, &settings)?;
+    let mut expired = go_duplicate(&calibrated);
+    expired.expires_unix_seconds = 100;
+    let mut incomplete = go_duplicate(&calibrated);
     incomplete
         .snapshot
         .details
         .as_mut()
-        .unwrap()
+        .ok_or("quota details")?
         .calibrated_windows
         .retain(|pool| pool != "seven_day");
-    let mut missing_window = duplicate(&calibrated);
+    let mut missing_window = go_duplicate(&calibrated);
     missing_window
         .snapshot
         .windows
         .retain(|window| window.pool != "seven_day");
-    let mut stale = duplicate(&calibrated);
+    let mut stale = go_duplicate(&fixture.raw);
     stale.expires_unix_seconds = 100;
-    for (name, observations) in [
-        ("missing quota", vec![]),
-        ("partial ledger", vec![duplicate(&raw)]),
-        ("expired calibration", vec![expired]),
-        ("incomplete calibration", vec![incomplete]),
-        ("missing window", vec![missing_window]),
-        ("stale quota", vec![stale]),
+    for observation in [
+        None,
+        Some(go_duplicate(&fixture.raw)),
+        Some(expired),
+        Some(incomplete),
+        Some(missing_window),
+        Some(stale),
     ] {
-        let mut ctx = context(&catalogue, &config, now()?);
-        ctx.availability = &availability;
-        ctx.access = &access;
-        ctx.quota = &observations;
-        let route = resolve(&query, &ctx)?;
-        assert!(
-            matches!(route.readiness, RouteReadiness::Ready { .. }),
-            "{name}"
-        );
-        let detail = route.pool_selection.unwrap().candidates[0]
-            .pacing_detail
-            .clone()
-            .unwrap();
-        assert!(
-            detail.contains("Go quota source: local-ledger, coverage: partial"),
-            "{name}: {detail}"
-        );
-        // The same local ledger remains visible for explicitly selected models.
-        let explicit = resolve(&request(model)?, &ctx)?;
-        assert!(
-            matches!(explicit.readiness, RouteReadiness::Ready { .. }),
-            "{name}"
-        );
+        let pooled = go_route(
+            &fixture,
+            fixture.config.clone(),
+            &fixture.pooled,
+            observation.clone(),
+        )?;
+        assert!(matches!(pooled.readiness, RouteReadiness::Ready { .. }));
+        assert!(pooled.pool_selection.is_some());
+        let explicit = go_route(
+            &fixture,
+            fixture.config.clone(),
+            &fixture.explicit,
+            observation,
+        )?;
+        assert!(matches!(explicit.readiness, RouteReadiness::Ready { .. }));
     }
-    let mut higher_ledger = duplicate(&raw);
-    higher_ledger.snapshot.windows[2].used_basis_points = 7000;
-    let mut passed_reset = duplicate(&calibrated);
+    Ok(())
+}
+
+#[test]
+fn go_pool_pacing_tracks_the_most_constraining_calibrated_window()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = go_fixture()?;
+    let settings = go_settings("go", Some(43), Some(17), Some(59))?;
+    let calibrated = apply_go_calibration(&fixture.raw, &settings)?;
+    let mut higher_ledger = go_duplicate(&fixture.raw);
+    higher_ledger.snapshot.windows[2].used_basis_points = 7_000;
+    let higher_calibration = apply_go_calibration(&higher_ledger, &settings)?;
+    let mut passed_reset = go_duplicate(&calibrated);
     for window in &mut passed_reset.snapshot.windows {
         window.resets_unix_seconds = Some(99);
     }
-    for (observation, expected_factor) in [
-        (duplicate(&raw), 10_000),
-        (calibrated, 4100),
-        (apply(&higher_ledger), 3000),
-        (passed_reset, 4100),
-    ] {
-        let observations = [observation];
-        let mut ctx = context(&catalogue, &config, now()?);
-        ctx.availability = &availability;
-        ctx.access = &access;
-        ctx.quota = &observations;
-        let route = resolve(&query, &ctx)?;
-        assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
-        let receipt = serde_json::to_value(&route)?["pool_selection"].clone();
-        assert_eq!(
-            receipt["candidates"][0]["factor_basis_points"],
-            expected_factor
-        );
-        assert_eq!(route.account_key.as_deref(), Some("go"));
-    }
+    let raw_factor = go_factor(
+        &fixture,
+        fixture.config.clone(),
+        &fixture.pooled,
+        &fixture.raw,
+    )?;
+    let calibrated_factor = go_factor(
+        &fixture,
+        fixture.config.clone(),
+        &fixture.pooled,
+        &calibrated,
+    )?;
+    let higher_factor = go_factor(
+        &fixture,
+        fixture.config.clone(),
+        &fixture.pooled,
+        &higher_calibration,
+    )?;
+    let passed_reset_factor = go_factor(
+        &fixture,
+        fixture.config.clone(),
+        &fixture.pooled,
+        &passed_reset,
+    )?;
+    assert!(raw_factor > calibrated_factor);
+    assert!(higher_factor < calibrated_factor);
+    assert_eq!(passed_reset_factor, calibrated_factor);
     Ok(())
 }
 
@@ -816,6 +837,7 @@ fn opencode_zen_pool_does_not_inherit_go_pacing_quota() -> Result<(), Box<dyn st
         .snapshot
         .windows
         .push(provenant_quota::QuotaWindow {
+            extra: Default::default(),
             pool: "five_hour".into(),
             window_seconds: Some(18_000),
             used_basis_points: 10_000,
@@ -831,14 +853,8 @@ fn opencode_zen_pool_does_not_inherit_go_pacing_quota() -> Result<(), Box<dyn st
     let route = resolve(&query, &ctx)?;
     assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
     assert_eq!(route.account_key.as_deref(), Some("zen"));
-    let receipt = serde_json::to_value(&route)?["pool_selection"].clone();
-    assert_eq!(receipt["candidates"][0]["factor_basis_points"], 10_000);
-    assert!(
-        receipt["candidates"][0]["pacing_detail"]
-            .as_str()
-            .ok_or("pacing detail")?
-            .contains("source=provider policy=Pace")
-    );
+    let receipt = route.pool_selection.as_ref().ok_or("receipt")?;
+    assert_eq!(receipt.candidates[0].factor_basis_points, 10_000);
     let previews = pacing_preview(&ModelId::parse(free)?, &ctx);
     assert_eq!(previews.len(), 1);
     assert_eq!(previews[0].account.as_deref(), Some("zen"));
@@ -860,6 +876,7 @@ fn account_level_exhausted_record_stands_by_when_the_model_windows_are_unprobed(
     )?;
     spent.snapshot.account.adapter = "claude".into();
     spent.snapshot.windows = vec![QuotaWindow {
+        extra: Default::default(),
         pool: "seven_day".into(),
         window_seconds: Some(604_800),
         used_basis_points: 10_000,

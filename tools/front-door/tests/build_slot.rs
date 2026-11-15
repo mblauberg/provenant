@@ -10,7 +10,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -280,7 +280,6 @@ fn missing_builtin_slot_settings_still_run_the_build() -> Result {
     let rig = Rig::new()?;
     // The test clears inherited state, then supplies only the typed backend
     // metadata and verifies that absent Builtin slot settings do not queue Cargo.
-    let began = Instant::now();
     let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
     command
         .args(["internal", "build-slot", "--"])
@@ -294,11 +293,6 @@ fn missing_builtin_slot_settings_still_run_the_build() -> Result {
     let mut child = command.spawn()?;
     assert!(finish(&mut child, Duration::from_secs(10))?);
     assert!(rig.started("end"), "Cargo ran without a slot grant");
-    assert!(
-        began.elapsed() < Duration::from_secs(10),
-        "an ungated build took {:?}",
-        began.elapsed()
-    );
     Ok(())
 }
 

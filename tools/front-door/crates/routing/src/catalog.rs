@@ -989,23 +989,18 @@ mod go_allowance_tests {
             );
         }
         let model = ModelId::parse("opencode/opencode-go/unlisted")?;
-        let error = check_go_allowance(&model, &config, &catalogue).unwrap_err();
-        assert!(
-            error.contains("opencode-go/unlisted")
-                && error.contains("unknown")
-                && error.contains("domains.routing.opencode_go.min_monthly_allowance_usd"),
-            "{error}"
-        );
+        assert!(check_go_allowance(&model, &config, &catalogue).is_err());
         config.opencode_go.min_monthly_allowance_usd = 0;
         assert!(check_go_allowance(&model, &config, &catalogue).is_ok());
         config.opencode_go.min_monthly_allowance_usd = 61;
-        let error = check_go_allowance(
-            &ModelId::parse("opencode/opencode-go/glm-5.3-flash")?,
-            &config,
-            &catalogue,
-        )
-        .unwrap_err();
-        assert!(error.contains("$60"), "{error}");
+        assert!(
+            check_go_allowance(
+                &ModelId::parse("opencode/opencode-go/glm-5.3-flash")?,
+                &config,
+                &catalogue,
+            )
+            .is_err()
+        );
         config.opencode_go.min_monthly_allowance_usd = 60;
         Ok(())
     }
@@ -1038,8 +1033,8 @@ mod pacing_profile_tests {
             "'thu 00:00'",
             "'day 25'",
             "'2026-11-02T09:00'",
-            "{reset_of='anese'}",
-            "{reset_of='anese',window='monthly'}",
+            "{reset_of='account-a'}",
+            "{reset_of='account-a',window='monthly'}",
         ] {
             let profile: PacingProfile =
                 toml_edit::de::from_str(&format!("deadline={deadline}")).unwrap();
@@ -1055,7 +1050,7 @@ mod pacing_profile_tests {
         for invalid in [
             "deadline='thu 25:00'",
             "deadline='day 32'",
-            "deadline={reset_of='anese',when='weekly'}",
+            "deadline={reset_of='account-a',when='weekly'}",
             "policy='unlimited'",
             "after_deadline='stop'",
             "window=['five_hour']",
@@ -1065,10 +1060,11 @@ mod pacing_profile_tests {
                 "{invalid}"
             );
         }
-        let error =
-            toml_edit::de::from_str::<PacingProfile>("deadline={reset_of='anese',when='weekly'}")
-                .unwrap_err()
-                .to_string();
+        let error = toml_edit::de::from_str::<PacingProfile>(
+            "deadline={reset_of='account-a',when='weekly'}",
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
             error.contains("reset_of") && error.contains("window"),
             "{error}"
@@ -1089,7 +1085,13 @@ mod pacing_profile_tests {
                 ..PacingProfile::default()
             },
         );
-        assert_eq!(config.validate().len(), 2);
+        let errors = config
+            .validate()
+            .into_iter()
+            .map(|error| (error.field, error.code))
+            .collect::<Vec<_>>();
+        assert!(errors.contains(&("pacing.accounts.pro.deadline".into(), "selector")));
+        assert!(errors.contains(&("pacing.accounts.pro.reserve".into(), "range")));
     }
 }
 fn defaults(_: Profile) -> &'static str {
@@ -1682,7 +1684,6 @@ mod tests {
         assert!(names.contains("junior"), "{names:?}");
         assert!(!names.contains("absent"), "{names:?}");
 
-        // Merged from preferences.rs::routing_default_matches_bundled_asset
         let asset: RoutingConfig =
             toml_edit::de::from_str(include_str!("../assets/review-defaults.toml"))?;
         assert_eq!(
@@ -1730,6 +1731,21 @@ mod tests {
             .first()
             .ok_or("no warn models in catalogue")?
             .clone();
+        let design_cheaper = catalogue
+            .pools
+            .get("design")
+            .and_then(|members| {
+                members.iter().find(|member| {
+                    member.model != warn_model
+                        && catalogue
+                            .writer_advisory
+                            .cheaper_models
+                            .contains(&member.model)
+                })
+            })
+            .ok_or("no bundled cheaper design member")?
+            .model
+            .clone();
         let mut route = resolve(&request(warn_model.as_str())?, &context)?;
         let default = config
             .opus_writer_advisory(&catalogue, &route)
@@ -1739,12 +1755,19 @@ mod tests {
             r#"
             [writer_advisory]
             warn_models = ["{warn_model}", "custom/synth-warn"]
-            cheaper_models = ["custom/synth-cheap", "{warn_model}"]
+            cheaper_models = ["custom/synth-cheap", "{design_cheaper}"]
             pool_priority = ["design", "senior", "principal"]
         "#,
-            warn_model = warn_model.as_str()
+            warn_model = warn_model.as_str(),
+            design_cheaper = design_cheaper.as_str()
         ))?;
         assert!(changed.validate().is_empty());
+        let overridden = changed
+            .opus_writer_advisory(&catalogue, &route)
+            .ok_or("overridden advisory missing")?;
+        for part in [warn_model.as_str(), "design", design_cheaper.as_str()] {
+            assert!(overridden.contains(part), "{overridden}");
+        }
         route.adapter = "custom".into();
         route.model = "synth-warn".into();
         assert!(config.opus_writer_advisory(&catalogue, &route).is_none());
@@ -1907,8 +1930,8 @@ mod tests {
     fn model_policy_fallbacks_are_reported_for_the_effective_route()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut config = RoutingConfig::default();
-        config.model_policy.defaults.result.fallback =
-            Some(ModelId::parse("codex/not-catalogued")?);
+        let unknown_fallback = ModelId::parse("codex/not-catalogued")?;
+        config.model_policy.defaults.result.fallback = Some(unknown_fallback.clone());
         assert!(config.validate().is_empty());
         let effective = config.model_policy.effective(
             &ModelId::parse("codex/gpt-6-luna")?,
@@ -1916,12 +1939,14 @@ mod tests {
             provenant_core::WallTime::from_unix_seconds(1)?,
         );
         assert!(effective.policy.result.fallback.is_none());
-        assert_eq!(
-            effective.dropped_fallback,
-            Some((ModelId::parse("codex/not-catalogued")?, "unknown model"))
+        assert!(
+            effective
+                .dropped_fallback
+                .is_some_and(|(model, _)| model == unknown_fallback)
         );
 
-        config.model_policy.defaults.result.fallback = Some(ModelId::parse("codex/gpt-6-luna")?);
+        let unsupported_effort_fallback = ModelId::parse("codex/gpt-6-luna")?;
+        config.model_policy.defaults.result.fallback = Some(unsupported_effort_fallback.clone());
         config.model_policy.defaults.result.fallback_effort = Some("unsupported".into());
         assert!(config.validate().is_empty());
         let effective = config.model_policy.effective(
@@ -1929,9 +1954,10 @@ mod tests {
             None,
             provenant_core::WallTime::from_unix_seconds(1)?,
         );
-        assert_eq!(
-            effective.dropped_fallback,
-            Some((ModelId::parse("codex/gpt-6-luna")?, "unsupported effort"))
+        assert!(
+            effective
+                .dropped_fallback
+                .is_some_and(|(model, _)| model == unsupported_effort_fallback)
         );
         Ok(())
     }

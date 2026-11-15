@@ -257,17 +257,15 @@ mod tests {
         assert_ne!(digest(&r).unwrap(), digest(&other).unwrap());
     }
     #[test]
-    fn bounds_versions_unknown_tags_and_duplicate_keys_fail_closed() {
-        let bytes = canonical(&receipt()).unwrap();
-        let text = std::str::from_utf8(bytes.as_bytes()).unwrap();
-        for bad in [
-            text.replace("\"schema_version\":2", "\"schema_version\":3"),
-            text.replacen('{', "{\"revision\":1,", 1),
-            text.replace("\"created_at\":1234567", "\"created_at\":1.5"),
-            text.replace("\"revision\":1", "\"revision\":18446744073709551616"),
-            text.replace("\"pending\"", "\"unknown\""),
-        ] {
-            assert!(read(bad.as_bytes()).is_err());
+    fn bounds_versions_and_unknown_tags_fail_closed() {
+        let mut unsupported_version = serde_json::to_value(receipt()).unwrap();
+        unsupported_version["schema_version"] = (RECEIPT_SCHEMA_VERSION + 1).into();
+        let mut invalid_time = serde_json::to_value(receipt()).unwrap();
+        invalid_time["created_at"] = 1.5.into();
+        let mut invalid_tag = serde_json::to_value(receipt()).unwrap();
+        invalid_tag["decision"]["status"] = "unknown".into();
+        for bad in [unsupported_version, invalid_time, invalid_tag] {
+            assert!(read(serde_json::to_vec(&bad).unwrap().as_slice()).is_err());
         }
         assert!(matches!(
             read(vec![b' '; MAX_RECEIPT_BYTES as usize + 1].as_slice()),
@@ -275,7 +273,7 @@ mod tests {
         ));
         let r = changed(|v| {
             v["review_attempts"] = serde_json::to_value(
-                (0..257_u64)
+                (0..=MAX_REVIEW_REFS as u64)
                     .map(|i| {
                         let mut b = [0; 16];
                         b[..8].copy_from_slice(&i.to_be_bytes());

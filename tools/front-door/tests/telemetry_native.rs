@@ -250,17 +250,20 @@ fn stats_output_omits_attempt_rows_and_keeps_unlinked_usage() -> Result {
     ])?;
     assert_eq!(code(&end), 0, "{end:?}");
 
-    let default_output = rig.command(&["telemetry", "stats"])?;
-    assert_eq!(code(&default_output), 0);
-    let default_text = String::from_utf8(default_output.stdout.bytes)?;
-
-    let header = "native sub-agent usage (host; may overlap chair usage):\n";
-    assert!(default_text.contains(header));
-    // Stats prints no per-attempt rows.
-    assert!(!default_text.contains("reviewer claude-opus-5-5:"));
-
-    // Unlinked sub-agent usage stays visible.
-    assert!(default_text.contains("unlinked claude-opus-5-5: 1 messages, input=23 output=30"));
+    let output = rig.command(&["telemetry", "stats", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let native = &report["data"]["native_subagents"];
+    assert_eq!(native["attempts"], serde_json::json!([]));
+    let unlinked = native["unlinked"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["model"] == "claude-opus-5-5"))
+        .ok_or("unlinked usage row")?;
+    assert_eq!(unlinked["messages"], 1);
+    assert_eq!(unlinked["buckets"][0], 5);
+    assert_eq!(unlinked["buckets"][1], 7);
+    assert_eq!(unlinked["buckets"][2], 11);
+    assert_eq!(unlinked["buckets"][4], 30);
 
     Ok(())
 }

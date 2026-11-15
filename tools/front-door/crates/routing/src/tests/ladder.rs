@@ -515,8 +515,10 @@ fn depletion_facts_judge_each_account_with_the_dispatch_checks()
         confinement_ref: "grant",
     }];
     let snapshot = provenant_quota::QuotaSnapshot {
+        extra: Default::default(),
         schema_version: 1,
         account: provenant_quota::AccountScope {
+            extra: Default::default(),
             adapter: "codex".into(),
             account_key: "second".into(),
             label: "second".into(),
@@ -527,6 +529,7 @@ fn depletion_facts_judge_each_account_with_the_dispatch_checks()
         source_ref: "test".into(),
         authority_ref: None,
         windows: vec![provenant_quota::QuotaWindow {
+            extra: Default::default(),
             pool: "primary".into(),
             window_seconds: Some(18_000),
             used_basis_points: 10_000,

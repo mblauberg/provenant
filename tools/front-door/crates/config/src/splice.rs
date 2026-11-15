@@ -1092,24 +1092,32 @@ mod tests {
     }
 
     #[test]
-    fn pretty_json_normalises_spacing_and_keeps_fixture_key_order() {
-        let source = br#"{"z": {"one":1,"two":2}, "a": [ {"x":true,"y":false} ]}"#;
-        let pretty = super::pretty_json(source).expect("fixture formats");
-        let text = std::str::from_utf8(&pretty).expect("UTF-8 output");
-        assert_eq!(
-            text,
-            "{\n  \"z\": {\n    \"one\": 1,\n    \"two\": 2\n  },\n  \"a\": [\n    {\n      \"x\": true,\n      \"y\": false\n    }\n  ]\n}\n"
-        );
-    }
-
-    #[test]
-    fn pretty_json_follows_a_four_space_source_indent() {
-        let source = b"{\n    \"a\": {\n        \"b\": [1, 2]\n    }\n}\n";
-        let pretty = super::pretty_json(source).expect("fixture formats");
-        assert_eq!(
-            std::str::from_utf8(&pretty).expect("UTF-8 output"),
-            "{\n    \"a\": {\n        \"b\": [\n            1,\n            2\n        ]\n    }\n}\n"
-        );
+    fn pretty_json_preserves_source_indent_key_order_and_idempotence() {
+        for (source, indent, first_key, second_key) in [
+            (
+                br#"{"z": {"one":1,"two":2}, "a": [ {"x":true,"y":false} ]}"#.as_slice(),
+                2,
+                "z",
+                "a",
+            ),
+            (
+                b"{\n    \"z\": {\n        \"one\": 1,\n        \"two\": 2\n    },\n    \"a\": [1, 2]\n}\n".as_slice(),
+                4,
+                "z",
+                "a",
+            ),
+        ] {
+            let pretty = super::pretty_json(source).expect("fixture formats");
+            let text = std::str::from_utf8(&pretty).expect("UTF-8 output");
+            let first = text.find(&format!("\"{first_key}\""));
+            let second = text.find(&format!("\"{second_key}\""));
+            assert!(matches!((first, second), (Some(first), Some(second)) if first < second));
+            let expected_indent = " ".repeat(indent);
+            assert!(text.lines().any(|line| {
+                line.starts_with(&expected_indent) && line.trim_start().starts_with('"')
+            }));
+            assert_eq!(super::pretty_json(&pretty).unwrap(), pretty);
+        }
     }
 
     #[test]
@@ -1141,10 +1149,10 @@ mod tests {
     #[test]
     fn accepts_a_larger_harness_config_only_with_its_explicit_bound() {
         let mut source = b"{\"a\":\"".to_vec();
-        source.resize(1_048_577, b'x');
+        source.resize(Limits::CONFIG.max_bytes as usize + 1, b'x');
         source.extend_from_slice(b"\"}");
         let larger = Limits {
-            max_bytes: 16 * 1024 * 1024,
+            max_bytes: Limits::CONFIG.max_bytes.saturating_mul(16),
             ..Limits::CONFIG
         };
         assert!(matches!(
@@ -1163,12 +1171,12 @@ mod tests {
     #[test]
     fn rejects_oversized_input_before_span_editing() {
         let mut source = b"{\"a\":\"".to_vec();
-        source.resize(1_048_577, b'x');
+        source.resize(Limits::CONFIG.max_bytes as usize + 1, b'x');
         assert!(matches!(
             get(&source, &["a"]),
             Err(InstallError::Decode(
-                provenant_records::DecodeError::TooLarge { limit: 1_048_576 }
-            ))
+                provenant_records::DecodeError::TooLarge { limit }
+            )) if limit == Limits::CONFIG.max_bytes
         ));
     }
 }

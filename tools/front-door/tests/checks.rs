@@ -1,5 +1,5 @@
 mod support;
-use support::{Result, TestRig, code};
+use support::{Result, TestRig, code, git, json};
 
 // Install inspection intentionally refuses a device crossing from its anchor.
 // CI supplies a temporary root on the checkout device; the default can be a tmpfs.
@@ -92,7 +92,7 @@ fn config_and_install_defects_are_findings_but_escape_is_an_error() -> Result {
     let escaped = rig.command(&["check", "config", "--json"])?;
     assert_eq!(code(&escaped), 3);
     assert!(!String::from_utf8_lossy(&escaped.stdout.bytes).contains("must never be read"));
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -224,19 +224,6 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
     Ok(())
 }
 
-fn json(output: &provenant_os::exec::ExecOutcome) -> Result<serde_json::Value> {
-    Ok(serde_json::from_slice(&output.stdout.bytes)?)
-}
-fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
-    let output = rig.execute(std::path::Path::new("/usr/bin/git"), args, None)?;
-    assert_eq!(
-        code(&output),
-        0,
-        "Git fixture: {}",
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    Ok(String::from_utf8(output.stdout.bytes)?.trim().into())
-}
 fn commit(rig: &TestRig, message: &str) -> Result<String> {
     git(rig, &["add", "--all"])?;
     git(rig, &["commit", "-q", "--allow-empty", "-m", message])?;
@@ -262,32 +249,44 @@ fn legal(rig: &TestRig) -> Result {
 fn cursors_recheck_all_inputs_and_later_pages_keep_findings_exit() -> Result {
     let rig = check_rig()?;
     std::fs::create_dir_all(&rig.state)?;
+    let first_page_limit = 100usize;
+    let first_page_limit_arg = first_page_limit.to_string();
+    let unknown_keys: Vec<_> = (0..first_page_limit + 5)
+        .map(|index| format!("unknown_{index}"))
+        .collect();
     let config = format!(
         "schema_version=1\n{}",
-        (0..105)
-            .map(|i| format!("unknown_{i}=true\n"))
+        unknown_keys
+            .iter()
+            .map(|key| format!("{key}=true\n"))
             .collect::<String>()
     );
     std::fs::write(rig.state.join("config.toml"), &config)?;
-    let first = rig.command(&["check", "config", "--limit", "100", "--json"])?;
+    let first = rig.command(&[
+        "check",
+        "config",
+        "--limit",
+        &first_page_limit_arg,
+        "--json",
+    ])?;
     assert_eq!(code(&first), 1);
     let first = json(&first)?;
-    assert_eq!(first["data"]["count"], 105);
+    assert_eq!(first["data"]["count"], unknown_keys.len());
     assert_eq!(
         first["data"]["findings"]
             .as_array()
             .ok_or("findings")?
             .len(),
-        100
+        first_page_limit
     );
     let cursor = first["data"]["next_cursor"].as_str().ok_or("cursor")?;
     let next = rig.command(&["check", "config", "--cursor", cursor, "--json"])?;
     assert_eq!(code(&next), 1);
     let next = json(&next)?;
-    assert_eq!(next["data"]["offset"], 100);
+    assert_eq!(next["data"]["offset"], first_page_limit);
     assert_eq!(
         next["data"]["findings"].as_array().ok_or("findings")?.len(),
-        5
+        unknown_keys.len() - first_page_limit
     );
     assert!(next["data"]["next_cursor"].is_null());
     let mismatched = rig.command(&["check", "install", "--cursor", cursor, "--json"])?;
@@ -309,7 +308,7 @@ fn cursors_recheck_all_inputs_and_later_pages_keep_findings_exit() -> Result {
         code(&rig.command(&["check", "config", "--cursor", "malformed", "--json"])?),
         2
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn release_checks_the_running_binary_as_an_artifact() -> Result {
@@ -334,7 +333,7 @@ fn release_checks_the_running_binary_as_an_artifact() -> Result {
         "Git source and history bytes are outside the executable scan"
     );
     assert_eq!(code(&output), if findings.is_empty() { 0 } else { 1 });
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -386,7 +385,7 @@ fn release_flags_personal_email_in_commit_author_and_committer() -> Result {
         .ok_or("expected identities")?
         .to_vec()
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn release_requires_tracked_public_files() -> Result {
@@ -406,7 +405,7 @@ fn release_requires_tracked_public_files() -> Result {
             && finding["line"] == 1
             && finding["message"] == "required public file is not tracked"
     }));
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn release_ranges_check_commit_identity_across_a_shallow_boundary() -> Result {
@@ -446,7 +445,7 @@ fn release_ranges_check_commit_identity_across_a_shallow_boundary() -> Result {
             || finding["path"]["path"] == "@artifact/provenant"
     }));
     assert_eq!(code(&output), 1);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -503,7 +502,7 @@ fn release_checks_legal_private_symlink_and_bounded_evidence() -> Result {
     );
     fs::write(rig.project.join("LICENSE"), vec![b'a'; 5 * 1024 * 1024 + 1])?;
     assert_eq!(code(&rig.command(&["check", "release", "--json"])?), 3);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -571,7 +570,7 @@ fn release_reads_packed_objects_native_alternates_and_linked_worktrees() -> Resu
         code(&linked_output),
         if linked_findings.is_empty() { 0 } else { 1 }
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 #[test]
 fn release_ignores_grafts_and_rejects_missing_ancestry_evidence() -> Result {
@@ -606,7 +605,7 @@ fn release_ignores_grafts_and_rejects_missing_ancestry_evidence() -> Result {
             .join(head.get(2..).ok_or("oid tail")?),
     )?;
     assert_eq!(code(&rig.command(&["check", "release", "--json"])?), 3);
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -617,7 +616,7 @@ fn check_target_outside_a_checkout_is_invalid_input() -> Result {
     let output = rig.command(&["check", "release", "--json"])?;
     assert_eq!(code(&output), 2);
     assert_eq!(json(&output)?["status"], "invalid");
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -655,7 +654,7 @@ fn writing_checks_use_typed_findings_and_input_exits() -> Result {
         code(&rig.command(&["check", "writing", "link.md", "--json"])?),
         3
     );
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }
 
 #[test]
@@ -670,17 +669,16 @@ fn writing_pages_bind_rules_files_and_selector() -> Result {
             "/../../skills/legal-writing/lint-rules.json"
         )),
     )?;
-    std::fs::write(
-        rig.project.join("draft.md"),
-        format!("{}TODO\n", "robust.\n".repeat(120)),
-    )?;
+    let draft = format!("{}TODO\n", "robust.\n".repeat(120));
+    let expected_count = draft.lines().count();
+    std::fs::write(rig.project.join("draft.md"), draft)?;
     let first = rig.command(&[
         "check", "writing", "draft.md", "--rules", "legal", "--json", "--limit", "1",
     ])?;
     assert_eq!(code(&first), 1);
     assert!(first.stdout.bytes.len() < 1024 * 1024);
     let first = json(&first)?;
-    assert_eq!(first["data"]["count"], 121);
+    assert_eq!(first["data"]["count"], expected_count);
     assert_eq!(first["data"]["blockers"], 1);
     let cursor = first["data"]["next_cursor"].as_str().ok_or("cursor")?;
     let second = rig.command(&[
@@ -716,5 +714,5 @@ fn writing_refuses_inputs_that_only_resolve_skipped_legal_files() -> Result {
         assert_eq!(code(&output), 2, "{name}");
         assert_eq!(json(&output)?["status"], "invalid");
     }
-    rig.assert_legacy_unchanged()
+    rig.assert_v1_root_untouched()
 }

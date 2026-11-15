@@ -39,6 +39,8 @@ pub struct ReplyContext {
     pub compactions: u64,
     #[serde(default)]
     pub unknown_evidence: bool,
+    #[serde(default, flatten)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 impl ReplyContext {

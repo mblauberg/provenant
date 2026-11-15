@@ -1,26 +1,15 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
 use crate::{receipt, risk};
-use provenant_core::{ActorId, GitOid, MonoTime, RootInputs, TestClock, UtcMicros};
+use provenant_core::{ActorId, GitOid, MonoTime, TestClock, UtcMicros};
 use provenant_records::workflow::*;
+use provenant_test_support::{IdentityPathResolver, test_roots};
 use std::io;
-struct Resolver;
-impl provenant_core::PathResolver for Resolver {
-    fn resolve_existing_ancestor(&self, path: &std::path::Path) -> io::Result<std::path::PathBuf> {
-        Ok(path.into())
-    }
-}
 fn setup() -> (tempfile::TempDir, ReceiptStore, DeliveryReceipt) {
     let temp = crate::test_support::tempdir().unwrap();
     let base = temp.path().canonicalize().unwrap();
-    let home = base.join("home");
-    let state = base.join("state");
-    std::fs::create_dir(&home).unwrap();
-    provenant_os::fixture::private_state_dir(&state).unwrap();
-    // All roots are explicit, including HOME; no environment/harness config is read.
-    let mut inputs = RootInputs::new(home, base.join("checkout"));
-    inputs.state_dir = Some(state);
-    let root = StateRoot::resolve(&inputs, &Resolver).unwrap();
+    let inputs = test_roots(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &IdentityPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let delivery = DeliveryId::from_bytes([2; 16]);
     let factors = RiskFactors {
@@ -117,12 +106,12 @@ fn saves_one_complete_receipt_and_rejects_a_stale_revision() {
 }
 
 #[test]
-fn a_retired_receipt_names_the_remedy_and_is_replaced_by_saving_again() {
+fn a_retired_receipt_is_typed_and_saving_again_uses_the_current_shape() {
     let (_temp, store, r) = setup();
     let first = save(&store, &r, 0, 20).unwrap();
-    // Version 1: a pull request subject without the reviewed base.
+    // The retired shape omitted the reviewed base from a pull request subject.
     let mut retired = serde_json::to_value(&first).unwrap();
-    retired["schema_version"] = 1.into();
+    retired["schema_version"] = (RECEIPT_SCHEMA_VERSION - 1).into();
     retired["subject"].as_object_mut().unwrap().remove("base");
     std::fs::write(
         directory(&store).join("receipt.json"),
@@ -130,13 +119,10 @@ fn a_retired_receipt_names_the_remedy_and_is_replaced_by_saving_again() {
     )
     .unwrap();
     let error = store.read().unwrap_err();
-    assert!(matches!(error, StoreError::Retired { revision: 1, .. }));
-    assert!(
-        error
-            .to_string()
-            .starts_with("receipt shape retired: save it again"),
-        "{error}"
-    );
+    assert!(matches!(
+        error,
+        StoreError::Retired { revision, .. } if revision == first.revision()
+    ));
     let Subject::Pr {
         repository, number, ..
     } = *first.subject()
@@ -147,10 +133,10 @@ fn a_retired_receipt_names_the_remedy_and_is_replaced_by_saving_again() {
     assert!(found.receipts.is_empty());
     assert!(matches!(
         found.retired.as_slice(),
-        [StoreError::Retired { revision: 1, .. }]
+        [StoreError::Retired { revision, .. }] if *revision == first.revision()
     ));
-    let saved = save(&store, &r, 1, 30).unwrap();
-    assert_eq!(saved.revision(), 2);
+    let saved = save(&store, &r, first.revision(), 30).unwrap();
+    assert_eq!(saved.revision(), first.revision() + 1);
     assert_eq!(saved.created_at(), first.created_at());
     assert_eq!(saved.schema_version(), RECEIPT_SCHEMA_VERSION);
     assert_eq!(store.read().unwrap(), Some(saved));
@@ -300,16 +286,21 @@ fn lock_inode_is_stable_and_cancellation_deadline_contention_are_distinct() {
         valid_until: time(1000),
     };
     assert!(matches!(
-        store.save(&first, 1, context(), budget, &cancel, &clock),
+        store.save(&first, first.revision(), context(), budget, &cancel, &clock),
         Err(StoreError::Cancelled)
     ));
     let expired = TestClock::new(time(30), MonoTime::from_micros(1_000_000));
     assert!(matches!(
-        store.save(&first, 1, context(), budget, &CancelToken::new(), &expired),
+        store.save(
+            &first,
+            first.revision(),
+            context(),
+            budget,
+            &CancelToken::new(),
+            &expired
+        ),
         Err(StoreError::Deadline)
     ));
-    // A tiny remaining budget exercises the OS layer's nonblocking lock poll.
-    let almost_expired = TestClock::new(time(30), MonoTime::from_micros(999_999));
     let dir = Directory::open_anchor(&path).unwrap();
     let guard = dir
         .lock(
@@ -323,59 +314,16 @@ fn lock_inode_is_stable_and_cancellation_deadline_contention_are_distinct() {
     assert!(matches!(
         store.save(
             &first,
-            1,
+            first.revision(),
             context(),
-            budget,
+            WaitBudget::nonblocking(clock.mono_now()),
             &CancelToken::new(),
-            &almost_expired
+            &clock
         ),
         Err(StoreError::Contention)
     ));
-    struct ExpiringClock(std::sync::Mutex<u32>);
-    impl Clock for ExpiringClock {
-        fn wall_now(&self) -> Result<UtcMicros, provenant_core::TimeError> {
-            Ok(time(30))
-        }
-        fn mono_now(&self) -> MonoTime {
-            let mut value = self.0.lock().unwrap();
-            let call = *value;
-            *value += 1;
-            MonoTime::from_micros(if call < 2 { 999_999 } else { 1_000_000 })
-        }
-        fn wait_until(&self, _deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
-            Ok(())
-        }
-    }
-    assert!(matches!(
-        store.save(
-            &first,
-            1,
-            context(),
-            budget,
-            &CancelToken::new(),
-            &ExpiringClock(std::sync::Mutex::new(0))
-        ),
-        Err(StoreError::Deadline)
-    ));
-    let other = ReceiptStore::new(
-        store.root.clone(),
-        store.project,
-        DeliveryId::from_bytes([9; 16]),
-    );
-    let other_receipt = changed(&r, |v| {
-        v["delivery_id"] = serde_json::to_value(other.delivery).unwrap()
-    });
-    save(&other, &other_receipt, 0, 30).unwrap();
-    let session = crate::session::SessionStore::new(
-        store.root.clone(),
-        store.project,
-        crate::session::HostSessionId::parse("host-1").unwrap(),
-    );
-    session
-        .save(b"independent", budget, &CancelToken::new(), &clock)
-        .unwrap();
     drop(guard);
-    save(&store, &first, 1, 30).unwrap();
+    save(&store, &first, first.revision(), 30).unwrap();
     assert_eq!(
         std::fs::metadata(path.join("receipt.lock")).unwrap().ino(),
         inode

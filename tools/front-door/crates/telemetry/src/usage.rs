@@ -62,6 +62,8 @@ struct Event {
     /// Explicit wait mode from the parsed status command; historical values unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     wait: Option<bool>,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 fn project_trace(project_id: Option<ProjectId>) -> Option<Trace> {
@@ -147,6 +149,7 @@ pub fn record_cli_context(
             session: session.map(str::to_owned),
             config: None,
             wait,
+            extra: Default::default(),
         },
         true,
     );
@@ -180,6 +183,7 @@ pub fn record_chair(
             session: Some(session.into()),
             config: config.map(str::to_owned),
             wait: None,
+            extra: Default::default(),
         },
         true,
     );
@@ -298,7 +302,7 @@ fn events(roots: &Roots) -> Result<Vec<Event>, UsageError> {
                 if line.len() > LINE_CAP || !line.ends_with(b"\n") {
                     continue;
                 }
-                let Ok(event) = serde_json::from_slice::<Event>(line) else {
+                let Ok(event) = crate::decode_record::<Event>(line, LINE_CAP as u64) else {
                     continue;
                 };
                 events.push(event);
