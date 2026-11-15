@@ -2930,9 +2930,7 @@ fn route_choice(input: &Value, raw: Option<&Value>) -> Result<Option<RouteChoice
 /// The role a launched node plays, which `--route role=tier` addresses.
 fn route_role(node: &provenant_fabric_runtime::graph::GraphNode) -> &'static str {
     use provenant_fabric_runtime::graph::{AccessMode, NodeKind};
-    if node.review_behaviour.is_some()
-        || provenant_fabric_runtime::graph::is_review_node(node)
-    {
+    if node.review_behaviour.is_some() || provenant_fabric_runtime::graph::is_review_node(node) {
         "review"
     } else if node.plan.is_some() {
         "plan"
@@ -5109,10 +5107,7 @@ mod tests {
                 Err(error) => {
                     assert!(path.starts_with(&rig.home));
                     assert_eq!(preview["status"], "refused");
-                    assert!(
-                        rows.iter()
-                            .all(|row| row["code"] == error.code)
-                    );
+                    assert!(rows.iter().all(|row| row["code"] == error.code));
                 }
             }
             assert!(!rig.state.join("writer-git-home").exists());
