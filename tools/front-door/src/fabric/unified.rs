@@ -2682,30 +2682,22 @@ mod tests {
     #[test]
     fn composite_output_preserves_every_public_typed_export() {
         let commit = "1".repeat(40);
-        let progress: provenant_fabric_runtime::graph::NodeProgress =
-            serde_json::from_value(json!({
-                "id": "panel",
-                "state": "succeeded",
-                "worktree": null,
-                "children": ["writer"],
-                "outputs": {
-                    "schema_version": 2,
-                    "result": {
-                        "digest": "sha256:fixture",
-                        "excerpt": "result bytes",
-                        "truncated": false,
-                        "path": null
-                    },
-                    "verdict": "VERDICT: PASS",
-                    "findings": [],
-                    "findings_available": true,
-                    "branch": "feature/output",
-                    "commit": commit,
-                    "remaining": ["finish the export test"],
-                    "warnings": []
-                }
-            }))
-            .unwrap();
+        let progress = composite_progress(json!({
+            "schema_version": 2,
+            "result": {
+                "digest": "sha256:fixture",
+                "excerpt": "result bytes",
+                "truncated": false,
+                "path": null
+            },
+            "verdict": "VERDICT: PASS",
+            "findings": [],
+            "findings_available": true,
+            "branch": "feature/output",
+            "commit": commit,
+            "remaining": ["finish the export test"],
+            "warnings": []
+        }));
         let command = provenant_cli::Output {
             target: "typed-output/panel".parse().unwrap(),
             part: provenant_cli::Part::Result,
@@ -2732,6 +2724,7 @@ mod tests {
             "state": "succeeded",
             "worktree": null,
             "children": ["writer"],
+            "attempts": [],
             "outputs": outputs
         }))
         .unwrap()
