@@ -299,38 +299,44 @@ mod tests {
     }
 
     #[test]
-    fn ancestry_of_the_fetched_target_is_landed() {
-        assert_eq!(
-            landed(&graph(), oid(3), &main_at(oid(4)), &[]).unwrap(),
-            Landing::Landed(LandedBy::Ancestry)
-        );
-    }
-
-    #[test]
-    fn a_target_without_the_commit_is_unproven() {
-        assert_eq!(
-            landed(&graph(), oid(3), &main_at(oid(6)), &[]).unwrap(),
-            Landing::Unproven(Unproven::NotContained)
-        );
-    }
-
-    #[test]
-    fn a_revalidated_receipt_chain_to_the_root_is_landed() {
-        let chain = [lane_into_batch(), batch_into_main()];
-        assert_eq!(
-            landed(&graph(), oid(3), &main_at(oid(5)), &chain).unwrap(),
-            Landing::Landed(LandedBy::ReceiptChain { edges: 2 })
-        );
-    }
-
-    #[test]
-    fn a_force_pushed_root_is_unproven_despite_receipts() {
-        // Main was rewound past the integration commit to an unrelated tip.
-        let chain = [lane_into_batch(), batch_into_main()];
-        assert_eq!(
-            landed(&graph(), oid(3), &main_at(oid(6)), &chain).unwrap(),
-            Landing::Unproven(Unproven::NotContained)
-        );
+    fn landing_requires_containment_by_the_authorised_target() {
+        struct Case {
+            receipts: bool,
+            target: u8,
+            expected: Landing,
+        }
+        for case in [
+            Case {
+                receipts: false,
+                target: 4,
+                expected: Landing::Landed(LandedBy::Ancestry),
+            },
+            Case {
+                receipts: true,
+                target: 5,
+                expected: Landing::Landed(LandedBy::ReceiptChain { edges: 2 }),
+            },
+            Case {
+                receipts: false,
+                target: 6,
+                expected: Landing::Unproven(Unproven::NotContained),
+            },
+            Case {
+                receipts: true,
+                target: 6,
+                expected: Landing::Unproven(Unproven::NotContained),
+            },
+        ] {
+            let chain = if case.receipts {
+                vec![lane_into_batch(), batch_into_main()]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                landed(&graph(), oid(3), &main_at(oid(case.target)), &chain).unwrap(),
+                case.expected
+            );
+        }
     }
 
     #[test]

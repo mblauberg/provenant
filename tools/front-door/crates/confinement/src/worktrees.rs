@@ -27,7 +27,7 @@ pub use context::{
     with_context_using_workers_and_facts,
 };
 pub use custody::*;
-pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, doctor};
+pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, WorktreeRepairKind, doctor};
 pub use gc::{
     CandidateReport, CollectionMode, ForgeObservation, OutputEntry, RetirementFeeds,
     WorktreeGcPolicy, WorktreeGcReport, acknowledge_foreign_preview, branch_candidate, collect,
@@ -856,7 +856,7 @@ impl std::fmt::Display for TaintCause {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UncertaintyReason {
     CensusUnavailable,
     UnstableProcessIdentity,
@@ -866,6 +866,19 @@ pub enum UncertaintyReason {
     ListingIncomplete,
     PolicyRejected,
     RootUnreadable,
+}
+
+impl UncertaintyReason {
+    pub const ALL: &'static [Self] = &[
+        Self::CensusUnavailable,
+        Self::UnstableProcessIdentity,
+        Self::CwdUnreadable,
+        Self::OccupancyIncomplete,
+        Self::PathUnplaceable,
+        Self::ListingIncomplete,
+        Self::PolicyRejected,
+        Self::RootUnreadable,
+    ];
 }
 
 impl std::fmt::Display for UncertaintyReason {
@@ -1011,11 +1024,14 @@ mod worktree_layout_tests {
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir(project.path().join(".provenant")).unwrap();
         let mut ports = provenant_config::PortTable::builtin();
-        ports.worktree_layout.roots = vec![
-            PathBuf::from(".worktrees"),
-            PathBuf::from(".claude/worktrees"),
-        ];
-        ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
+        let root = ports.worktree_layout.roots[0].clone();
+        let branch_token = ports
+            .worktree_layout
+            .default
+            .file_name()
+            .unwrap()
+            .to_owned();
+        ports.worktree_layout.default = root.join(branch_token);
         std::fs::write(
             project.path().join(provenant_config::PORTS_CONFIG),
             serde_json::to_vec(&ports).unwrap(),
@@ -1024,24 +1040,15 @@ mod worktree_layout_tests {
 
         assert_eq!(
             managed_writer_relative_path(project.path(), project.path(), "feature/topic").unwrap(),
-            PathBuf::from(".claude/worktrees/feature-topic"),
+            root.join("feature-topic"),
         );
         assert_eq!(
-            managed_writer_branch(
-                project.path(),
-                project.path(),
-                Path::new(".worktrees/other")
-            )
-            .unwrap(),
+            managed_writer_branch(project.path(), project.path(), &root.join("other")).unwrap(),
             Some("other".to_owned()),
         );
         assert_eq!(
-            managed_writer_branch(
-                project.path(),
-                project.path(),
-                Path::new(".claude/worktrees/feature-topic"),
-            )
-            .unwrap(),
+            managed_writer_branch(project.path(), project.path(), &root.join("feature-topic"),)
+                .unwrap(),
             Some("feature-topic".to_owned()),
         );
     }
@@ -1051,10 +1058,7 @@ mod worktree_layout_tests {
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir(project.path().join(".git")).unwrap();
         std::fs::create_dir(project.path().join(".provenant")).unwrap();
-        let mut ports = provenant_config::PortTable::builtin();
-        ports.worktree_layout.roots =
-            vec![PathBuf::from("trees"), PathBuf::from(".claude/worktrees")];
-        ports.worktree_layout.default = PathBuf::from("trees/topic-<branch>/checkout");
+        let ports = provenant_config::PortTable::builtin();
         std::fs::write(
             project.path().join(provenant_config::PORTS_CONFIG),
             serde_json::to_vec(&ports).unwrap(),
@@ -1063,10 +1067,12 @@ mod worktree_layout_tests {
 
         assert_eq!(
             allocation_directories(&project.path().join(".git"), project.path()).unwrap(),
-            vec![
-                project.path().join("trees"),
-                project.path().join(".claude/worktrees"),
-            ],
+            ports
+                .worktree_layout
+                .roots
+                .iter()
+                .map(|root| project.path().join(root))
+                .collect::<Vec<_>>(),
         );
     }
 }

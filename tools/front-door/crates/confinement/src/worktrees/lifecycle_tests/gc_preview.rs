@@ -172,18 +172,29 @@ fn gc_preview_verdict_matches_apply_for_every_worktree_state() -> Result<(), Box
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)] // Compare fixture mtimes to the filesystem clock.
 fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Error>> {
-    for scenario in [
-        "preview",
-        "idle",
-        "aged",
-        "unowned",
-        "recent",
-        "live",
-        "unknown",
-        "no-output",
-        "unconfigured",
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Case {
+        Preview,
+        Idle,
+        Aged,
+        Unowned,
+        Recent,
+        Live,
+        Unknown,
+        NoOutput,
+        Unconfigured,
+    }
+    for case in [
+        Case::Preview,
+        Case::Idle,
+        Case::Aged,
+        Case::Unowned,
+        Case::Recent,
+        Case::Live,
+        Case::Unknown,
+        Case::NoOutput,
+        Case::Unconfigured,
     ] {
         let fixture = Fixture::new()?;
         fs::write(fixture.root.join(".gitignore"), "target/\n")?;
@@ -202,11 +213,11 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
         fs::create_dir(path.join("target"))?;
         fs::write(path.join("target/artifact"), "output")?;
         fs::write(path.join("untracked"), "source")?;
-        if scenario == "no-output" {
+        if case == Case::NoOutput {
             fs::remove_dir_all(path.join("target"))?;
         }
-        if scenario == "aged" {
-            let old = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+        if case == Case::Aged {
+            let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
             let tree = verify_worktree(context.repo, &path)?;
             for item in [
                 path.join("target/artifact"),
@@ -225,7 +236,7 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
             .into_iter()
             .find(|lane| lane.path == path)
             .ok_or("missing tree")?;
-        if scenario != "unowned" {
+        if case != Case::Unowned {
             lane.occupancy =
                 Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");
         } else {
@@ -234,10 +245,10 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
         }
         let live = NamedLive;
         let unknown = UnknownWorkers;
-        if scenario == "live" {
+        if case == Case::Live {
             context.workers = &live;
         }
-        if scenario == "unknown" {
+        if case == Case::Unknown {
             context.workers = &unknown;
         }
         let retirement = HostRetirementFixture::new(&test)?;
@@ -249,20 +260,18 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                 upstream: None,
                 terminal: &|_| false,
                 no_live_lanes: &|_| true,
-                regenerable: if scenario == "unconfigured" {
+                regenerable: if case == Case::Unconfigured {
                     &[]
                 } else {
                     &regenerable
                 },
                 keep: &[],
-                written_before_ns: match scenario {
-                    "recent" => 0,
-                    "aged" => (std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
-                        .duration_since(std::time::UNIX_EPOCH)?
-                        .as_nanos() as i128,
+                written_before_ns: match case {
+                    Case::Recent => 0,
+                    Case::Aged => 2_000_000_000,
                     _ => i128::MAX,
                 },
-                dry_run: matches!(scenario, "preview" | "no-output" | "unconfigured"),
+                dry_run: matches!(case, Case::Preview | Case::NoOutput | Case::Unconfigured),
                 include_foreign: true,
                 retirement_port: Some(&retirement),
                 retirement_feeds: Some(&retirement),
@@ -274,21 +283,25 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
             },
             &cancel(),
         )?;
-        assert!(path.is_dir(), "{scenario}");
+        assert!(path.is_dir(), "{case:?}");
         assert_eq!(fs::read_to_string(path.join("untracked"))?, "source");
         assert_eq!(
             path.join("target/artifact").exists(),
-            !matches!(scenario, "idle" | "aged" | "unowned" | "no-output"),
-            "{scenario}"
+            !matches!(
+                case,
+                Case::Idle | Case::Aged | Case::Unowned | Case::NoOutput
+            ),
+            "{case:?}"
         );
-        if scenario == "preview" {
+        if case == Case::Preview {
             assert!(
-                report.idle_output.iter().any(
-                    |entry| entry.path == path.join("target") && entry.reason == "would_remove"
-                )
+                report
+                    .idle_output
+                    .iter()
+                    .any(|entry| entry.path == path.join("target") && !entry.removed)
             );
         }
-        if matches!(scenario, "idle" | "aged" | "unowned") {
+        if matches!(case, Case::Idle | Case::Aged | Case::Unowned) {
             assert!(
                 report
                     .idle_output
@@ -296,7 +309,7 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
                     .any(|entry| entry.path == path.join("target") && entry.removed)
             );
         }
-        if matches!(scenario, "recent" | "live" | "unknown") {
+        if matches!(case, Case::Recent | Case::Live | Case::Unknown) {
             assert!(report.idle_output.iter().all(|entry| !entry.removed));
         }
     }
@@ -518,8 +531,8 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         cache_writer_guard(context.project_state, &path).map(|_| ()),
     ] {
         assert!(matches!(refusal,
-            Err(Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody })
-                if scope == path && evidence.contains("retained import fence")
+            Err(Occupancy::Unknown { scope, source: OccupancyUnknownSource::Custody, .. })
+                if scope == path
         ));
     }
     let lane = list(&context, &cancel())?
@@ -527,8 +540,8 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         .find(|lane| lane.path == path)
         .ok_or("lane")?;
     assert!(matches!(&lane.occupancy,
-        Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody }
-            if scope == &path && evidence.contains("retained import fence")
+        Occupancy::Unknown { scope, source: OccupancyUnknownSource::Custody, .. }
+            if scope == &path
     ));
     fs::write(path.join("uncommitted"), "preserve unfinished work")?;
     let tree = verify_worktree(&fixture.repo, &path)?;

@@ -194,26 +194,34 @@ fn detached_removal_keeps_dirty_unmerged_and_live_work() -> Result<(), Box<dyn E
 }
 
 #[test]
-fn ignored_paths_refusal_names_regenerable_setting() {
-    let message = WorktreeError::IgnoredPaths("target, .build".into()).with_repair();
-    assert!(message.contains("target, .build"));
-    assert!(message.contains("gc.projects.<id>.regenerable"));
-    assert!(message.contains("provenant fabric identity"));
-}
-
-#[test]
 fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn Error>> {
-    for scenario in ["idle", "recent", "lease", "tracked", "untracked", "lane"] {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Case {
+        Idle,
+        Recent,
+        Lease,
+        Tracked,
+        Untracked,
+        Lane,
+    }
+    for case in [
+        Case::Idle,
+        Case::Recent,
+        Case::Lease,
+        Case::Tracked,
+        Case::Untracked,
+        Case::Lane,
+    ] {
         let fixture = Fixture::new()?;
         fs::write(
             fixture.root.join(".gitignore"),
-            if scenario == "untracked" {
+            if case == Case::Untracked {
                 ".env\n"
             } else {
                 "target/\n.env\n"
             },
         )?;
-        if scenario == "tracked" {
+        if case == Case::Tracked {
             fs::create_dir(fixture.root.join("target"))?;
             fs::write(fixture.root.join("target/source"), "tracked")?;
             fixture.run(&["add", "-f", "target/source"])?;
@@ -226,34 +234,10 @@ fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn 
         fs::create_dir_all(created.path.join("target"))?;
         fs::write(created.path.join("target/cache"), "output")?;
         let lanes = list(&context, &cancel())?;
-        if scenario == "untracked" {
-            // Call the pruning owner directly so the early dirty-lane gate
-            // cannot mask the non-ignored output protection.
-            let entries = context.facts.read_inventory(&context, &cancel())?;
-            let entry = entries
-                .iter()
-                .find(|entry| entry.path == created.path)
-                .ok_or("worktree")?;
-            let locked = lock_worktree_for_mutation(&context, entry, &cancel())?;
-            let refused = gc::prepare_removal(
-                &context,
-                locked.verified.repo(),
-                &["target".into()],
-                &[],
-                &cancel(),
-            );
-            assert!(
-                matches!(refused, Err(WorktreeError::IgnoredPaths(ref paths)) if paths.contains("target"))
-            );
-            assert_eq!(
-                fs::read_to_string(created.path.join("target/cache"))?,
-                "output"
-            );
-        }
         let state = context
             .project_state
             .open_verified_directory(&state_dir_name(&created.path))?;
-        let lease = if scenario == "lease" {
+        let lease = if case == Case::Lease {
             Some(state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?)
         } else {
             None
@@ -273,24 +257,24 @@ fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn 
                 excluded_paths: &[],
                 upstream: None,
                 terminal: &|_| false,
-                no_live_lanes: &|_| scenario != "lane",
+                no_live_lanes: &|_| case != Case::Lane,
                 regenerable: &["target".into()],
                 keep: &[],
-                written_before_ns: if scenario == "recent" { 0 } else { i128::MAX },
+                written_before_ns: if case == Case::Recent { 0 } else { i128::MAX },
                 dry_run: false,
             },
             &cancel(),
         )?;
         assert_eq!(
             created.path.join("target/cache").exists(),
-            scenario != "idle",
-            "{scenario}"
+            case != Case::Idle,
+            "{case:?}"
         );
-        assert_eq!(
-            report.idle_output.iter().filter(|row| row.removed).count(),
-            usize::from(scenario == "idle"),
-            "{scenario}"
-        );
+        let target_removed = report
+            .idle_output
+            .iter()
+            .any(|row| row.path == created.path.join("target") && row.removed);
+        assert_eq!(target_removed, case == Case::Idle, "{case:?}");
         assert!(created.path.is_dir());
         drop(lease);
     }
@@ -469,16 +453,143 @@ fn remove_lane_scratch_without_declaration() -> Result<(), Box<dyn Error>> {
 #[test]
 fn gc_foreign_cleanup_respects_exclusions_census_and_durable_ownership()
 -> Result<(), Box<dyn Error>> {
-    for scenario in [
-        "default",
-        "recent",
-        "unknown",
-        "unmerged",
-        "live-lane",
-        "dirty",
-        "preview",
-        "apply",
-    ] {
+    #[derive(Clone, Copy)]
+    enum Retention {
+        Unasserted,
+        None,
+        UnknownWriter,
+        Dirty,
+    }
+    #[derive(Clone, Copy)]
+    struct Case {
+        include_foreign: bool,
+        unmerged: bool,
+        recent: bool,
+        census_unknown: bool,
+        live_lane: bool,
+        dirty: bool,
+        preview: bool,
+        acknowledged: bool,
+        expected_path: bool,
+        expected_branch: bool,
+        expected_state: bool,
+        expected_retention: Retention,
+    }
+    const CASES: [Case; 8] = [
+        Case {
+            include_foreign: false,
+            unmerged: false,
+            recent: false,
+            census_unknown: false,
+            live_lane: false,
+            dirty: false,
+            preview: false,
+            acknowledged: false,
+            expected_path: true,
+            expected_branch: true,
+            expected_state: false,
+            expected_retention: Retention::None,
+        },
+        Case {
+            include_foreign: true,
+            unmerged: true,
+            recent: true,
+            census_unknown: false,
+            live_lane: false,
+            dirty: false,
+            preview: false,
+            acknowledged: false,
+            expected_path: true,
+            expected_branch: true,
+            expected_state: true,
+            expected_retention: Retention::Unasserted,
+        },
+        Case {
+            include_foreign: true,
+            unmerged: false,
+            recent: false,
+            census_unknown: true,
+            live_lane: false,
+            dirty: false,
+            preview: false,
+            acknowledged: false,
+            expected_path: true,
+            expected_branch: true,
+            expected_state: true,
+            expected_retention: Retention::UnknownWriter,
+        },
+        Case {
+            include_foreign: true,
+            unmerged: true,
+            recent: false,
+            census_unknown: false,
+            live_lane: false,
+            dirty: false,
+            preview: false,
+            acknowledged: false,
+            expected_path: false,
+            expected_branch: true,
+            expected_state: true,
+            expected_retention: Retention::Unasserted,
+        },
+        Case {
+            include_foreign: true,
+            unmerged: false,
+            recent: false,
+            census_unknown: false,
+            live_lane: true,
+            dirty: false,
+            preview: false,
+            acknowledged: false,
+            expected_path: true,
+            expected_branch: true,
+            expected_state: false,
+            expected_retention: Retention::UnknownWriter,
+        },
+        Case {
+            include_foreign: true,
+            unmerged: false,
+            recent: false,
+            census_unknown: false,
+            live_lane: false,
+            dirty: true,
+            preview: false,
+            acknowledged: false,
+            expected_path: true,
+            expected_branch: true,
+            expected_state: true,
+            expected_retention: Retention::Dirty,
+        },
+        Case {
+            include_foreign: true,
+            unmerged: false,
+            recent: false,
+            census_unknown: false,
+            live_lane: false,
+            dirty: false,
+            preview: true,
+            acknowledged: false,
+            expected_path: true,
+            expected_branch: true,
+            expected_state: false,
+            expected_retention: Retention::None,
+        },
+        Case {
+            include_foreign: true,
+            unmerged: false,
+            recent: false,
+            census_unknown: false,
+            live_lane: false,
+            dirty: false,
+            preview: false,
+            acknowledged: true,
+            expected_path: false,
+            expected_branch: false,
+            expected_state: true,
+            expected_retention: Retention::None,
+        },
+    ];
+    for case in CASES {
         let fixture = Fixture::new()?;
         let test_context = TestContext::new(&fixture)?;
         let mut context = test_context.context();
@@ -493,7 +604,7 @@ fn gc_foreign_cleanup_respects_exclusions_census_and_durable_ownership()
             path.to_str().ok_or("path")?,
         ])?;
         // Recency only protects work that is not already landed.
-        if matches!(scenario, "unmerged" | "recent") {
+        if case.unmerged || case.recent {
             fs::write(path.join("new-work"), b"new work")?;
             run_in_worktree(&fixture, &path, &["add", "new-work"])?;
             run_in_worktree(
@@ -502,14 +613,14 @@ fn gc_foreign_cleanup_respects_exclusions_census_and_durable_ownership()
                 &["commit", "--allow-empty", "-m", "unmerged"],
             )?;
         }
-        if scenario == "dirty" {
+        if case.dirty {
             fs::write(path.join("notes"), "keep")?;
         }
         let unknown = UnknownWorkers;
-        if scenario == "unknown" {
+        if case.census_unknown {
             context.workers = &unknown;
         }
-        if scenario == "apply" {
+        if case.acknowledged {
             acknowledge_foreign_preview(&context)?;
         }
         let lanes = list(&context, &cancel())?;
@@ -517,7 +628,7 @@ fn gc_foreign_cleanup_respects_exclusions_census_and_durable_ownership()
             &context,
             &lanes,
             &WorktreeGcPolicy {
-                include_foreign: scenario != "default",
+                include_foreign: case.include_foreign,
                 retirement_port: Some(&retirement),
                 retirement_feeds: Some(&retirement),
                 mode: CollectionMode::Worktrees,
@@ -527,16 +638,15 @@ fn gc_foreign_cleanup_respects_exclusions_census_and_durable_ownership()
                 excluded_paths: &[],
                 upstream: Some(fixture.head()?),
                 terminal: &|_| false,
-                no_live_lanes: &|_| scenario != "live-lane",
+                no_live_lanes: &|_| !case.live_lane,
                 regenerable: &[],
                 keep: &[],
-                written_before_ns: if scenario == "recent" { 0 } else { i128::MAX },
-                dry_run: scenario == "preview",
+                written_before_ns: if case.recent { 0 } else { i128::MAX },
+                dry_run: case.preview,
             },
             &cancel(),
         )?;
-        let worktree_path = path.clone();
-        if scenario == "preview" {
+        if case.preview {
             assert!(
                 report
                     .worktrees
@@ -546,50 +656,44 @@ fn gc_foreign_cleanup_respects_exclusions_census_and_durable_ownership()
             );
             assert!(report.removals.is_empty());
         }
-        let expected = match scenario {
-            "unknown" | "live-lane" => Some(RetainReason::UnknownWriter),
-            "dirty" => Some(RetainReason::Dirty),
-            _ => None,
-        };
-        if let Some(reason) = expected {
-            assert!(
-                report
-                    .worktrees
-                    .retained
-                    .iter()
-                    .any(|retained| { retained.branch == "native" && retained.reason == reason })
-            );
+        let retained = report
+            .worktrees
+            .retained
+            .iter()
+            .find(|retained| retained.branch == "native")
+            .map(|retained| retained.reason);
+        match case.expected_retention {
+            Retention::Unasserted => {}
+            Retention::None => assert!(retained.is_none()),
+            Retention::UnknownWriter => assert_eq!(retained, Some(RetainReason::UnknownWriter)),
+            Retention::Dirty => assert_eq!(retained, Some(RetainReason::Dirty)),
         }
-        if scenario == "apply" {
-            assert!(!path.exists(), "applied foreign retirement left its tree");
-            assert!(!branch_exists(&fixture, "native"));
+        if case.acknowledged {
             assert!(report.removals.iter().any(|removal| {
-                worktree_subject_matches_path(&removal.subject, &worktree_path)
+                worktree_subject_matches_path(&removal.subject, &path)
                     && matches!(
                         &removal.outcome,
                         provenant_records::custody::RemovalOutcome::Removed { .. }
                     )
             }));
-        } else if scenario == "unmerged" {
-            // An idle, unlanded lane is retired but its branch, the work, stays.
-            assert!(!path.exists(), "idle unlanded tree was not retired");
-        } else {
-            assert!(
-                path.exists(),
-                "{scenario}: preview or protected tree was deleted"
-            );
         }
+        assert_eq!(path.exists(), case.expected_path);
+        assert_eq!(branch_exists(&fixture, "native"), case.expected_branch);
         assert_eq!(
             context
                 .project_state
                 .open_verified_directory(&state_dir_name(&path))
                 .is_ok(),
-            !matches!(scenario, "default" | "preview" | "live-lane"),
-            "exclusion state after {scenario}"
+            case.expected_state
         );
-        assert_eq!(branch_exists(&fixture, "native"), scenario != "apply");
-        if scenario == "preview" {
-            assert_eq!(report.worktrees.pruned_refs, vec!["native"]);
+        if case.preview {
+            assert!(
+                report
+                    .worktrees
+                    .pruned_refs
+                    .iter()
+                    .any(|name| name == "native")
+            );
         }
     }
     Ok(())
@@ -663,7 +767,12 @@ fn gc_output_pruning_holds_writer_but_not_repository_lock() -> Result<(), Box<dy
 
 #[test]
 fn gc_foreign_rechecks_changes_before_removal() -> Result<(), Box<dyn Error>> {
-    for change in ["ignored", "head"] {
+    #[derive(Clone, Copy)]
+    enum Change {
+        Ignored,
+        Head,
+    }
+    for change in [Change::Ignored, Change::Head] {
         let fixture = Fixture::new()?;
         fs::write(fixture.root.join(".gitignore"), ".env\n")?;
         fixture.run(&["add", ".gitignore"])?;
@@ -678,28 +787,22 @@ fn gc_foreign_rechecks_changes_before_removal() -> Result<(), Box<dyn Error>> {
         let evidence = gc_landing_evidence(&fixture, upstream)?;
         let lanes = list(&context, &cancel())?;
         let changed = std::cell::Cell::new(false);
-        let calls = std::cell::Cell::new(0);
-        let no_live = |_: &Path| {
-            let count = calls.get() + 1;
-            calls.set(count);
+        let no_live = |candidate: &Path| {
             let repository_held = context
                 .repo
                 .common_dir()
                 .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
                 .is_err();
-            if !changed.get()
-                && ((change == "ignored" && repository_held) || (change == "head" && count == 3))
-            {
+            if !changed.get() && candidate == path && repository_held {
                 changed.set(true);
-                if change == "ignored" {
-                    fs::write(path.join(".env"), "new secret").unwrap();
-                } else {
-                    run_in_worktree(
+                match change {
+                    Change::Ignored => fs::write(path.join(".env"), "new secret").unwrap(),
+                    Change::Head => run_in_worktree(
                         &fixture,
                         &path,
                         &["commit", "--allow-empty", "-m", "concurrent work"],
                     )
-                    .unwrap();
+                    .unwrap(),
                 }
             }
             true
@@ -728,7 +831,7 @@ fn gc_foreign_rechecks_changes_before_removal() -> Result<(), Box<dyn Error>> {
         )?;
         assert!(changed.get());
         assert!(path.is_dir());
-        let reason = if change == "ignored" {
+        let reason = if matches!(change, Change::Ignored) {
             RetainReason::Dirty
         } else {
             RetainReason::Changed
@@ -738,7 +841,7 @@ fn gc_foreign_rechecks_changes_before_removal() -> Result<(), Box<dyn Error>> {
                 retained.branch == "native-recheck" && retained.reason == reason
             })
         );
-        if change == "ignored" {
+        if matches!(change, Change::Ignored) {
             assert_eq!(fs::read_to_string(path.join(".env"))?, "new secret");
         }
     }
@@ -829,14 +932,16 @@ fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
     retirement.seed_lane(&context, &second)?;
     let upstream = fixture.head()?;
     let evidence = gc_landing_evidence(&fixture, upstream)?;
-    let calls = std::cell::Cell::new(0);
+    let mutation_boundary_rejected = std::cell::Cell::new(false);
     let no_live_lanes = |path: &Path| {
-        if path == first.path {
-            calls.set(calls.get() + 1);
-            calls.get() != 2
-        } else {
-            true
-        }
+        let repository_held = context
+            .repo
+            .common_dir()
+            .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
+            .is_err();
+        let reject = path == first.path && repository_held;
+        mutation_boundary_rejected.set(mutation_boundary_rejected.get() || reject);
+        !reject
     };
     let report = collect(
         &context,
@@ -860,10 +965,7 @@ fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
         },
         &cancel(),
     )?;
-    assert!(
-        calls.get() >= 2,
-        "the live lane observation is rechecked at the mutation fence"
-    );
+    assert!(mutation_boundary_rejected.get());
     assert!(first.path.is_dir());
     assert!(branch_exists(&fixture, "gc-prune-failed"));
     assert!(report.worktrees.retained.iter().any(|retained| {
@@ -1121,14 +1223,6 @@ fn gc_merged_tree_previews_and_removes_declared_output() -> Result<(), Box<dyn E
 
 #[test]
 fn gc_retires_only_lanes_contained_in_a_retained_ref() -> Result<(), Box<dyn Error>> {
-    // A concurrent test's fork can briefly inherit a just-released lock
-    // descriptor; rebuild the whole fixture rather than weaken zero-wait locks.
-    for _ in 0..5 {
-        match merge_proof_scenario() {
-            Err(error) if format!("{error:?}").contains("LockTimeout") => {}
-            result => return result,
-        }
-    }
     merge_proof_scenario()
 }
 

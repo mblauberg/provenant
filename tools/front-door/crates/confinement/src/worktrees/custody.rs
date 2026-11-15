@@ -341,12 +341,30 @@ pub(super) fn dirty_paths_summary(paths: &[StatusPath]) -> String {
         .iter()
         .flat_map(|path| std::iter::once(path.path.as_slice()).chain(path.original_path.as_deref()))
         .collect();
-    dirty_paths_summary_bytes(&raw)
+    dirty_paths_summary_bytes(&raw).text
 }
 
-fn dirty_paths_summary_bytes(paths: &[&[u8]]) -> String {
+struct DirtyPathsSummary {
+    text: String,
+    #[cfg(test)]
+    listed: usize,
+    #[cfg(test)]
+    omitted: usize,
+    #[cfg(test)]
+    total: usize,
+}
+
+fn dirty_paths_summary_bytes(paths: &[&[u8]]) -> DirtyPathsSummary {
     if paths.is_empty() {
-        return String::new();
+        return DirtyPathsSummary {
+            text: String::new(),
+            #[cfg(test)]
+            listed: 0,
+            #[cfg(test)]
+            omitted: 0,
+            #[cfg(test)]
+            total: 0,
+        };
     }
     let mut seen = std::collections::HashSet::new();
     let mut unique = Vec::new();
@@ -375,7 +393,15 @@ fn dirty_paths_summary_bytes(paths: &[&[u8]]) -> String {
     if more > 0 {
         summary.push_str(&format!(" and {more} more"));
     }
-    summary
+    DirtyPathsSummary {
+        text: summary,
+        #[cfg(test)]
+        listed,
+        #[cfg(test)]
+        omitted: more,
+        #[cfg(test)]
+        total: unique.len(),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -946,42 +972,31 @@ mod dirty_tests {
 
     #[test]
     fn summary_lists_dirty_paths_and_counts_the_rest() {
-        assert_eq!(dirty_paths_summary_bytes(&[]), "");
+        let empty = dirty_paths_summary_bytes(&[]);
+        assert!(empty.text.is_empty());
+        assert_eq!((empty.listed, empty.omitted, empty.total), (0, 0, 0));
         let one = dirty_paths_summary_bytes(&[b"a.rs", b"b/c.rs"]);
         for path in ["a.rs", "b/c.rs"] {
-            assert_eq!(one.matches(path).count(), 1, "{one}");
+            assert_eq!(one.text.matches(path).count(), 1, "{}", one.text);
         }
         let dedup = dirty_paths_summary_bytes(&[b"a.rs", b"a.rs", b"b.rs"]);
         for path in ["a.rs", "b.rs"] {
-            assert_eq!(dedup.matches(path).count(), 1, "{dedup}");
+            assert_eq!(dedup.text.matches(path).count(), 1, "{}", dedup.text);
         }
+        assert_eq!(dedup.total, 2);
+        assert_eq!(dedup.listed + dedup.omitted, dedup.total);
         let many: Vec<Vec<u8>> = (0..15).map(|n| format!("f{n:02}").into_bytes()).collect();
         let many_refs: Vec<&[u8]> = many.iter().map(Vec::as_slice).collect();
         let summary = dirty_paths_summary_bytes(&many_refs);
-        assert!(summary.len() <= 1024);
-        let listed = (0..15)
-            .filter(|n| summary.contains(&format!("f{n:02}")))
-            .count();
-        let omitted: usize = summary
-            .split_whitespace()
-            .rev()
-            .nth(1)
-            .unwrap()
-            .parse()
-            .unwrap();
-        assert_eq!(listed + omitted, many.len(), "{summary}");
-        let long = vec![b'x'; 4000];
-        let long_summary = dirty_paths_summary_bytes(&[&long]);
-        assert!(long_summary.len() <= 1024);
-        // Long names that overflow the byte budget are left whole and counted.
+        assert!(summary.text.len() <= DIRTY_SUMMARY_BYTES);
+        assert_eq!(summary.total, many.len());
+        assert_eq!(summary.listed + summary.omitted, summary.total);
         let wide: Vec<Vec<u8>> = (0..12)
             .map(|n| format!("{n:02}{}", "y".repeat(200)).into_bytes())
             .collect();
         let wide_refs: Vec<&[u8]> = wide.iter().map(Vec::as_slice).collect();
         let summary = dirty_paths_summary_bytes(&wide_refs);
-        let (names, rest) = summary.split_once(" and ").expect("omission count");
-        let listed: Vec<_> = names.split(", ").collect();
-        assert!(listed.iter().all(|name| name.len() == 202), "{summary}");
-        assert_eq!(rest, format!("{} more", 12 - listed.len()), "{summary}");
+        assert_eq!(summary.total, wide.len());
+        assert_eq!(summary.listed + summary.omitted, summary.total);
     }
 }

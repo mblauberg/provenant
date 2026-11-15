@@ -16,12 +16,37 @@ pub enum WorktreeDiagnosisState {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeRepairKind {
+    RetryDiagnosis,
+    CreateWorktree,
+    PruneRegistration,
+    WaitForWriter,
+    PreserveChanges,
+    InspectGit,
+    CreateBranch,
+}
+
+impl WorktreeRepairKind {
+    pub const ALL: &'static [Self] = &[
+        Self::RetryDiagnosis,
+        Self::CreateWorktree,
+        Self::PruneRegistration,
+        Self::WaitForWriter,
+        Self::PreserveChanges,
+        Self::InspectGit,
+        Self::CreateBranch,
+    ];
+}
+
 /// A diagnosis grants no custody and never performs the suggested repair.
 #[derive(Clone, Debug, Serialize)]
 pub struct WorktreeDiagnosis {
     pub path: StructuredPathWire,
     pub state: WorktreeDiagnosisState,
     pub reason: String,
+    pub repair_kind: WorktreeRepairKind,
     pub repair: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder: Option<AttemptId>,
@@ -31,6 +56,53 @@ pub struct WorktreeDiagnosis {
     pub evidence: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<&'static str>,
+}
+
+impl WorktreeDiagnosis {
+    pub fn repair_kind(&self) -> WorktreeRepairKind {
+        self.repair_kind
+    }
+
+    fn set_state(
+        &mut self,
+        state: WorktreeDiagnosisState,
+        repair_kind: WorktreeRepairKind,
+        repository: &Path,
+        path: &Path,
+    ) {
+        self.state = state;
+        self.repair_kind = repair_kind;
+        self.repair = repair_kind.render(repository, path);
+    }
+}
+
+impl WorktreeRepairKind {
+    pub(super) fn render(self, repository: &Path, path: &Path) -> String {
+        match self {
+            Self::RetryDiagnosis => shell_path(path, Destination::Local).map_or_else(
+                || "provenant worktree doctor PATH".into(),
+                |path| format!("provenant worktree doctor {path}"),
+            ),
+            Self::CreateWorktree => "provenant worktree create BRANCH".into(),
+            Self::PruneRegistration => shell_path(repository, Destination::Local).map_or_else(
+                || "git worktree prune".into(),
+                |root| format!("git -C {root} worktree prune"),
+            ),
+            Self::WaitForWriter => "provenant status --wait".into(),
+            Self::PreserveChanges => shell_path(path, Destination::Local).map_or_else(
+                || "git -C PATH stash push --include-untracked".into(),
+                |path| format!("git -C {path} stash push --include-untracked"),
+            ),
+            Self::InspectGit => shell_path(path, Destination::Local).map_or_else(
+                || "git -C PATH status".into(),
+                |path| format!("git -C {path} status"),
+            ),
+            Self::CreateBranch => shell_path(path, Destination::Local).map_or_else(
+                || "git -C PATH switch -c BRANCH".into(),
+                |path| format!("git -C {path} switch -c BRANCH"),
+            ),
+        }
+    }
 }
 
 /// Inspect one named path, including registrations whose checkout is missing.
@@ -57,21 +129,23 @@ pub fn doctor(
         context.repo.revalidate()?;
         context.facts.read_inventory(context, cancel)?
     };
-    let quoted = shell_path(&path, Destination::Local);
-    let retry = quoted.as_ref().map_or_else(
-        || "provenant worktree doctor PATH".to_owned(),
-        |path| format!("provenant worktree doctor {path}"),
-    );
     let mut report = WorktreeDiagnosis {
         path: StructuredPathWire::from_path(&path)?,
         state: WorktreeDiagnosisState::Unregistered,
         reason: "The path is not a registered checkout in this repository.".into(),
-        repair: "provenant worktree create BRANCH".into(),
+        repair_kind: WorktreeRepairKind::CreateWorktree,
+        repair: String::new(),
         holder: None,
         scope: None,
         evidence: None,
         source: None,
     };
+    report.set_state(
+        WorktreeDiagnosisState::Unregistered,
+        WorktreeRepairKind::CreateWorktree,
+        context.repo.root_path(),
+        &path,
+    );
     let Some(entry) = entries.iter().find(|entry| {
         !entry.bare
             && (entry.path == path || canonicalize(&entry.path).ok().as_ref() == Some(&path))
@@ -80,12 +154,13 @@ pub fn doctor(
     };
     let custody = disk_writer_state(context.project_state, &path);
     if (entry.prunable || !path.exists()) && custody.is_available() {
-        report.state = WorktreeDiagnosisState::StaleRegistration;
-        report.reason = "Git retains a registration for a missing checkout.".into();
-        report.repair = shell_path(context.repo.root_path(), Destination::Local).map_or_else(
-            || "git worktree prune".into(),
-            |root| format!("git -C {root} worktree prune"),
+        report.set_state(
+            WorktreeDiagnosisState::StaleRegistration,
+            WorktreeRepairKind::PruneRegistration,
+            context.repo.root_path(),
+            &path,
         );
+        report.reason = "Git retains a registration for a missing checkout.".into();
         return Ok(report);
     }
     let occupancy = match custody {
@@ -108,13 +183,17 @@ pub fn doctor(
         other => other,
     };
     if let Occupancy::Held = occupancy {
-        report.state = WorktreeDiagnosisState::LiveWriter;
+        report.set_state(
+            WorktreeDiagnosisState::LiveWriter,
+            WorktreeRepairKind::WaitForWriter,
+            context.repo.root_path(),
+            &path,
+        );
         report.holder = writer_holder(context.project_state, &path);
         report.reason = report.holder.map_or_else(
             || "A writer holds the worktree lease.".into(),
             |holder| format!("Attempt {holder} holds the worktree lease."),
         );
-        report.repair = "provenant status --wait".into();
         return Ok(report);
     }
     if let Occupancy::Unknown {
@@ -123,7 +202,12 @@ pub fn doctor(
         source,
     } = occupancy
     {
-        report.state = WorktreeDiagnosisState::Unknown;
+        report.set_state(
+            WorktreeDiagnosisState::Unknown,
+            WorktreeRepairKind::RetryDiagnosis,
+            context.repo.root_path(),
+            &path,
+        );
         report.reason =
             "Worktree occupancy could not be decided; inspect the scoped evidence before retrying."
                 .into();
@@ -133,7 +217,6 @@ pub fn doctor(
             OccupancyUnknownSource::Census => "census",
             OccupancyUnknownSource::Custody => "custody",
         });
-        report.repair = retry;
         return Ok(report);
     }
     let verified = if path == context.repo.root_path() {
@@ -142,12 +225,16 @@ pub fn doctor(
         match verify_probed_worktree(context, &path, cancel) {
             Ok(tree) => Some(tree),
             Err(error) => {
-                report.state = WorktreeDiagnosisState::Unknown;
+                report.set_state(
+                    WorktreeDiagnosisState::Unknown,
+                    WorktreeRepairKind::RetryDiagnosis,
+                    context.repo.root_path(),
+                    &path,
+                );
                 report.reason = "The worktree registration could not be verified.".into();
                 report.scope = Some(StructuredPathWire::from_path(&path)?);
                 report.evidence = Some(safe_text(&error.to_string()));
                 report.source = Some("custody");
-                report.repair = retry;
                 return Ok(report);
             }
         }
@@ -155,52 +242,54 @@ pub fn doctor(
     if let Some(tree) = verified.as_ref()
         && let Err(error) = load_owner(tree)
     {
-        report.state = WorktreeDiagnosisState::Unknown;
+        report.set_state(
+            WorktreeDiagnosisState::Unknown,
+            WorktreeRepairKind::RetryDiagnosis,
+            context.repo.root_path(),
+            &path,
+        );
         report.reason = "The worktree owner record could not be read.".into();
         report.scope = Some(StructuredPathWire::from_path(&path)?);
         report.evidence = Some(safe_text(&error.to_string()));
         report.source = Some("custody");
-        report.repair = retry;
         return Ok(report);
     }
     let repo = verified.as_ref().map_or(context.repo, |tree| tree.repo());
-    let git = quoted.map_or_else(|| "git -C PATH".into(), |path| format!("git -C {path}"));
     let condition = worktree_dirty_at(context, repo, cancel)?;
-    let (state, reason, repair) = match condition {
+    let (state, reason, repair_kind) = match condition {
         WorktreeCondition::Dirty => (
             WorktreeDiagnosisState::Dirty,
             "The checkout has uncommitted changes; preserve them before starting a writer.",
-            format!("{git} stash push --include-untracked"),
+            WorktreeRepairKind::PreserveChanges,
         ),
         WorktreeCondition::GitOperationInProgress => (
             WorktreeDiagnosisState::GitOperationInProgress,
             "A Git operation is in progress; inspect its state and finish it before retrying.",
-            format!("{git} status"),
+            WorktreeRepairKind::InspectGit,
         ),
         WorktreeCondition::Unknown => (
             WorktreeDiagnosisState::Unknown,
             "Checkout cleanliness could not be verified.",
-            format!("{git} status"),
+            WorktreeRepairKind::InspectGit,
         ),
         _ if entry.branch.is_none() => (
             WorktreeDiagnosisState::Detached,
             "HEAD is detached; create a branch before starting a writer.",
-            format!("{git} switch -c BRANCH"),
+            WorktreeRepairKind::CreateBranch,
         ),
         _ if occupancy.is_observed() => (
             WorktreeDiagnosisState::Observed,
             "A process was observed in the checkout; writer custody is free and admission checks the Git boundary.",
-            retry,
+            WorktreeRepairKind::RetryDiagnosis,
         ),
         _ => (
             WorktreeDiagnosisState::Clean,
             "The checkout is clean and writer custody is free; admission rechecks custody and the Git boundary.",
-            retry,
+            WorktreeRepairKind::RetryDiagnosis,
         ),
     };
-    report.state = state;
+    report.set_state(state, repair_kind, context.repo.root_path(), &path);
     report.reason = reason.into();
-    report.repair = repair;
     if state == WorktreeDiagnosisState::Unknown {
         report.scope = Some(StructuredPathWire::from_path(&path)?);
         report.evidence = Some(report.reason.clone());
