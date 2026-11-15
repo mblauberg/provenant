@@ -232,7 +232,10 @@ fn interrupted_terminal_collection_resumes_derived_cleanup() {
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
 
-    let directory = root.as_path().join("fabric/graphs").join(project.to_string());
+    let directory = root
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string());
     let prompt_blobs = || {
         std::fs::read_dir(&directory)
             .unwrap()

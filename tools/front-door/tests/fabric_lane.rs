@@ -342,7 +342,7 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
     drop(journal);
     let state = context.roots.state.clone();
     let project = context.identity.project;
-    let patch = json!({"schema_version":1,"expected_revision":0,"idempotency_key":"direct-edit","nodes":[{"id":"direct","use":"task","brief":"Direct"}]});
+    let patch = json!({"schema_version":1,"expected_revision":0,"idempotency_key":"direct-edit","nodes":[{"id":"direct","use":"task","prompt":"Direct"}]});
     let request = json!({"op":"edit","id":graph_id,"patch":patch});
     let result = provenant_cli::fabric::graph_relay::serve(
         &context,
@@ -408,7 +408,7 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
     std::fs::write(
         &path,
         serde_json::to_vec(
-            &json!({"schema_version":1,"expected_revision":1,"idempotency_key":"live-edit","nodes":[{"id":"next","use":"task","brief":"Next"}]}),
+            &json!({"schema_version":1,"expected_revision":1,"idempotency_key":"live-edit","nodes":[{"id":"next","use":"task","prompt":"Next"}]}),
         )?,
     )?;
     let path = path.to_str().ok_or("patch path")?;

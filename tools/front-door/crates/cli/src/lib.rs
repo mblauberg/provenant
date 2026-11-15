@@ -279,7 +279,11 @@ fn removed_spelling(argv: &[OsString]) -> Option<&'static Removed> {
     }
     REMOVED
         .iter()
-        .filter(|removed| removed.config_key.is_none() && removed.diagnostic_code.is_none())
+        .filter(|removed| {
+            removed.config_key.is_none()
+                && removed.diagnostic_code.is_none()
+                && removed.graph_field.is_none()
+        })
         .find(|removed| {
             words.len() >= removed.words.len()
                 && words
@@ -2254,6 +2258,7 @@ mod tests {
             REMOVED.iter().any(|removed| {
                 removed.config_key.is_none()
                     && removed.diagnostic_code.is_none()
+                    && removed.graph_field.is_none()
                     && removed.flag.is_none()
                     && removed.words.len() <= path.len()
                     && path

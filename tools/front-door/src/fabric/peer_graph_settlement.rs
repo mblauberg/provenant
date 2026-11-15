@@ -202,7 +202,7 @@ fn child_launch_refuses_credential_and_state_roots_at_the_host()
     for (name, root) in [("credential", credential), ("state", rig.state.clone())] {
         // The lane forwards the request; only the host decides access at launch.
         let child = factory.child_request(&serde_json::json!({
-            "op":"run", "document":{"use":"task", "brief":"Read requested root", "read_roots":[root]}
+            "op":"run", "document":{"use":"task", "prompt":"Read requested root", "read_roots":[root]}
         }))?;
         assert_eq!(
             child.launch.ok_or("missing child launch")?.node["read_roots"],

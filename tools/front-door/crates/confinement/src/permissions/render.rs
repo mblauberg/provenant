@@ -1192,6 +1192,21 @@ fn push_boundaries(
 ) -> Result<(), PermissionError> {
     let mut ancestors = std::collections::BTreeSet::new();
     let mut mandatory = mandatory_for_plan(plan, home, worktree)?;
+    // Every credential root the plan declares (a relocated Cargo home, for
+    // example) is denied explicitly, as the home-derived stores are.
+    for root in plan.credential_roots.entries() {
+        mandatory.add_declared_credential(
+            PathGrant {
+                path: root.path.clone(),
+                scope: match root.scope {
+                    provenant_core::CredentialScope::Exact => PathScope::Exact,
+                    provenant_core::CredentialScope::Subtree => PathScope::Subtree,
+                },
+            },
+            root.source.clone(),
+            root.kind.clone(),
+        )?;
+    }
     // Every declared authentication family is private, selected or otherwise.
     for root in profile
         .spec

@@ -389,7 +389,7 @@ fn live(
     // a fallback or spends a second attempt on the same route.
     let launch_error = factory.graph_document(json!({"op":"run","document":{
         "schema_version":2,"graph_id":name,"limits":{"continuations":0,"concurrency":1},
-        "nodes":[{"id":"smoke","use":"task","brief":PROMPT,"access":"read_only",
+        "nodes":[{"id":"smoke","use":"task","prompt":PROMPT,"access":"read_only",
             "on_stop":on_stop,"attempt":{"provider_timeout":settings.timeout_seconds.value},
             "route":{"adapter":row.model.adapter(),"model":row.model.model(),"account":row.account_key,"effort":row.effort}}]
     }}), budget, &cancel).err();

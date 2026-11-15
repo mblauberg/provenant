@@ -459,7 +459,7 @@ fn quota_stopped_task_and_composite_member_keep_the_same_lineage() -> Result {
     for writer in [false, true] {
         let mut lineages = Vec::new();
         for composite in [false, true] {
-            let mut task = json!({"id":"task", "use":"task", "brief":"do the work"});
+            let mut task = json!({"id":"task", "use":"task", "prompt":"do the work"});
             if writer {
                 task["access"] = json!("worktree_write");
                 task["worktree"] = json!("/fixture/parity-writer");

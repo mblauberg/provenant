@@ -4190,10 +4190,10 @@ fn graph_node_reads_full_upstream_result_from_its_inputs_directory() -> Result {
         rig.project.join("graph.json"),
         serde_json::to_vec(
             &json!({"schema_version":1,"graph_id":"full-inputs","nodes":[
-                {"id":"producer","use":"task","brief":"fixture large result","access":"read_only","route":route},
-                {"id":"Review","use":"task","brief":"fixture case result Review","access":"read_only","route":route},
-                {"id":"review","use":"task","brief":"fixture case result review","access":"read_only","route":route},
-                {"id":"consumer","use":"task","brief":"fixture read upstream file","access":"read_only",
+                {"id":"producer","use":"task","prompt":"fixture large result","access":"read_only","route":route},
+                {"id":"Review","use":"task","prompt":"fixture case result Review","access":"read_only","route":route},
+                {"id":"review","use":"task","prompt":"fixture case result review","access":"read_only","route":route},
+                {"id":"consumer","use":"task","prompt":"fixture read upstream file","access":"read_only",
                  "after":["producer","Review","review"],
                  "inputs":[{"node":"producer","outputs":["result"]},
                            {"node":"Review","outputs":["result"]},
@@ -4414,7 +4414,7 @@ fn graph_codex_commit_source_starts_and_returns_a_verdict() -> Result {
         &rig,
         "codex-commit-source",
         json!({
-            "id":"review", "use":"task", "brief":"fixture commit source verdict",
+            "id":"review", "use":"task", "prompt":"fixture commit source verdict",
             // This probe asserts the immutable source view's denied writes.
             "attempt":{"sandbox":"on"},
             "access":"read_only", "source":{"type":"commit", "commit":head},

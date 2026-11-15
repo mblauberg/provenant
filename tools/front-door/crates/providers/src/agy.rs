@@ -144,7 +144,10 @@ fn read_identity_probe(
     directory: &std::path::Path,
 ) -> Option<IdentityProbe> {
     let bytes = root
-        .read_bounded(identity_file(directory).as_ref(), IDENTITY_RECORD_BYTES as u64)
+        .read_bounded(
+            identity_file(directory).as_ref(),
+            IDENTITY_RECORD_BYTES as u64,
+        )
         .ok()?;
     provenant_records::decode(
         bytes.as_slice(),

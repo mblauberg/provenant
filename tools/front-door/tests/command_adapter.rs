@@ -116,7 +116,7 @@ fn dispatch_with(
 ) -> Result<Value> {
     let document = rig.root.join(format!("{name}.json"));
     let mut graph = json!({"schema_version":2,"graph_id":name,"nodes":[{
-        "id":"command", "use":"task", "brief":"Ignore this prompt: it cannot change command argv.",
+        "id":"command", "use":"task", "prompt":"Ignore this prompt: it cannot change command argv.",
         "access":"read_only", "route":{"adapter":"command","name":name},
         "attempt":{"provider_timeout":timeout}
     }]});
@@ -204,7 +204,7 @@ fn command_task_feeds_an_attemptless_verdict_gate() -> Result {
         rig.project.join("graph.json"),
         serde_json::to_vec(&json!({
             "schema_version":2,"graph_id":"command-gate","nodes":[
-                {"id":"check","use":"task","access":"read_only","brief":"Run the configured check.","route":{"adapter":"command","name":"gate-check"}},
+                {"id":"check","use":"task","access":"read_only","prompt":"Run the configured check.","route":{"adapter":"command","name":"gate-check"}},
                 {"id":"accept","kind":"gate","access":"read_only","depends_on":["check"],
                  "inputs":[{"node":"check","outputs":["verdict"]}],
                  "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}

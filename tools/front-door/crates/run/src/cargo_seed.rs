@@ -836,7 +836,10 @@ mod tests {
             &env,
             &provenant_core::CancelToken::new(),
         );
-        assert_eq!((outcome.status.as_str(), outcome.reason.as_str()), ("seeded", "cloned"));
+        assert_eq!(
+            (outcome.status.as_str(), outcome.reason.as_str()),
+            ("seeded", "cloned")
+        );
         assert!(cache.join("target").is_dir());
         // A refusal records its code and nothing from the environment.
         let refused = [("RUSTC".into(), "/secret/rustc".into())];

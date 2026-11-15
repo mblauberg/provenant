@@ -16,7 +16,7 @@ fn spawn_graph_command(
     fs::write(
         &file,
         serde_json::to_vec(&serde_json::json!({
-            "graph_id":id, "nodes":[{"id":"writer", "use":"task", "brief":"reply OK",
+            "graph_id":id, "nodes":[{"id":"writer", "use":"task", "prompt":"reply OK",
                 "access":"worktree_write", "worktree":worktree, "delivery":delivery,
                 "route":{"adapter":"codex", "model":"codex/gpt-6-luna", "account":"preparation"}}]
         }))?,

@@ -180,11 +180,8 @@ pub fn worker(state: &Path) -> Option<WorkerRecord> {
 fn stored_worker(state: &Path) -> Option<StoredWorkerRecord> {
     let dir = Directory::open_anchor(&state.join("provider-updates")).ok()?;
     decode_stored(
-        &dir.read_stable(
-            std::ffi::OsStr::new(WORKER_RECORD),
-            STORED_RECORD_BYTES,
-        )
-        .ok()?,
+        &dir.read_stable(std::ffi::OsStr::new(WORKER_RECORD), STORED_RECORD_BYTES)
+            .ok()?,
     )
 }
 
