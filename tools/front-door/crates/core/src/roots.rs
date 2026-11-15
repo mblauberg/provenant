@@ -561,10 +561,11 @@ fn protected_roots(inputs: &RootInputs) -> Vec<ProtectedRoot> {
 }
 
 /// One decision for both lexical and bound paths. Containing a boundary is as
-/// unsafe as being inside it for data integrity. Lane checkouts and provider
-/// homes live under the state root, so containing Git metadata or a credential
-/// store is expected; only a state root inside one is refused. Advisory
-/// overlaps always warn and proceed.
+/// unsafe as being inside it for data integrity. Lane checkouts, provider
+/// homes and installed releases live under the state root, so containing Git
+/// metadata, a credential store or an advisory location is expected; only a
+/// state root inside one is refused, and a state root inside an advisory
+/// location warns and proceeds.
 fn classify(candidate: &Path, protected: &[ProtectedRoot]) -> Result<Vec<RootWarning>, RootError> {
     let mut warnings = Vec::new();
     for root in protected {
@@ -595,7 +596,7 @@ fn classify(candidate: &Path, protected: &[ProtectedRoot]) -> Result<Vec<RootWar
 fn contained_is_expected(boundary: Option<RootBoundary>) -> bool {
     matches!(
         boundary,
-        Some(RootBoundary::GitIsolation | RootBoundary::Credentials)
+        None | Some(RootBoundary::GitIsolation | RootBoundary::Credentials)
     )
 }
 
@@ -714,6 +715,17 @@ mod tests {
             warning.protected == Path::new("/fixture/project/.claude")
                 && warning.source == "project-local agent configuration: .claude"
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn installed_release_assets_under_the_state_root_do_not_warn() -> Result<(), RootError> {
+        let state = Path::new("/fixture/home").join(DEFAULT_STATE_SUFFIX);
+        let input = RootInputs::new(
+            "/fixture/home".into(),
+            state.join("releases/sha256:fixture"),
+        );
+        assert!(input.resolve(&Resolver)?.state.warnings().is_empty());
         Ok(())
     }
 
