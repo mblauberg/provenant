@@ -95,8 +95,8 @@ error. Reports name each setting with its source.
 
 Wait budgets clamp to `domains.wait.max_timeout_seconds`, warning once with
 the effective limit and source when exceeded. A larger request remains a
-blocking wait. Parsing retains the request so configured limits take effect
-in one place.
+blocking wait. Parsing retains the request so configured limits, including
+maxima above the default, take effect in one place.
 - Why: an oversized budget must not turn a blocking call into a retry loop.
 
 With `--json`, wait emits JSONL events followed by a terminal command-result
