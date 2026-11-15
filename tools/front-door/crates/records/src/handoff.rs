@@ -680,7 +680,7 @@ mod tests {
         assert!(Handoff::from_result(&result).is_err());
         assert_eq!(Handoff::from_turns(&result, &ends), Ok(stop.clone()));
         let parsed = Handoff::from_turns_report(&result, &ends);
-        assert_eq!(parsed.handoff, Ok(Some(stop.clone())));
+        assert_eq!(parsed.handoff, Ok(stop.clone()));
         assert!(!parsed.trailing_verdict_tolerated);
         // Acceptance 4: a later valid declaration wins.
         let (result, ends) = turns(&[(&report, true), ("Ack.", false), (&done, false)]);
