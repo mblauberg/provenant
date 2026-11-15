@@ -330,7 +330,7 @@ fn zero_tokens_need_no_price_but_subscription_is_never_assumed_free() {
 
 #[test]
 fn usd_formatter_covers_microdollar_values() {
-    for (microdollars, expected) in [(0, "0.000000"), (1, "0.000001"), (2_000_000, "2.000000")] {
+    for (microdollars, expected) in [(0u64, "0.000000"), (1, "0.000001"), (2_000_000, "2.000000")] {
         let numerator = u128::from(microdollars) * 1_000_000;
         let money = crate::reducer::Money::from_numerator(numerator).unwrap();
         assert_eq!(money.usd, expected);

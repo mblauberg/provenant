@@ -45,7 +45,7 @@ fn decode_claude(
         let Some(used) = value.get("utilization").and_then(basis_points) else {
             continue;
         };
-        windows.push(QuotaWindow {
+        windows.push(QuotaWindow { extra: Default::default(),
             pool: name.to_owned(),
             used_basis_points: used,
             window_seconds: Some(if name == "five_hour" { 18_000 } else { 604_800 }),
@@ -101,7 +101,7 @@ fn decode_claude(
             } else {
                 unique_pool(windows, pool)
             };
-            let row = QuotaWindow {
+            let row = QuotaWindow { extra: Default::default(),
                 pool: pool.clone(),
                 used_basis_points: used,
                 window_seconds: limit.get("window_minutes").and_then(minutes_to_seconds).or(

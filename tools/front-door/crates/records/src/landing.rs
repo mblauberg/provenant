@@ -74,7 +74,6 @@ pub struct DependencyEdge {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Subscriber {
     pub run_id: Option<String>,
     pub node_id: Option<String>,
@@ -82,7 +81,6 @@ pub struct Subscriber {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LandRequest {
     pub members: Vec<LandMember>,
     pub authority: Authority,
@@ -178,7 +176,6 @@ impl std::fmt::Display for LandingId {
 
 /// Inputs that determine which independent approvals a landing requires.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ReviewScope {
     pub project: Option<provenant_core::ProjectId>,
     pub exempt_patterns: Vec<String>,
@@ -249,7 +246,7 @@ pub enum Completion {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Plan {
     pub dependencies: Dependencies,
     pub candidate: CandidateKind,
@@ -278,7 +275,7 @@ pub enum CapabilityState {
 
 /// Capabilities are an optional, repository-scoped probe. Missing entries mean unknown.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Capabilities {
     pub repository: Option<String>,
     pub values: BTreeMap<ForgeCapability, CapabilityState>,
@@ -316,7 +313,6 @@ pub enum Execution {
 
 /// Repository publisher. The full pending intent is supplied as JSON on stdin.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RepositoryCommand {
     pub argv: Vec<String>,
     pub unknown_exit_code: i64,
@@ -393,7 +389,7 @@ declare_strategies! {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Compose {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<Dependencies>,
@@ -522,7 +518,6 @@ impl std::fmt::Display for Unavailable {
 impl std::error::Error for Unavailable {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ResolvedPlan {
     pub strategy: Strategy,
     pub plan: Plan,
@@ -795,7 +790,6 @@ pub struct ConsumerCursor {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LandingRecord {
     pub schema_version: u32,
     pub id: LandingId,

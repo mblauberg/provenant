@@ -725,7 +725,7 @@ fn unavailable_account_moves_selection_to_an_alternate_account()
     skipped.sort_by(|a, b| a.account.cmp(&b.account));
     assert_eq!(
         skipped,
-        ["review", "work"].map(|account| provenant_records::SkippedAccount {
+        ["review", "work"].map(|account| provenant_records::SkippedAccount { extra: Default::default(),
             account: account.into(),
             reason: RouteExclusionReason::ProviderRefused,
         })

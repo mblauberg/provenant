@@ -353,7 +353,7 @@ const PENDING: &str = "summary-pending.json";
 /// Worst case for a journal: two checkpoint texts (the replaced and the new)
 /// as JSON strings, where one control character escapes to six bytes, plus the
 /// revision chain, discovery record and receipt.
-const PENDING_LIMIT: u64 = 2 * super::CHECKPOINT_LIMIT * 6 + 1024 * 1024;
+pub(super) const PENDING_LIMIT: u64 = 2 * super::CHECKPOINT_LIMIT * 6 + 1024 * 1024;
 /// Receipts hold a summary (at most an 8 KiB header, escaped) each.
 const RECEIPTS_LIMIT: u64 = RECEIPTS_KEPT as u64 * (8192 * 6 + 16 * 1024);
 const RECEIPTS: &str = "summary-receipts.json";

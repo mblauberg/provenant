@@ -34,6 +34,7 @@ pub fn validate_availability(
 
 /// Composition supplies a model-scoped, current quota observation. No unknown or
 /// stale observation can freshly exhaust a model or another account/pool.
+#[derive(Clone)]
 pub struct QuotaObservation {
     pub model: ModelId,
     pub snapshot: QuotaSnapshot,

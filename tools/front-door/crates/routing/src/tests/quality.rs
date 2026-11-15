@@ -42,7 +42,7 @@ fn catalogue_pool_members_each_have_a_prior_and_stay_eligible()
         .pools
         .iter()
         .flat_map(|(pool, entries)| {
-            entries.iter().map(|member| RoutePrior {
+            entries.iter().map(move |member| RoutePrior {
                 extra: Default::default(),
                 model: member.model.clone(),
                 pool: pool.clone(),

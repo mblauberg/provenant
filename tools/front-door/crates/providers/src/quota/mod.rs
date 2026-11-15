@@ -89,7 +89,7 @@ fn decode_source(
     decode_payload(payload, &mut windows, &mut details)?;
 
     let status = status(adapter, payload, &windows, details.as_ref());
-    let snapshot = QuotaSnapshot {
+    let snapshot = QuotaSnapshot { extra: Default::default(),
         schema_version: 1,
         account: account.clone(),
         revision: 0,

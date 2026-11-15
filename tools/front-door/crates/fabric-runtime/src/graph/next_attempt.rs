@@ -885,11 +885,11 @@ mod tests {
         // A quota refusal before launch names every account it passed over
         // with its own reason, instead of claiming the allowance is spent.
         let skipped = [
-            provenant_records::SkippedAccount {
+            provenant_records::SkippedAccount { extra: Default::default(),
                 account: "agy-work".into(),
                 reason: provenant_records::RouteExclusionReason::ProviderRefused,
             },
-            provenant_records::SkippedAccount {
+            provenant_records::SkippedAccount { extra: Default::default(),
                 account: "agy-second".into(),
                 reason: provenant_records::RouteExclusionReason::StaleAvailability,
             },

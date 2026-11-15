@@ -55,7 +55,7 @@ fn decode_cursor(
         (limit > 0.0).then_some((used / limit) * 100.0)
     });
     if let Some(used) = usage.and_then(basis_points_from_percent) {
-        windows.push(QuotaWindow {
+        windows.push(QuotaWindow { extra: Default::default(),
             pool: "billing_cycle".into(),
             used_basis_points: used,
             window_seconds: payload

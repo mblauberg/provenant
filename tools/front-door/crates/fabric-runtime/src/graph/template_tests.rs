@@ -1524,8 +1524,4 @@ fn graph_node_accepts_prompt_and_refuses_removed_brief_spelling() {
         "id":"work", "access":"read_only", "brief":"Do the work"
     }));
     assert!(alias.is_err());
-    assert_eq!(
-        provenant_config::removed::graph_field_replacement("brief"),
-        Some("prompt")
-    );
 }

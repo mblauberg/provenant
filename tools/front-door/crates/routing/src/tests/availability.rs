@@ -470,8 +470,8 @@ fn availability_access_and_scoped_quota_are_independent_gates()
             None,
         ),
     ];
-    for (scope, observations, expected) in cases {
-        context.quota = &observations;
+    for (scope, observations, expected) in &cases {
+        context.quota = observations;
         assert_eq!(
             reason(&resolve(&query, &context)?),
             expected.as_ref(),

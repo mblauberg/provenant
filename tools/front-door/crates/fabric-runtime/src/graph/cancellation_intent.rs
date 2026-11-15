@@ -8,14 +8,12 @@ use std::{ffi::OsStr, io::ErrorKind};
 const MAX_REQUEST_BYTES: u64 = super::MAX_CHECKPOINT_BYTES;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RequestSet {
     schema_version: u8,
     requests: Vec<CancellationRequest>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct CancellationRequest {
     id: String,
     graph_id: String,

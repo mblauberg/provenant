@@ -28,9 +28,6 @@ pub const TEMPLATE_FIELD: &str = "template";
 /// decodes as a known optional field or fails its known type; an unknown field
 /// instead survives in `extra`.
 fn compiled_field(field: &str) -> bool {
-    if provenant_config::removed::graph_field_replacement(field).is_some() {
-        return false;
-    }
     let mut probe = serde_json::json!({"id":"probe", "access":"read_only"});
     probe[field] = Value::Null;
     match serde_json::from_value::<GraphNode>(probe) {
@@ -45,9 +42,6 @@ fn check_extensions(node: &Map<String, Value>) -> Result<(), String> {
             .as_object()
             .ok_or("node extensions must be a table")?;
         for field in fields.keys() {
-            if let Some(replacement) = provenant_config::removed::graph_field_replacement(field) {
-                return Err(format!("node field {field} is removed; use {replacement}"));
-            }
             if compiled_field(field) || template_syntax(field) || field == "extensions" {
                 return Err(format!("reserved node field {field} in extensions"));
             }
@@ -120,11 +114,6 @@ fn check_authored_fields(
 ) -> Result<(), String> {
     check_extensions(node).map_err(|error| format!("node {stage}: {error}"))?;
     for field in node.keys() {
-        if let Some(replacement) = provenant_config::removed::graph_field_replacement(field) {
-            return Err(format!(
-                "node {stage}: field {field} is removed; use {replacement}"
-            ));
-        }
         // This control selects findings collection for review-panel instances.
         if field != "extensions"
             && !matches!(field.as_str(), "after" | "tier")

@@ -7,7 +7,7 @@ use provenant_quota::{
 const NOW: i64 = 1_792_800_000;
 
 fn scope(adapter: &str) -> AccountScope {
-    AccountScope {
+    AccountScope { extra: Default::default(),
         adapter: adapter.into(),
         account_key: format!("{adapter}-account"),
         label: format!("{adapter}-label"),

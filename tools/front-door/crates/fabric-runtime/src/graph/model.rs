@@ -541,14 +541,6 @@ fn graph_node_extra<'de, D: serde::Deserializer<'de>>(
             "auto_continue_no_work was removed; use on_stop",
         ));
     }
-    if let Some((field, replacement)) = extra.iter().find_map(|(field, _)| {
-        provenant_config::removed::graph_field_replacement(field)
-            .map(|replacement| (field, replacement))
-    }) {
-        return Err(serde::de::Error::custom(format!(
-            "graph node field `{field}` is removed; use `{replacement}`"
-        )));
-    }
     Ok(extra)
 }
 
@@ -966,7 +958,7 @@ pub enum NodeKind {
 
 /// Immutable review subject or the commit a later writer must start from.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum SourceBinding {
     Commit {
         commit: String,
@@ -1114,7 +1106,6 @@ pub struct GateResult {
 
 /// A required edge removed because its producer is skipped.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RemovedRequirement {
     pub consumer: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1149,7 +1140,6 @@ pub enum OutputKind {
 
 /// The structured repair-scope claim produced by a principal report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RepairDesign {
     pub within_scope: bool,
     pub one_way_door: bool,
@@ -1178,7 +1168,6 @@ pub enum RepairItemStatus {
 
 /// A retry allowance retained with the node's history across automatic resets.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RetryAllowance {
     pub retries: u8,
     pub origin: String,
@@ -1186,7 +1175,6 @@ pub struct RetryAllowance {
 
 /// Content growth evidence retained only for the exact measured commits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RepairGrowth {
     pub before: String,
     pub after: String,
@@ -1252,7 +1240,7 @@ pub struct NodeOutputs {
 
 /// Durable result of a decide request. `Unanswered` structurally carries no option.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DecideOutcome {
     Answered { option: String, actor: String },
     AnsweredByDefault { option: String },
@@ -1434,14 +1422,12 @@ pub enum AccessMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PendingWriterProvisioning {
     pub path: String,
     pub source: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CancellationRequestReceipt {
     pub request_id: String,
 }
@@ -2273,7 +2259,7 @@ pub struct MaterialisedInputs {
 /// Host polling policy. Defaults observe pending gates once per tick; hosts
 /// can select a longer exponential backoff independently for each gate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct CiPollBackoff {
     pub initial_seconds: u64,
     pub max_seconds: u64,

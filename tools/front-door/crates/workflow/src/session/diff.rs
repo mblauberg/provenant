@@ -139,7 +139,7 @@ pub fn unified(old: &str, new: &str, old_label: &str, new_label: &str) -> String
 
 #[cfg(test)]
 mod tests {
-    use super::unified;
+    use super::{TABLE_CELLS, unified};
 
     #[test]
     fn identical_text_has_no_diff() {
@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn an_unalignable_middle_is_a_replacement() {
-        let mut middle_len = 0;
+        let mut middle_len: usize = 0;
         while (middle_len + 1).saturating_mul(middle_len + 1) <= TABLE_CELLS {
             middle_len += 1;
         }

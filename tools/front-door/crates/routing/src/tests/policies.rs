@@ -360,7 +360,7 @@ fn opus_advisory_uses_the_applied_pool_tier() -> Result<(), Box<dyn std::error::
         let route = resolve(&request(warn_model.as_str())?, &context)?;
         let advisory = config
             .opus_writer_advisory(&catalogue, &route)
-            .ok_or_else(|| format!("missing writer advisory for {warn_model}"))?;
+            .ok_or_else(|| format!("missing writer advisory for {}", warn_model.as_str()))?;
         assert!(advisory.contains(warn_model.as_str()), "{advisory}");
         let quiet = RoutingConfig {
             suppress_opus_writer_warning: true,

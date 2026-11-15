@@ -4,7 +4,7 @@ use provenant_records::ExtraFields;
 use serde::{Deserialize, Serialize};
 
 /// Identity of the route whose readiness was observed.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadinessScope {
     #[serde(flatten)]
     pub extra: ExtraFields,
@@ -808,12 +808,12 @@ mod tests {
         let decoded = ReadinessFile::decode(&bytes, "fixture", "account")?;
         let encoded = provenant_records::encode(&decoded)?;
         let round_trip: ReadinessFile =
-            provenant_records::decode(&encoded, provenant_records::Limits::CONFIG)?;
+            provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG)?;
         assert_eq!(serde_json::to_value(&round_trip)?, value);
         for &state in ReadinessState::ALL {
             let encoded = provenant_records::encode(&state)?;
             let decoded: ReadinessState =
-                provenant_records::decode(&encoded, provenant_records::Limits::CONFIG)?;
+                provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG)?;
             assert_eq!(decoded, state);
         }
         Ok(())
@@ -842,7 +842,7 @@ mod tests {
         for &reason in ReadinessReason::ALL {
             let encoded = provenant_records::encode(&reason).unwrap();
             let decoded: ReadinessReason =
-                provenant_records::decode(&encoded, provenant_records::Limits::CONFIG).unwrap();
+                provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG).unwrap();
             assert_eq!(decoded, reason);
             let expected = unavailable_projection(reason);
             let mut read = ReadinessRead::unknown(reason);

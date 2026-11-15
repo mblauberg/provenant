@@ -529,7 +529,7 @@ mod tests {
         value["capacity_cooldowns"][0]["account"]["label"] = serde_json::json!("renamed");
         let encoded = provenant_records::encode(&record).unwrap();
         let round_trip: AccountRecord =
-            provenant_records::decode(&encoded, provenant_records::Limits::CONFIG).unwrap();
+            provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG).unwrap();
         assert_eq!(serde_json::to_value(&round_trip).unwrap(), value);
     }
 

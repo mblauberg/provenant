@@ -888,8 +888,8 @@ mod tests {
 
         assert_extra_round_trip(revision, json_limits(MANIFEST_LIMIT));
         assert_extra_round_trip(&manifest, json_limits(MANIFEST_LIMIT));
-        assert_extra_round_trip(&plan, json_limits(PENDING_LIMIT));
-        assert_extra_round_trip(&saved_record, json_limits(PENDING_LIMIT));
+        assert_extra_round_trip(&plan, json_limits(summary::PENDING_LIMIT));
+        assert_extra_round_trip(&saved_record, json_limits(summary::PENDING_LIMIT));
 
         let manifest_path = path(&root, project, "chair").join(MANIFEST);
         let mut stored: serde_json::Value =
@@ -2407,7 +2407,7 @@ mod tests {
             HookEvent::SessionStart,
             &input[..],
             &clock,
-            DurationMicros::from_micros(mtime),
+            DurationMicros::from_micros(mtime as u64),
         );
         let context = context(&response);
         assert!(context.contains(chair_marker));
@@ -2592,7 +2592,7 @@ mod tests {
                 UtcMicros::from_micros(0)
             }
             fn mono_now(&self) -> MonoTime {
-                MonoTime::from_micros(self.0.load(Ordering::SeqCst))
+                MonoTime::from_micros(self.0.load(Ordering::SeqCst) as u64)
             }
             fn wait_until(&self, _deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
                 Ok(())

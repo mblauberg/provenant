@@ -76,7 +76,7 @@ fn decode_opencode(payload: &Value, windows: &mut Vec<QuotaWindow>) {
             continue;
         };
         let pool = unique_pool(windows, pool.to_owned());
-        windows.push(QuotaWindow {
+        windows.push(QuotaWindow { extra: Default::default(),
             pool,
             used_basis_points: used,
             window_seconds: row

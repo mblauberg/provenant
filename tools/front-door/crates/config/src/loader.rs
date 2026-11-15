@@ -2559,7 +2559,7 @@ mod warning_tests {
             .iter()
             .find(|warning| warning.rule == "unknown_key")
             .ok_or("missing current unknown-key warning")?;
-        assert!(warning.path.as_path().ends_with("config.toml"));
+        assert!(warning.path.to_relative_path().unwrap().as_path().ends_with("config.toml"));
         assert!(warning.line > 0);
         assert!(first_warning(
             roots.state.as_path(),

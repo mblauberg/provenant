@@ -24,7 +24,6 @@ const ID_BYTES: usize = 64;
 
 /// A document launch retains its node overrides and inline template definitions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ChildLaunch {
     pub node: Value,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -33,7 +32,6 @@ pub struct ChildLaunch {
 
 /// A lane's request to add one child to its graph.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ChildRequest {
     /// Local ID; the node joins as `parent--id`.
     pub id: String,
@@ -116,7 +114,6 @@ fn task() -> String {
 
 /// What the host returns to the lane for an admitted child.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ChildReceipt {
     pub graph_id: String,
     pub parent: String,

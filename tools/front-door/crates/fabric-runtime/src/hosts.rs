@@ -320,7 +320,6 @@ impl From<MutationResult> for CoordinationResult {
 }
 /// Typed launch facts for a graph node submitted to a peer host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GraphSubmitContext {
     pub launch_actor: ActorId,
     pub attempt: crate::graph::AttemptSpec,
@@ -332,7 +331,6 @@ pub struct GraphSubmitContext {
 
 /// Graph identity for a read of its accepted peer receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GraphReceiptContext {
     pub launch_actor: ActorId,
     pub origin_work_key: provenant_records::WorkKey,
@@ -340,7 +338,6 @@ pub struct GraphReceiptContext {
 
 /// Graph identity for a receiver-owned cancellation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GraphCancelContext {
     pub launch_actor: ActorId,
 }

@@ -81,7 +81,7 @@ pub struct GithubPolicy {
     #[serde(default)]
     pub deny_labels: Vec<String>,
     #[serde(flatten)]
-    extra: provenant_records::ExtraFields,
+    pub extra: provenant_records::ExtraFields,
 }
 
 fn decode_policy(bytes: &[u8]) -> Result<GithubPolicy, ConfigError> {

@@ -274,7 +274,7 @@ mod tests {
         for &kind in MarkerKind::ALL {
             let encoded = provenant_records::encode(&kind).unwrap();
             let decoded: MarkerKind =
-                provenant_records::decode(&encoded, provenant_records::Limits::CONFIG).unwrap();
+                provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG).unwrap();
             assert_eq!(decoded, kind);
         }
     }

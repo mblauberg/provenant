@@ -1,4 +1,5 @@
 use super::*;
+use provenant_core::{TimeError, WallTime};
 use provenant_test_support::{IdentityPathResolver, test_roots};
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -287,7 +288,7 @@ fn session_identities_split_usage_when_a_config_directory_rotates() -> Result {
     let dirs = [ConfigDir {
         path: f.dir("rotating"),
     }];
-    let report = ingest_with_clock(
+    let report = ingest(
         &f.roots,
         &Request {
             dirs: &dirs,
@@ -651,7 +652,7 @@ fn an_expired_deadline_reads_nothing_and_keeps_the_store() -> Result {
         .iter()
         .map(|(_, dir)| ConfigDir { path: f.dir(dir) })
         .collect();
-    let report = ingest(
+    let report = ingest_with_clock(
         &f.roots,
         &Request {
             dirs: &dirs,

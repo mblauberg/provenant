@@ -540,3 +540,19 @@ fn typed_route_selection_roundtrips_and_rejects_malformed_fields() {
     resolved["diagnostics"]["account_load"]["headroom_basis_points"] = json!("unknown");
     assert!(serde_json::from_value::<ResolvedRoute>(resolved).is_err());
 }
+
+/// Stored and host-exchanged records decode when a later 2.x writer adds a
+/// field, so rollback and mixed-version peers keep reading them.
+#[test]
+fn stored_records_decode_with_a_future_field() -> TestResult {
+    let mut port = json!({"argv":["true"],"exit_codes":{"success":[0],"unknown":[2],"other":"refused"}});
+    port["future_field"] = json!(1);
+    port["exit_codes"]["future_field"] = json!(1);
+    let decoded: ports::PortCommand = serde_json::from_value(port)?;
+    assert_eq!(decoded.argv, ["true"]);
+    let mut publisher = json!({"argv":["publish"],"unknown_exit_code":3});
+    publisher["future_field"] = json!({"nested":true});
+    let decoded: landing::RepositoryCommand = serde_json::from_value(publisher)?;
+    assert_eq!(decoded.unknown_exit_code, 3);
+    Ok(())
+}

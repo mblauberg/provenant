@@ -618,7 +618,7 @@ mod tests {
         let decoded = AccountRecord::decode(&bytes)?;
         let encoded = provenant_records::encode(&decoded)?;
         let round_trip: AccountRecord =
-            provenant_records::decode(&encoded, provenant_records::Limits::CONFIG)?;
+            provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG)?;
         assert_eq!(serde_json::to_value(&round_trip)?, value);
         round_trip.validate()?;
         let observed = &round_trip.credential_metadata[0];

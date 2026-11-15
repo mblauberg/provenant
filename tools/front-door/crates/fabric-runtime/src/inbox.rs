@@ -196,7 +196,6 @@ pub fn locate_request(
 
 /// Verified provenance for a graph attempt that is steered across hosts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GraphSteerContext {
     pub launch_actor: ActorId,
     pub launch_operation: OperationId,

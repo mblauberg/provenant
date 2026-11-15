@@ -1054,7 +1054,7 @@ impl RunStore {
         let policy = record
             .limits
             .as_ref()
-            .and_then(|limits| limits.budget_policy)
+            .and_then(|limits| limits.budget_policy.clone())
             .unwrap_or_default();
         let remaining = budget_ceiling(budget.value, policy.grace)
             .saturating_sub(crate::token_budget::used(&record.usage).unwrap_or(budget.value));
@@ -6536,7 +6536,7 @@ fn soft_budget_wrap_up(record: &AttemptRecord, usage: &UsageRecord) -> bool {
     let Some(budget) = &limits.token_budget else {
         return false;
     };
-    let policy = limits.budget_policy.unwrap_or_default();
+    let policy = limits.budget_policy.clone().unwrap_or_default();
     policy.action == provenant_records::BudgetAction::WrapUp
         && crate::token_budget::used(usage).is_some_and(|used| {
             used > budget.value && used < budget_ceiling(budget.value, policy.grace)

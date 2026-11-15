@@ -65,7 +65,7 @@ pub fn lane_limits(
             LimitStrength::Default,
         )),
     };
-    let mut limits = LaneLimits {
+    let mut limits = LaneLimits { extra: Default::default(),
         token_budget,
         budget_policy: writer.then_some(budget_policy),
         // Wrap-up must spend its remaining allowance in the same session;

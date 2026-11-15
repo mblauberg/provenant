@@ -137,7 +137,7 @@ impl LiveQuota {
             {
                 return Err(QuotaError::Invalid("absolute identity directory"));
             }
-            let scope = AccountScope {
+            let scope = AccountScope { extra: Default::default(),
                 adapter: registration.adapter.clone(),
                 account_key: registration.key.clone(),
                 label: registration.label.clone(),
@@ -628,7 +628,7 @@ mod tests {
             .command("unused-provider", &[], None, None, quota.now() + 60, 1)
             .unwrap_err();
         let account = Account {
-            scope: AccountScope {
+            scope: AccountScope { extra: Default::default(),
                 adapter: "agy".into(),
                 account_key: "agy-test".into(),
                 label: "test".into(),
@@ -721,7 +721,7 @@ mod tests {
             if quota_probe {
                 live.executor = Some(Box::new(executor));
                 let account = Account {
-                    scope: AccountScope {
+                    scope: AccountScope { extra: Default::default(),
                         adapter: "agy".into(),
                         account_key: key,
                         label: "test".into(),
@@ -806,7 +806,7 @@ mod tests {
         let now = live.now();
         let mut stale = AccountRecord::empty(account.scope.clone());
         stale.last_attempt_unix_seconds = Some(now);
-        stale.claim = Some(provenant_quota::RefreshClaim {
+        stale.claim = Some(provenant_quota::RefreshClaim { extra: Default::default(),
             token: "switch".into(),
             deadline_unix_seconds: now + provenant_quota::schedule::TICK_BUDGET_SECONDS,
         });
@@ -911,7 +911,7 @@ mod tests {
         let now = live.now();
         let mut stale = AccountRecord::empty(account.scope.clone());
         stale.last_attempt_unix_seconds = Some(now);
-        stale.claim = Some(provenant_quota::RefreshClaim {
+        stale.claim = Some(provenant_quota::RefreshClaim { extra: Default::default(),
             token: "refused-rebind".into(),
             deadline_unix_seconds: now + provenant_quota::schedule::TICK_BUDGET_SECONDS,
         });
@@ -1017,7 +1017,7 @@ mod tests {
             homes: homes.clone(),
         }));
         let account = |dir: &Path, email: &str| Account {
-            scope: AccountScope {
+            scope: AccountScope { extra: Default::default(),
                 adapter: "agy".into(),
                 account_key: format!(
                     "agy-{}",
@@ -1096,7 +1096,7 @@ mod tests {
         }));
         let email = "OAuth: authenticated successfully as second@example.test\n";
         let account = Account {
-            scope: AccountScope {
+            scope: AccountScope { extra: Default::default(),
                 adapter: "agy".into(),
                 account_key: format!("agy-{}", agy_fingerprint(email.as_bytes()).unwrap()),
                 label: "test".into(),
@@ -1319,7 +1319,7 @@ mod tests {
             credential_reads: credential_reads.clone(),
         }));
         let account = Account {
-            scope: AccountScope {
+            scope: AccountScope { extra: Default::default(),
                 adapter: "claude".into(),
                 account_key: crate::identity::fingerprint("selected@example.test").unwrap(),
                 label: "selected".into(),
@@ -1501,7 +1501,7 @@ mod tests {
                 renewed: (live.now() + 3600) * 1000,
             }));
             let account = Account {
-                scope: AccountScope {
+                scope: AccountScope { extra: Default::default(),
                     adapter: "claude".into(),
                     account_key: crate::identity::fingerprint(email).unwrap(),
                     label: label.into(),
@@ -1528,7 +1528,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let quota = quota(home.path(), home.path().join("missing"));
         let account = Account {
-            scope: AccountScope {
+            scope: AccountScope { extra: Default::default(),
                 adapter: "claude".into(),
                 account_key: "test".into(),
                 label: "test".into(),

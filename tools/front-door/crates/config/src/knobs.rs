@@ -279,13 +279,6 @@ pub(crate) fn nearest<'a>(name: &str, known: impl Iterator<Item = &'a str>) -> V
         .map(|(_, known)| known.to_owned())
         .collect()
 }
-/// Registry knob names closest to `name`.
-pub(crate) fn nearest_knobs(name: &str) -> Vec<String> {
-    registry().map_or_else(
-        |_| Vec::new(),
-        |registry| nearest(name, registry.knobs.keys().map(String::as_str)),
-    )
-}
 fn distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let mut row: Vec<usize> = (0..=b.len()).collect();

@@ -20,7 +20,6 @@ pub enum ExitDisposition {
 /// Success and unknown codes are declared. Other codes use the declared typed
 /// disposition, so a command never relies on an implicit exit-code guess.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CommandExitCodes {
     pub success: Vec<i32>,
     pub unknown: Vec<i32>,
@@ -28,7 +27,6 @@ pub struct CommandExitCodes {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PortCommand {
     pub argv: Vec<String>,
     pub exit_codes: CommandExitCodes,

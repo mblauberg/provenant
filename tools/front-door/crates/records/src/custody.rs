@@ -69,7 +69,6 @@ pub struct Subject {
 /// One checkout incarnation. The canonical path is an association, never its
 /// identity by itself; Git's private directory owns the immutable generation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WorktreeIdentity {
     pub path: String,
     pub generation: String,
@@ -211,7 +210,6 @@ pub struct LandedEvidence {
 
 /// A durable pointer to the archive captured before an explicit discard.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ArchiveProof {
     /// Archive directory id under the project's declared discard archive root.
     pub id: String,
@@ -232,7 +230,7 @@ impl ArchiveProof {
 /// Evidence accepted for a destructive removal. Explicit discard is an
 /// authority choice, not a claim that the subject landed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RemovalEvidence {
     Landing {
         evidence: LandedEvidence,
@@ -251,7 +249,7 @@ pub enum RemovalEvidence {
 /// Where a reference lives. Remote delivery is pinned to the push URL bound by
 /// the host; callers never infer it from the remote name.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RefEndpoint {
     Local,
     Remote {
@@ -274,7 +272,7 @@ pub enum RefOrigin {
 
 /// Endpoint-qualified identity for one logical reference in a project.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RefEndpointIdentity {
     Local,
     Remote {
@@ -287,7 +285,6 @@ pub enum RefEndpointIdentity {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RefIdentity {
     pub repository: ProjectId,
     pub endpoint: RefEndpointIdentity,
@@ -304,7 +301,6 @@ impl RefIdentity {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RefOwnership {
     pub repository: ProjectId,
     pub endpoint: RefEndpoint,
@@ -314,7 +310,6 @@ pub struct RefOwnership {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RefGeneration {
     pub identity: RefIdentity,
     pub generation: u64,
@@ -417,7 +412,7 @@ fn valid_worktree_path(path: &str) -> bool {
 /// The actor's durable decision. Explicit discard is distinct from a landing
 /// claim and remains fenced by the pinned reference generation and tip.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "action", rename_all = "snake_case")]
 pub enum RetirementDecision {
     /// Remove the reference and its associated worktrees after current landing
     /// evidence or a previously captured explicit-discard archive.
@@ -677,7 +672,6 @@ pub struct RetirementStepOutcome {
 
 /// Custody-owned intent and resumable outcomes for one reference generation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RetirementRecord {
     pub schema_version: u32,
     pub id: String,

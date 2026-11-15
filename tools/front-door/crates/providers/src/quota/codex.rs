@@ -193,7 +193,7 @@ fn decode_codex_group(group: &Value, prefix: &str, windows: &mut Vec<QuotaWindow
             .or_else(|| window.get("reset_at"))
             .and_then(unix_seconds);
         let pool = unique_pool(windows, format!("{prefix}{name}"));
-        windows.push(QuotaWindow {
+        windows.push(QuotaWindow { extra: Default::default(),
             pool,
             used_basis_points: used,
             window_seconds: window_duration_seconds(window),

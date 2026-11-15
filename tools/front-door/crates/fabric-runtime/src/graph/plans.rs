@@ -123,7 +123,6 @@ impl PlanSpec {
 /// document remains the digest authority, just as it does for loop rounds.
 /// The prior topology and progress retained by a container redo tombstone.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RetiredExpansion {
     pub reason: String,
     pub expansion: Expansion,

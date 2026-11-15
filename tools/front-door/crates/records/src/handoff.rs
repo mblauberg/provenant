@@ -130,7 +130,7 @@ pub enum SpecConcernStatus {
 
 /// Typed scope evidence attached by the host after settlement.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WriteScopeReport {
     Full {
         #[serde(deserialize_with = "scope_report_schema")]

@@ -155,7 +155,6 @@ pub enum DecideTimeoutSource {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DecideTimeout {
     pub seconds: u64,
     pub source: DecideTimeoutSource,

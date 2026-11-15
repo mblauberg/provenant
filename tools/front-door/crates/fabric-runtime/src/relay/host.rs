@@ -71,7 +71,6 @@ const MAX_BYTES: u64 = 1_048_576;
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct Request {
     pub tool: String,
     pub arguments: Value,

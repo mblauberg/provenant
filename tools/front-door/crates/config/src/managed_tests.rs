@@ -3799,7 +3799,7 @@ fn claude_settings_fixture_is_pretty_and_keeps_existing_key_order() {
         false,
     )
     .unwrap();
-    let text = fs::read_to_string(settings).unwrap();
+    let text = fs::read_to_string(&settings).unwrap();
     assert!(text.find("\"z\"").unwrap() < text.find("\"hooks\"").unwrap());
     let z_line = text.lines().find(|line| line.contains("z")).unwrap();
     let output_indent = z_line.len() - z_line.trim_start().len();

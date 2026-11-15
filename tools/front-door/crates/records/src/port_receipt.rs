@@ -27,7 +27,7 @@ pub enum PortCommandBackend {
 /// Retention is attached to each persisted receipt so collection uses the
 /// lifetime selected by its owner when it was written.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PortReceiptLifetime {
     /// Admission evidence waits for terminal attempt state and a proven
     /// release at the same lease epoch.
@@ -44,7 +44,6 @@ pub enum PortReceiptLifetime {
 /// One content-free command receipt. Stored data is decoded by the bounded
 /// records codec and this type accepts exactly its current schema version.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PortCommandReceipt {
     #[serde(deserialize_with = "schema_version")]
     schema_version: u16,

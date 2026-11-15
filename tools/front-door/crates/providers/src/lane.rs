@@ -419,6 +419,7 @@ impl Default for GhShim<'static> {
         static NO_POLICY: provenant_config::GithubPolicy = provenant_config::GithubPolicy {
             deny_verbs: Vec::new(),
             deny_labels: Vec::new(),
+            extra: std::collections::BTreeMap::new(),
         };
         Self {
             policy: &NO_POLICY,
@@ -1995,6 +1996,7 @@ mod tests {
         let policy = provenant_config::GithubPolicy {
             deny_verbs: vec!["release create".into()],
             deny_labels: vec![" ci ".into(), "".into(), "needs review".into()],
+            extra: Default::default(),
         };
         let counter = temp.path().join("count");
         fs::write(

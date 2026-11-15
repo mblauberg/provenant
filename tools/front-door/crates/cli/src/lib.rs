@@ -279,11 +279,6 @@ fn removed_spelling(argv: &[OsString]) -> Option<&'static Removed> {
     }
     REMOVED
         .iter()
-        .filter(|removed| {
-            removed.config_key.is_none()
-                && removed.diagnostic_code.is_none()
-                && removed.graph_field.is_none()
-        })
         .find(|removed| {
             words.len() >= removed.words.len()
                 && words
@@ -2222,11 +2217,7 @@ mod tests {
 
     #[test]
     fn each_removed_spelling_exits_2_with_one_line_naming_its_replacement() {
-        for removed in REMOVED.iter().filter(|removed| {
-            removed.config_key.is_none()
-                && removed.diagnostic_code.is_none()
-                && removed.graph_field.is_none()
-        }) {
+        for removed in REMOVED {
             let words = removed_words(removed);
             let ParseOutcome::Invalid { error, .. } = parse(words.iter().map(OsString::from))
             else {
@@ -2256,10 +2247,7 @@ mod tests {
         }
         fn retired_command(path: &[&str]) -> bool {
             REMOVED.iter().any(|removed| {
-                removed.config_key.is_none()
-                    && removed.diagnostic_code.is_none()
-                    && removed.graph_field.is_none()
-                    && removed.flag.is_none()
+                removed.flag.is_none()
                     && removed.words.len() <= path.len()
                     && path
                         .iter()
@@ -2326,9 +2314,7 @@ mod tests {
                     .strip_prefix("--")
                     .expect("fixture options use long spellings");
                 let exact = REMOVED.iter().any(|removed| {
-                    removed.config_key.is_none()
-                        && removed.diagnostic_code.is_none()
-                        && removed.flag == Some(name)
+                    removed.flag == Some(name)
                         && removed.words == path
                 });
                 if !has_option(current, &model, name) && !exact && !retired_command(&path) {

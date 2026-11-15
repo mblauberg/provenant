@@ -88,7 +88,6 @@ pub struct UserApproval {
 }
 /// A chair's recorded judgement; owner acceptance uses UserApproval separately.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ChairDowngrade {
     pub actor_id: ActorId,
     pub evidence: EvidenceRef,

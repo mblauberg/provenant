@@ -88,7 +88,7 @@ fn append_agy_buckets(buckets: Option<&Value>, pool: Option<&str>, windows: &mut
             _ => id.map(str::to_owned).unwrap_or_else(|| "quota".to_owned()),
         };
         let name = unique_pool(windows, name);
-        windows.push(QuotaWindow {
+        windows.push(QuotaWindow { extra: Default::default(),
             pool: name,
             used_basis_points: used,
             window_seconds: bucket
