@@ -12,6 +12,8 @@ procedure.
 - **Commands.** A removed spelling exits 2 and prints its replacement, so a failing script
   tells you what to change. There are no aliases. The complete migration list follows.
 
+### Removed commands
+
 <!-- REMOVED_CLI_START -->
 | Removed spelling | Replacement |
 |---|---|

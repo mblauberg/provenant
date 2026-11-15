@@ -37,11 +37,10 @@ def config(root, effective_config_json=None):
             return copy.deepcopy(DEFAULTS)
         with path.open() as stream:
             ports = json.load(stream)
-        names = set(BUILTIN_PORTS) - {"schema_version"}
+        # Only the verify port matters here; other ports evolve without this script.
         if (not isinstance(ports, dict)
                 or type(ports.get("schema_version")) is not int
-                or ports["schema_version"] != BUILTIN_PORTS["schema_version"]
-                or {name for name in ports if name != "schema_version"} != names):
+                or ports["schema_version"] != BUILTIN_PORTS["schema_version"]):
             raise ValueError("invalid port table shape")
         verify = ports.get("verify")
     if not isinstance(verify, dict):

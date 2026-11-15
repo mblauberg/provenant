@@ -47,6 +47,8 @@ A command is stable only when a stable entry on this page names it: today
 commands other than `process-tree`, is evolving. Human output, including printed
 next-step command lines, is evolving: scripts read `--json`. A removed command or option exits 2 with one line naming its replacement and is never an alias. The complete migration list follows.
 
+### Removed commands
+
 <!-- REMOVED_CLI_START -->
 | Removed spelling | Replacement |
 |---|---|
