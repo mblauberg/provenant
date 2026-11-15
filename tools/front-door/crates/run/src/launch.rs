@@ -245,9 +245,7 @@ pub struct Decoded {
 }
 impl Decoded {
     /// The lane's final handoff: the one rule for every provider.
-    pub fn handoff(
-        &self,
-    ) -> std::result::Result<Option<provenant_records::handoff::Handoff>, &'static str> {
+    pub fn handoff(&self) -> provenant_records::handoff::HandoffResult {
         provenant_records::handoff::Handoff::from_turns(&self.result, &self.turns)
     }
 }

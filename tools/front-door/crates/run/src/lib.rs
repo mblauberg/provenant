@@ -7,6 +7,7 @@ mod completion;
 pub use board::{BoardLane, BoardPage};
 pub use completion::{
     handoff_progress_guidance, lane_preamble, lane_preamble_with_policy, sanitise_handoff,
+    sanitise_handoff_result,
 };
 mod controls;
 mod correlation;
@@ -454,6 +455,8 @@ pub enum RunError {
     AttemptReservationRetained,
     #[error("invalid run record: {0}")]
     Validation(&'static str),
+    #[error(transparent)]
+    Handoff(#[from] provenant_records::handoff::HandoffError),
     #[error("invalid run record: {0}")]
     WriterLineage(&'static str),
     #[error("invalid run record: writer HEAD is not the lane branch")]

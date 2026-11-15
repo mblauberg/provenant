@@ -6,7 +6,7 @@ use crate::{
 use provenant_os::fs::Directory;
 use provenant_records::{
     AttemptFile,
-    handoff::{HANDOFF_BYTES, Handoff},
+    handoff::{HANDOFF_BYTES, Handoff, HandoffError, HandoffResult},
     run::{PathScope, WriteSource},
 };
 use std::{
@@ -20,9 +20,11 @@ pub(crate) fn guidance() -> &'static str {
 
 impl RunStore {
     /// Read the host's immutable settlement snapshot, never provider history.
-    pub fn handoff(&self, record: &AttemptRecord) -> Result<Option<Handoff>> {
+    pub fn handoff(&self, record: &AttemptRecord) -> Result<HandoffResult> {
         let attempt = self.attempt_dir(record.attempt_id, false)?;
-        Ok(read_snapshot(&attempt)?.map(|handoff| attach_scope_report(&attempt, &handoff)))
+        Ok(read_snapshot(&attempt)?
+            .unwrap_or(Ok(None))
+            .map(|handoff| handoff.map(|handoff| attach_scope_report(&attempt, &handoff))))
     }
 
     pub(crate) fn capture_handoff(
@@ -30,9 +32,10 @@ impl RunStore {
         attempt: &Directory,
         record: &AttemptRecord,
         decoded: &Decoded,
-    ) -> Result<Option<Handoff>> {
+    ) -> Result<HandoffResult> {
         if let Some(handoff) = read_snapshot(attempt)? {
-            return Ok(Some(attach_scope_report(attempt, &handoff)));
+            return Ok(handoff
+                .map(|handoff| handoff.map(|handoff| attach_scope_report(attempt, &handoff))));
         }
         let interrupted = !decoded.complete
             || matches!(
@@ -44,24 +47,21 @@ impl RunStore {
                     | Outcome::Lost
             );
         let handoff = match decoded.handoff() {
-            Ok(Some(handoff)) => Some(handoff),
-            // The provider may die partway through its final fence. A complete
-            // malformed answer remains ambiguous; an interrupted one can use
-            // the last valid, atomically written progress snapshot.
-            _ if interrupted => self.progress_handoff(attempt, record).ok().flatten(),
-            _ => None,
+            Ok(None) if interrupted => self
+                .progress_handoff(attempt, record)
+                .unwrap_or_else(|_| Err(HandoffError::new("$", "progress handoff unreadable"))),
+            // A malformed final declaration is evidence even on interruption.
+            // Never substitute an older progress declaration for it.
+            handoff => handoff,
         };
-        // Provider-writable progress is output, not previously scanned input.
-        // Sanitise every JSON field, including forward fields, before keeping
-        // or disclosing the snapshot to a successor account or provider.
-        let handoff = handoff.and_then(|handoff| sanitise_handoff(&handoff).ok());
-        if let Some(handoff) = &handoff {
+        let handoff = sanitise_handoff_result(handoff);
+        if handoff != Ok(None) {
             seal(
                 attempt,
                 AttemptFile::Handoff.name(),
-                &serde_json::to_vec(handoff)
+                &serde_json::to_vec(&handoff)
                     .map_err(|_| RunError::Validation("handoff encoding"))?,
-                HANDOFF_BYTES as u64,
+                HANDOFF_RECORD_BYTES as u64,
             )?;
         }
         Ok(handoff)
@@ -71,7 +71,7 @@ impl RunStore {
         &self,
         attempt: &Directory,
         record: &AttemptRecord,
-    ) -> Result<Option<Handoff>> {
+    ) -> Result<HandoffResult> {
         let expected = self
             .context
             .state_root
@@ -84,31 +84,39 @@ impl RunStore {
             .iter()
             .filter(|grant| grant.source == WriteSource::PrivateState);
         let Some(grant) = grants.next() else {
-            return Ok(None);
+            return Ok(Ok(None));
         };
         if grants.next().is_some() || grant.scope != PathScope::Subtree {
-            return Ok(None);
+            return Ok(Ok(None));
         }
         // The applied grant pins the launched candidate. Never scan other
         // candidates, follow paths from model text or open provider credentials.
         let granted = grant.path.to_path_buf()?;
         let relative = match granted.strip_prefix(&expected) {
             Ok(relative) => relative,
-            Err(_) => return Ok(None),
+            Err(_) => return Ok(Ok(None)),
         };
         let mut parts = relative.components();
         let Some(Component::Normal(candidate)) = parts.next() else {
-            return Ok(None);
+            return Ok(Ok(None));
         };
         if parts.next().is_some() {
-            return Ok(None);
+            return Ok(Ok(None));
         }
-        let state = attempt.open_verified_directory(OsStr::new("provider-state"))?;
-        let candidate = state.open_verified_directory(candidate)?;
-        let Some(bytes) = read_sealed(&candidate, "handoff.json", HANDOFF_BYTES as u64)? else {
-            return Ok(None);
+        let state = match attempt.open_verified_directory(OsStr::new("provider-state")) {
+            Ok(state) => state,
+            Err(error) if error.is_not_found() => return Ok(Ok(None)),
+            Err(error) => return Err(error.into()),
         };
-        Ok(Handoff::from_json(&bytes).ok())
+        let candidate = match state.open_verified_directory(candidate) {
+            Ok(candidate) => candidate,
+            Err(error) if error.is_not_found() => return Ok(Ok(None)),
+            Err(error) => return Err(error.into()),
+        };
+        let Some(bytes) = read_sealed(&candidate, "handoff.json", HANDOFF_BYTES as u64)? else {
+            return Ok(Ok(None));
+        };
+        Ok(Handoff::from_json(&bytes).map(Some))
     }
 }
 
@@ -162,47 +170,94 @@ pub(crate) fn attach_scope_report(attempt: &Directory, handoff: &Handoff) -> Han
     sanitise_handoff(&compact).unwrap_or_else(|_| handoff.clone())
 }
 
+fn walk_handoff_value(
+    value: &mut serde_json::Value,
+    transform: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    match value {
+        serde_json::Value::String(text) => *text = transform(text)?,
+        serde_json::Value::Array(items) => {
+            for item in items {
+                walk_handoff_value(item, transform)?;
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for (key, mut value) in std::mem::take(fields) {
+                let key = transform(&key)?;
+                walk_handoff_value(&mut value, transform)?;
+                if fields.insert(key, value).is_some() {
+                    return Err(RunError::Validation("handoff field collision"));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Transform decoded values and object keys, including nested forward fields,
 /// then revalidate both field and total bounds after any replacement growth.
 pub(crate) fn transform_handoff(
     handoff: &Handoff,
     mut transform: impl FnMut(&str) -> Result<String>,
 ) -> Result<Handoff> {
-    fn walk(
-        value: &mut serde_json::Value,
-        transform: &mut impl FnMut(&str) -> Result<String>,
-    ) -> Result<()> {
-        match value {
-            serde_json::Value::String(text) => *text = transform(text)?,
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    walk(item, transform)?;
-                }
-            }
-            serde_json::Value::Object(fields) => {
-                for (key, mut value) in std::mem::take(fields) {
-                    let key = transform(&key)?;
-                    walk(&mut value, transform)?;
-                    if fields.insert(key, value).is_some() {
-                        return Err(RunError::Validation("handoff field collision"));
-                    }
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
     let mut value =
         serde_json::to_value(handoff).map_err(|_| RunError::Validation("handoff encoding"))?;
-    walk(&mut value, &mut transform)?;
+    walk_handoff_value(&mut value, &mut transform)?;
     let bytes = serde_json::to_vec(&value).map_err(|_| RunError::Validation("handoff encoding"))?;
-    Handoff::from_json(&bytes).map_err(RunError::Validation)
+    Handoff::from_json(&bytes).map_err(RunError::Handoff)
 }
 
-fn read_snapshot(attempt: &Directory) -> Result<Option<Handoff>> {
-    read_sealed(attempt, AttemptFile::Handoff.name(), HANDOFF_BYTES as u64)?
-        .map(|bytes| Handoff::from_json(&bytes).map_err(RunError::Validation))
-        .transpose()
+// The envelope includes a typed error and a retained partial object, in
+// addition to the bounded provider payload. This is not the input byte cap.
+const HANDOFF_RECORD_BYTES: usize = HANDOFF_BYTES * 4;
+
+fn read_snapshot(attempt: &Directory) -> Result<Option<HandoffResult>> {
+    read_sealed(
+        attempt,
+        AttemptFile::Handoff.name(),
+        HANDOFF_RECORD_BYTES as u64,
+    )?
+    .map(|bytes| {
+        let handoff: HandoffResult = serde_json::from_slice(&bytes)
+            .map_err(|_| RunError::Validation("handoff snapshot unreadable"))?;
+        Ok(match handoff {
+            Ok(Some(handoff)) => Handoff::from_json(
+                &serde_json::to_vec(&handoff)
+                    .map_err(|_| RunError::Validation("handoff encoding"))?,
+            )
+            .map(Some),
+            other => other,
+        })
+    })
+    .transpose()
+}
+
+/// Errors and retained fields are provider output too: redact their keys and
+/// values before persistence or disclosure, just as for a complete handoff.
+pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
+    match handoff {
+        Ok(Some(handoff)) => sanitise_handoff(&handoff)
+            .map(Some)
+            .map_err(|error| match error {
+                RunError::Handoff(error) => error,
+                _ => HandoffError::new("$", "handoff redaction failed"),
+            }),
+        Ok(None) => Ok(None),
+        Err(error) => {
+            let mut value = serde_json::json!(error);
+            let safe = walk_handoff_value(&mut value, &mut |text: &str| {
+                let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
+                    .map_err(|_| RunError::Validation("handoff error redaction failed"))?;
+                String::from_utf8(safe).map_err(|_| RunError::Validation("handoff error UTF-8"))
+            });
+            if safe.is_err() {
+                return Err(HandoffError::new("$", "handoff error redaction failed"));
+            }
+            Err(serde_json::from_value(value)
+                .unwrap_or_else(|_| HandoffError::new("$", "handoff error redaction failed")))
+        }
+    }
 }
 
 /// The verification and slot-wait rules every writer lane is told. A writer's `cargo` commands
@@ -347,8 +402,8 @@ mod tests {
         seal(
             &attempt,
             AttemptFile::Handoff.name(),
-            &raw,
-            HANDOFF_BYTES as u64,
+            &serde_json::to_vec(&Ok::<_, HandoffError>(Some(original.clone())))?,
+            HANDOFF_RECORD_BYTES as u64,
         )?;
         let report = serde_json::json!({
             "code": "WRITE_SCOPE",
@@ -369,8 +424,8 @@ mod tests {
             "policy-write-scope.json"
         );
         assert_eq!(attached.extra["write_scope"]["out_of_scope_count"], 1);
-        assert_eq!(read_snapshot(&attempt)?, Some(original));
-        assert_eq!(store.handoff(&record)?, Some(attached));
+        assert_eq!(read_snapshot(&attempt)?, Some(Ok(Some(original))));
+        assert_eq!(store.handoff(&record)??, Some(attached));
         Ok(())
     }
 
@@ -445,14 +500,14 @@ mod tests {
         seal(&candidate, "handoff.json", &bytes, HANDOFF_BYTES as u64)?;
         let expected = Handoff::from_json(&bytes)?;
         assert_eq!(
-            store.progress_handoff(&attempt, &record)?,
+            store.progress_handoff(&attempt, &record)??,
             Some(expected.clone())
         );
         assert_eq!(
-            store.capture_handoff(&attempt, &record, &decoded())?,
+            store.capture_handoff(&attempt, &record, &decoded())??,
             Some(expected.clone())
         );
-        assert_eq!(store.handoff(&record)?, Some(expected));
+        assert_eq!(store.handoff(&record)??, Some(expected));
         Ok(())
     }
 
@@ -565,7 +620,7 @@ mod tests {
                 ..
             }
         ));
-        let handoff = store.handoff(&terminal)?.ok_or("missing snapshot")?;
+        let handoff = store.handoff(&terminal)??.ok_or("missing snapshot")?;
         assert_eq!(
             handoff.remaining,
             ["Finish renderer", "\n[REDACTED]", "\t[REDACTED]"]
@@ -578,7 +633,7 @@ mod tests {
         assert!(handoff.fenced().contains("[REDACTED]"));
         // Progress survives temporary cleanup and provider history expiry.
         crate::artifacts::remove_entry_tree(&attempt, OsStr::new("provider-state"))?;
-        assert_eq!(store.handoff(&old)?, Some(handoff.clone()));
+        assert_eq!(store.handoff(&old)??, Some(handoff.clone()));
         assert_eq!(
             std::fs::read_to_string(worktree.join("partial.txt"))?,
             "parser implementation survives"
@@ -612,11 +667,11 @@ mod tests {
                 result.outcome = Outcome::Succeeded;
                 result.result = Handoff::from_json(&serde_json::to_vec(&value)?)?.fenced();
                 let safe = store
-                    .capture_handoff(&attempt, &record, &result)?
+                    .capture_handoff(&attempt, &record, &result)??
                     .ok_or("final snapshot")?;
                 assert!(!safe.fenced().contains("sk-abcdefghijklmnopqrstuvwx"));
                 assert!(safe.fenced().contains("[REDACTED]"));
-                assert_eq!(store.handoff(&record)?, Some(safe));
+                assert_eq!(store.handoff(&record)??, Some(safe));
             }
         }
         // Redacting short URL credentials expands the note past its byte cap.
@@ -633,7 +688,7 @@ mod tests {
             String::from_utf8(safe).map_err(|_| RunError::Validation("UTF-8"))
         };
         let invalid = transform_handoff(&handoff, redact);
-        assert!(matches!(invalid, Err(RunError::Validation(_))));
+        assert!(matches!(invalid, Err(RunError::Handoff(_))));
         let mut value: serde_json::Value = serde_json::from_slice(&snapshot("done"))?;
         value["future"] = serde_json::json!({"url":url,"padding":""});
         let padding = HANDOFF_BYTES - serde_json::to_vec(&value)?.len();
@@ -641,7 +696,7 @@ mod tests {
         let handoff = Handoff::from_json(&serde_json::to_vec(&value)?)?;
         assert!(matches!(
             transform_handoff(&handoff, redact),
-            Err(RunError::Validation("handoff exceeds 12288 bytes"))
+            Err(RunError::Handoff(_))
         ));
         Ok(())
     }
@@ -702,7 +757,7 @@ mod tests {
         grant(&mut record, &base.join("candidate-0"))?;
         assert!(
             store
-                .capture_handoff(&attempt, &record, &decoded())?
+                .capture_handoff(&attempt, &record, &decoded())??
                 .is_none()
         );
         seal(
@@ -715,27 +770,31 @@ mod tests {
         grant(&mut record, &base.join("candidate-1"))?;
         assert!(
             store
-                .capture_handoff(&attempt, &record, &decoded())?
+                .capture_handoff(&attempt, &record, &decoded())??
                 .is_none()
         );
         grant(&mut record, &base.join("candidate-0"))?;
         let mut result = decoded();
         result.outcome = Outcome::Succeeded;
         result.complete = true;
-        result.result = "```handoff\n{}\n```".into();
-        assert!(store.capture_handoff(&attempt, &record, &result)?.is_none());
-        result.outcome = Outcome::Succeeded;
-        result.complete = true;
         result.result = "Completed prose without a declaration".into();
-        assert!(store.capture_handoff(&attempt, &record, &result)?.is_none());
+        assert!(
+            store
+                .capture_handoff(&attempt, &record, &result)??
+                .is_none()
+        );
         let done = Handoff::from_json(&snapshot("done"))?.fenced();
         let example = format!("````markdown\n{done}\n````");
         result.result = example.clone();
-        assert!(store.capture_handoff(&attempt, &record, &result)?.is_none());
+        assert!(
+            store
+                .capture_handoff(&attempt, &record, &result)??
+                .is_none()
+        );
         result.result = format!("{example}\n{done}");
         assert!(
             !store
-                .capture_handoff(&attempt, &record, &result)?
+                .capture_handoff(&attempt, &record, &result)??
                 .ok_or("missing final")?
                 .unfinished()
         );
@@ -743,51 +802,95 @@ mod tests {
     }
 
     #[test]
-    fn progress_cannot_follow_links_or_escape_the_applied_attempt() -> TestResult {
+    fn unsafe_or_oversize_progress_is_a_typed_error_without_following_links() -> TestResult {
         use std::os::unix::fs::symlink;
-        let temp = tempfile::tempdir()?;
-        let clock = clock();
-        let cancel = provenant_core::CancelToken::new();
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
-        let input = input();
-        store.create(&input, &call)?;
-        let mut record = store.record(input.attempt_id, &call)?;
-        let attempt = store.attempt_dir(record.attempt_id, false)?;
-        let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
-        let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
-        let base = store
-            .context
-            .state_root
-            .as_path()
-            .join(format!("attempts/{}/provider-state", record.attempt_id));
-        grant(&mut record, &base.join("candidate-0"))?;
-        let outside = temp.path().join("outside.json");
-        std::fs::write(&outside, snapshot("stopped_early"))?;
-        symlink(&outside, base.join("candidate-0/handoff.json"))?;
-        assert!(
-            store
-                .capture_handoff(&attempt, &record, &decoded())?
-                .is_none()
-        );
-        candidate.unlink(OsStr::new("handoff.json"))?;
-        seal(
-            &candidate,
-            "handoff.json",
-            &vec![b'x'; HANDOFF_BYTES + 1],
-            (HANDOFF_BYTES + 1) as u64,
-        )?;
-        assert!(
-            store
-                .capture_handoff(&attempt, &record, &decoded())?
-                .is_none()
-        );
-        grant(&mut record, temp.path())?;
-        assert!(
-            store
-                .capture_handoff(&attempt, &record, &decoded())?
-                .is_none()
-        );
+        for link in [true, false] {
+            let temp = tempfile::tempdir()?;
+            let clock = clock();
+            let cancel = provenant_core::CancelToken::new();
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&context(temp.path())?, &call)?;
+            let input = input();
+            store.create(&input, &call)?;
+            let mut record = store.record(input.attempt_id, &call)?;
+            let attempt = store.attempt_dir(record.attempt_id, false)?;
+            let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
+            let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
+            let base = store
+                .context
+                .state_root
+                .as_path()
+                .join(format!("attempts/{}/provider-state", record.attempt_id));
+            // An ungranted location is absent evidence, even if it has a file.
+            grant(&mut record, temp.path())?;
+            assert_eq!(
+                store.capture_handoff(&attempt, &record, &decoded())?,
+                Ok(None)
+            );
+            grant(&mut record, &base.join("candidate-0"))?;
+            if link {
+                let outside = temp.path().join("outside.json");
+                std::fs::write(&outside, snapshot("stopped_early"))?;
+                symlink(&outside, base.join("candidate-0/handoff.json"))?;
+            } else {
+                seal(
+                    &candidate,
+                    "handoff.json",
+                    &vec![b'x'; HANDOFF_BYTES + 1],
+                    (HANDOFF_BYTES + 1) as u64,
+                )?;
+            }
+            let result = store.capture_handoff(&attempt, &record, &decoded())?;
+            assert!(result.is_err());
+            assert_eq!(store.handoff(&record)?, result);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_final_retains_fields_and_never_uses_stale_progress() -> TestResult {
+        for complete in [true, false] {
+            let temp = tempfile::tempdir()?;
+            let clock = clock();
+            let cancel = provenant_core::CancelToken::new();
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&context(temp.path())?, &call)?;
+            let input = input();
+            store.create(&input, &call)?;
+            let mut record = store.record(input.attempt_id, &call)?;
+            let attempt = store.attempt_dir(record.attempt_id, false)?;
+            let state = crate::artifacts::subdir(&attempt, OsStr::new("provider-state"), true)?;
+            let candidate = crate::artifacts::subdir(&state, OsStr::new("candidate-0"), true)?;
+            let base = store
+                .context
+                .state_root
+                .as_path()
+                .join(format!("attempts/{}/provider-state", record.attempt_id));
+            grant(&mut record, &base.join("candidate-0"))?;
+            seal(
+                &candidate,
+                "handoff.json",
+                &snapshot("done"),
+                HANDOFF_BYTES as u64,
+            )?;
+            let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+            let value = serde_json::json!({"schema_version":2,"status":"done","note":format!("New note {secret}"),"remaining":["Unfinished work"],"decisions":[],"verify":[false]});
+            let mut result = decoded();
+            result.complete = complete;
+            result.outcome = Outcome::Succeeded;
+            result.result = format!("```handoff\n{value}\n```");
+            let captured = store.capture_handoff(&attempt, &record, &result)?;
+            let error = captured.as_ref().unwrap_err();
+            assert_eq!(error.dropped[0].field, "verify[0]");
+            assert_eq!(
+                error.retained["remaining"],
+                serde_json::json!(["Unfinished work"])
+            );
+            assert!(!serde_json::to_string(error)?.contains(secret));
+            assert_eq!(store.handoff(&record)?, captured);
+            result.result = Handoff::from_json(&snapshot("done"))?.fenced();
+            assert_eq!(store.capture_handoff(&attempt, &record, &result)?, captured);
+        }
         Ok(())
     }
 }

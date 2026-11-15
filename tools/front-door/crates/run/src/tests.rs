@@ -764,7 +764,7 @@ pub(super) fn route() -> RouteRecord {
 }
 pub(super) fn publication() -> TerminalPublication<'static> {
     TerminalPublication {
-        handoff: None,
+        handoff: Ok(None),
         terminal_cause: None,
         terminal_note: None,
         outcome: Outcome::Succeeded,

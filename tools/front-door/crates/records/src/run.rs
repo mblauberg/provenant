@@ -1297,6 +1297,8 @@ settlement_reasons! {
     CompletedBeforeBudget { source: Host, node: Succeeded, outcome: Succeeded, stop: Some(crate::stop::StopCause::TokenBudget) },
     /// The provider finished without a final handoff, so nothing was reported.
     HandoffMissing { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMissing) },
+    /// A final handoff was present but malformed; retain its field diagnostics.
+    HandoffMalformed { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::HandoffMalformed) },
     /// The writer exited without a final message.
     EmptyResult { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::EmptyResult) },
     /// The lane declared that work remains.
@@ -1321,7 +1323,7 @@ impl SettlementReason {
         evidence: Option<&TerminalEvidence>,
         partial: &[PartialSignal],
         terminal_cause: Option<TerminalCause>,
-        handoff: Option<&crate::handoff::Handoff>,
+        handoff: Result<Option<&crate::handoff::Handoff>, &crate::handoff::HandoffError>,
     ) -> Self {
         match (evidence, outcome) {
             (_, Outcome::Lost) => Self::Lost,
@@ -1330,11 +1332,16 @@ impl SettlementReason {
             (Some(TerminalEvidence::Unsettled { .. }), _) => Self::Unsettled,
             (_, Outcome::Cancelled) => Self::Cancelled,
             (Some(TerminalEvidence::PreLaunchRefusal), _) => Self::PreLaunchRefusal,
+            _ if handoff.is_err() => Self::HandoffMalformed,
             _ => match terminal_cause {
                 Some(TerminalCause::EmptyWriterResult) => Self::EmptyResult,
                 Some(TerminalCause::Blocked | TerminalCause::StoppedNoWork) => Self::DeclaredStop,
                 Some(TerminalCause::ProviderEarlyStop) => Self::ProviderStop,
-                _ if handoff.is_some_and(|handoff| handoff.unfinished()) => Self::DeclaredStop,
+                _ if handoff
+                    .is_ok_and(|handoff| handoff.is_some_and(|handoff| handoff.unfinished())) =>
+                {
+                    Self::DeclaredStop
+                }
                 _ if partial.contains(&PartialSignal::DeclaredStop) => Self::DeclaredStop,
                 _ if partial.contains(&PartialSignal::HandoffMissing) => Self::HandoffMissing,
                 _ if partial.contains(&PartialSignal::ProviderStop) => Self::ProviderStop,
@@ -1350,8 +1357,10 @@ impl SettlementReason {
                             | Outcome::ReviewRequired
                             | Outcome::Failed
                             | Outcome::TimedOut
-                    ) && handoff.is_some_and(|handoff| {
-                        !handoff.unfinished() && handoff.validate().is_ok()
+                    ) && handoff.is_ok_and(|handoff| {
+                        handoff.is_some_and(|handoff| {
+                            !handoff.unfinished() && handoff.validate().is_ok()
+                        })
                     }) =>
                 {
                     Self::CompletedBeforeBudget
@@ -1386,11 +1395,18 @@ impl SettlementReason {
         evidence: Option<&TerminalEvidence>,
         partial: &[PartialSignal],
         terminal_cause: Option<TerminalCause>,
-        handoff: Option<&crate::handoff::Handoff>,
+        handoff: Result<Option<&crate::handoff::Handoff>, &crate::handoff::HandoffError>,
     ) -> Result<SettlementClassification, crate::stop::StopError> {
         let reason = Self::derive(outcome, evidence, partial, terminal_cause, handoff);
         let outcome = reason.rule().terminal_outcome.apply(outcome);
-        let stop = crate::stop::Stop::sealed(terminal_cause, outcome, reason, handoff.cloned())?;
+        let stop = crate::stop::Stop::sealed(
+            terminal_cause,
+            outcome,
+            reason,
+            handoff
+                .map(|handoff| handoff.cloned())
+                .map_err(Clone::clone),
+        )?;
         let stop_cause = stop.as_ref().map(crate::stop::Stop::cause);
         let source = stop_cause.map_or(reason.rule().source, crate::stop::StopCause::source);
         let node_outcome = reason.node_outcome(stop_cause);
@@ -1738,8 +1754,10 @@ pub fn provider_silence_reason(silent_for_ms: u64) -> String {
 pub enum PartialSignal {
     /// Identity evidence is incomplete; usage stays attributed to the requested account.
     IdentityUnobserved,
-    /// A successful final answer did not include a valid final handoff.
+    /// A successful final answer did not include a final handoff.
     HandoffMissing,
+    /// A final handoff was present but malformed.
+    HandoffMalformed,
     /// The final answer ends with a valid `handoff` block whose status is
     /// `stopped_early` or `blocked`: the lane's statement that work remains.
     DeclaredStop,
@@ -1753,6 +1771,7 @@ impl PartialSignal {
         match self {
             Self::IdentityUnobserved => "identity_unobserved",
             Self::HandoffMissing => "handoff_missing",
+            Self::HandoffMalformed => "handoff_malformed",
             Self::DeclaredStop => "declared_stop",
             Self::ProviderStop => "provider_stop",
             Self::UncommittedWork => "uncommitted_work",
@@ -1970,11 +1989,11 @@ mod tests {
             },
         ] {
             assert_eq!(
-                SettlementReason::derive(Outcome::Lost, Some(&evidence), &[], None, None),
+                SettlementReason::derive(Outcome::Lost, Some(&evidence), &[], None, Ok(None)),
                 SettlementReason::Lost
             );
             assert_eq!(
-                SettlementReason::derive(Outcome::Unsettled, Some(&evidence), &[], None, None),
+                SettlementReason::derive(Outcome::Unsettled, Some(&evidence), &[], None, Ok(None)),
                 SettlementReason::Unsettled
             );
         }

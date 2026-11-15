@@ -29,11 +29,44 @@ non-exempt uncommitted work does not deliver it.
 - Test: `crates/run/src/dispatch_custody_tests.rs::publication_holder_accepts_exit_zero_or_completed_host_budget`; `crates/run/src/dispatch_settlement_tests.rs::a_read_only_answer_without_handoff_settles_succeeded`
 
 A declared stop or missing writer handoff makes an otherwise successful attempt
-require review. Only a valid final handoff determines a declared stop; a
-malformed final handoff does not fall back to stale progress. Partial work
-remains visible for delivery or review.
+require review. Only a valid final handoff determines a declared stop. A present
+but malformed handoff seals `handoff_malformed`, distinct from `handoff_missing`,
+and cannot release graph dependants. Its typed diagnostic names each dropped
+field using its serde path (for example `verify[0]`) and preserves the decoder
+error. Status and output show that diagnostic rather than claiming no handoff.
+Custody facts such as lost, unsettled or cancelled retain priority; the malformed
+handoff evidence still survives in their sealed stop.
 - Why: unfinished work must not appear complete or lose its handoff.
-- Test: `crates/run/src/dispatch_settlement_tests.rs::a_declared_stop_settles_review_required`
+- Test: `crates/records/src/handoff.rs::tests::declared_fields_round_trip_and_malformed_fields_are_retained_as_typed_outcomes`; `crates/run/src/dispatch_settlement_tests.rs::a_declared_stop_settles_review_required`
+
+The handoff declaration owns its fields, per-field decoding and validation.
+Decoding a valid JSON object retains independently valid fields and forward
+fields, and drops an invalid declared field whole, even when only an array item
+is wrong. The diagnostic lists the dropped paths and errors. Retained `note`,
+`remaining`, `decisions`, `verify` and concerns are evidence for the chair; they
+never turn a malformed declaration into completion or continuation authority.
+Invalid JSON, oversized input and invalid fence syntax have the root path `$`;
+there is no parsed remainder when the JSON itself cannot be decoded. Existing
+byte, item-count and non-empty-text bounds still apply.
+
+`SpecConcern` accepts a string as its claim. Its other text fields default to
+empty, and its status defaults to `as_written`: raising a concern does not imply
+permission to diverge. Object concerns require a non-empty claim; their other
+text may be empty. The `remaining`, `decisions` and `verify` fields also accept a
+single string as a one-item array. Handoff status accepts casing differences and
+surrounding whitespace, with the same three spellings. Serialization always
+writes canonical arrays, lowercase status and concern objects.
+- Test: `crates/records/src/handoff.rs::tests::unambiguous_agent_spellings_decode_through_the_types`
+
+The immutable handoff artifact and the handoff inside a sealed stop store the
+same typed parse outcome: `Ok(null)` for absent, `Ok(handoff)` for valid, or
+`Err({dropped, retained})` for malformed (Serde's externally tagged JSON).
+There is no reader for the previous snapshot shape. A malformed final handoff
+never falls back to stale progress, including on interruption. Only an absent
+final declaration on an interrupted attempt can use its granted progress file;
+a malformed or unreadable progress file is also explicit evidence. Diagnostics,
+retained fields and forward fields are redacted before persistence or disclosure.
+- Test: `crates/run/src/completion.rs::tests::malformed_final_retains_fields_and_never_uses_stale_progress`; `crates/run/src/completion.rs::tests::unsafe_or_oversize_progress_is_a_typed_error_without_following_links`
 
 One settlement classification derives the terminal outcome, sealed stop and graph outcome from terminal evidence, reason and handoff.
 A missing required writer handoff seals `handoff_missing` and goes to the chair; graph dependants cannot treat it as success.

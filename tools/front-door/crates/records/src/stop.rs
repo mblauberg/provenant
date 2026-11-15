@@ -10,7 +10,7 @@
 //! graph runtime's one decision function, and can only turn a step into
 //! [`NextStep::Chair`]. `docs/specs/run.md#what-follows-a-stop` mirrors the
 //! table and a test keeps the two equal.
-use crate::handoff::{HANDOFF_BYTES, Handoff, HandoffStatus};
+use crate::handoff::{HANDOFF_BYTES, Handoff, HandoffResult, HandoffStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -28,8 +28,10 @@ pub enum StopCause {
     /// or an external change prevents progress. The stop carries the
     /// handoff, so its note names what blocks it.
     Blocked,
-    /// A writer on a model route ended without a valid final handoff.
+    /// A writer on a model route ended without a final handoff.
     HandoffMissing,
+    /// The final handoff was present but could not be decoded or validated.
+    HandoffMalformed,
     /// The provider ended with an empty final message.
     EmptyResult,
     /// A writer left edits it did not commit.
@@ -288,13 +290,14 @@ pub const STOP_TABLE: &[StopRule] = {
         rule(Lost, CHAIR, crate::run::CauseSource::Host),
         rule(Unsettled, CHAIR, crate::run::CauseSource::Host),
         rule(Quarantined, CHAIR, crate::run::CauseSource::Host),
+        rule(HandoffMalformed, CHAIR, crate::run::CauseSource::Provider),
     ]
 };
 
 impl StopCause {
     /// Every cause. `ordinal` matches exhaustively, so a new variant fails to
     /// compile there, and the assertion below keeps this list in step.
-    pub const ALL: [StopCause; 41] = {
+    pub const ALL: [StopCause; 42] = {
         use StopCause::*;
         [
             StoppedEarly,
@@ -338,6 +341,7 @@ impl StopCause {
             Lost,
             Unsettled,
             Quarantined,
+            HandoffMalformed,
         ]
     };
 
@@ -385,6 +389,7 @@ impl StopCause {
             Lost => 38,
             Unsettled => 39,
             Quarantined => 40,
+            HandoffMalformed => 41,
         }
     }
 
@@ -468,6 +473,7 @@ impl StopCause {
             StoppedEarly => "stopped_early",
             Blocked => "blocked",
             HandoffMissing => "handoff_missing",
+            HandoffMalformed => "handoff_malformed",
             EmptyResult => "empty_result",
             Uncommitted => "uncommitted",
             InputRequired => "input_required",
@@ -571,8 +577,7 @@ impl std::fmt::Display for StopCause {
 #[serde(try_from = "StopWire")]
 pub struct Stop {
     cause: StopCause,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    handoff: Option<Handoff>,
+    handoff: HandoffResult,
     #[serde(flatten)]
     extra: crate::ExtraFields,
 }
@@ -580,8 +585,7 @@ pub struct Stop {
 #[derive(Deserialize)]
 struct StopWire {
     cause: StopCause,
-    #[serde(default)]
-    handoff: Option<Handoff>,
+    handoff: HandoffResult,
     #[serde(flatten)]
     extra: crate::ExtraFields,
 }
@@ -600,15 +604,15 @@ impl Stop {
     /// A declared cause (`stopped_early`, `blocked`) needs the handoff that
     /// declared it. Any other cause may carry the writer's last handoff.
     pub fn new(cause: StopCause, handoff: Option<Handoff>) -> Result<Self, StopError> {
-        Self::with_extra(cause, handoff, Default::default())
+        Self::with_extra(cause, Ok(handoff), Default::default())
     }
 
     fn with_extra(
         cause: StopCause,
-        handoff: Option<Handoff>,
+        handoff: HandoffResult,
         extra: crate::ExtraFields,
     ) -> Result<Self, StopError> {
-        if let Some(handoff) = &handoff {
+        if let Ok(Some(handoff)) = &handoff {
             handoff.validate().map_err(StopError::Handoff)?;
             let bytes = serde_json::to_vec(handoff).map_err(|_| StopError::HandoffBytes)?;
             if bytes.len() > HANDOFF_BYTES {
@@ -617,6 +621,8 @@ impl Stop {
         }
         let declared = handoff
             .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
             .and_then(|handoff| StopCause::declared(handoff.status));
         if matches!(cause, StopCause::StoppedEarly | StopCause::Blocked) && declared != Some(cause)
         {
@@ -648,20 +654,30 @@ impl Stop {
         cause: Option<crate::run::TerminalCause>,
         outcome: crate::run::Outcome,
         reason: crate::run::SettlementReason,
-        handoff: Option<Handoff>,
+        handoff: HandoffResult,
     ) -> Result<Option<Self>, StopError> {
-        let declared = handoff.as_ref().is_some_and(Handoff::unfinished);
-        let host = cause
-            .map(Into::into)
-            .or(reason.rule().stop_cause)
-            .or_else(|| {
-                StopCause::of_outcome(outcome)
-                    .filter(|cause| !(declared && *cause == StopCause::Uncommitted))
-            });
+        let declared = handoff
+            .as_ref()
+            .is_ok_and(|handoff| handoff.as_ref().is_some_and(Handoff::unfinished));
+        let host = if reason == crate::run::SettlementReason::HandoffMalformed {
+            Some(StopCause::HandoffMalformed)
+        } else {
+            cause.map(Into::into).or(reason.rule().stop_cause)
+        }
+        .or_else(|| {
+            StopCause::of_outcome(outcome)
+                .filter(|cause| !(declared && *cause == StopCause::Uncommitted))
+        });
         match (host, handoff) {
-            (Some(cause), handoff) => Self::new(cause, handoff).map(Some),
-            (None, Some(handoff)) => Self::declared(handoff),
-            (None, None) => Ok(None),
+            (Some(cause), handoff) => {
+                Self::with_extra(cause, handoff, Default::default()).map(Some)
+            }
+            (None, Ok(Some(handoff))) => Self::declared(handoff),
+            (None, Ok(None)) => Ok(None),
+            (None, Err(error)) => {
+                Self::with_extra(StopCause::HandoffMalformed, Err(error), Default::default())
+                    .map(Some)
+            }
         }
     }
 
@@ -670,13 +686,23 @@ impl Stop {
     }
 
     pub fn handoff(&self) -> Option<&Handoff> {
-        self.handoff.as_ref()
+        self.handoff.as_ref().ok().and_then(Option::as_ref)
+    }
+
+    pub fn handoff_result(&self) -> &HandoffResult {
+        &self.handoff
     }
 
     /// The writer's own one-line account, such as what blocks a `blocked`
     /// stop, for `status` and `output`.
     pub fn note(&self) -> Option<&str> {
-        self.handoff.as_ref().map(|handoff| handoff.note.as_str())
+        match &self.handoff {
+            Ok(handoff) => handoff.as_ref().map(|handoff| handoff.note.as_str()),
+            Err(error) => error
+                .retained
+                .get("note")
+                .and_then(serde_json::Value::as_str),
+        }
     }
 
     pub fn next_step(&self, on_stop: &OnStop, facts: StopFacts) -> NextStep {

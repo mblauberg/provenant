@@ -132,8 +132,31 @@ pub(super) fn make_outputs_with_upstream(
     });
     // Remaining work and spec concerns share one bounded checkpoint projection.
     // Full entries stay in the immutable result and handoff artifacts.
+    if let Some(error) = result.and_then(|capture| capture.handoff.as_ref().err()) {
+        warnings.push(bounded(
+            &format!("handoff_malformed: {error}"),
+            WARNING_BYTES,
+        ));
+    }
+    // Partial fields remain evidence in the snapshot, never a completion or
+    // continuation declaration. Project their remaining work for visibility.
+    let partial = result.and_then(|capture| capture.handoff.as_ref().err());
+    let partial_remaining: Vec<String> = partial
+        .and_then(|error| error.retained.get("remaining"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
+    let partial_concerns: Vec<provenant_records::handoff::SpecConcern> = partial
+        .and_then(|error| error.retained.get("spec_concerns"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
     let handoff = result.and_then(|capture| capture.handoff.as_ref().ok().and_then(Option::as_ref));
-    let spec_concern_count = handoff.map_or(0, |handoff| handoff.spec_concerns.len());
+    let remaining = handoff.map_or(partial_remaining.as_slice(), |handoff| {
+        handoff.remaining.as_slice()
+    });
+    let concerns = handoff.map_or(partial_concerns.as_slice(), |handoff| {
+        handoff.spec_concerns.as_slice()
+    });
+    let spec_concern_count = concerns.len();
     let mut kept_concerns = Vec::<provenant_records::handoff::SpecConcern>::new();
     let mut kept_remaining = Vec::<String>::new();
     let projection_bytes =
@@ -148,31 +171,31 @@ pub(super) fn make_outputs_with_upstream(
                 "spec_concern_count":spec_concern_count,
             }))
         };
-    if let Some(handoff) = handoff {
-        for concern in &handoff.spec_concerns {
+    {
+        for concern in concerns {
             kept_concerns.push(concern.clone());
             if projection_bytes(&kept_remaining, &kept_concerns) > REMAINING_BYTES {
                 kept_concerns.pop();
                 break;
             }
         }
-        for item in &handoff.remaining {
+        for item in remaining {
             kept_remaining.push(item.clone());
             if projection_bytes(&kept_remaining, &kept_concerns) > REMAINING_BYTES {
                 kept_remaining.pop();
                 break;
             }
         }
-        if kept_concerns.len() < handoff.spec_concerns.len() {
+        if kept_concerns.len() < concerns.len() {
             warnings.push(bounded(&format!(
                 "handoff spec concerns retained {} of {}; full entries: {} and the attempt handoff.json",
-                kept_concerns.len(), handoff.spec_concerns.len(), path.as_deref().unwrap_or("the attempt result artifact")
+                kept_concerns.len(), concerns.len(), path.as_deref().unwrap_or("the attempt result artifact")
             ), WARNING_BYTES));
         }
-        if kept_remaining.len() < handoff.remaining.len() {
+        if kept_remaining.len() < remaining.len() {
             warnings.push(bounded(&format!(
                 "handoff remaining items cut to {} of {}; full entries in the attempt result and handoff.json",
-                kept_remaining.len(), handoff.remaining.len()
+                kept_remaining.len(), remaining.len()
             ), WARNING_BYTES));
         }
     }
@@ -1929,6 +1952,26 @@ mod alias_tests {
         assert_eq!(
             view[0].spec_concerns[0].status,
             provenant_records::handoff::SpecConcernStatus::AsWritten
+        );
+
+        let mut malformed: serde_json::Value =
+            serde_json::from_str(text.lines().nth(2).unwrap()).unwrap();
+        malformed["verify"] = serde_json::json!([false]);
+        malformed["remaining"] = serde_json::json!(["Finish the work"]);
+        captured.handoff = provenant_records::handoff::Handoff::from_result(&format!(
+            "```handoff\n{malformed}\n```"
+        ));
+        let partial = make_outputs(Some(&captured), None, None, None, None);
+        assert_eq!(
+            partial.remaining.as_deref(),
+            Some(["Finish the work".to_owned()].as_slice())
+        );
+        assert_eq!(partial.extra["spec_concern_count"], 1);
+        assert!(
+            partial
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("verify[0]"))
         );
 
         // An individual concern may fill the handoff's field limit. Its full

@@ -88,7 +88,13 @@ pub fn status_evidence(
         })
     })
     .flatten();
-    json!({"provider_error": provider_error, "handoff": store.handoff(record).ok().flatten()})
+    let handoff = store.handoff(record).unwrap_or_else(|_| {
+        Err(provenant_records::handoff::HandoffError::new(
+            "$",
+            "handoff snapshot unreadable",
+        ))
+    });
+    json!({"provider_error": provider_error, "handoff": handoff})
 }
 
 pub fn project_lane(

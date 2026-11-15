@@ -1661,7 +1661,10 @@ impl RunStore {
         // Scrub before publication so a retry never starts from new plaintext.
         let session_redaction_failed =
             provenant_confinement::redact::scrub_session_history(&provider_state).is_err();
-        let mut handoff = self.capture_handoff(attempt, &record, &decoded)?;
+        let (mut handoff, handoff_error) = match self.capture_handoff(attempt, &record, &decoded)? {
+            Ok(handoff) => (handoff, None),
+            Err(error) => (None, Some(error)),
+        };
         // Failed headless tools can leave only stderr. Keep the recognised
         // provider diagnostic alongside any partial answer before sealing it.
         if decoded.outcome == Outcome::Failed
@@ -1714,7 +1717,7 @@ impl RunStore {
                     Some(&provenant_records::run::TerminalEvidence::ProcessExit),
                     &decoded.partial_signals,
                     Some(TerminalCause::TokenBudget),
-                    handoff.as_ref(),
+                    handoff_error.as_ref().map_or(Ok(handoff.as_ref()), Err),
                 )
                 .rule()
                 .terminal_outcome,
@@ -1837,6 +1840,7 @@ impl RunStore {
         if decoded.outcome == Outcome::TimedOut
             && exit.stop_reason == Some(StopReason::TokenBudget)
             && soft_budget_wrap_up(&record, &decoded.usage)
+            && handoff_error.is_none()
         {
             decoded.outcome = Outcome::ReviewRequired;
             let stopped = stopped_handoff(
@@ -2280,6 +2284,7 @@ impl RunStore {
         // commits and uncommitted edits stay where they are.
         if decoded.outcome == Outcome::TimedOut
             && exit.stop_reason == Some(StopReason::ContextHandoff)
+            && handoff_error.is_none()
             && task.writer.is_some()
             && !cancelled
         {
@@ -2303,6 +2308,7 @@ impl RunStore {
         // lapsed refuses it there as `account_login_required`.
         if decoded.outcome == Outcome::AuthRequired
             && decoded.terminal_cause == Some(TerminalCause::LaneTokenLost)
+            && handoff_error.is_none()
             && task.writer.is_some()
             && !cancelled
         {
@@ -2439,6 +2445,13 @@ impl RunStore {
         let succeeded_before_stop = decoded.outcome == Outcome::Succeeded;
         // A declared stop requires review even when the provider succeeded.
         let mut partial = std::mem::take(&mut decoded.partial_signals);
+        if let Some(error) = &handoff_error {
+            partial.push(PartialSignal::HandoffMalformed);
+            decoded.reason = Some(error.to_string());
+            if matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted) {
+                decoded.outcome = Outcome::ReviewRequired;
+            }
+        }
         if decoded.terminal_cause == Some(TerminalCause::EmptyWriterResult) {
             partial.push(PartialSignal::HandoffMissing);
         }
@@ -2449,7 +2462,8 @@ impl RunStore {
             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
         ) && task.writer.is_some()
             && !matches!(&task.route, RequestedRoute::Adapter { .. })
-            && decoded.handoff().ok().flatten().is_none()
+            && decoded.handoff().is_ok_and(|handoff| handoff.is_none())
+            && handoff_error.is_none()
         {
             partial.push(PartialSignal::HandoffMissing);
             // A lane that reports nothing has not passed. It needs review,
@@ -2616,7 +2630,7 @@ impl RunStore {
         }
         let decoded_reason = decoded.reason.take().map(bounded_reason);
         let publication = TerminalPublication {
-            handoff: handoff.clone(),
+            handoff: handoff_error.map_or(Ok(handoff.clone()), Err),
             terminal_cause: decoded.terminal_cause,
             terminal_note,
             outcome: decoded.outcome,

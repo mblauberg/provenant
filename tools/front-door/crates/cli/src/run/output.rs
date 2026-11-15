@@ -116,6 +116,13 @@ pub(super) fn output_summary(
             }
         }
     }
+    if let Some(error) = data.get("handoff").and_then(|value| value.get("Err")) {
+        if let Ok(error) =
+            serde_json::from_value::<provenant_records::handoff::HandoffError>(error.clone())
+        {
+            lines.push(crate::bounded_text(&error.to_string(), 2048));
+        }
+    }
     if headed && let Some(fallback) = data.get("planner_fallback") {
         lines.push(format!(
             "planner fallback: {} (reason: {})",
@@ -1003,6 +1010,26 @@ mod tests {
                 Some("provenant wait repair/writer#2")
             );
         }
+    }
+
+    #[test]
+    fn output_summary_shows_malformed_handoff_field_diagnostics() {
+        let error =
+            provenant_records::handoff::HandoffError::new("spec_concerns[0]", "expected concern");
+        let data = json!({"state":"review_required", "cause":"handoff_malformed", "handoff":{"Err":error}});
+        let summary = output_summary(&data, "captured answer", true, None);
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line.contains("spec_concerns[0]"))
+        );
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line.contains("expected concern"))
+        );
     }
 
     #[test]

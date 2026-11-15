@@ -110,6 +110,7 @@ restart into a chair decision. See [routing](routing.md) for route selection.
 | `stopped_early` | `new_route` | no | 0 |
 | `blocked` | `chair` | yes | 0 |
 | `handoff_missing` | `chair` | no | 0 |
+| `handoff_malformed` | `chair` | no | 0 |
 | `empty_result` | `new_route` | no | 1 |
 | `uncommitted` | `chair` | no | 0 |
 | `input_required` | `chair` | yes | 0 |

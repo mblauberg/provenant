@@ -369,7 +369,7 @@ fn block<'a>(
 pub(super) fn handoff(
     capture: &crate::result_capture::CapturedResult,
 ) -> Result<Option<provenant_records::handoff::Handoff>, String> {
-    let handoff = capture.handoff.clone().map_err(str::to_owned)?;
+    let handoff = capture.handoff.clone().map_err(|error| error.to_string())?;
     let Some(handoff) = handoff.filter(provenant_records::handoff::Handoff::unfinished) else {
         return Ok(None);
     };
@@ -1918,12 +1918,13 @@ pub(super) fn settle(
         })
     } else {
         if writer(node)
-            && capture.is_some_and(|capture| handoff(capture).is_err())
+            && let Some(error) = capture.and_then(|capture| handoff(capture).err())
             && let Some(outputs) = &mut checkpoint.nodes[index].outputs
         {
-            outputs
-                .warnings
-                .push("ignored optional handoff: invalid handoff; inspect the result".into());
+            outputs.warnings.push(super::outputs::bounded(
+                &format!("ignored optional handoff: {error}"),
+                WARNING_BYTES,
+            ));
         }
         return None;
     };
