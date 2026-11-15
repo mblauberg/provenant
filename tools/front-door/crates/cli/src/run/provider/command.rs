@@ -26,6 +26,23 @@ fn executable_unavailable(program: &str) -> PrepareError {
     }
 }
 
+fn command_executable(
+    program: &str,
+    cwd: &Path,
+    lane_path: &run::FilteredLanePath,
+    locate_override: Option<&dyn Fn(&str) -> Result<PathBuf, String>>,
+) -> Result<PathBuf, PrepareError> {
+    if program.contains('/') {
+        Ok(cwd.join(program))
+    } else if let Some(locate) = locate_override {
+        locate(program).map_err(|_| executable_unavailable(program))
+    } else {
+        lane_path
+            .resolve(program)
+            .map_err(|_| executable_unavailable(program))
+    }
+}
+
 /// Resolve only a host-configured entry. The result enters the ordinary lane
 /// launcher, supervisor, guardian and settlement path below this edge.
 pub(super) fn prepare_command(
@@ -33,7 +50,7 @@ pub(super) fn prepare_command(
     task: &run::TaskRequest,
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
-    locate: &dyn Fn(&str) -> Result<PathBuf, String>,
+    locate_override: Option<&dyn Fn(&str) -> Result<PathBuf, String>>,
     provider: &str,
     name: &str,
 ) -> Result<run::PreparedLaunch, PrepareError> {
@@ -89,16 +106,9 @@ pub(super) fn prepare_command(
         .writer
         .as_ref()
         .map_or(source.as_path(), |writer| writer.project.as_path());
-    let lane_path =
-        super::preparation::filtered_requester_lane_path(registry.host, path_project, &cwd)?;
-    let invocation = if program.contains('/') {
-        cwd.join(program)
-    } else if let Some(path) = lane_path.as_deref() {
-        let search_path = std::env::split_paths(path).collect::<Vec<_>>();
-        find_command_on_path(program, &search_path).map_err(|_| executable_unavailable(program))?
-    } else {
-        locate(program).map_err(|_| executable_unavailable(program))?
-    };
+    let lane_path = run::FilteredLanePath::for_requester(registry.host, path_project, &cwd)
+        .map_err(|error| error.to_string())?;
+    let invocation = command_executable(program, &cwd, &lane_path, locate_override)?;
     let executable = canonical(&invocation).map_err(|_| executable_unavailable(program))?;
     let runtimes = command
         .runtimes
@@ -230,8 +240,8 @@ pub(super) fn prepare_command(
             host_var: &|key| {
                 if key == provenant_core::consumer_env::SANDBOX {
                     Some(sandbox.env_value().into())
-                } else if key == "PATH" && lane_path.is_some() {
-                    lane_path.clone()
+                } else if key == "PATH" {
+                    Some(lane_path.path().to_os_string())
                 } else {
                     host_provider_var(registry, key)
                 }
@@ -401,6 +411,31 @@ pub(super) fn prepare_command(
             backend: None,
         }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_slash_path_stays_on_the_configured_path_route()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let project = temp.path().join("project");
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir_all(&project)?;
+        std::fs::create_dir_all(&worktree)?;
+        let lane_path =
+            run::FilteredLanePath::from_path(std::ffi::OsStr::new(""), &project, &worktree)?;
+
+        let explicit = project.join("tools/runner");
+        assert_eq!(
+            command_executable("tools/runner", &project, &lane_path, None)?,
+            explicit
+        );
+        assert!(command_executable("runner", &project, &lane_path, None).is_err());
+        Ok(())
+    }
 }
 
 #[cfg(feature = "fixture")]

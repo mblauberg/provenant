@@ -1360,23 +1360,6 @@ pub(super) fn publishing_executable(
     }
 }
 
-pub(crate) fn resolve_executable(name: &str) -> Result<PathBuf, String> {
-    canonical(&find_executable(name)?)
-}
-
-pub(super) fn host_executable(
-    host: &run::HostLaunchContext,
-    name: &str,
-) -> Result<PathBuf, String> {
-    // The caller holds this provider's lease. Retry only an omitted entry,
-    // using host-sealed directories rather than the guardian's environment.
-    let path = match host.executables.get(name) {
-        Some(path) => path.clone(),
-        None => find_executable_on_path(name, &host.executable_search_path)?,
-    };
-    canonical(&path)
-}
-
 pub(crate) fn find_executable(name: &str) -> Result<PathBuf, String> {
     let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
     find_executable_on_path(name, &std::env::split_paths(&path).collect::<Vec<_>>())

@@ -1228,11 +1228,10 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
             .ok_or("git")?
             .canonicalize()?,
     );
-    host.executables
-        .insert("claude".into(), std::env::current_exe()?);
-    // Provider resolution must honour the host pin, even when captured PATH
-    // does not contain Claude. Command entries instead retain literal lookup.
-    host.executable_search_path = vec![rig.root.join("missing-bin")];
+    // Provider resolution uses the captured host search path when this
+    // handoff has no retained requester PATH. Command entries keep literal
+    // lookup, while a missing host search path cannot fall through to ambient.
+    host.executable_search_path = vec![rig.root.join("provider/bin")];
     let registry = provenant_cli::run::Registry {
         roots: Some(&roots),
         home: Some(&rig.home),

@@ -1633,7 +1633,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         &live,
         &paths,
         None,
-        &|_| Ok(fake.clone()),
+        Some(&|_| Ok(fake.clone())),
         "command",
         "fake",
     )?;
@@ -1654,7 +1654,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         &task,
         &paths,
         None,
-        &|_| Ok(fake.clone()),
+        Some(&|_| Ok(fake.clone())),
         "command",
         "fake",
     )?;
@@ -1795,7 +1795,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         &task,
         &paths,
         None,
-        &|_| Ok(fake.clone()),
+        Some(&|_| Ok(fake.clone())),
         "command",
         "fake",
     )?;
@@ -1819,7 +1819,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         &task,
         &paths,
         None,
-        &|_| Ok(fake.clone()),
+        Some(&|_| Ok(fake.clone())),
         "command",
         "fake",
     )

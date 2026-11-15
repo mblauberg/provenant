@@ -1,38 +1,12 @@
 use super::*;
 
-/// Use the launch host's inventory even when preparation runs in a guardian
-/// with no ambient environment. Named commands retain literal-name lookup.
+/// Resolve a provider or named command through the filtered requester PATH.
 pub(super) fn preparation_executable(
-    host: Option<&run::HostLaunchContext>,
-    command: bool,
+    path: &run::FilteredLanePath,
     name: &str,
 ) -> Result<PathBuf, String> {
-    match host {
-        Some(host) if command => find_command_on_path(name, &host.executable_search_path),
-        Some(host) => host_executable(host, name),
-        None if command => {
-            let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
-            find_command_on_path(name, &std::env::split_paths(&path).collect::<Vec<_>>())
-        }
-        None => resolve_executable(name),
-    }
-}
-
-/// Use the requester's retained PATH for lanes, after excluding the project
-/// and selected worktree. Model and command launch preparation share this
-/// filtered value; command lookup must not drift to the advancing supervisor.
-pub(super) fn filtered_requester_lane_path(
-    host: Option<&run::HostLaunchContext>,
-    project: &Path,
-    worktree: &Path,
-) -> Result<Option<std::ffi::OsString>, String> {
-    use std::os::unix::ffi::OsStrExt;
-    host.and_then(|host| host.lane_path.as_deref())
-        .map(|path| {
-            run::filtered_lane_path(std::ffi::OsStr::from_bytes(path), project, worktree)
-                .map_err(|error| error.to_string())
-        })
-        .transpose()
+    let name = AdapterSpec::get(name).map_or(name, |spec| spec.binary);
+    path.resolve(name)
 }
 
 fn include_local_login(
@@ -610,22 +584,8 @@ pub(crate) fn prepare(
     resume: Option<&run::AttemptRecord>,
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
-    prepare_with_wait(
-        registry,
-        task,
-        prompt_text,
-        paths,
-        resume,
-        |name| {
-            let command = matches!(&task.route, run::RequestedRoute::Adapter { provider, .. }
-                if AdapterSpec::get(provider).is_some_and(|spec|
-                    spec.named_entry == provenant_records::NamedEntry::Command));
-            preparation_executable(registry.host, command, name)
-        },
-        None,
-        wait,
-    )
-    .map_err(|error| error.into_refusal())
+    prepare_inner(registry, task, prompt_text, paths, resume, None, None, wait)
+        .map_err(|error| error.into_refusal())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1538,6 +1498,29 @@ pub(super) fn prepare_with_wait(
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
+    prepare_inner(
+        registry,
+        task,
+        prompt_text,
+        paths,
+        resume,
+        Some(&locate),
+        fixture_token,
+        wait,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_inner(
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+    prompt_text: &str,
+    paths: &run::LaunchPaths,
+    resume: Option<&run::AttemptRecord>,
+    locate_override: Option<&dyn Fn(&str) -> Result<PathBuf, String>>,
+    fixture_token: Option<&provenant_providers::claude::OauthToken>,
+    wait: Option<u64>,
+) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route
         && AdapterSpec::get(provider)
             .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::DelegatedAgent)
@@ -1592,7 +1575,7 @@ pub(super) fn prepare_with_wait(
             prompt_text,
             paths,
             None,
-            &locate,
+            locate_override,
             fixture_token,
             wait,
         )?;
@@ -1617,7 +1600,7 @@ pub(super) fn prepare_with_wait(
         prompt_text,
         paths,
         resume,
-        &locate,
+        locate_override,
         fixture_token,
         wait,
     )
@@ -2376,12 +2359,20 @@ pub(super) fn prepare_candidates(
     prompt_text: &str,
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
-    locate: &dyn Fn(&str) -> Result<PathBuf, String>,
+    locate_override: Option<&dyn Fn(&str) -> Result<PathBuf, String>>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
-        return prepare_command(registry, task, paths, resume, locate, provider, name);
+        return prepare_command(
+            registry,
+            task,
+            paths,
+            resume,
+            locate_override,
+            provider,
+            name,
+        );
     }
     let policy_project = task
         .profile
@@ -2494,6 +2485,16 @@ pub(super) fn prepare_candidates(
         super::source_tree::snapshot_source(registry, task, paths, &source, &git)?
     } else {
         source.clone()
+    };
+    let path_project = task
+        .writer
+        .as_ref()
+        .map_or(source.as_path(), |writer| writer.project.as_path());
+    let lane_path = run::FilteredLanePath::for_requester(registry.host, path_project, &cwd)
+        .map_err(|error| error.to_string())?;
+    let locate = |name: &str| match locate_override {
+        Some(locate) => locate(name),
+        None => preparation_executable(&lane_path, name),
     };
     let writer_context = writer
         .as_ref()
@@ -3772,11 +3773,6 @@ pub(super) fn prepare_candidates(
             task,
             &plan,
         );
-        let path_project = task
-            .writer
-            .as_ref()
-            .map_or(source.as_path(), |writer| writer.project.as_path());
-        let lane_path = filtered_requester_lane_path(registry.host, path_project, &cwd)?;
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
                 credential_roots: credential_roots.clone(),
@@ -3795,8 +3791,8 @@ pub(super) fn prepare_candidates(
                 host_var: &|key| {
                     if key == provenant_core::consumer_env::SANDBOX {
                         Some(sandbox.env_value().into())
-                    } else if key == "PATH" && lane_path.is_some() {
-                        lane_path.clone()
+                    } else if key == "PATH" {
+                        Some(lane_path.path().to_os_string())
                     } else {
                         host_provider_var(registry, key)
                     }
@@ -5395,7 +5391,7 @@ mod route_launch_boundary_regressions {
 
     // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
     #[test]
-    fn requester_path_filter_is_shared_with_named_command_lookup() -> Result<(), String> {
+    fn requester_path_filter_and_named_lookup_share_one_owner() -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let root = std::fs::canonicalize(temp.path()).map_err(|error| error.to_string())?;
         let project = root.join("project");
@@ -5418,14 +5414,11 @@ mod route_launch_boundary_regressions {
                 .map_err(|error| error.to_string())?;
         host.lane_path = Some(supplied.as_os_str().as_bytes().to_vec());
 
-        let filtered = filtered_requester_lane_path(Some(&host), &project, &worktree)?
-            .ok_or("requester PATH disappeared")?;
-        let directories = std::env::split_paths(&filtered).collect::<Vec<_>>();
+        let filtered = run::FilteredLanePath::for_requester(Some(&host), &project, &worktree)
+            .map_err(|error| error.to_string())?;
+        let directories = std::env::split_paths(filtered.path()).collect::<Vec<_>>();
         assert_eq!(directories, [bin]);
-        assert_eq!(
-            find_command_on_path("fixture-command", &directories)?,
-            executable
-        );
+        assert_eq!(filtered.resolve("fixture-command")?, executable);
         Ok(())
     }
 }

@@ -173,16 +173,16 @@ compare-and-swap.
 
 ### Native environment and sandbox tool stores
 
-Unsandboxed lanes inherit the host environment, tool caches and credentials in
-place. Their PATH comes from the requester of the run or retry, retained with
-the host graph execution for later advancement. Before lane preparation it is
-filtered to existing absolute directories outside the project and worktree,
-using the host delivery PATH rules. Named commands use the same filtered
-requester PATH for executable lookup and launch environment. A graph retry
-publishes its checkpoint and requester's PATH in one journal save, so a tick
-cannot advance it with the previous requester's tools. A remote peer records
-its own local agent PATH at ingress, since origin host directories need not
-exist on the peer.
+Unsandboxed lanes inherit host environment, tool caches and credentials.
+`FilteredLanePath` selects retained requester PATH, captured host search path
+for older handoffs, or process PATH only without a host handoff. It filters
+canonical directories and executable symlink targets under the project and
+worktree. Model/account discovery, bare commands and provider launch
+environments share its lookup and PATH. Host delivery filters its captured
+host PATH through the same owner for tool lookup. Explicit program paths stay
+explicit. Graph retry saves PATH with its checkpoint under one journal lock.
+Remote peers record their own PATH at ingress because origin directories may
+not exist there.
 Provider account selectors still choose the registered
 account and its required credentials. Credential
 values stay in the live launch, never in prompts or receipts. Native launches

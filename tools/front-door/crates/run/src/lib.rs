@@ -59,7 +59,7 @@ pub use controls::{
     CancelReceipt, Reconciled, Resume, TemporaryReason, TemporaryReasonKind, UncertainReason,
     holder_absent, overdue_at,
 };
-pub use delivery::{HostDeliveryContext, filtered_lane_path};
+pub use delivery::{FilteredLanePath, HostDeliveryContext};
 pub use git_context::{
     GitContext, continuation_history, ensure_local_branch, ensure_recorded_local_branch,
     resolve_git_base, resolve_git_base_with_facts, review_merge_base, review_merge_base_between,

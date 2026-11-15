@@ -2,15 +2,13 @@
 impl super::Factory {
     pub(crate) fn requester_lane_path(&self) -> Vec<u8> {
         use std::os::unix::ffi::OsStringExt;
-        let path = self
-            .host_launch
-            .as_ref()
-            .and_then(|host| host.lane_path.clone())
-            .map(std::ffi::OsString::from_vec)
-            .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
-        provenant_run::filtered_lane_path(&path, &self.cwd, &self.cwd)
-            .unwrap_or_default()
-            .into_vec()
+        provenant_run::FilteredLanePath::for_requester(
+            self.host_launch.as_ref(),
+            &self.cwd,
+            &self.cwd,
+        )
+        .map(|path| path.path().to_os_string().into_vec())
+        .unwrap_or_default()
     }
 }
 

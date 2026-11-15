@@ -479,7 +479,6 @@ pub(super) fn launch_on_host_with_wait(
             graph_directory: None,
             configuration_root: edge.roots.state.as_path().into(),
             cwd: edge.cwd.into(),
-            executables: std::collections::BTreeMap::new(),
             executable_search_path: std::env::var_os("PATH")
                 .map(|path| {
                     std::env::split_paths(&path)
@@ -650,15 +649,6 @@ pub(super) fn launch_on_host_with_wait(
         let task = &request.task;
         let operation = session.store.attempt_operation(attempt.attempt_id, call)?;
         let mut host = host.clone();
-        if !inherited_host {
-            // Called after preparation, while its selected provider lease is held.
-            for registration in REGISTRY {
-                let name = registration.adapter.id();
-                if let Ok(path) = provider::find_executable(name) {
-                    host.executables.insert(name.into(), path);
-                }
-            }
-        }
         if let Some(writer) = task.writer.as_ref() {
             host.cwd = writer.worktree.clone();
             provenant_confinement::worktrees::with_context(

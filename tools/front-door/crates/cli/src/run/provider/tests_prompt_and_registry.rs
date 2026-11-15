@@ -257,13 +257,16 @@ fn executable_discovery_after_wait_observes_the_completed_update()
     use provenant_os::fs::LockMode;
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir()?;
-    let executable = temp.path().join("cursor-agent");
+    let project = temp.path().join("project");
+    let bin = temp.path().join("requester-bin");
+    std::fs::create_dir_all(&project)?;
+    std::fs::create_dir_all(&bin)?;
+    let executable = bin.join("cursor-agent");
     let host = run::HostLaunchContext {
         graph_directory: None,
-        configuration_root: temp.path().into(),
-        cwd: temp.path().into(),
-        executables: Default::default(),
-        executable_search_path: vec![temp.path().into()],
+        configuration_root: temp.path().join("state"),
+        cwd: project.clone(),
+        executable_search_path: vec![bin],
         lane_path: None,
         git: "/usr/bin/git".into(),
         default_account_directories: Default::default(),
@@ -274,7 +277,8 @@ fn executable_discovery_after_wait_observes_the_completed_update()
         #[cfg(feature = "fixture")]
         fixture_state_write: false,
     };
-    assert!(host_executable(&host, "cursor").is_err());
+    let search = run::FilteredLanePath::for_requester(Some(&host), &project, &project)?;
+    assert!(super::preparation::preparation_executable(&search, "cursor").is_err());
     let updating =
         provenant_os::provider_fence::acquire(temp.path(), "cursor", LockMode::Exclusive)?;
     let clock = provenant_os::clock::SystemClock::new();
@@ -305,8 +309,8 @@ fn executable_discovery_after_wait_observes_the_completed_update()
         )?;
         assert!(leases.contains_key("cursor"));
         assert_eq!(
-            host_executable(&host, "cursor")?,
-            executable.canonicalize()?
+            super::preparation::preparation_executable(&search, "cursor")?,
+            executable
         );
         assert_eq!(std::fs::read_to_string(executable)?, "new provider");
         update.join().expect("update thread")?;
@@ -691,13 +695,13 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         prompt,
         &paths,
         None,
-        &|name| {
+        Some(&|name| {
             if name == adapter_name {
                 Ok(executable.clone())
             } else {
                 Err("unavailable".into())
             }
-        },
+        }),
         None,
         None,
     )?;
