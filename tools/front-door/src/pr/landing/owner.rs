@@ -1274,7 +1274,8 @@ mod tests {
     }
 
     #[test]
-    fn landing_record_decode_is_bounded_and_rejects_duplicates_and_removed_fields()
+    // Spec: docs/specs/state.md#strict-bounded-records
+    fn landing_record_decode_is_bounded_and_rejects_ambiguous_or_unsupported_records()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut world = world(1)?;
         let (_, record) = submit(
@@ -1296,13 +1297,20 @@ mod tests {
         );
         assert!(decode_record(duplicate.as_bytes()).is_err());
 
-        let mut old_shape: serde_json::Value = serde_json::from_slice(&bytes)?;
-        let object = old_shape
+        let mut extended: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let object = extended
             .as_object_mut()
             .ok_or("landing record must be an object")?;
-        object.insert("outbox".into(), serde_json::json!([]));
-        let old_shape = serde_json::to_vec(&old_shape)?;
-        assert!(decode_record(old_shape.as_slice()).is_err());
+        object.insert("future_field".into(), serde_json::json!([]));
+        let decoded = decode_record(serde_json::to_vec(&extended)?.as_slice())?;
+        assert_eq!(
+            serde_json::to_value(decoded)?,
+            serde_json::to_value(&record)?
+        );
+        for version in [1, 3] {
+            extended["schema_version"] = serde_json::json!(version);
+            assert!(decode_record(serde_json::to_vec(&extended)?.as_slice()).is_err());
+        }
         Ok(())
     }
 
