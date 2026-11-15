@@ -62,7 +62,7 @@ fenced blocks: `VERDICT: PASS`, `VERDICT: FAIL` or `VERDICT: INCONCLUSIVE`.
 Put the final fenced handoff after the verdict and leave no text after it. Do
 not repeat a findings block, handoff block or verdict line. The host captures
 exactly one canonical verdict outside fenced blocks. The canonical order is
-verdict then final handoff; if a provider emits one recognized standalone
+verdict then final handoff; if a provider emits one recognised standalone
 verdict as the only content after a valid closed handoff, the host accepts it
 and records that ordering tolerance. Other trailing text remains malformed.
 

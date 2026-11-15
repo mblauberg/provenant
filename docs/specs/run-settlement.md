@@ -37,12 +37,12 @@ handoff evidence still survives in their sealed stop.
 
 The canonical review result order is a standalone verdict followed by the
 final handoff. As a narrow provider-order tolerance, a valid closed final
-handoff may be followed by exactly one recognized standalone verdict, and
+handoff may be followed by exactly one recognised standalone verdict, and
 nothing else. ResultCapture owns verdict recognition and requires exactly one
 canonical verdict outside fenced blocks. In turn-aware settlement, a later
 text-only acknowledgement may preserve an earlier handoff only when no verdict
 follows it. Once a verdict follows a handoff, the entire suffix from that
-handoff must be the sole recognized verdict: prose before or after it, another
+handoff must be the sole recognised verdict: prose before or after it, another
 verdict, or a repeated handoff remains malformed. Provider-turn boundaries
 still decide whether later tool work invalidates an earlier handoff.
 Settlement records an accepted order tolerance in the terminal reason; the
