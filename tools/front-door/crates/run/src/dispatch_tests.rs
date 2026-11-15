@@ -215,6 +215,8 @@ pub(super) struct Fake {
     pub(super) outcome: Option<Outcome>,
     /// The terminal cause a decode reports.
     pub(super) terminal_cause: Option<TerminalCause>,
+    /// Provider session the decode reports, for terminal continuation tests.
+    pub(super) session: Option<String>,
     /// The answer a decode reports, instead of the captured stdout.
     pub(super) answer: Option<String>,
     /// Partial-finish signals a decode reports.
@@ -307,7 +309,7 @@ impl Providers for Fake {
             }),
             observed_route: self.observed.clone(),
             usage: self.codex_usage.clone().unwrap_or_default(),
-            session: None,
+            session: self.session.clone(),
             reason: None,
             partial_signals: self.partial.clone(),
             turns: self.turns.clone(),
