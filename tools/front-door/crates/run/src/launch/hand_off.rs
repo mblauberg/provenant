@@ -34,7 +34,7 @@ fn typed_local(
             ),
         ) => Some(TerminalCause::UnsupportedPlatform),
         RunError::DeliveryPrepare {
-            step: "credential helper",
+            step: crate::DeliveryPrepareStep::CredentialHelper,
             ..
         } => Some(TerminalCause::DeliveryPrepareCredentialHelper),
         _ => None,
@@ -494,6 +494,30 @@ struct CancelWatch {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+fn forward_stop_request(
+    attempt: &provenant_os::fs::Directory,
+    scope: Scope,
+    target: &provenant_core::CancelToken,
+    caller: &provenant_core::CancelToken,
+    done: &std::sync::atomic::AtomicBool,
+    pause: &dyn provenant_core::Pause,
+) {
+    use std::sync::atomic::Ordering;
+    loop {
+        if done.load(Ordering::Acquire) {
+            return;
+        }
+        if caller.is_cancelled() || crate::store::cancel_requested(attempt, scope) {
+            target.cancel();
+            return;
+        }
+        pause.wait(
+            provenant_core::DurationMicros::from_micros(100_000),
+            &provenant_core::CancelToken::new(),
+        );
+    }
+}
+
 impl CancelWatch {
     fn start(
         attempt: provenant_os::fs::Directory,
@@ -501,23 +525,19 @@ impl CancelWatch {
         target: &provenant_core::CancelToken,
         caller: &provenant_core::CancelToken,
     ) -> Self {
-        use std::sync::atomic::Ordering;
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (stop, target, caller) = (done.clone(), target.clone(), caller.clone());
         let thread = std::thread::Builder::new()
             .name("cancel-watch".into())
             .spawn(move || {
-                while !stop.load(Ordering::Acquire) {
-                    if caller.is_cancelled() || crate::store::cancel_requested(&attempt, scope) {
-                        target.cancel();
-                        return;
-                    }
-                    provenant_core::Pause::wait(
-                        &provenant_core::ThreadPause,
-                        provenant_core::DurationMicros::from_micros(100_000),
-                        &provenant_core::CancelToken::new(),
-                    );
-                }
+                forward_stop_request(
+                    &attempt,
+                    scope,
+                    &target,
+                    &caller,
+                    &stop,
+                    &provenant_core::ThreadPause,
+                );
             })
             .ok();
         Self { done, thread }
@@ -587,50 +607,55 @@ fn hosted_credential(name: &std::ffi::OsStr) -> bool {
 mod tests {
     #[test]
     fn hosted_credentials_are_stripped_and_the_lane_keeps_its_own_environment() {
-        let mut environment: Vec<(std::ffi::OsString, std::ffi::OsString)> = [
-            "AWS_ACCESS_KEY_ID",
-            "AWS_PROFILE",
-            "NEON_API_KEY",
-            "CLOUDFLARE_API_TOKEN",
-            "CF_API_TOKEN",
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "STRIPE_SECRET_KEY",
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            "PGPASSWORD",
-            "REDIS_PASSWORD",
-            "GITHUB_TOKEN",
-            "HF_TOKEN",
-            "TF_VAR_db_password",
-            "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
-            "aws_secret_access_key",
-            "GH_TOKEN",
-            "HOME",
-            "PATH",
-            "TMPDIR",
-            "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
-            "PROVENANT_SANDBOX",
-            "SCCACHE_DIR",
-        ]
-        .into_iter()
-        .map(|name| (name.into(), "value".into()))
-        .collect();
-        super::strip_hosted_credentials(&mut environment);
-        let kept: Vec<_> = environment
+        let cases = [
+            ("AWS_ACCESS_KEY_ID", true),
+            ("AWS_PROFILE", true),
+            ("NEON_API_KEY", true),
+            ("CLOUDFLARE_API_TOKEN", true),
+            ("CF_API_TOKEN", true),
+            ("ANTHROPIC_API_KEY", true),
+            ("OPENAI_API_KEY", true),
+            ("STRIPE_SECRET_KEY", true),
+            ("GOOGLE_APPLICATION_CREDENTIALS", true),
+            ("PGPASSWORD", true),
+            ("REDIS_PASSWORD", true),
+            ("GITHUB_TOKEN", true),
+            ("HF_TOKEN", true),
+            ("TF_VAR_db_password", true),
+            ("CLOUDSDK_AUTH_ACCESS_TOKEN_FILE", true),
+            ("aws_secret_access_key", true),
+            ("GH_TOKEN", false),
+            ("HOME", false),
+            ("PATH", false),
+            ("TMPDIR", false),
+            ("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", false),
+            ("PROVENANT_SANDBOX", false),
+            ("SCCACHE_DIR", false),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(
+                super::hosted_credential(std::ffi::OsStr::new(name)),
+                expected
+            );
+        }
+        let mut environment: Vec<(std::ffi::OsString, std::ffi::OsString)> = cases
             .iter()
-            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .map(|(name, _)| ((*name).into(), format!("value:{name}").into()))
             .collect();
-        assert_eq!(
-            kept,
-            [
-                "GH_TOKEN",
-                "HOME",
-                "PATH",
-                "TMPDIR",
-                "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
-                "PROVENANT_SANDBOX",
-                "SCCACHE_DIR",
-            ]
+        let original = environment.clone();
+        super::strip_hosted_credentials(&mut environment);
+        for (name, value) in original {
+            let retained = environment.iter().find(|(key, _)| key == &name);
+            if super::hosted_credential(&name) {
+                assert!(retained.is_none());
+            } else {
+                assert_eq!(retained.map(|(_, value)| value), Some(&value));
+            }
+        }
+        assert!(
+            environment
+                .iter()
+                .all(|(name, _)| !super::hosted_credential(name))
         );
     }
 
@@ -827,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_watch_forwards_a_stop_request_to_setup_within_a_fraction_of_a_second()
+    fn cancel_watch_forwards_a_stop_request_to_setup()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
@@ -847,40 +872,41 @@ mod tests {
         let record = store.record(id, &call)?;
         let scope = RunStore::scope(&record);
         let directory = store.attempt_dir(id, false)?;
-        // The launcher's setup token must not fire without a request.
         let setup = CancelToken::new();
-        let watch = CancelWatch::start(directory.try_clone()?, scope, &setup, &cancel);
-        let real = provenant_core::ThreadPause;
-        let never = CancelToken::new();
-        provenant_core::Pause::wait(
-            &real,
-            provenant_core::DurationMicros::from_micros(250_000),
-            &never,
-        );
-        assert!(!setup.is_cancelled(), "no request, no setup cancel");
-        custody::request_stop(
-            directory,
-            scope,
-            provenant_core::ActorId::from_bytes([2; 16]),
-            provenant_supervisor::machine::StopReason::ExplicitCancellation,
-        )?;
-        // Two seconds at 10 ms steps: the watch polls every 100 ms.
-        for _ in 0..200 {
-            if setup.is_cancelled() {
-                break;
-            }
-            provenant_core::Pause::wait(
-                &real,
-                provenant_core::DurationMicros::from_micros(10_000),
-                &never,
-            );
+        struct RequestStopOnPause<'a> {
+            directory: &'a provenant_os::fs::Directory,
+            scope: Scope,
+            setup: &'a CancelToken,
         }
-        assert!(setup.is_cancelled(), "setup was not cancelled");
+        impl provenant_core::Pause for RequestStopOnPause<'_> {
+            fn wait(&self, _: provenant_core::DurationMicros, _: &CancelToken) {
+                assert!(!self.setup.is_cancelled());
+                custody::request_stop(
+                    self.directory.try_clone().expect("attempt directory"),
+                    self.scope,
+                    provenant_core::ActorId::from_bytes([2; 16]),
+                    provenant_supervisor::machine::StopReason::ExplicitCancellation,
+                )
+                .expect("stop request");
+            }
+        }
+        forward_stop_request(
+            &directory,
+            scope,
+            &setup,
+            &cancel,
+            &std::sync::atomic::AtomicBool::new(false),
+            &RequestStopOnPause {
+                directory: &directory,
+                scope,
+                setup: &setup,
+            },
+        );
+        assert!(setup.is_cancelled());
         assert!(
             !cancel.is_cancelled(),
             "the caller's own token is untouched"
         );
-        drop(watch);
         Ok(())
     }
 

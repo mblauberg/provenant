@@ -882,49 +882,90 @@ mod tests {
     }
 
     #[test]
-    fn late_close_moves_later_attempts_to_the_next_generation()
+    fn late_close_reassigns_only_unsealed_attempts_after_a_known_close_time()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let store = crate::RunStore::open(&context, &call)?;
-        let input = crate::tests::input();
-        store.create(&input, &call)?;
-        let mut attempt = store.record(input.attempt_id, &call)?;
-        let db = Contributions::open(context.state_root.as_path(), &call)?;
-        let old = PullRequest {
-            repository: "owner/repo".into(),
-            number: 10,
-        };
-        let new = PullRequest {
-            number: 11,
-            ..old.clone()
-        };
-        let head = GitOid::parse(&"a".repeat(40))?;
-        db.bind(context.project_id, "feat/x", &old, head, &call)?;
-        // Ids 1 is before the merge; 2 and 3 are dispatched after the UI merge.
-        for (id, time) in [(1, 100), (2, 300), (3, 400)] {
-            attempt.attempt_id = AttemptId::from_bytes([id; 16]);
-            attempt.queued_at = WallTime::from_micros(time)?;
-            db.capture(&attempt, "feat/x", "worker", &call)?;
+        #[derive(Clone, Copy, Debug)]
+        enum CloseCase {
+            LaterAttempts,
+            BoundaryAndSealed,
+            UnknownCloseTime,
         }
-        assert_eq!(db.for_pr(&old, &call)?.len(), 3);
-        let merged = Some(WallTime::from_micros(200)?);
-        assert!(db.close_at(context.project_id, &old, merged, &call)?);
-        assert!(!db.close_at(context.project_id, &old, merged, &call)?);
-        db.bind(context.project_id, "feat/x", &new, head, &call)?;
-        let ids = |pr: &PullRequest| -> std::result::Result<Vec<AttemptId>, RunError> {
-            Ok(db
-                .for_pr(pr, &call)?
-                .iter()
-                .map(|row| row.attempt)
-                .collect())
-        };
-        assert_eq!(ids(&old)?, [AttemptId::from_bytes([1; 16])]);
-        assert_eq!(ids(&new)?, [2, 3].map(|id| AttemptId::from_bytes([id; 16])));
-        assert_eq!(db.reassigned_from_pr(&old, &call)?, 2);
+        for case in [
+            CloseCase::LaterAttempts,
+            CloseCase::BoundaryAndSealed,
+            CloseCase::UnknownCloseTime,
+        ] {
+            let temp = tempfile::tempdir()?;
+            let (context, mut attempt, old, new) = fixture(temp.path())?;
+            let clock = clock();
+            let cancel = CancelToken::new();
+            let call = call(&clock, &cancel);
+            let db = Contributions::open(context.state_root.as_path(), &call)?;
+            let head = GitOid::parse(&"a".repeat(40))?;
+            db.bind(context.project_id, "feat/x", &old, head, &call)?;
+            let name = |id: u8| AttemptId::from_bytes([id; 16]);
+            let (times, closed_at, expected_old, expected_new): (&[(u8, i64)], _, &[u8], &[u8]) =
+                match case {
+                    CloseCase::LaterAttempts => {
+                        (&[(1, 100), (2, 300), (3, 400)], Some(200), &[1], &[2, 3])
+                    }
+                    CloseCase::BoundaryAndSealed => (
+                        &[(1, 100), (2, 200), (3, 300), (4, 300), (5, 300)],
+                        Some(200),
+                        &[1, 2, 3, 4],
+                        &[5],
+                    ),
+                    CloseCase::UnknownCloseTime => (&[(1, 900)], None, &[1], &[]),
+                };
+            for &(id, time) in times {
+                attempt.attempt_id = name(id);
+                attempt.queued_at = WallTime::from_micros(time)?;
+                db.capture(&attempt, "feat/x", "worker", &call)?;
+            }
+            if matches!(case, CloseCase::BoundaryAndSealed) {
+                db.allocate(name(3), &[(old.clone(), WEIGHT_ONE)], &call)?;
+                // The SQL schema permits an unknown dispatch time; AttemptRecord does not.
+                db.0.execute(
+                    "UPDATE branch_attempts SET queued_at=NULL WHERE attempt=?1",
+                    [name(4).to_string()],
+                )?;
+            }
+            let closed_at = closed_at.map(WallTime::from_micros).transpose()?;
+            assert!(
+                db.close_at(context.project_id, &old, closed_at, &call)?,
+                "{case:?}"
+            );
+            assert!(
+                !db.close_at(context.project_id, &old, closed_at, &call)?,
+                "{case:?}"
+            );
+            db.bind(context.project_id, "feat/x", &new, head, &call)?;
+            let ids = |pr: &PullRequest| -> Result<std::collections::BTreeSet<AttemptId>> {
+                Ok(db
+                    .for_pr(pr, &call)?
+                    .iter()
+                    .map(|row| row.attempt)
+                    .collect())
+            };
+            assert_eq!(
+                ids(&old)?,
+                expected_old.iter().copied().map(name).collect(),
+                "{case:?}"
+            );
+            assert_eq!(
+                ids(&new)?,
+                expected_new.iter().copied().map(name).collect(),
+                "{case:?}"
+            );
+            assert_eq!(
+                db.reassigned_from_pr(&old, &call)?,
+                expected_new.len() as u64,
+                "{case:?}"
+            );
+            if matches!(case, CloseCase::BoundaryAndSealed) {
+                assert_eq!(db.unplaced_for_pr(&old, &call)?, 1);
+            }
+        }
         Ok(())
     }
 
@@ -957,69 +998,6 @@ mod tests {
         };
         Ok((context, attempt, old, new))
     }
-    #[test]
-    fn late_close_boundary_null_time_and_sealed_attempts_stay_put()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let (context, mut attempt, old, new) = fixture(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let db = Contributions::open(context.state_root.as_path(), &call)?;
-        let head = GitOid::parse(&"a".repeat(40))?;
-        db.bind(context.project_id, "feat/x", &old, head, &call)?;
-        let name = |id: u8| AttemptId::from_bytes([id; 16]);
-        for (id, time) in [(1, 100), (2, 200), (3, 300), (4, 300), (5, 300)] {
-            attempt.attempt_id = name(id);
-            attempt.queued_at = WallTime::from_micros(time)?;
-            db.capture(&attempt, "feat/x", "worker", &call)?;
-        }
-        // 3 is sealed; 4 has no queue time; 2 sits exactly on the boundary.
-        db.allocate(name(3), &[(old.clone(), WEIGHT_ONE)], &call)?;
-        db.0.execute(
-            "UPDATE branch_attempts SET queued_at=NULL WHERE attempt=?1",
-            [name(4).to_string()],
-        )?;
-        let before = db.for_pr(&old, &call)?.len();
-        assert_eq!(before, 5);
-        db.close_at(
-            context.project_id,
-            &old,
-            Some(WallTime::from_micros(200)?),
-            &call,
-        )?;
-        db.bind(context.project_id, "feat/x", &new, head, &call)?;
-        let left: Vec<_> = db.for_pr(&old, &call)?.iter().map(|r| r.attempt).collect();
-        assert_eq!(left.len(), 4);
-        assert!(!left.contains(&name(5)));
-        let moved: Vec<_> = db.for_pr(&new, &call)?.iter().map(|r| r.attempt).collect();
-        assert_eq!(moved, [name(5)]);
-        assert_eq!(db.unplaced_for_pr(&old, &call)?, 1);
-        assert_eq!(db.reassigned_from_pr(&old, &call)?, 1);
-        Ok(())
-    }
-
-    #[test]
-    fn close_without_a_time_moves_nothing() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let (context, mut attempt, old, new) = fixture(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let db = Contributions::open(context.state_root.as_path(), &call)?;
-        let head = GitOid::parse(&"a".repeat(40))?;
-        db.bind(context.project_id, "feat/x", &old, head, &call)?;
-        attempt.attempt_id = AttemptId::from_bytes([1; 16]);
-        attempt.queued_at = WallTime::from_micros(900)?;
-        db.capture(&attempt, "feat/x", "worker", &call)?;
-        db.close_at(context.project_id, &old, None, &call)?;
-        db.bind(context.project_id, "feat/x", &new, head, &call)?;
-        assert_eq!(db.for_pr(&old, &call)?.len(), 1);
-        assert!(db.for_pr(&new, &call)?.is_empty());
-        assert_eq!(db.reassigned_from_pr(&old, &call)?, 0);
-        Ok(())
-    }
-
     #[test]
     fn reader_orders_by_queue_time_then_attempt()
     -> std::result::Result<(), Box<dyn std::error::Error>> {

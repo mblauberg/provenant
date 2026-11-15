@@ -3,6 +3,27 @@ use super::policy::LandPolicy;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+macro_rules! stored_enum {
+    (
+        $(#[$attribute:meta])*
+        $visibility:vis enum $name:ident {
+            $($(#[$variant_attribute:meta])* $variant:ident $({ $($fields:tt)* })? => $sample:expr),+ $(,)?
+        }
+    ) => {
+        $(#[$attribute])*
+        $visibility enum $name {
+            $($(#[$variant_attribute])* $variant $({ $($fields)* })?),+
+        }
+
+        impl $name {
+            #[cfg(test)]
+            pub(crate) fn all() -> Vec<Self> {
+                vec![$($sample),+]
+            }
+        }
+    };
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EligiblePr {
     pub number: u64,
@@ -13,6 +34,8 @@ pub struct EligiblePr {
     /// Set when the chair landed the pull request without a covering review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted: Option<Accepted>,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 impl EligiblePr {
     /// Keep every observed approval; source priority and arrival order do not
@@ -35,18 +58,24 @@ pub struct ApprovalEvidence {
     pub reference: String,
     pub reviewer: String,
     pub head: String,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 /// A delta landed on the chair's word, with who gave it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Accepted {
     pub reason: String,
     pub actor: String,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CandidateStep {
     pub pr: EligiblePr,
     pub commit: String,
     pub tree: String,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
@@ -55,6 +84,8 @@ pub struct Candidate {
     pub commit: String,
     pub tree: String,
     pub ref_name: String,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 pub use provenant_records::landing::{CheckEvidence, GateDefinition, GateResult};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,34 +99,42 @@ pub struct GateEvidence {
     pub result: GateResult,
     pub pool: Option<String>,
     pub duration_seconds: Option<u64>,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PublishMode {
-    FastForward,
-    RestOrdered,
-    Command,
+stored_enum! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum PublishMode {
+        FastForward => Self::FastForward,
+        RestOrdered => Self::RestOrdered,
+        Command => Self::Command,
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishDecision {
     pub mode: PublishMode,
     pub reason: String,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishResult {
     pub landed: Vec<String>,
     pub alarms: Vec<Alarm>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Outcome {
-    Landed,
-    Red,
-    Conflicted,
-    Excluded,
-    PendingUnknown,
-    /// Still waiting on CI or another lander; a resubmission resumes it.
-    Pending,
+stored_enum! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Outcome {
+        Landed => Self::Landed,
+        Red => Self::Red,
+        Conflicted => Self::Conflicted,
+        Excluded => Self::Excluded,
+        PendingUnknown => Self::PendingUnknown,
+        /// Still waiting on CI or another lander; a resubmission resumes it.
+        Pending => Self::Pending,
+    }
 }
 /// The head and base a landing request pinned for one pull request. A
 /// member whose live head or base differs is excluded, never landed.
@@ -108,12 +147,24 @@ pub struct Pin {
 pub struct Alarm {
     pub code: String,
     pub message: String,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum CostEstimate {
-    Known { micros: u64 },
-    Unknown { reason: String },
+stored_enum! {
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "status", rename_all = "snake_case")]
+    pub enum CostEstimate {
+        Known {
+            micros: u64,
+            #[serde(flatten, default)]
+            extra: provenant_records::ExtraFields,
+        } => Self::Known { micros: 0, extra: Default::default() },
+        Unknown {
+            reason: String,
+            #[serde(flatten, default)]
+            extra: provenant_records::ExtraFields,
+        } => Self::Unknown { reason: String::new(), extra: Default::default() },
+    }
 }
 /// Durable evidence recorded before attempting a publication.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -133,6 +184,9 @@ pub struct PendingAttempt {
     pub dispatched: Option<Vec<u64>>,
     #[serde(default)]
     pub started_at: Option<u64>,
+    /// Fields written by a newer minor release survive pending-record rewrites.
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 /// A definite publication outcome. This phase never authorises publication.
@@ -147,14 +201,32 @@ pub struct SettledAttempt {
     pub follow_pending: bool,
     pub local_follow_pending: bool,
     pub cleanup_pending: bool,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum SettledOutcome {
-    Landed { commit: String },
-    Refused,
-    NotLanded,
+stored_enum! {
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "outcome", rename_all = "snake_case")]
+    pub enum SettledOutcome {
+        Landed {
+            commit: String,
+            #[serde(flatten, default)]
+            extra: provenant_records::ExtraFields,
+        } => Self::Landed { commit: String::new(), extra: Default::default() },
+        Refused {
+            #[serde(flatten, default)]
+            extra: provenant_records::ExtraFields,
+        } => Self::Refused {
+            extra: Default::default(),
+        },
+        NotLanded {
+            #[serde(flatten, default)]
+            extra: provenant_records::ExtraFields,
+        } => Self::NotLanded {
+            extra: Default::default(),
+        },
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LandingReceipt {
@@ -174,6 +246,9 @@ pub struct LandingReceipt {
     pub cost: CostEstimate,
     pub alarms: Vec<Alarm>,
     pub shadow: bool,
+    /// Fields written by a newer minor release survive receipt rewrites.
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 impl LandingReceipt {
@@ -203,6 +278,7 @@ impl LandingReceipt {
             cost,
             alarms: Vec::new(),
             shadow,
+            extra: Default::default(),
         }
     }
 }

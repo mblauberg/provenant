@@ -154,7 +154,7 @@ mod tests {
     use provenant_os::exec::SystemExecutor;
     use provenant_os::exec::Termination;
 
-    use std::{path::Path, time::Duration};
+    use std::time::Duration;
 
     #[test]
     fn run_plan_loads_only_its_bound_projects_policy_and_uses_attempt_temp()
@@ -170,15 +170,7 @@ mod tests {
         let home = base.join("home");
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))?;
-        let git = [
-            "/opt/homebrew/bin/git",
-            "/usr/local/bin/git",
-            "/usr/bin/git",
-        ]
-        .iter()
-        .map(Path::new)
-        .find(|p| p.is_file())
-        .ok_or("git missing")?;
+        let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
         let executor = SystemExecutor::new(2)?;
         let argv = [
             git.as_os_str().to_owned(),
@@ -193,7 +185,7 @@ mod tests {
         let mut options = ExecOptions::new(&argv, &base, Duration::from_secs(10));
         options.env = Some(&env);
         assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
-        let runtime = UtilityRuntime::new(git, &home, context.state_root.as_path())?;
+        let runtime = UtilityRuntime::new(&git, &home, context.state_root.as_path())?;
         let repo = runtime.open_read_repo(
             &executor,
             &repo_path,

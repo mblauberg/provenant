@@ -61,7 +61,7 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
     assert!(matches!(
         fixture.prepare(),
         Err(RunError::DeliveryPrepare {
-            step: "integration target",
+            step: DeliveryPrepareStep::IntegrationTarget,
             ..
         })
     ));
@@ -518,7 +518,7 @@ fn commit_pr_body_is_bounded_and_contains_commit_messages()
             && body.contains("Attempt fixture")
     );
     let capped = cap_pr_body("\u{1f600}".repeat(30_000));
-    assert!(capped.len() <= 60_000 && capped.ends_with("[Commit summary truncated.]\n"));
+    assert!(capped.len() <= PR_BODY_LIMIT && capped.ends_with(PR_BODY_TRUNCATION_NOTE));
     fixture.commit(
         &fixture.writer.worktree,
         &format!("Large commit\n\n{}", "\u{1f600}".repeat(20_000)),
@@ -528,7 +528,7 @@ fn commit_pr_body_is_bounded_and_contains_commit_messages()
         host.head(&fixture.writer)?,
         "Run fixture\nAttempt fixture",
     )?;
-    assert!(body.len() <= 60_000 && body.contains("[Commit summary truncated.]"));
+    assert!(body.len() <= PR_BODY_LIMIT && body.ends_with(PR_BODY_TRUNCATION_NOTE.trim_end()));
     Ok(())
 }
 

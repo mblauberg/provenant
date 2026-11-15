@@ -417,52 +417,52 @@ mod tests {
         let larger = vec![b'x'; RECORD_LIMIT as usize + 1];
         seal(
             &dir,
-            "terminal-pending.json",
+            provenant_records::AttemptFile::TerminalPending.name(),
             &larger,
             TERMINAL_RECORD_LIMIT,
         )?;
         assert_eq!(
-            read_sealed(&dir, "terminal-pending.json", TERMINAL_RECORD_LIMIT)?.as_deref(),
+            read_sealed(
+                &dir,
+                provenant_records::AttemptFile::TerminalPending.name(),
+                TERMINAL_RECORD_LIMIT
+            )?
+            .as_deref(),
             Some(larger.as_slice())
         );
-        assert!(read_sealed(&dir, "terminal-pending.json", RECORD_LIMIT).is_err());
+        assert!(
+            read_sealed(
+                &dir,
+                provenant_records::AttemptFile::TerminalPending.name(),
+                RECORD_LIMIT
+            )
+            .is_err()
+        );
         Ok(())
     }
 
     #[test]
-    fn read_sealed_follows_a_checkpoint_replaced_after_open() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let dir = Directory::open_anchor(temp.path())?;
-        checkpoint(&dir, b"old")?;
-        let mut opens = 0;
-        let read = read_sealed_observing(&dir, "process.json", 1024, || {
-            opens += 1;
-            if opens == 1 {
-                // The guardian's next periodic checkpoint lands between the
-                // reader's open and its fstat, leaving the handle unlinked.
-                checkpoint(&dir, b"new").expect("replace checkpoint");
-            }
-        })?;
-        assert_eq!(read.as_deref(), Some(&b"new"[..]));
-        assert_eq!(opens, 2);
-        Ok(())
-    }
-
-    #[test]
-    fn observed_read_follows_a_checkpoint_replaced_after_open() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let dir = Directory::open_anchor(temp.path())?;
-        checkpoint(&dir, b"old")?;
-        let mut opens = 0;
-        let read = read_sealed_with(&dir, "process.json", 1024, false, || {
-            opens += 1;
-            if opens == 1 {
-                checkpoint(&dir, b"new").expect("replace checkpoint");
-            }
-        })?;
-        assert_eq!(read.as_deref(), Some(&b"new"[..]));
-        assert_eq!(opens, 2);
-        assert_eq!(read, read_sealed(&dir, "process.json", 1024)?);
+    fn checkpoint_reads_follow_replacement_for_each_durability_mode() -> TestResult {
+        for durable in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let dir = Directory::open_anchor(temp.path())?;
+            checkpoint(&dir, b"old")?;
+            let mut replaced = false;
+            let mut observe = || {
+                if !replaced {
+                    // Replace the checkpoint between open and the final name check.
+                    checkpoint(&dir, b"new").expect("replace checkpoint");
+                    replaced = true;
+                }
+            };
+            let read = if durable {
+                read_sealed_observing(&dir, "process.json", 1024, observe)?
+            } else {
+                read_sealed_with(&dir, "process.json", 1024, false, observe)?
+            };
+            assert_eq!(read.as_deref(), Some(&b"new"[..]));
+            assert_eq!(read, read_sealed(&dir, "process.json", 1024)?);
+        }
         Ok(())
     }
 
@@ -500,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn read_sealed_still_refuses_unsafe_entries_and_names_them() -> TestResult {
+    fn read_sealed_reports_typed_refusal_for_unsafe_entries() -> TestResult {
         let temp = tempfile::tempdir()?;
         let dir = Directory::open_anchor(temp.path())?;
         checkpoint(&dir, b"x")?;
@@ -532,14 +532,10 @@ mod tests {
         assert!(matches!(
             error,
             RunError::UnsafePath {
+                path,
                 check: PathCheck::Mode,
-                ..
-            }
+            } if path == dir.anchored_path().join("process.json")
         ));
-        assert_eq!(
-            error.to_string(),
-            "run-store path process.json is not private or contained: mode"
-        );
         Ok(())
     }
 

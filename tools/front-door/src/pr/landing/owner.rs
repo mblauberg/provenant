@@ -1390,6 +1390,7 @@ mod tests {
         older.authority = Authority::Chair;
         older.members[0].review_proof = ReviewProof::Accepted {
             reason: "older acceptance".into(),
+            extra: Default::default(),
         };
         let mut current = snapshot.clone();
         current.revision += 1;
@@ -1461,6 +1462,7 @@ mod tests {
         for member in &mut members {
             member.review_proof = ReviewProof::Accepted {
                 reason: "owner accepts uncovered delta".into(),
+                extra: Default::default(),
             };
         }
         let (_, record) = submit(

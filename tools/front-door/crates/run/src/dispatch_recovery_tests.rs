@@ -1,92 +1,126 @@
 use super::*;
 
 #[test]
-fn reconcile_recovers_writer_when_device_numbers_change_after_reboot() -> TestResult {
-    recover_rebooted_writer_inner(false, false, true, NEW_BOOT, false, true, false)
-}
-#[test]
-fn reconcile_rebooted_handoff_after_device_numbers_change() -> TestResult {
-    let observer = RebootObserver(NEW_BOOT);
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let context = context(temp.path())?;
-    let store = RunStore::open(&context, &call)?;
-    let mut run = input();
-    let worktree = temp.path().join("lane");
-    std::fs::create_dir(&worktree)?;
-    std::fs::write(worktree.join("unfinished.rs"), "keep my work")?;
-    run.request.task.writer = Some(WriterRequest {
-        extra: Default::default(),
-        custody_project: Some(crate::tests::writer_project()),
-        project: temp.path().to_path_buf(),
-        worktree: worktree.clone(),
-    });
-    store.create(&run, &call)?;
-    let id = run.attempt_id;
-    store.mark_starting(
-        &store.record(id, &call)?,
-        &route(),
-        &[],
-        &Default::default(),
-        None,
-        &call,
-    )?;
-    store
-        .claim(id, &at_micros(100), &call)?
-        .ok_or("not admitted")?;
-    let scope = RunStore::scope(&store.record(id, &call)?);
-    let attempt = store.attempt_dir(id, false)?;
-    let custody = store
-        .writer_registry
-        .join("worktrees")
-        .join(context.project_id.to_string())
-        .join(provenant_confinement::worktrees::state_dir_name(&worktree));
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&custody)?;
-    let slot = Directory::open_anchor(&custody)?;
-    drop(provenant_supervisor::fixture::acquire_writer(
-        slot.try_clone()?,
-        scope,
-        call.lock_budget(),
-        &cancel,
-        &clock,
-    )?);
-    // The attempt-scoped reservation survives a reboot that renumbered the
-    // devices while it was handing off.
-    let child_reservation = custody.join(id.to_string()).join("reservation.json");
-    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&child_reservation)?)?;
-    let shift = |value: &serde_json::Value| value.as_u64().map(|device| device + 1);
-    value["boot"] = OLD_BOOT.into();
-    value["launch_state"] = "handing_off".into();
-    value["reservation_device"] = shift(&value["reservation_device"])
-        .ok_or("reservation device")?
-        .into();
-    let attempt_meta = attempt.metadata()?;
-    value["attempt_device"] = (attempt_meta.device + 1).into();
-    value["attempt_inode"] = attempt_meta.inode.into();
-    std::fs::write(&child_reservation, serde_json::to_vec(&value)?)?;
-
-    assert_eq!(
-        store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?,
-        vec![(id, Reconciled::Finished)]
-    );
-    assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
-    assert!(store.writer_fences()?.is_empty());
-    assert!(!child_reservation.exists());
-    assert_eq!(
-        std::fs::read_to_string(worktree.join("unfinished.rs"))?,
-        "keep my work"
-    );
-    assert!(artifacts::read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_none());
+fn reboot_recovery_preserves_custody_across_boot_and_holder_states() -> TestResult {
+    let base = RebootRecoveryCase::writer_after_reboot();
+    for case in [
+        RebootRecoveryCase {
+            device_numbers: DeviceNumbers::Changed,
+            ..base
+        },
+        RebootRecoveryCase {
+            boot: BootRelation::Same,
+            device_numbers: DeviceNumbers::Changed,
+            ..base
+        },
+        RebootRecoveryCase {
+            operation: RecoveryOperation::CancelThenReconcile,
+            ..base
+        },
+        RebootRecoveryCase {
+            phase: AttemptPhase::TerminalCommitInterrupted,
+            ..base
+        },
+        RebootRecoveryCase {
+            operation: RecoveryOperation::CancelThenReconcile,
+            phase: AttemptPhase::TerminalCommitInterrupted,
+            ..base
+        },
+        RebootRecoveryCase {
+            lane: LaneOwnership::Reader,
+            phase: AttemptPhase::TerminalCommitInterrupted,
+            ..base
+        },
+        RebootRecoveryCase {
+            boot: BootRelation::Same,
+            ..base
+        },
+        RebootRecoveryCase {
+            operation: RecoveryOperation::CancelThenReconcile,
+            boot: BootRelation::Same,
+            ..base
+        },
+        RebootRecoveryCase {
+            boot: BootRelation::Same,
+            lane: LaneOwnership::Reader,
+            ..base
+        },
+        RebootRecoveryCase {
+            boot: BootRelation::Same,
+            custody: CustodyEvidence::Unresolved,
+            ..base
+        },
+        RebootRecoveryCase {
+            worktree: WorktreeState::Removed,
+            ..base
+        },
+    ] {
+        recover_rebooted_writer(case)?;
+    }
+    rebooted_handoff_with_renumbered_devices_keeps_custody()?;
     Ok(())
 }
+
 #[test]
-fn changed_device_numbers_on_same_boot_keep_writer_custody() -> TestResult {
-    recover_rebooted_writer_inner(false, false, true, OLD_BOOT, false, true, false)
+fn unreserved_recovery_uses_process_evidence_and_operation() -> TestResult {
+    for evidence in [
+        ProcessEvidence::None,
+        ProcessEvidence::CurrentGuardian,
+        ProcessEvidence::MismatchedProvider,
+        ProcessEvidence::PreviousBootTree,
+    ] {
+        for operation in [
+            RecoveryOperation::Reconcile,
+            RecoveryOperation::CancelThenReconcile,
+        ] {
+            placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+                operation,
+                evidence,
+                reservation: ReservationCase::Missing,
+                worktree: WorktreeState::Present,
+            })?;
+        }
+    }
+    Ok(())
 }
+
+#[test]
+fn reservation_recovery_validates_generation_attempt_and_worktree() -> TestResult {
+    for operation in [
+        RecoveryOperation::Reconcile,
+        RecoveryOperation::CancelThenReconcile,
+    ] {
+        placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+            operation,
+            evidence: ProcessEvidence::PreviousBootTree,
+            reservation: ReservationCase::Stale,
+            worktree: WorktreeState::Present,
+        })?;
+        placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+            operation,
+            evidence: ProcessEvidence::PreviousBootTree,
+            reservation: ReservationCase::Missing,
+            worktree: WorktreeState::Removed,
+        })?;
+    }
+    for (evidence, reservation) in [
+        (ProcessEvidence::CurrentGuardian, ReservationCase::Stale),
+        (ProcessEvidence::PreviousBootTree, ReservationCase::Newer),
+        (
+            ProcessEvidence::PreviousBootTree,
+            ReservationCase::DifferentAttempt,
+        ),
+    ] {
+        placed_writer_with_missing_or_stale_reservation(RecoveryCase {
+            operation: RecoveryOperation::Reconcile,
+            evidence,
+            reservation,
+            worktree: WorktreeState::Present,
+        })?;
+    }
+    Ok(())
+}
+
 #[test]
 fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
     let observer = RebootObserver(NEW_BOOT);
@@ -142,141 +176,103 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
     let manifest_path = path.join("quarantine/manifest.json");
     let manifest = std::fs::read(&manifest_path)?;
     std::fs::write(&manifest_path, b"invalid manifest")?;
-    assert!(
-        matches!(store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?.as_slice(),
-        [(attempt, Reconciled::Uncertain { .. })] if *attempt == id)
-    );
-    assert!(
-        reservation.exists(),
-        "failed verification retains the reservation"
-    );
-    assert!(temporary.exists(), "uncertain custody retains tmp");
+    assert!(matches!(
+        store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?.as_slice(),
+        [(attempt, Reconciled::Uncertain { .. })] if *attempt == id
+    ));
+    assert!(reservation.exists());
+    assert!(temporary.exists());
     assert_eq!(store.record(id, &call)?, record);
-    std::fs::write(manifest_path, manifest)?;
+    std::fs::write(&manifest_path, manifest)?;
     assert_eq!(
         store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?,
         vec![(id, Reconciled::Finished)]
     );
     let cleanup = controls::REBOOT_TEMPORARY_CLEANUP.with(|result| result.borrow_mut().take());
     assert_eq!(cleanup, Some(Ok(Some(Reconciled::TemporaryRemoved))));
-    assert!(
-        !path.join("scratch").exists(),
-        "normal settlement removes empty launch staging"
-    );
-    assert!(
-        path.join("release.json").exists(),
-        "normal settlement verifies release evidence"
-    );
+    assert!(!path.join("scratch").exists());
+    assert!(path.join("release.json").exists());
     assert!(!reservation.exists());
-    assert!(!path.join("tmp").exists(), "released tmp is removed");
+    assert!(!path.join("tmp").exists());
     assert_eq!(store.record(id, &call)?, record);
     Ok(())
 }
-#[test]
-fn cancel_recovers_a_writer_from_a_previous_boot() -> TestResult {
-    recover_rebooted_writer(true, false, true, NEW_BOOT)
-}
-#[test]
-fn reconcile_retries_reboot_release_after_the_terminal_commit() -> TestResult {
-    recover_rebooted_writer(false, true, true, NEW_BOOT)
-}
-#[test]
-fn cancel_retries_reboot_release_after_the_terminal_commit() -> TestResult {
-    recover_rebooted_writer(true, true, true, NEW_BOOT)
-}
-#[test]
-fn reconcile_retries_reboot_release_for_a_reader() -> TestResult {
-    recover_rebooted_writer(false, true, false, NEW_BOOT)
-}
-#[test]
-fn unreserved_cancel_keeps_unidentified_provider_uncertain() -> TestResult {
-    placed_writer_without_reservation(true, 0)
-}
-#[test]
-fn unreserved_reconcile_keeps_unidentified_provider_uncertain() -> TestResult {
-    placed_writer_without_reservation(false, 0)
-}
-#[test]
-fn unreserved_live_guardian_keeps_attempt_open() -> TestResult {
-    placed_writer_without_reservation(true, 1)?;
-    placed_writer_without_reservation(false, 1)
-}
-#[test]
-fn unreserved_live_provider_keeps_attempt_open() -> TestResult {
-    placed_writer_without_reservation(true, 3)?;
-    placed_writer_without_reservation(false, 3)
-}
-#[test]
-fn unreserved_recorded_process_tree_before_reboot_is_lost() -> TestResult {
-    placed_writer_without_reservation(true, 2)?;
-    placed_writer_without_reservation(false, 2)
-}
-#[test]
-fn stale_reservation_before_reboot_is_reclaimed() -> TestResult {
-    for cancel_run in [true, false] {
-        placed_writer_with_missing_or_stale_reservation(RecoveryCase {
-            cancel_run,
-            evidence: 2,
-            reservation: ReservationCase::Stale,
-            removed: false,
-        })?;
-    }
+
+fn rebooted_handoff_with_renumbered_devices_keeps_custody() -> TestResult {
+    let observer = RebootObserver(NEW_BOOT);
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut run = input();
+    let worktree = temp.path().join("lane");
+    std::fs::create_dir(&worktree)?;
+    std::fs::write(worktree.join("unfinished.rs"), "keep my work")?;
+    run.request.task.writer = Some(WriterRequest {
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
+        project: temp.path().to_path_buf(),
+        worktree: worktree.clone(),
+    });
+    store.create(&run, &call)?;
+    let id = run.attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store
+        .claim(id, &at_micros(100), &call)?
+        .ok_or("not admitted")?;
+    let scope = RunStore::scope(&store.record(id, &call)?);
+    let attempt = store.attempt_dir(id, false)?;
+    let custody = store
+        .writer_registry
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join(provenant_confinement::worktrees::state_dir_name(&worktree));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&custody)?;
+    let slot = Directory::open_anchor(&custody)?;
+    drop(provenant_supervisor::fixture::acquire_writer(
+        slot.try_clone()?,
+        scope,
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?);
+    let child_reservation = custody.join(id.to_string()).join("reservation.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&child_reservation)?)?;
+    let shift = |value: &serde_json::Value| value.as_u64().map(|device| device + 1);
+    value["boot"] = OLD_BOOT.into();
+    value["launch_state"] = "handing_off".into();
+    value["reservation_device"] = shift(&value["reservation_device"])
+        .ok_or("reservation device")?
+        .into();
+    let attempt_meta = attempt.metadata()?;
+    value["attempt_device"] = (attempt_meta.device + 1).into();
+    value["attempt_inode"] = attempt_meta.inode.into();
+    std::fs::write(&child_reservation, serde_json::to_vec(&value)?)?;
+
+    assert_eq!(
+        store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?,
+        vec![(id, Reconciled::Finished)]
+    );
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
+    assert!(store.writer_fences()?.is_empty());
+    assert!(!child_reservation.exists());
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("unfinished.rs"))?,
+        "keep my work"
+    );
+    assert!(artifacts::read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_none());
     Ok(())
-}
-#[test]
-fn removed_worktree_before_reboot_is_lost() -> TestResult {
-    for cancel_run in [true, false] {
-        placed_writer_with_missing_or_stale_reservation(RecoveryCase {
-            cancel_run,
-            evidence: 2,
-            reservation: ReservationCase::Missing,
-            removed: true,
-        })?;
-    }
-    recover_rebooted_writer_removed_worktree()
-}
-#[test]
-fn stale_reservation_with_current_boot_process_is_retained() -> TestResult {
-    placed_writer_with_missing_or_stale_reservation(RecoveryCase {
-        cancel_run: false,
-        evidence: 1,
-        reservation: ReservationCase::Stale,
-        removed: false,
-    })
-}
-#[test]
-fn newer_generation_reservation_is_retained() -> TestResult {
-    placed_writer_with_missing_or_stale_reservation(RecoveryCase {
-        cancel_run: false,
-        evidence: 2,
-        reservation: ReservationCase::Newer,
-        removed: false,
-    })
-}
-#[test]
-fn different_attempt_reservation_is_retained() -> TestResult {
-    placed_writer_with_missing_or_stale_reservation(RecoveryCase {
-        cancel_run: false,
-        evidence: 2,
-        reservation: ReservationCase::DifferentAttempt,
-        removed: false,
-    })
-}
-#[test]
-fn same_boot_with_no_live_holder_settles_lost() -> TestResult {
-    recover_rebooted_writer(false, false, true, OLD_BOOT)
-}
-#[test]
-fn same_boot_with_unresolved_custody_stays_uncertain() -> TestResult {
-    recover_rebooted_writer_inner(false, false, true, OLD_BOOT, false, false, true)
-}
-#[test]
-fn cancel_settles_an_attempt_with_no_live_holder() -> TestResult {
-    recover_rebooted_writer(true, false, true, OLD_BOOT)
-}
-#[test]
-fn reader_with_no_live_holder_settles_lost() -> TestResult {
-    recover_rebooted_writer(false, false, false, OLD_BOOT)
 }
 #[test]
 fn reconcile_sealed_never_spawned_exit_without_a_stop_request() -> TestResult {

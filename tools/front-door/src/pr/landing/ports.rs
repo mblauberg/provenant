@@ -232,3 +232,61 @@ pub fn sync_project(
         alarms.set_project_path(path);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct SavedScopeSource(provenant_records::landing::ReviewScope);
+
+    impl ReviewRecordSource for SavedScopeSource {
+        fn reviews(
+            &self,
+            scope: &provenant_records::landing::ReviewScope,
+            number: u64,
+            head: &str,
+        ) -> Result<Reviews, LandingError> {
+            if scope != &self.0 || number != 42 || head != "pinned-head" {
+                return Ok(Reviews::default());
+            }
+            Ok(Reviews {
+                records: vec![ReviewRecord {
+                    reference: "review-run".into(),
+                    reviewer: "reviewer".into(),
+                    head: head.into(),
+                    verdict: provenant_records::workflow::ReviewVerdict::Approve,
+                    independent: true,
+                }],
+                unusable: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn scoped_reviews_use_the_saved_project_and_pinned_head() -> Result<(), LandingError> {
+        let scope = provenant_records::landing::ReviewScope {
+            project: Some(
+                provenant_core::ProjectId::parse("01abcdef2345678901abcdef23456789").unwrap(),
+            ),
+            exempt_patterns: vec!["docs/**".into()],
+        };
+        let source = SavedScopeSource(scope.clone());
+        let scoped = ScopedReviews {
+            source: &source,
+            scope: &scope,
+        };
+        let reviews = scoped.reviews(42, "pinned-head")?;
+        assert_eq!(
+            reviews.records,
+            vec![ReviewRecord {
+                reference: "review-run".into(),
+                reviewer: "reviewer".into(),
+                head: "pinned-head".into(),
+                verdict: provenant_records::workflow::ReviewVerdict::Approve,
+                independent: true,
+            }]
+        );
+        assert!(scoped.reviews(42, "moved-head")?.records.is_empty());
+        Ok(())
+    }
+}

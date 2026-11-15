@@ -1,8 +1,9 @@
 //! Host-only delivery. Credential environment travels on the private handoff
 //! pipe, never in provider environment, launch records or the delivery receipt.
 use crate::{
-    PathCheck, Result, RunError, WriterDeliveryReceipt, WriterDeliveryRequest,
-    WriterDeliveryStage as Stage, WriterDeliveryState, WriterIntegration, WriterRequest,
+    DeliveryPrepareRefusal, DeliveryPrepareStep, HelperSafety, PathCheck, Result, RunError,
+    WriterDeliveryReceipt, WriterDeliveryRequest, WriterDeliveryStage as Stage,
+    WriterDeliveryState, WriterIntegration, WriterRequest,
 };
 use provenant_confinement::redact::Redactor;
 use provenant_confinement::repo::GitRefName;
@@ -56,6 +57,18 @@ const BINDING_FILE: &str = "delivery-binding.json";
 pub(crate) const HEAD_MISMATCH: &str = "worktree head differs from sealed delivery head";
 const BINDING_MISMATCH: &str = "delivery destination differs from the launch binding";
 const BINDING_MISSING: &str = "delivery launch binding was not sealed";
+const ORIGIN_REFRESH_LIMIT: u64 = 4096;
+pub(super) const ORIGIN_REFRESH_PRECOMPOSE_SETTING: &str = "core.precomposeunicode=true";
+pub(super) const PREPARE_REASON_LIMIT: usize = 1024;
+pub(super) const PREPARE_REASON_TRUNCATION_MARKER: &str = "...";
+pub(super) const PR_BODY_LIMIT: usize = 60_000;
+pub(super) const PR_BODY_TRUNCATION_NOTE: &str = "\n\n[Commit summary truncated.]\n";
+pub(super) const HOST_GIT_HARDENING_CONFIG_ARGS: [&str; 4] = [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+];
 
 /// Recovery cannot repair these; retrying them cannot change the answer.
 pub(crate) fn recovery_refused(error: &RunError) -> bool {
@@ -66,8 +79,10 @@ pub(crate) fn recovery_refused(error: &RunError) -> bool {
 }
 
 /// The destination the host bound before the lane ran.
-#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct LaunchBinding {
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
     schema_version: u64,
     scope: provenant_records::custody::Scope,
     push_url: String,
@@ -78,6 +93,7 @@ struct LaunchBinding {
 impl LaunchBinding {
     fn new(scope: provenant_records::custody::Scope, bound: &BoundDelivery) -> Self {
         Self {
+            extra: Default::default(),
             schema_version: 1,
             scope,
             push_url: bound.push_url.clone(),
@@ -87,6 +103,17 @@ impl LaunchBinding {
         }
     }
 }
+impl PartialEq for LaunchBinding {
+    fn eq(&self, other: &Self) -> bool {
+        self.schema_version == other.schema_version
+            && self.scope == other.scope
+            && self.push_url == other.push_url
+            && self.lane_branch == other.lane_branch
+            && self.pull_request_repo == other.pull_request_repo
+            && self.destination == other.destination
+    }
+}
+impl Eq for LaunchBinding {}
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct HostTools {
     git: PathBuf,
@@ -94,6 +121,8 @@ struct HostTools {
 }
 #[derive(Serialize, Deserialize)]
 struct PickupReceipt {
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
     schema_version: u64,
     request: WriterDeliveryRequest,
     receipt: WriterDeliveryReceipt,
@@ -104,11 +133,17 @@ fn publish_pickup(
     request: &WriterDeliveryRequest,
     receipt: &WriterDeliveryReceipt,
 ) -> Result<()> {
+    let extra = match attempt.read_stable(OsStr::new("delivery-pickup.json"), crate::RECORD_LIMIT) {
+        Ok(raw) => crate::db::decode::<PickupReceipt>(&raw)?.extra,
+        Err(error) if error.is_not_found() => Default::default(),
+        Err(error) => return Err(error.into()),
+    };
     attempt
         .atomic_write(
             OsStr::new("delivery-pickup.json"),
             ".pickup-",
             &crate::db::bytes(&PickupReceipt {
+                extra,
                 schema_version: 1,
                 request: request.clone(),
                 receipt: receipt.clone(),
@@ -180,11 +215,21 @@ impl HostDeliveryContext {
             .bound
             .as_ref()
             .ok_or(RunError::Validation("delivery binding missing"))?;
+        let mut binding = LaunchBinding::new(scope, bound);
+        if let Some(raw) =
+            crate::artifacts::read_sealed(attempt, BINDING_FILE, crate::RECORD_LIMIT)?
+        {
+            let previous: LaunchBinding = crate::db::decode(&raw)?;
+            if previous != binding {
+                return Err(RunError::Validation(BINDING_MISMATCH));
+            }
+            binding.extra = previous.extra;
+        }
         attempt
             .atomic_write(
                 OsStr::new(BINDING_FILE),
                 ".binding-",
-                &crate::db::bytes(&LaunchBinding::new(scope, bound))?,
+                &crate::db::bytes(&binding)?,
                 provenant_os::fs::PublishMode::Replace,
             )?
             .require_durable()
@@ -242,17 +287,17 @@ impl HostDeliveryContext {
         input: &[u8],
     ) -> Result<String> {
         use provenant_config::{ForgeOperation, ForgePort, PortTable};
-        let state = self
-            .host_state()
-            .ok_or_else(|| prepare_error("forge port", "host state root unknown"))?;
+        let state = self.host_state().ok_or_else(|| {
+            prepare_error(DeliveryPrepareStep::ForgePort, "host state root unknown")
+        })?;
         let project = self
             .bound
             .as_ref()
             .map_or(cwd, |bound| bound.host_cwd.as_path());
         let table = PortTable::read_for(Some(project), &state)
-            .map_err(|error| prepare_error("forge port", error.to_string()))?;
+            .map_err(|error| prepare_error(DeliveryPrepareStep::ForgePort, error.to_string()))?;
         let mut forge = ForgePort::new(table.forge, "forge", project, &state)
-            .map_err(|error| prepare_error("forge port", error.to_string()))?;
+            .map_err(|error| prepare_error(DeliveryPrepareStep::ForgePort, error.to_string()))?;
         if let Some(cancel) = &self.cancellation {
             forge.set_cancel(cancel.clone());
         }
@@ -321,7 +366,7 @@ impl HostDeliveryContext {
             )
             .map_err(|error| {
                 if stage == Stage::Prepare {
-                    prepare_error("forge port", error.to_string())
+                    prepare_error(DeliveryPrepareStep::ForgePort, error.to_string())
                 } else {
                     RunError::Delivery(stage)
                 }
@@ -329,7 +374,7 @@ impl HostDeliveryContext {
         if response.execution.disposition != provenant_config::PortCommandDisposition::Succeeded {
             return Err(if stage == Stage::Prepare {
                 prepare_error(
-                    "forge port",
+                    DeliveryPrepareStep::ForgePort,
                     format!(
                         "forge command returned {:?}",
                         response.execution.disposition
@@ -391,7 +436,7 @@ impl HostDeliveryContext {
             .is_empty()
         {
             return Err(prepare_error(
-                "integration target",
+                DeliveryPrepareStep::IntegrationTarget,
                 "symbolic branch targets are refused",
             ));
         }
@@ -753,11 +798,11 @@ impl HostDeliveryContext {
         let stage = Stage::Prepare;
         let git = self.executable("git", writer)?;
         let gh = if request.open_pr {
-            let state = self
-                .host_state()
-                .ok_or_else(|| prepare_error("forge port", "host state root unknown"))?;
+            let state = self.host_state().ok_or_else(|| {
+                prepare_error(DeliveryPrepareStep::ForgePort, "host state root unknown")
+            })?;
             let ports = provenant_config::PortTable::read_for(Some(&writer.project), &state)
-                .map_err(|error| prepare_error("forge port", error))?;
+                .map_err(|error| prepare_error(DeliveryPrepareStep::ForgePort, error))?;
             provenant_config::dispatch_port_backend(
                 &ports.forge.backend,
                 || self.executable("gh", writer).map(Some),
@@ -790,7 +835,7 @@ impl HostDeliveryContext {
                 lane_branch: branch,
                 pull_request_repo: None,
                 git_dir: std::fs::canonicalize(git_dir)
-                    .map_err(|error| prepare_error("git dir", error))?,
+                    .map_err(|error| prepare_error(DeliveryPrepareStep::GitDir, error))?,
                 common_git_dir,
                 host_cwd: writer.project.clone(),
                 destination: request.clone(),
@@ -807,9 +852,12 @@ impl HostDeliveryContext {
         let url = urls
             .next()
             .filter(|v| !v.is_empty() && !v.starts_with('-'))
-            .ok_or_else(|| prepare_error("remote URL", "no usable push URL"))?;
+            .ok_or_else(|| prepare_error(DeliveryPrepareStep::RemoteUrl, "no usable push URL"))?;
         if urls.next().is_some() {
-            return Err(prepare_error("remote URL", "multiple push URLs"));
+            return Err(prepare_error(
+                DeliveryPrepareStep::RemoteUrl,
+                "multiple push URLs",
+            ));
         }
         // Embedded HTTP credentials would become process arguments below.
         // Host credential helpers, gh config and the SSH agent remain available.
@@ -827,7 +875,7 @@ impl HostDeliveryContext {
                         .is_some_and(|user| user.contains(':')))
         {
             return Err(prepare_error(
-                "remote URL",
+                DeliveryPrepareStep::RemoteUrl,
                 "embedded credentials, query or fragment refused",
             ));
         }
@@ -837,7 +885,8 @@ impl HostDeliveryContext {
             &["symbolic-ref", "--quiet", "--short", "HEAD"],
             stage,
         )?;
-        GitRefName::branch(&branch).map_err(|error| prepare_error("HEAD", error))?;
+        GitRefName::branch(&branch)
+            .map_err(|error| prepare_error(DeliveryPrepareStep::Head, error))?;
         let git_dir = self.command(
             &writer.worktree,
             "git",
@@ -846,9 +895,9 @@ impl HostDeliveryContext {
         )?;
         let push_url = if !url.contains(':') && !Path::new(url).is_absolute() {
             std::fs::canonicalize(writer.worktree.join(url))
-                .map_err(|error| prepare_error("remote URL", error))?
+                .map_err(|error| prepare_error(DeliveryPrepareStep::RemoteUrl, error))?
                 .to_str()
-                .ok_or_else(|| prepare_error("remote URL", "path is not UTF-8"))?
+                .ok_or_else(|| prepare_error(DeliveryPrepareStep::RemoteUrl, "path is not UTF-8"))?
                 .to_owned()
         } else {
             url.to_owned()
@@ -860,16 +909,17 @@ impl HostDeliveryContext {
             stage,
         )?;
         self.bound = Some(BoundDelivery {
-            base_head: GitOid::parse(&base).map_err(|error| prepare_error("HEAD", error))?,
+            base_head: GitOid::parse(&base)
+                .map_err(|error| prepare_error(DeliveryPrepareStep::Head, error))?,
             push_url,
             lane_branch: branch,
             pull_request_repo: request
                 .open_pr
                 .then(|| pull_request_repo(url))
                 .transpose()
-                .map_err(|error| prepare_error("remote URL", error))?,
+                .map_err(|error| prepare_error(DeliveryPrepareStep::RemoteUrl, error))?,
             git_dir: std::fs::canonicalize(git_dir)
-                .map_err(|error| prepare_error("git dir", error))?,
+                .map_err(|error| prepare_error(DeliveryPrepareStep::GitDir, error))?,
             common_git_dir,
             host_cwd: writer.project.clone(),
             destination: request.clone(),
@@ -909,11 +959,11 @@ impl HostDeliveryContext {
         });
         let git_dir = git_dir
             .to_str()
-            .ok_or_else(|| prepare_error("git dir", "path is not UTF-8"))?;
+            .ok_or_else(|| prepare_error(DeliveryPrepareStep::GitDir, "path is not UTF-8"))?;
         let worktree = writer
             .worktree
             .to_str()
-            .ok_or_else(|| prepare_error("worktree", "path is not UTF-8"))?;
+            .ok_or_else(|| prepare_error(DeliveryPrepareStep::Worktree, "path is not UTF-8"))?;
         let remotes = host.command(
             &writer.worktree,
             "git",
@@ -1061,7 +1111,7 @@ impl HostDeliveryContext {
             // (which `refs_collide` then sees) without a normalisation
             // dependency here.
             "-c",
-            "core.precomposeunicode=true",
+            ORIGIN_REFRESH_PRECOMPOSE_SETTING,
             "fetch",
             "--no-auto-maintenance",
             "--no-tags",
@@ -1171,8 +1221,8 @@ impl HostDeliveryContext {
                 continue;
             }
             if key.eq_ignore_ascii_case("core.sshcommand") {
-                return Err(prepare_error(
-                    "credential helper",
+                return Err(credential_helper_refusal(
+                    HelperSafety::UnsupportedSshCommand,
                     "delivery does not support core.sshCommand; use host SSH config",
                 ));
             }
@@ -1185,15 +1235,17 @@ impl HostDeliveryContext {
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b"/_-.=~:@".contains(&b))
                 {
-                    return Err(prepare_error(
-                        "credential helper",
+                    return Err(credential_helper_refusal(
+                        HelperSafety::OpaqueShellCommand,
                         "delivery refuses an opaque shell credential helper",
                     ));
                 }
                 if Path::new(parts[0]).is_absolute() {
                     credential_helper(Path::new(parts[0]), writer)?;
                 } else {
-                    self.executable("gh", writer)?;
+                    self.executable("gh", writer).map_err(|error| {
+                        credential_helper_refusal(HelperSafety::Unavailable, error)
+                    })?;
                 }
             } else {
                 let parts: Vec<_> = value.split_whitespace().collect();
@@ -1201,16 +1253,16 @@ impl HostDeliveryContext {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b" /_-.=~:@".contains(&b))
                 {
-                    return Err(prepare_error(
-                        "credential helper",
+                    return Err(credential_helper_refusal(
+                        HelperSafety::NonPlainExecutable,
                         "delivery credential helper needs a plain executable",
                     ));
                 }
                 if Path::new(parts[0]).is_absolute() {
                     credential_helper(Path::new(parts[0]), writer)?;
                 } else if parts[0].contains('/') {
-                    return Err(prepare_error(
-                        "credential helper",
+                    return Err(credential_helper_refusal(
+                        HelperSafety::LaneLocalPath,
                         "delivery credential helper must resolve outside the lane",
                     ));
                 }
@@ -1221,12 +1273,12 @@ impl HostDeliveryContext {
     fn host_environment(&mut self, writer: &WriterRequest) -> Result<()> {
         // A graph delivery runs in the project checkout itself, which is not a
         // lane.
-        let host_state = self
-            .host_state()
-            .ok_or_else(|| prepare_error("lane roots", "host state root unknown"))?;
+        let host_state = self.host_state().ok_or_else(|| {
+            prepare_error(DeliveryPrepareStep::LaneRoots, "host state root unknown")
+        })?;
         self.lane_roots =
             provenant_confinement::transport::LaneRoots::project(&writer.project, &host_state)
-                .map_err(|error| prepare_error("lane roots", error))?
+                .map_err(|error| prepare_error(DeliveryPrepareStep::LaneRoots, error))?
                 .into_paths();
         if writer.worktree != writer.project {
             self.lane_roots.push(writer.worktree.clone());
@@ -1238,7 +1290,7 @@ impl HostDeliveryContext {
             let name = std::str::from_utf8(key).unwrap_or_default();
             if name == "GIT_SSH_COMMAND" && !value.is_empty() {
                 return Err(prepare_error(
-                    "environment",
+                    DeliveryPrepareStep::Environment,
                     "GIT_SSH_COMMAND is not supported; use host SSH config",
                 ));
             }
@@ -1250,7 +1302,9 @@ impl HostDeliveryContext {
                     .filter(|p| !p.starts_with(&writer.worktree) && !p.starts_with(&writer.project))
                     .collect();
                 *value = std::env::join_paths(paths)
-                    .map_err(|_| prepare_error("environment", "PATH is invalid"))?
+                    .map_err(|_| {
+                        prepare_error(DeliveryPrepareStep::Environment, "PATH is invalid")
+                    })?
                     .into_vec();
             } else if matches!(
                 name,
@@ -1265,7 +1319,9 @@ impl HostDeliveryContext {
             ) && !value.is_empty()
             {
                 *value = host_path(Path::new(&path), writer)
-                    .map_err(|error| prepare_error("environment", format!("{name}: {error}")))?
+                    .map_err(|error| {
+                        prepare_error(DeliveryPrepareStep::Environment, format!("{name}: {error}"))
+                    })?
                     .into_os_string()
                     .into_vec();
             }
@@ -1283,7 +1339,7 @@ impl HostDeliveryContext {
                 provenant_os::git::resolve_git_executable(override_path.as_deref().map(Path::new))
                     .ok_or(RunError::GitUnavailable)?;
             return host_path(&path, writer)
-                .map_err(|error| prepare_error("git executable", error));
+                .map_err(|error| prepare_error(DeliveryPrepareStep::GitExecutable, error));
         }
         let path = self
             .environment
@@ -1292,7 +1348,7 @@ impl HostDeliveryContext {
             .map(|(_, v)| OsString::from_vec(v.clone()))
             .ok_or_else(|| {
                 prepare_error(
-                    "gh executable",
+                    DeliveryPrepareStep::GhExecutable,
                     format!("{tool} is unavailable: PATH is unset"),
                 )
             })?;
@@ -1301,7 +1357,12 @@ impl HostDeliveryContext {
             .map(|p| p.join(tool))
             .filter_map(|p| std::fs::canonicalize(p).ok())
             .find(|p| !p.starts_with(&writer.worktree) && provenant_os::sys::is_executable(p))
-            .ok_or_else(|| prepare_error("gh executable", format!("{tool} is unavailable on PATH")))
+            .ok_or_else(|| {
+                prepare_error(
+                    DeliveryPrepareStep::GhExecutable,
+                    format!("{tool} is unavailable on PATH"),
+                )
+            })
     }
     pub(super) fn command(
         &self,
@@ -1349,14 +1410,16 @@ impl HostDeliveryContext {
         let failure = |reason: String| {
             if stage == Stage::Prepare {
                 let step = match args.first().copied() {
-                    Some("remote") => "remote URL",
-                    Some("symbolic-ref") => "HEAD",
-                    Some("rev-parse") if args.contains(&"--absolute-git-dir") => "git dir",
-                    Some("rev-parse") => "HEAD",
-                    Some("config") => "credential helper",
-                    Some("worktree") => "worktree",
-                    _ if args.contains(&"fetch") => "fetch",
-                    _ => "git executable",
+                    Some("remote") => DeliveryPrepareStep::RemoteUrl,
+                    Some("symbolic-ref") => DeliveryPrepareStep::Head,
+                    Some("rev-parse") if args.contains(&"--absolute-git-dir") => {
+                        DeliveryPrepareStep::GitDir
+                    }
+                    Some("rev-parse") => DeliveryPrepareStep::Head,
+                    Some("config") => DeliveryPrepareStep::CredentialHelper,
+                    Some("worktree") => DeliveryPrepareStep::Worktree,
+                    _ if args.contains(&"fetch") => DeliveryPrepareStep::Fetch,
+                    _ => DeliveryPrepareStep::GitExecutable,
                 };
                 prepare_error(step, reason)
             } else {
@@ -1387,12 +1450,7 @@ impl HostDeliveryContext {
             _ => return Err(failure(format!("{tool} is unavailable"))),
         };
         let git_options: &[&str] = if tool == "git" {
-            &[
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "core.fsmonitor=false",
-            ]
+            &HOST_GIT_HARDENING_CONFIG_ARGS
         } else {
             &[]
         };
@@ -1437,7 +1495,7 @@ impl HostDeliveryContext {
         options.stdin = Some(input);
         let commit_log = tool == "git" && args.first() == Some(&"log");
         let limit = if tool == "git" && provenant_os::git::fact_capture_limit(args, 0) != 0 {
-            provenant_os::exec::DEFAULT_CAPTURE_LIMIT
+            host_output_limit(HostOutputClass::FactCapture)
         } else {
             stdout_limit(commit_log, args)
         };
@@ -1535,7 +1593,10 @@ impl HostDeliveryContext {
             return Ok(());
         }
         if stage == Stage::Prepare {
-            return Err(prepare_error("fetch", "destination is a symbolic ref"));
+            return Err(prepare_error(
+                DeliveryPrepareStep::Fetch,
+                "destination is a symbolic ref",
+            ));
         }
         Err(RunError::Delivery(stage))
     }
@@ -1637,7 +1698,7 @@ impl HostDeliveryContext {
         // lane-writable Git metadata after delivery has been bound.
         let failure = |reason: String| {
             if stage == Stage::Prepare {
-                prepare_error("HEAD", reason)
+                prepare_error(DeliveryPrepareStep::Head, reason)
             } else {
                 RunError::Delivery(stage)
             }
@@ -2334,10 +2395,9 @@ impl provenant_confinement::worktrees::CommitGraph for HostGraph<'_> {
 }
 
 pub(super) fn cap_pr_body(mut body: String) -> String {
-    const NOTE: &str = "\n\n[Commit summary truncated.]\n";
-    if body.len() > 60_000 - NOTE.len() {
-        body.truncate(body.floor_char_boundary(60_000 - NOTE.len()));
-        body.push_str(NOTE);
+    if body.len() > PR_BODY_LIMIT - PR_BODY_TRUNCATION_NOTE.len() {
+        body.truncate(body.floor_char_boundary(PR_BODY_LIMIT - PR_BODY_TRUNCATION_NOTE.len()));
+        body.push_str(PR_BODY_TRUNCATION_NOTE);
     }
     body
 }
@@ -2370,7 +2430,7 @@ pub(super) fn coalesced_origin_refresh(
         requested,
         cancel,
         WaitBudget::cli(clock.mono_now(), 60)
-            .map_err(|error| prepare_error("origin refresh", error))?,
+            .map_err(|error| prepare_error(DeliveryPrepareStep::OriginRefresh, error))?,
         refresh,
     )
 }
@@ -2413,12 +2473,17 @@ pub(super) fn coalesced_origin_refresh_with_budget(
     }
     match refresh() {
         Ok(()) => {
+            let mut marker = OriginRefreshRequest::capture()?;
+            if let Some(latest) = latest {
+                marker.extra = latest.extra;
+            }
             common
                 .atomic_write(
                     OsStr::new("provenant-lane-origin-refresh"),
                     ".origin-refresh-",
-                    &serde_json::to_vec(&OriginRefreshRequest::capture()?)
-                        .map_err(|error| prepare_error("origin refresh", error))?,
+                    &serde_json::to_vec(&marker).map_err(|error| {
+                        prepare_error(DeliveryPrepareStep::OriginRefresh, error)
+                    })?,
                     provenant_os::fs::PublishMode::Replace,
                 )?
                 .require_durable()?;
@@ -2427,8 +2492,9 @@ pub(super) fn coalesced_origin_refresh_with_budget(
         // Another Git client can win a tracking-ref transaction without
         // participating in our fetch lock. Do not record failed refreshes.
         Err(RunError::DeliveryPrepare {
-            step: "fetch",
+            step: DeliveryPrepareStep::Fetch,
             ref reason,
+            ..
         }) if (reason.contains("cannot lock ref ")
             && reason.contains(" is at ")
             && reason.contains(" but expected "))
@@ -2446,32 +2512,53 @@ pub(super) fn coalesced_origin_refresh_with_budget(
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct OriginRefreshRequest {
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
     boot: String,
     micros: u64,
 }
 impl OriginRefreshRequest {
     pub(super) fn capture() -> Result<Self> {
         Ok(Self {
+            extra: Default::default(),
             boot: provenant_os::clock::boot_identity()
-                .map_err(|error| prepare_error("origin refresh", error))?,
+                .map_err(|error| prepare_error(DeliveryPrepareStep::OriginRefresh, error))?,
             micros: provenant_os::clock::host_monotonic_micros()
-                .map_err(|error| prepare_error("origin refresh", error))?,
+                .map_err(|error| prepare_error(DeliveryPrepareStep::OriginRefresh, error))?,
         })
     }
 }
 fn origin_refresh_completion(common: &Directory) -> Result<Option<OriginRefreshRequest>> {
-    match common.read_bounded(OsStr::new("provenant-lane-origin-refresh"), 4096) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| prepare_error("origin refresh", error)),
+    match common.read_bounded(
+        OsStr::new("provenant-lane-origin-refresh"),
+        ORIGIN_REFRESH_LIMIT,
+    ) {
+        Ok(bytes) => provenant_records::decode(
+            bytes.as_slice(),
+            provenant_records::Limits {
+                max_bytes: ORIGIN_REFRESH_LIMIT,
+                ..Default::default()
+            },
+        )
+        .map(Some)
+        .map_err(|error| prepare_error(DeliveryPrepareStep::OriginRefresh, error)),
         Err(error) if error.is_not_found() => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
 
-pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) -> RunError {
+pub(super) fn prepare_error(step: DeliveryPrepareStep, detail: impl std::fmt::Display) -> RunError {
     RunError::DeliveryPrepare {
         step,
+        refusal: None,
+        reason: prepare_reason(detail),
+    }
+}
+
+fn credential_helper_refusal(safety: HelperSafety, detail: impl std::fmt::Display) -> RunError {
+    RunError::DeliveryPrepare {
+        step: DeliveryPrepareStep::CredentialHelper,
+        refusal: Some(DeliveryPrepareRefusal::CredentialHelper(safety)),
         reason: prepare_reason(detail),
     }
 }
@@ -2494,19 +2581,55 @@ fn pr_lookup_error(error: RunError) -> RunError {
     }
 }
 
+/// Output classes used by host-side repository and forge capture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HostOutputClass {
+    FactCapture,
+    RefListing,
+    CommitLog,
+    OriginConfiguration,
+    Ordinary,
+}
+
+/// One declaration for every bounded host output class.
+pub(super) const HOST_COMMAND_OUTPUT_LIMITS: [(HostOutputClass, usize); 5] = [
+    (
+        HostOutputClass::FactCapture,
+        provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
+    ),
+    (
+        HostOutputClass::RefListing,
+        provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
+    ),
+    (HostOutputClass::CommitLog, 56_000),
+    (HostOutputClass::OriginConfiguration, 1024 * 1024),
+    (HostOutputClass::Ordinary, 16 * 1024),
+];
+
+pub(super) fn host_output_limit(class: HostOutputClass) -> usize {
+    HOST_COMMAND_OUTPUT_LIMITS
+        .iter()
+        .find_map(|(declared, limit)| (*declared == class).then_some(*limit))
+        .expect("every host output class has one declared limit")
+}
+
+fn host_output_class(commit_log: bool, args: &[&str]) -> HostOutputClass {
+    if commit_log {
+        HostOutputClass::CommitLog
+    } else if args.contains(&"--show-origin") {
+        // A configuration listing with origins can exceed an ordinary reply.
+        HostOutputClass::OriginConfiguration
+    } else if matches!(git_subcommand(args).as_str(), "for-each-ref" | "ls-remote") {
+        HostOutputClass::RefListing
+    } else {
+        HostOutputClass::Ordinary
+    }
+}
+
 /// The stdout limit for non-fact host Git and forge calls. Ref listings grow
 /// with the repository; other calls keep their own bounds.
 pub(super) fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
-    if commit_log {
-        56_000
-    } else if args.contains(&"--show-origin") {
-        // A configuration listing with origins can exceed an ordinary reply.
-        1024 * 1024
-    } else if matches!(git_subcommand(args).as_str(), "for-each-ref" | "ls-remote") {
-        provenant_os::exec::DEFAULT_CAPTURE_LIMIT
-    } else {
-        16 * 1024
-    }
+    host_output_limit(host_output_class(commit_log, args))
 }
 
 /// The failed receipt state for a delivery error. A staged error keeps its
@@ -2581,9 +2704,9 @@ fn prepare_reason(detail: impl std::fmt::Display) -> String {
     let detail = detail.to_string();
     let redacted = provenant_confinement::redact::delivery_diagnostics(&detail);
     let mut reason = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
-    if reason.len() > 1024 {
-        reason.truncate(reason.floor_char_boundary(1024));
-        reason.push_str("...");
+    if reason.len() > PREPARE_REASON_LIMIT {
+        reason.truncate(reason.floor_char_boundary(PREPARE_REASON_LIMIT));
+        reason.push_str(PREPARE_REASON_TRUNCATION_MARKER);
     }
     reason
 }
@@ -2593,11 +2716,24 @@ fn credential_helper(path: &Path, writer: &WriterRequest) -> Result<()> {
         .file_name()
         .unwrap_or(path.as_os_str())
         .to_string_lossy();
-    let helper = host_path(path, writer)
-        .map_err(|error| prepare_error("credential helper", format!("{name}: {error}")))?;
+    let helper = match host_path(path, writer) {
+        Ok(helper) => helper,
+        Err(error @ HostPathError::InsideWorktree) => {
+            return Err(credential_helper_refusal(
+                HelperSafety::LaneLocalPath,
+                format!("{name}: {error}"),
+            ));
+        }
+        Err(error @ HostPathError::NotFound) => {
+            return Err(credential_helper_refusal(
+                HelperSafety::Unavailable,
+                format!("{name}: {error}"),
+            ));
+        }
+    };
     if !helper.is_file() || !provenant_os::sys::is_executable(&helper) {
-        return Err(prepare_error(
-            "credential helper",
+        return Err(credential_helper_refusal(
+            HelperSafety::Unavailable,
             format!("{name} is unavailable ({})", path.display()),
         ));
     }
@@ -3184,4 +3320,153 @@ pub(crate) fn deliver_once(
         crate::RECORD_LIMIT,
     )?;
     Ok(receipt)
+}
+
+#[cfg(test)]
+mod stored_format_tests {
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    enum StoredDeliveryShape {
+        LaunchBinding,
+        PickupReceipt,
+        OriginRefreshRequest,
+    }
+
+    const STORED_DELIVERY_SHAPES: [StoredDeliveryShape; 3] = [
+        StoredDeliveryShape::LaunchBinding,
+        StoredDeliveryShape::PickupReceipt,
+        StoredDeliveryShape::OriginRefreshRequest,
+    ];
+
+    fn preserves_unknown<T>(
+        record: T,
+        max_bytes: u64,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let future = serde_json::json!({"preserved": true});
+        let mut value = serde_json::to_value(record)?;
+        value
+            .as_object_mut()
+            .ok_or("stored record must be an object")?
+            .insert("future_record_field".to_owned(), future.clone());
+        let incoming = serde_json::to_vec(&value)?;
+        let limits = provenant_records::Limits {
+            max_bytes,
+            ..Default::default()
+        };
+        let decoded: T = provenant_records::decode(incoming.as_slice(), limits)?;
+        let rewritten = provenant_records::CanonicalV1::bytes(&decoded)?;
+        let _: T = provenant_records::decode(rewritten.as_bytes(), limits)?;
+        let shape: serde_json::Value = provenant_records::decode(rewritten.as_bytes(), limits)?;
+        assert_eq!(shape.get("future_record_field"), Some(&future));
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_delivery_shapes_preserve_unknown_fields_through_bounded_decode()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let request = WriterDeliveryRequest {
+            extra: Default::default(),
+            mode: crate::DeliveryMode::Push,
+            remote: "origin".into(),
+            branch: "feature".into(),
+            open_pr: false,
+            fast_forward_only: false,
+        };
+        let bound = BoundDelivery {
+            base_head: GitOid::parse(&"a".repeat(40))?,
+            push_url: "file:///remote.git".into(),
+            lane_branch: "lane".into(),
+            pull_request_repo: None,
+            git_dir: PathBuf::from("/repo/.git"),
+            common_git_dir: PathBuf::from("/repo/.git"),
+            host_cwd: PathBuf::from("/repo"),
+            destination: request.clone(),
+        };
+        let scope = provenant_records::custody::Scope {
+            attempt: provenant_core::AttemptId::from_bytes([1; 16]),
+            generation: 1,
+        };
+        let receipt = WriterDeliveryReceipt {
+            extra: Default::default(),
+            schema_version: 1,
+            remote: "origin".into(),
+            branch: "feature".into(),
+            head: None,
+            review_acceptance: None,
+            state: WriterDeliveryState::NoNewCommits {
+                extra: Default::default(),
+            },
+            integration: None,
+        };
+        for shape in STORED_DELIVERY_SHAPES {
+            match shape {
+                StoredDeliveryShape::LaunchBinding => {
+                    preserves_unknown(LaunchBinding::new(scope, &bound), crate::RECORD_LIMIT)?;
+                }
+                StoredDeliveryShape::PickupReceipt => {
+                    preserves_unknown(
+                        PickupReceipt {
+                            extra: Default::default(),
+                            schema_version: 1,
+                            request: request.clone(),
+                            receipt: receipt.clone(),
+                        },
+                        crate::RECORD_LIMIT,
+                    )?;
+                }
+                StoredDeliveryShape::OriginRefreshRequest => {
+                    preserves_unknown(
+                        OriginRefreshRequest {
+                            extra: Default::default(),
+                            boot: "fixture-boot".into(),
+                            micros: 1,
+                        },
+                        ORIGIN_REFRESH_LIMIT,
+                    )?;
+                }
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        let future = serde_json::json!({"preserved": true});
+        let mut extra = provenant_records::ExtraFields::new();
+        extra.insert("future_record_field".into(), future.clone());
+        let prior = PickupReceipt {
+            extra,
+            schema_version: 1,
+            request: request.clone(),
+            receipt: receipt.clone(),
+        };
+        attempt
+            .atomic_write(
+                OsStr::new("delivery-pickup.json"),
+                ".fixture-",
+                &crate::db::bytes(&prior)?,
+                provenant_os::fs::PublishMode::Replace,
+            )?
+            .require_durable()?;
+        publish_pickup(&attempt, &request, &receipt)?;
+        let raw = attempt.read_stable(OsStr::new("delivery-pickup.json"), crate::RECORD_LIMIT)?;
+        let updated: PickupReceipt = provenant_records::decode(
+            raw.as_slice(),
+            provenant_records::Limits {
+                max_bytes: crate::RECORD_LIMIT,
+                ..Default::default()
+            },
+        )?;
+        let rewritten = provenant_records::encode(&updated)?;
+        let shape: serde_json::Value = provenant_records::decode(
+            rewritten.as_slice(),
+            provenant_records::Limits {
+                max_bytes: crate::RECORD_LIMIT,
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(shape.get("future_record_field"), Some(&future));
+        Ok(())
+    }
 }

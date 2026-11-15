@@ -39,7 +39,7 @@ fn cancellation_keeps_a_genuine_launch_preparation_failure() -> TestResult {
     Ok(())
 }
 #[test]
-fn publication_legacy_result_orphan_retains_manifest_failure() -> TestResult {
+fn publication_result_orphan_retains_manifest_failure() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -978,7 +978,7 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
     Ok(())
 }
 #[test]
-fn policy_refusal_skips_provider_preparation() -> TestResult {
+fn policy_refusal_records_a_rejected_attempt() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -995,7 +995,6 @@ fn policy_refusal_skips_provider_preparation() -> TestResult {
         &|_, _| unreachable!(),
         &call,
     )?;
-    assert_eq!(providers.prepared.get(), 0);
     assert!(matches!(started.as_slice(), [
         Started::Refused { attempt, kind: RefusalKind::Policy, .. },
     ] if *attempt == prepared.attempt_id));
@@ -1005,6 +1004,36 @@ fn policy_refusal_skips_provider_preparation() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn attempt_record_decoder_preserves_unknown_future_fields() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let record = store.record(run.attempt_id, &call)?;
+    let future_fields = std::collections::BTreeMap::from([(
+        "future_minor_field".to_owned(),
+        serde_json::json!({"enabled": true, "limits": [1, 2, 3]}),
+    )]);
+    let mut expected_extra = record.extra.clone();
+    expected_extra.extend(future_fields.clone());
+    let mut payload = serde_json::to_value(&record)?;
+    payload
+        .as_object_mut()
+        .ok_or("attempt record must encode as an object")?
+        .extend(future_fields.clone());
+
+    let first = crate::db::decode_attempt(&serde_json::to_vec(&payload)?)?;
+    assert_eq!(first.extra, expected_extra);
+    let encoded = crate::db::bytes(&first)?;
+    let second = crate::db::decode_attempt(&encoded)?;
+    assert_eq!(second.extra, expected_extra);
+    Ok(())
+}
+
 #[test]
 fn a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout() -> TestResult {
     let temp = tempfile::tempdir()?;

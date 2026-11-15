@@ -61,7 +61,7 @@ fn an_unreadable_host_clock_or_boot_identity_refuses_the_claim() -> TestResult {
 }
 
 #[test]
-fn memory_floor_warns_for_both_lane_classes() -> TestResult {
+fn advisory_memory_floor_does_not_refuse_writer_or_reader() -> TestResult {
     // Each case has its own store and ledger, so only the floor can decide it.
     for (seed, writer, available) in [
         (50, true, 1),
@@ -120,9 +120,4 @@ fn admission_warns_for_unconfigured_memory_floor_without_refusing() -> TestResul
         assert_eq!(admitted.started_at, Some(clock.wall_now()?));
     }
     Ok(())
-}
-
-#[test]
-fn waiting_parent_yields_host_and_project_leases_and_both_writers_finish() -> TestResult {
-    child_wait_lease_cycle(false)
 }

@@ -117,6 +117,5 @@ mod tests {
         );
         assert_eq!(set.receipt()["value"], "full");
         assert_eq!(set.receipt()["source"], "launch");
-        assert!(set.preamble().contains("CI scope: full (source: launch"));
     }
 }

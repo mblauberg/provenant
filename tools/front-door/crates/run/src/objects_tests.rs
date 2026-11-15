@@ -1078,6 +1078,21 @@ fn sha1_bytes(bytes: &[u8]) -> TestResult<[u8; 20]> {
     }
     Ok(result)
 }
+
+fn blob_name(bytes: &[u8]) -> TestResult<[u8; 20]> {
+    let mut object = format!("blob {}\0", bytes.len()).into_bytes();
+    object.extend_from_slice(bytes);
+    sha1_bytes(&object)
+}
+
+fn git_oid(name: [u8; 20]) -> TestResult<GitOid> {
+    let hex = name
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(GitOid::parse(&hex)?)
+}
+
 fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = !0_u32;
     for byte in bytes {
@@ -1211,40 +1226,152 @@ fn wrong_content_duplicate_and_corrupt_non_first_pack_entry_never_enter_shared_s
     Ok(())
 }
 
-/// Exercise receive-pack directly with a malformed incoming pack. Unlike the
-/// sender's exclusion of unused entries, this must fail in object quarantine.
+#[derive(Clone, Copy, Debug)]
+enum IncomingPack {
+    Malformed,
+    Duplicate,
+    Oversized,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnpackStatus {
+    Accepted,
+    Refused,
+}
+
+impl IncomingPack {
+    fn build(self) -> TestResult<(Vec<u8>, GitOid, Vec<GitOid>)> {
+        match self {
+            Self::Malformed => {
+                let first = b"first entry";
+                let second = b"second entry";
+                let first_name = blob_name(first)?;
+                let second_name = blob_name(second)?;
+                let entries = [
+                    (first.as_slice(), first_name),
+                    (second.as_slice(), second_name),
+                ];
+                let (mut pack, _) = pack_pair(&entries)?;
+                // Corrupt the non-first entry's DEFLATE checksum, then fix the
+                // outer digest so Git checks the object stream itself.
+                let end = pack.len();
+                pack[end - 21] ^= 0xff;
+                let digest = sha1_bytes(&pack[..end - 20])?;
+                pack[end - 20..].copy_from_slice(&digest);
+                Ok((
+                    pack,
+                    git_oid(first_name)?,
+                    vec![git_oid(first_name)?, git_oid(second_name)?],
+                ))
+            }
+            Self::Duplicate => {
+                let bytes = b"duplicate blob\n";
+                let name = blob_name(bytes)?;
+                let (pack, _) = pack_pair(&[(bytes, name), (bytes, name)])?;
+                Ok((pack, git_oid(name)?, vec![git_oid(name)?]))
+            }
+            Self::Oversized => {
+                let bytes = vec![b'x'; 4096];
+                let name = blob_name(&bytes)?;
+                let (pack, _) = pack_pair(&[(&bytes, name)])?;
+                Ok((pack, git_oid(name)?, vec![git_oid(name)?]))
+            }
+        }
+    }
+
+    fn receiver_cap(self, pack: &[u8], request: &[u8]) -> TestResult<u64> {
+        let pack_bytes = u64::try_from(pack.len())?;
+        let request_bytes = u64::try_from(request.len())?;
+        match self {
+            Self::Oversized => pack_bytes.checked_sub(1).ok_or_else(|| "empty pack".into()),
+            Self::Malformed | Self::Duplicate => request_bytes
+                .checked_add(1)
+                .ok_or_else(|| "request size overflow".into()),
+        }
+    }
+}
+
+/// Refused incoming packs stay quarantined: no new shared object, pack, or
+/// import ref may be published, regardless of which typed boundary rejects it.
 #[test]
-fn malformed_received_pack_is_quarantined_and_never_publishes_objects_or_refs() -> TestResult {
-    let fixture = Fixture::new("sha1")?;
-    let entries = [
-        (b"first entry".as_slice(), [0; 20]),
-        (b"second entry".as_slice(), [0; 20]),
-    ];
-    let (mut pack, _) = pack_pair(&entries)?;
-    // Corrupt the non-first entry's DEFLATE checksum, then fix the outer
-    // pack digest. Git must reject the object stream, not just its trailer.
-    let end = pack.len();
-    pack[end - 21] ^= 0xff;
-    let digest = sha1_bytes(&pack[..end - 20])?;
-    pack[end - 20..].copy_from_slice(&digest);
-    let output = receive_pack(&fixture, &pack, fixture.head, 1024 * 1024)?;
-    let report = String::from_utf8_lossy(&output.stdout);
+fn refused_received_packs_never_publish_objects_or_refs() -> TestResult {
+    assert_eq!(unpack_status(b"000eunpack ok\n")?, UnpackStatus::Accepted);
     assert!(
-        report.contains("unpack ") && !report.contains("unpack ok"),
-        "{report}"
+        unpack_status(b"0000").is_err(),
+        "missing unpack status refused"
     );
-    fixture.assert_not_published();
-    assert!(
-        !fixture
-            .project
-            .join(".git/refs/provenant/import/attack")
-            .exists()
-    );
+    for case in [
+        (IncomingPack::Malformed, UnpackStatus::Refused),
+        (IncomingPack::Duplicate, UnpackStatus::Refused),
+        (IncomingPack::Oversized, UnpackStatus::Refused),
+    ] {
+        let fixture = Fixture::new("sha1")?;
+        let (pack, tip, incoming_objects) = case.0.build()?;
+        let request = receive_request(&pack, tip);
+        let cap = case.0.receiver_cap(&pack, &request)?;
+        let output = receive_pack(&fixture, &request, cap)?;
+        assert_eq!(unpack_status(&output.stdout)?, case.1, "{case:?}");
+        fixture.assert_not_published();
+        assert!(
+            !fixture
+                .project
+                .join(".git/refs/provenant/import/attack")
+                .exists(),
+            "{:?} published its import ref",
+            case.0
+        );
+        for incoming_object in incoming_objects {
+            assert!(
+                !object_path(&fixture.common_objects(), incoming_object).exists(),
+                "{:?} published incoming object {incoming_object}",
+                case.0
+            );
+        }
+    }
     Ok(())
 }
 
-fn receive_pack(fixture: &Fixture, pack: &[u8], tip: GitOid, cap: u64) -> TestResult<Output> {
-    use std::{io::Write, process::Stdio};
+fn unpack_status(response: &[u8]) -> TestResult<UnpackStatus> {
+    let mut offset: usize = 0;
+    while offset < response.len() {
+        let header_end = offset.checked_add(4).ok_or("pkt-line offset overflow")?;
+        let header = response
+            .get(offset..header_end)
+            .ok_or("truncated pkt-line header")?;
+        let length = usize::from_str_radix(std::str::from_utf8(header)?, 16)?;
+        match length {
+            0 => break,
+            1 | 2 => offset = header_end,
+            3 => return Err("invalid pkt-line length".into()),
+            _ => {
+                if length < 4 {
+                    return Err("invalid pkt-line length".into());
+                }
+                let packet_end = offset.checked_add(length).ok_or("pkt-line size overflow")?;
+                let payload = response
+                    .get(header_end..packet_end)
+                    .ok_or("truncated pkt-line payload")?;
+                if let Some(status) = payload.strip_prefix(b"unpack ") {
+                    let status = status
+                        .strip_suffix(b"\n")
+                        .ok_or("invalid unpack status line")?;
+                    if status.is_empty() {
+                        return Err("empty unpack status".into());
+                    }
+                    return Ok(if status == b"ok" {
+                        UnpackStatus::Accepted
+                    } else {
+                        UnpackStatus::Refused
+                    });
+                }
+                offset = packet_end;
+            }
+        }
+    }
+    Err("missing unpack status".into())
+}
+
+fn receive_request(pack: &[u8], tip: GitOid) -> Vec<u8> {
     let command = format!(
         "{} {} refs/provenant/import/attack\0report-status\n",
         "0".repeat(40),
@@ -1254,6 +1381,11 @@ fn receive_pack(fixture: &Fixture, pack: &[u8], tip: GitOid, cap: u64) -> TestRe
     request.extend_from_slice(command.as_bytes());
     request.extend_from_slice(b"0000");
     request.extend_from_slice(pack);
+    request
+}
+
+fn receive_pack(fixture: &Fixture, request: &[u8], cap: u64) -> TestResult<Output> {
+    use std::{io::Write, process::Stdio};
     let mut child = provenant_os::fixture::git_command_at(&fixture.git)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -1271,51 +1403,8 @@ fn receive_pack(fixture: &Fixture, pack: &[u8], tip: GitOid, cap: u64) -> TestRe
         .stdin
         .take()
         .ok_or("receive input")?
-        .write_all(&request)?;
+        .write_all(request)?;
     Ok(child.wait_with_output()?)
-}
-
-#[test]
-fn duplicate_entry_pack_below_unpack_threshold_is_refused() -> TestResult {
-    let fixture = Fixture::new("sha1")?;
-    let bytes = b"duplicate blob\n";
-    let mut object = format!("blob {}\0", bytes.len()).into_bytes();
-    object.extend_from_slice(bytes);
-    let name = sha1_bytes(&object)?;
-    let tip = GitOid::parse(&name.iter().map(|b| format!("{b:02x}")).collect::<String>())?;
-    let (pack, _) = pack_pair(&[(bytes, name), (bytes, name)])?;
-    let output = receive_pack(&fixture, &pack, tip, 1024 * 1024)?;
-    let report = String::from_utf8_lossy(&output.stdout);
-    let reason = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        report.contains("unpack ") && !report.contains("unpack ok"),
-        "{report}: {reason}"
-    );
-    assert!(
-        reason.contains("duplicate") || report.contains("index-pack abnormal exit"),
-        "{report}: {reason}"
-    );
-    fixture.assert_not_published();
-    Ok(())
-}
-
-#[test]
-fn oversized_received_pack_is_refused_with_a_clear_reason() -> TestResult {
-    let fixture = Fixture::new("sha1")?;
-    let bytes = vec![b'x'; 4096];
-    let (pack, _) = pack_pair(&[(&bytes, [0; 20])])?;
-    let output = receive_pack(&fixture, &pack, fixture.head, 1024)?;
-    let report = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        report.contains("pack exceeds maximum allowed size"),
-        "{report}"
-    );
-    fixture.assert_not_published();
-    Ok(())
 }
 
 #[test]

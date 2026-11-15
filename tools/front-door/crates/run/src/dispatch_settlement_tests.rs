@@ -114,7 +114,7 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
         ..Fake::default()
     };
 
-    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    store.finish(id, &dir, &observed, &fake, &call)?;
     assert!(matches!(
         record.state,
         AttemptState::Terminal {
@@ -217,51 +217,46 @@ fn failed_lane_reason_reports_path_denial_without_captured_text() -> TestResult 
     assert!(reason.contains("access grant"), "{reason}");
     Ok(())
 }
+#[derive(Clone, Copy)]
+enum DenialStream {
+    None,
+    Stdout,
+}
+
+#[derive(Clone, Copy)]
+enum DenialAnswer {
+    Plain,
+    CompletedHandoff,
+    Empty,
+}
+
 #[test]
-fn a_lane_without_a_handoff_reports_a_stdout_path_denial_in_its_reason() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let run = input();
-    let id = run.attempt_id;
-    store.create(&run, &call)?;
-    store.mark_starting(
-        &store.record(id, &call)?,
-        &route(),
-        &[],
-        &Default::default(),
-        None,
-        &call,
-    )?;
-    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(id, false)?;
-    artifacts::seal(
-        &dir,
-        "stdout.log",
-        b"tool: /fixture/missing-grant: Permission denied TOKEN_SENTINEL\n",
-        CAPTURE_LIMIT,
-    )?;
-    artifacts::seal(&dir, "stderr.log", b"", CAPTURE_LIMIT)?;
-    let mut observed = exit();
-    observed.scope = RunStore::scope(&store.record(id, &call)?);
-    seal_exit(&store, &observed)?;
-    let fake = Fake {
-        observed: Some(route()),
-        answer: Some("The tool failed".into()),
-        ..Fake::default()
-    };
-    store.finish(id, &dir, &observed, &fake, &call)?;
-    let reason = terminal_reason(&store, id, &call)?;
-    assert!(!reason.contains("/fixture/missing-grant"), "{reason}");
-    assert!(!reason.contains("TOKEN_SENTINEL"), "{reason}");
-    assert!(reason.contains("access grant"), "{reason}");
-    // A read-only answer is its own proof, so the denial is a diagnostic only.
-    assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
+fn path_denial_keeps_the_answer_and_settlement_outcome() -> TestResult {
+    for (stream, answer, expected) in [
+        (
+            DenialStream::Stdout,
+            DenialAnswer::Plain,
+            Outcome::Succeeded,
+        ),
+        (
+            DenialStream::None,
+            DenialAnswer::CompletedHandoff,
+            Outcome::Succeeded,
+        ),
+        (DenialStream::Stdout, DenialAnswer::Empty, Outcome::Failed),
+    ] {
+        path_denial_case(stream, answer, expected)?;
+    }
     Ok(())
 }
-#[test]
-fn a_path_denial_leaves_a_finished_lanes_answer_and_success_intact() -> TestResult {
+
+fn path_denial_case(
+    stream: DenialStream,
+    answer_case: DenialAnswer,
+    expected: Outcome,
+) -> TestResult {
+    const DENIAL: &[u8] = b"tool: /fixture/missing-grant: Permission denied TOKEN_SENTINEL\n";
+    const COMPLETED: &str = "cat: /fixture/missing-grant: Operation not permitted\nI used the brief instead.\n\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```\n";
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -279,73 +274,37 @@ fn a_path_denial_leaves_a_finished_lanes_answer_and_success_intact() -> TestResu
     )?;
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
     let dir = store.attempt_dir(id, false)?;
-    artifacts::seal(&dir, "stdout.log", b"", CAPTURE_LIMIT)?;
+    let captured = match stream {
+        DenialStream::None => b"".as_slice(),
+        DenialStream::Stdout => DENIAL,
+    };
+    artifacts::seal(&dir, "stdout.log", captured, CAPTURE_LIMIT)?;
     artifacts::seal(&dir, "stderr.log", b"", CAPTURE_LIMIT)?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     seal_exit(&store, &observed)?;
-    let answer = "cat: /fixture/missing-grant: Operation not permitted\nI used the brief instead.\n\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```\n";
+    let answer = match answer_case {
+        DenialAnswer::Plain => "The tool failed",
+        DenialAnswer::CompletedHandoff => COMPLETED,
+        DenialAnswer::Empty => "",
+    };
     let fake = Fake {
         observed: Some(route()),
         answer: Some(answer.into()),
         ..Fake::default()
     };
-    store.finish(id, &dir, &observed, &fake, &call)?;
-    assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
-    let result = artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.ok_or("result")?;
-    assert_eq!(String::from_utf8(result)?, answer);
-    let reason = terminal_reason(&store, id, &call)?;
-    assert!(!reason.contains("/fixture/missing-grant"), "{reason}");
-    assert!(!reason.contains("TOKEN_SENTINEL"), "{reason}");
-    Ok(())
-}
-#[test]
-fn denial_evidence_does_not_turn_an_empty_answer_into_success() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let run = input();
-    let id = run.attempt_id;
-    store.create(&run, &call)?;
-    store.mark_starting(
-        &store.record(id, &call)?,
-        &route(),
-        &[],
-        &Default::default(),
-        None,
-        &call,
-    )?;
-    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-    let dir = store.attempt_dir(id, false)?;
-    artifacts::seal(
-        &dir,
-        "stdout.log",
-        b"tool: /fixture/missing-grant: Permission denied TOKEN_SENTINEL\n",
-        CAPTURE_LIMIT,
-    )?;
-    artifacts::seal(&dir, "stderr.log", b"", CAPTURE_LIMIT)?;
-    let mut observed = exit();
-    observed.scope = RunStore::scope(&store.record(id, &call)?);
-    seal_exit(&store, &observed)?;
-    let fake = Fake {
-        observed: Some(route()),
-        answer: Some(String::new()),
-        ..Fake::default()
-    };
     let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert_eq!(terminal(&store, id, &call)?, expected);
     let reason = terminal_reason(&store, id, &call)?;
-    assert!(!reason.contains("/fixture/missing-grant"), "{reason}");
-    assert!(!reason.contains("TOKEN_SENTINEL"), "{reason}");
-    assert!(reason.contains("access grant"), "{reason}");
-    assert_eq!(terminal(&store, id, &call)?, Outcome::Failed);
-    assert!(matches!(
-        record.state,
-        AttemptState::Terminal {
-            outcome: Outcome::Failed,
-            ..
-        }
-    ));
+    assert!(!reason.contains("/fixture/missing-grant"));
+    assert!(!reason.contains("TOKEN_SENTINEL"));
+    if matches!(stream, DenialStream::Stdout) {
+        assert!(reason.contains("access grant"));
+    }
+    if matches!(answer_case, DenialAnswer::CompletedHandoff) {
+        let result = artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.ok_or("result")?;
+        assert_eq!(result, answer.as_bytes());
+    }
     Ok(())
 }
 #[test]

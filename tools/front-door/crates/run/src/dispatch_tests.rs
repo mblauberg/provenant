@@ -524,7 +524,13 @@ fn writers<const N: usize>(
     Ok(ids)
 }
 
-fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
+#[derive(Clone, Copy)]
+enum ParentWaitCommit {
+    Persisted,
+    StoreUpdateFailed,
+}
+
+fn child_wait_lease_cycle(parent_wait_commit: ParentWaitCommit) -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -549,7 +555,7 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
     let parent_dir = store.attempt_dir(parent_id, false)?;
     artifacts::seal(&parent_dir, "stdout.log", b"parent work", CAPTURE_LIMIT)?;
     let child_id = starting(&store, &child, &call)?;
-    if block_reclaim {
+    if matches!(parent_wait_commit, ParentWaitCommit::StoreUpdateFailed) {
         // The ledger yield commits before the owning store. Simulate the
         // latter failing: cleanup must still reclaim despite an active ticket.
         store.db.execute_batch("CREATE TEMP TRIGGER fail_child_wait BEFORE UPDATE ON admission BEGIN SELECT RAISE(ABORT,'injected store failure'); END;")?;
@@ -570,7 +576,7 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
     let child_record = store
         .claim_observed(child_id, &clock, &call, &facts)?
         .ok_or("child claim")?;
-    if block_reclaim {
+    if matches!(parent_wait_commit, ParentWaitCommit::StoreUpdateFailed) {
         assert!(store.set_child_wait_observed(parent_id, false, &call, &facts)?);
         let reopened = RunStore::open(&context(temp.path())?, &call)?;
         let retained = reopened.record(parent_id, &call)?;
@@ -728,7 +734,13 @@ fn assert_unreadable_prompt_rejected(
     Ok(())
 }
 
-fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
+#[derive(Clone, Copy)]
+enum ReservationBinding {
+    Verified,
+    Replaced,
+}
+
+fn holder_release_temporary_fixture(binding: ReservationBinding) -> TestResult {
     let temp = tempfile::tempdir()?;
     let custody_dir = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -771,7 +783,7 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
     value["unresolved_cleanup"] = false.into();
     value["census_incomplete"] = false.into();
     value["attempt_device"] = meta.device.into();
-    value["attempt_inode"] = if valid_binding {
+    value["attempt_inode"] = if matches!(binding, ReservationBinding::Verified) {
         meta.inode
     } else {
         meta.inode + 1
@@ -829,15 +841,6 @@ fn terminal(store: &RunStore, id: AttemptId, call: &Request<'_>) -> Result<Outco
     }
 }
 
-fn placed_writer_without_reservation(cancel_run: bool, evidence: u8) -> TestResult {
-    placed_writer_with_missing_or_stale_reservation(RecoveryCase {
-        cancel_run,
-        evidence,
-        reservation: ReservationCase::Missing,
-        removed: false,
-    })
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReservationCase {
     Missing,
@@ -846,19 +849,39 @@ enum ReservationCase {
     DifferentAttempt,
 }
 
+#[derive(Clone, Copy)]
+enum RecoveryOperation {
+    Reconcile,
+    CancelThenReconcile,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProcessEvidence {
+    None,
+    CurrentGuardian,
+    MismatchedProvider,
+    PreviousBootTree,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorktreeState {
+    Present,
+    Removed,
+}
+
 struct RecoveryCase {
-    cancel_run: bool,
-    evidence: u8,
+    operation: RecoveryOperation,
+    evidence: ProcessEvidence,
     reservation: ReservationCase,
-    removed: bool,
+    worktree: WorktreeState,
 }
 
 fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestResult {
     let RecoveryCase {
-        cancel_run,
+        operation,
         evidence,
         reservation: reservation_case,
-        removed,
+        worktree: worktree_state,
     } = case;
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -922,15 +945,18 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
         &serde_json::to_vec(&summary)?,
         RECORD_LIMIT,
     )?;
-    if evidence != 0 {
-        let (guardian, provider) = if evidence == 1 || evidence == 3 {
+    if evidence != ProcessEvidence::None {
+        let (guardian, provider) = if matches!(
+            evidence,
+            ProcessEvidence::CurrentGuardian | ProcessEvidence::MismatchedProvider
+        ) {
             let provenant_supervisor::census::ProcessObservation::Present(fact) =
                 provenant_supervisor::census::current_process()
             else {
                 return Err("current process identity unavailable".into());
             };
             let mut guardian = fact.identity.clone();
-            if evidence == 3 {
+            if evidence == ProcessEvidence::MismatchedProvider {
                 guardian.native_start = guardian.native_start.saturating_add(1);
             }
             (guardian, fact.identity)
@@ -980,19 +1006,23 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
     } else {
         std::fs::remove_file(&reservation)?;
     }
-    if removed {
+    if worktree_state == WorktreeState::Removed {
         std::fs::remove_dir(&worktree)?;
     }
     let system = provenant_supervisor::census::SystemProcessObserver;
     let reboot = RebootObserver(NEW_BOOT);
     let observer: &dyn provenant_supervisor::census::ProcessObserver =
-        if evidence == 2 { &reboot } else { &system };
-    let should_settle = evidence == 2
+        if evidence == ProcessEvidence::PreviousBootTree {
+            &reboot
+        } else {
+            &system
+        };
+    let should_settle = evidence == ProcessEvidence::PreviousBootTree
         && matches!(
             reservation_case,
             ReservationCase::Missing | ReservationCase::Stale
         );
-    if cancel_run {
+    if matches!(operation, RecoveryOperation::CancelThenReconcile) {
         let before = std::fs::read(&reservation).ok();
         assert_eq!(
             store.cancel_with_observer(id, "stop", &call, observer)?,
@@ -1021,8 +1051,8 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
         assert!(reconciled.contains(&(
             id,
             match evidence {
-                1 => Reconciled::Held,
-                2 if should_settle => Reconciled::Finished,
+                ProcessEvidence::CurrentGuardian => Reconciled::Held,
+                ProcessEvidence::PreviousBootTree if should_settle => Reconciled::Finished,
                 _ => Reconciled::Uncertain {
                     reason: UncertainReason::GuardianNotObservable
                 },
@@ -1032,7 +1062,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
     if should_settle {
         assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
         assert!(!reservation.exists());
-        if removed {
+        if worktree_state == WorktreeState::Removed {
             assert!(
                 matches!(store.record(id, &call)?.state, AttemptState::Terminal { reason: Some(reason), .. } if reason.contains("worktree"))
             );
@@ -1074,29 +1104,80 @@ impl provenant_supervisor::census::ProcessObserver for RebootObserver {
     }
 }
 
-fn recover_rebooted_writer(
-    cancel_run: bool,
-    interrupted: bool,
-    writer: bool,
-    boot: &'static str,
-) -> TestResult {
-    recover_rebooted_writer_inner(cancel_run, interrupted, writer, boot, false, false, false)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BootRelation {
+    Same,
+    Changed,
 }
 
-fn recover_rebooted_writer_removed_worktree() -> TestResult {
-    recover_rebooted_writer_inner(false, false, true, NEW_BOOT, true, false, false)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LaneOwnership {
+    Reader,
+    Writer,
 }
 
-fn recover_rebooted_writer_inner(
-    cancel_run: bool,
-    interrupted: bool,
-    writer: bool,
-    boot: &'static str,
-    removed: bool,
-    changed_device: bool,
-    unresolved: bool,
-) -> TestResult {
-    let observer = RebootObserver(boot);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AttemptPhase {
+    Running,
+    TerminalCommitInterrupted,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeviceNumbers {
+    Stable,
+    Changed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CustodyEvidence {
+    Resolved,
+    Unresolved,
+}
+
+#[derive(Clone, Copy)]
+struct RebootRecoveryCase {
+    operation: RecoveryOperation,
+    boot: BootRelation,
+    lane: LaneOwnership,
+    phase: AttemptPhase,
+    worktree: WorktreeState,
+    device_numbers: DeviceNumbers,
+    custody: CustodyEvidence,
+}
+
+impl RebootRecoveryCase {
+    fn writer_after_reboot() -> Self {
+        Self {
+            operation: RecoveryOperation::Reconcile,
+            boot: BootRelation::Changed,
+            lane: LaneOwnership::Writer,
+            phase: AttemptPhase::Running,
+            worktree: WorktreeState::Present,
+            device_numbers: DeviceNumbers::Stable,
+            custody: CustodyEvidence::Resolved,
+        }
+    }
+
+    fn observer_boot(self) -> &'static str {
+        match self.boot {
+            BootRelation::Same => OLD_BOOT,
+            BootRelation::Changed => NEW_BOOT,
+        }
+    }
+}
+
+fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
+    let RebootRecoveryCase {
+        operation,
+        boot,
+        lane,
+        phase,
+        worktree: worktree_state,
+        device_numbers,
+        custody: custody_evidence,
+    } = case;
+    let boot_identity = case.observer_boot();
+    let observer = RebootObserver(boot_identity);
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -1106,6 +1187,7 @@ fn recover_rebooted_writer_inner(
     let worktree = temp.path().join("lane");
     std::fs::create_dir(&worktree)?;
     std::fs::write(worktree.join("unfinished.rs"), "keep my work")?;
+    let writer = lane == LaneOwnership::Writer;
     run.request.task.writer = writer.then(|| WriterRequest {
         extra: Default::default(),
         custody_project: Some(crate::tests::writer_project()),
@@ -1159,7 +1241,7 @@ fn recover_rebooted_writer_inner(
     });
     value["boot"] = guardian["boot"].clone();
     value["guardian"] = guardian.clone();
-    if boot == OLD_BOOT && !unresolved {
+    if boot == BootRelation::Same && custody_evidence == CustodyEvidence::Resolved {
         value["provider"] = serde_json::json!({
             "boot": OLD_BOOT, "pid": 124, "native_start": 1,
             "group_id": 124, "session_id": 123,
@@ -1170,7 +1252,7 @@ fn recover_rebooted_writer_inner(
     value["launch_state"] = "spawned".into();
     value["attempt_device"] = meta.device.into();
     value["attempt_inode"] = meta.inode.into();
-    if changed_device {
+    if device_numbers == DeviceNumbers::Changed {
         value["reservation_device"] =
             (value["reservation_device"].as_u64().ok_or("device")? + 1).into();
         value["attempt_device"] = (meta.device + 1).into();
@@ -1210,11 +1292,11 @@ fn recover_rebooted_writer_inner(
         .join(format!("attempts/{id}/provider-state"));
     std::fs::write(history.join("session"), "history")?;
 
-    if removed {
+    if worktree_state == WorktreeState::Removed {
         std::fs::remove_dir_all(&worktree)?;
     }
 
-    if boot == OLD_BOOT {
+    if boot == BootRelation::Same {
         // Held writer exclusion means a guardian may remain: stay uncertain.
         let held = Directory::open_anchor(&custody)?.try_lock(
             std::ffi::OsStr::new("writer.lock"),
@@ -1228,10 +1310,10 @@ fn recover_rebooted_writer_inner(
         assert!(reservation.exists());
         assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
         drop(held);
-        if changed_device {
+        if device_numbers == DeviceNumbers::Changed {
             return Ok(());
         }
-        if unresolved {
+        if custody_evidence == CustodyEvidence::Unresolved {
             assert!(matches!(
                 store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?.as_slice(),
                 [(attempt, Reconciled::Uncertain { .. })] if *attempt == id
@@ -1242,7 +1324,7 @@ fn recover_rebooted_writer_inner(
         }
         // Free exclusion and an absent guardian and provider leave no holder.
         assert_eq!(store.reap_with(&call, |_, _| Ok(()))?, 1);
-        if cancel_run {
+        if matches!(operation, RecoveryOperation::CancelThenReconcile) {
             assert_eq!(
                 store.cancel_with_observer(id, "stop", &call, &observer)?,
                 CancelReceipt::Requested
@@ -1267,7 +1349,7 @@ fn recover_rebooted_writer_inner(
         assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
         return Ok(());
     }
-    if interrupted {
+    if phase == AttemptPhase::TerminalCommitInterrupted {
         let recovery = provenant_supervisor::custody::acquire_recovery(
             Directory::open_anchor(&custody)?,
             scope,
@@ -1283,7 +1365,8 @@ fn recover_rebooted_writer_inner(
         assert!(reservation.exists());
         assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
     }
-    if cancel_run && !interrupted {
+    if matches!(operation, RecoveryOperation::CancelThenReconcile) && phase == AttemptPhase::Running
+    {
         let custody_lock = attempt.try_lock(
             std::ffi::OsStr::new("custody.lock"),
             provenant_os::fs::LockMode::Exclusive,
@@ -1296,7 +1379,7 @@ fn recover_rebooted_writer_inner(
         assert!(reservation.exists());
         drop(custody_lock);
     }
-    if cancel_run {
+    if matches!(operation, RecoveryOperation::CancelThenReconcile) {
         let receipt = store.cancel_with_observer(id, "stop", &call, &observer)?;
         assert!(matches!(
             receipt,
@@ -1312,7 +1395,7 @@ fn recover_rebooted_writer_inner(
         );
     }
     assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
-    if removed {
+    if worktree_state == WorktreeState::Removed {
         assert!(
             matches!(store.record(id, &call)?.state, AttemptState::Terminal { reason: Some(reason), .. } if reason.contains("worktree"))
         );

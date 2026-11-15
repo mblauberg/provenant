@@ -88,29 +88,65 @@ detail_codes! {
     TOOLCHAIN_PIN_CHANNEL_MISSING = "toolchain_pin_channel_missing",
 }
 
-#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+/// Every reason persisted in `cargo-target-setup.json` when target seeding
+/// falls back. Keep call sites and the coverage table on this declaration.
+macro_rules! fallback_reasons {
+    ($($name:ident = $text:literal),* $(,)?) => {
+        mod fallback_reasons {
+            $(pub(super) const $name: &str = $text;)*
+            pub(super) const ALL: &[&str] = &[$($name),*];
+        }
+    };
+}
+fallback_reasons! {
+    CACHE_UNAVAILABLE = "cache_unavailable",
+    TARGET_UNAVAILABLE = "target_unavailable",
+    SEED_LOCK_UNAVAILABLE = "seed_lock_unavailable",
+    STAGING_CLEANUP_FAILED = "staging_cleanup_failed",
+    SEED_BUDGET_EXHAUSTED = "seed_budget_exhausted",
+    CANCELLED = "cancelled",
+    STORE_UNAVAILABLE = "store_unavailable",
+    NO_GENERATIONS = "no_generations",
+    MANIFEST_INVALID = "manifest_invalid",
+    TOOLCHAIN_MISMATCH = "toolchain_mismatch",
+    TRIPLE_MISMATCH = "triple_mismatch",
+    STAGING_UNAVAILABLE = "staging_unavailable",
+    STAGING_SYNC_FAILED = "staging_sync_failed",
+    PUBLISH_FAILED = "publish_failed",
+    TARGET_READ_FAILED = "target_read_failed",
+    TARGET_TOO_DEEP = "target_too_deep",
+    TARGET_CONTAINS_UNSUPPORTED_ENTRY = "target_contains_unsupported_entry",
+    CLONE_FAILED = "clone_failed",
+    TOOLCHAIN_UNVERIFIED = "toolchain_unverified",
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Outcome {
-    status: &'static str,
-    reason: &'static str,
+    status: String,
+    reason: String,
     /// Stable snake_case code for the specific refusal behind `reason`. Never
     /// an environment value or path.
     #[serde(skip_serializing_if = "Option::is_none")]
-    detail: Option<&'static str>,
+    detail: Option<String>,
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
 }
 impl Outcome {
     pub(crate) fn skipped(reason: &'static str) -> Self {
         Self {
-            status: "skipped",
-            reason,
+            status: "skipped".into(),
+            reason: reason.into(),
             detail: None,
+            extra: Default::default(),
         }
     }
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn fallback(reason: &'static str) -> Self {
         Self {
-            status: "fallback",
-            reason,
+            status: "fallback".into(),
+            reason: reason.into(),
             detail: None,
+            extra: Default::default(),
         }
     }
     /// One line for the host's stderr when a seed was wanted and not used, so
@@ -120,15 +156,19 @@ impl Outcome {
             format!(
                 "warning: {what} not seeded ({}{}); this lane builds without it",
                 self.reason,
-                self.detail.map(|d| format!(": {d}")).unwrap_or_default()
+                self.detail
+                    .as_deref()
+                    .map(|d| format!(": {d}"))
+                    .unwrap_or_default()
             )
         })
     }
     pub(crate) fn fallback_detail(reason: &'static str, detail: &'static str) -> Self {
         Self {
-            status: "fallback",
-            reason,
-            detail: Some(detail),
+            status: "fallback".into(),
+            reason: reason.into(),
+            detail: Some(detail.into()),
+            extra: Default::default(),
         }
     }
 }
@@ -155,7 +195,9 @@ pub(crate) fn seed_target(
             Some(cancel),
         ) {
             Ok(metadata) => metadata,
-            Err(detail) => return Outcome::fallback_detail("toolchain_unverified", detail),
+            Err(detail) => {
+                return Outcome::fallback_detail(fallback_reasons::TOOLCHAIN_UNVERIFIED, detail);
+            }
         };
         seed_target_cancellable(
             state,
@@ -200,31 +242,31 @@ fn seed_target_cancellable(
     use provenant_os::fs::{Directory, temporary_name};
     use std::ffi::{OsStr, OsString};
     let Ok(cache_dir) = Directory::open_anchor(cache) else {
-        return Outcome::fallback("cache_unavailable");
+        return Outcome::fallback(fallback_reasons::CACHE_UNAVAILABLE);
     };
     match cache_dir.metadata_at(OsStr::new("target"), false) {
         Ok(_) => return Outcome::skipped("existing_target"),
         Err(error) if error.is_not_found() => {}
-        Err(_) => return Outcome::fallback("target_unavailable"),
+        Err(_) => return Outcome::fallback(fallback_reasons::TARGET_UNAVAILABLE),
     }
     // Held until the entire clone is published or removed: GC cannot unlink its source.
     let Ok(_lock) = crate::target_seed::lock_store(state) else {
-        return Outcome::fallback("seed_lock_unavailable");
+        return Outcome::fallback(fallback_reasons::SEED_LOCK_UNAVAILABLE);
     };
     // An interrupted clone leaves a private stage; remove it under the same
     // store lock before attempting another target seed.
     let Ok(stages) = cache_dir.entries() else {
-        return Outcome::fallback("staging_cleanup_failed");
+        return Outcome::fallback(fallback_reasons::STAGING_CLEANUP_FAILED);
     };
     for stage in stages {
         if deadline.expired() {
-            return Outcome::fallback("seed_budget_exhausted");
+            return Outcome::fallback(fallback_reasons::SEED_BUDGET_EXHAUSTED);
         }
         if cancel.is_some_and(|token| token.is_cancelled()) {
-            return Outcome::fallback("cancelled");
+            return Outcome::fallback(fallback_reasons::CANCELLED);
         }
         let Ok(stage) = stage else {
-            return Outcome::fallback("staging_cleanup_failed");
+            return Outcome::fallback(fallback_reasons::STAGING_CLEANUP_FAILED);
         };
         if stage.to_string_lossy().starts_with(".target-seed-") {
             match remove_seed_tree(&cache_dir, &stage, cancel, deadline) {
@@ -232,19 +274,19 @@ fn seed_target_cancellable(
                 Ok(false) => {
                     return Outcome::fallback(
                         if cancel.is_some_and(|token| token.is_cancelled()) {
-                            "cancelled"
+                            fallback_reasons::CANCELLED
                         } else {
-                            "seed_budget_exhausted"
+                            fallback_reasons::SEED_BUDGET_EXHAUSTED
                         },
                     );
                 }
-                Err(_) => return Outcome::fallback("staging_cleanup_failed"),
+                Err(_) => return Outcome::fallback(fallback_reasons::STAGING_CLEANUP_FAILED),
             }
         }
     }
     let generations = crate::target_seed::store_path(state).join("generations");
     let Ok(entries) = std::fs::read_dir(generations) else {
-        return Outcome::fallback("store_unavailable");
+        return Outcome::fallback(fallback_reasons::STORE_UNAVAILABLE);
     };
     let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
@@ -254,10 +296,10 @@ fn seed_target_cancellable(
     let mut selected = None;
     for entry in entries {
         if deadline.expired() {
-            return Outcome::fallback("seed_budget_exhausted");
+            return Outcome::fallback(fallback_reasons::SEED_BUDGET_EXHAUSTED);
         }
         if cancel.is_some_and(|token| token.is_cancelled()) {
-            return Outcome::fallback("cancelled");
+            return Outcome::fallback(fallback_reasons::CANCELLED);
         }
         use std::os::unix::fs::PermissionsExt;
         if !entry.file_type().is_ok_and(|kind| kind.is_dir())
@@ -294,62 +336,70 @@ fn seed_target_cancellable(
     }
     let Some(source) = selected else {
         return Outcome::fallback(if !saw_entry {
-            "no_generations"
+            fallback_reasons::NO_GENERATIONS
         } else if !saw_manifest {
-            "manifest_invalid"
+            fallback_reasons::MANIFEST_INVALID
         } else if !saw_version {
-            "toolchain_mismatch"
+            fallback_reasons::TOOLCHAIN_MISMATCH
         } else {
-            "triple_mismatch"
+            fallback_reasons::TRIPLE_MISMATCH
         });
     };
     let Ok(random) = temporary_name() else {
-        return Outcome::fallback("staging_unavailable");
+        return Outcome::fallback(fallback_reasons::STAGING_UNAVAILABLE);
     };
     let mut stage = OsString::from(".target-seed-");
     stage.push(random);
     if cache_dir.mkdir(&stage, 0o700).is_err() {
-        return Outcome::fallback("staging_unavailable");
+        return Outcome::fallback(fallback_reasons::STAGING_UNAVAILABLE);
     }
     let result = (|| {
         let staging = cache_dir
             .open_verified_directory(&stage)
-            .map_err(|_| "staging_unavailable")?;
+            .map_err(|_| fallback_reasons::STAGING_UNAVAILABLE)?;
         clone(&source, &staging, deadline)?;
         if deadline.expired() {
-            return Err("seed_budget_exhausted");
+            return Err(fallback_reasons::SEED_BUDGET_EXHAUSTED);
         }
         // Publish only a complete private target.
-        staging.sync().map_err(|_| "staging_sync_failed")?;
+        staging
+            .sync()
+            .map_err(|_| fallback_reasons::STAGING_SYNC_FAILED)?;
         cache_dir
             .rename_noreplace(&stage, &cache_dir, OsStr::new("target"))
-            .map_err(|_| "publish_failed")?;
+            .map_err(|_| fallback_reasons::PUBLISH_FAILED)?;
         Ok(())
     })();
     match result {
         Ok(()) => Outcome {
-            status: "seeded",
+            status: "seeded".into(),
             reason: if cache_dir.sync().is_ok() {
-                "cloned"
+                "cloned".into()
             } else {
-                "durability_unconfirmed"
+                "durability_unconfirmed".into()
             },
             detail: None,
+            extra: Default::default(),
         },
-        Err(reason @ ("cancelled" | "seed_budget_exhausted")) => Outcome::fallback(reason),
+        Err(reason)
+            if reason == fallback_reasons::CANCELLED
+                || reason == fallback_reasons::SEED_BUDGET_EXHAUSTED =>
+        {
+            Outcome::fallback(reason)
+        }
         Err(reason) => {
             match remove_seed_tree(&cache_dir, &stage, cancel, deadline) {
                 Ok(true) => {}
                 Ok(false) => {
                     return Outcome::fallback(
                         if cancel.is_some_and(|token| token.is_cancelled()) {
-                            "cancelled"
+                            fallback_reasons::CANCELLED
                         } else {
-                            "seed_budget_exhausted"
+                            fallback_reasons::SEED_BUDGET_EXHAUSTED
                         },
                     );
                 }
-                Err(_) => return Outcome::fallback("staging_cleanup_failed"),
+                Err(_) => return Outcome::fallback(fallback_reasons::STAGING_CLEANUP_FAILED),
             }
             Outcome::fallback(reason)
         }
@@ -377,10 +427,10 @@ fn clone_target_until(
         source,
         destination,
         &CloneStore {
-            unavailable: "target_unavailable",
-            read_failed: "target_read_failed",
-            too_deep: "target_too_deep",
-            unsupported: "target_contains_unsupported_entry",
+            unavailable: fallback_reasons::TARGET_UNAVAILABLE,
+            read_failed: fallback_reasons::TARGET_READ_FAILED,
+            too_deep: fallback_reasons::TARGET_TOO_DEEP,
+            unsupported: fallback_reasons::TARGET_CONTAINS_UNSUPPORTED_ENTRY,
             writable_files: true,
             deadline,
         },
@@ -446,7 +496,7 @@ fn clone_tree(
     cancel: &provenant_core::CancelToken,
 ) -> Result<(), &'static str> {
     if store.deadline.expired() {
-        return Err("seed_budget_exhausted");
+        return Err(fallback_reasons::SEED_BUDGET_EXHAUSTED);
     }
     let source = provenant_os::fs::Directory::open_anchor(source).map_err(|_| store.unavailable)?;
     clone_entries(&source, destination, store, cancel, 0)
@@ -462,17 +512,17 @@ fn clone_entries(
 ) -> Result<(), &'static str> {
     use provenant_os::fs::FileKind;
     if store.deadline.expired() {
-        return Err("seed_budget_exhausted");
+        return Err(fallback_reasons::SEED_BUDGET_EXHAUSTED);
     }
     if depth > 128 {
         return Err(store.too_deep);
     }
     for entry in source.entries().map_err(|_| store.read_failed)? {
         if store.deadline.expired() {
-            return Err("seed_budget_exhausted");
+            return Err(fallback_reasons::SEED_BUDGET_EXHAUSTED);
         }
         if cancel.is_cancelled() {
-            return Err("cancelled");
+            return Err(fallback_reasons::CANCELLED);
         }
         let name = entry.map_err(|_| store.read_failed)?;
         match source
@@ -486,29 +536,29 @@ fn clone_entries(
                     .map_err(|_| store.read_failed)?;
                 destination
                     .mkdir(&name, 0o700)
-                    .map_err(|_| "clone_failed")?;
+                    .map_err(|_| fallback_reasons::CLONE_FAILED)?;
                 let target = destination
                     .open_verified_directory(&name)
-                    .map_err(|_| "clone_failed")?;
+                    .map_err(|_| fallback_reasons::CLONE_FAILED)?;
                 clone_entries(&child, &target, store, cancel, depth + 1)?;
             }
             FileKind::Regular => {
                 let file = source.open_read(&name).map_err(|_| store.read_failed)?;
                 destination
                     .clone_file_from(&file, &name)
-                    .map_err(|_| "clone_failed")?;
+                    .map_err(|_| fallback_reasons::CLONE_FAILED)?;
                 if store.writable_files {
                     destination
                         .open_read(&name)
                         .and_then(|file| file.make_owner_writable())
-                        .map_err(|_| "clone_failed")?;
+                        .map_err(|_| fallback_reasons::CLONE_FAILED)?;
                 }
             }
             _ => return Err(store.unsupported),
         }
     }
     if cancel.is_cancelled() {
-        return Err("cancelled");
+        return Err(fallback_reasons::CANCELLED);
     }
     Ok(())
 }
@@ -556,7 +606,93 @@ mod tests {
             );
             assert!(seen.insert(*code), "{code} is listed twice");
         }
-        assert!(codes::ALL.len() > 40);
+    }
+
+    #[test]
+    fn fallback_reasons_are_snake_case_and_unique() {
+        let mut seen = std::collections::BTreeSet::new();
+        for reason in fallback_reasons::ALL {
+            assert!(
+                !reason.is_empty()
+                    && !reason.starts_with('_')
+                    && !reason.ends_with('_')
+                    && !reason.contains("__")
+                    && reason.bytes().all(|byte| byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'_'),
+                "{reason} is not snake_case"
+            );
+            assert!(seen.insert(*reason), "{reason} is listed twice");
+        }
+    }
+
+    #[test]
+    fn download_stores_are_shared_without_reading_host_registry() {
+        let temp = tempfile::tempdir().unwrap();
+        let host_home = temp.path().join("host");
+        let cargo_home = host_home.join(".cargo");
+        let lane_home = temp.path().join("lane-home");
+        let lane_cache = temp.path().join("lane-cache");
+        std::fs::create_dir_all(cargo_home.join("registry/src")).unwrap();
+        std::fs::write(cargo_home.join("registry/src/package.crate"), b"fixture").unwrap();
+        std::fs::create_dir_all(&lane_home).unwrap();
+        std::fs::create_dir_all(&lane_cache).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                cargo_home.join("registry"),
+                std::fs::Permissions::from_mode(0),
+            )
+            .unwrap();
+        }
+        let environment = provenant_confinement::cargo::CargoHome::resolve(&host_home, |_| None)
+            .map(|binding| {
+                let mut environment = Vec::new();
+                binding.lane_cargo_environment(&lane_home, &lane_cache, &mut environment);
+                environment
+            });
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                cargo_home.join("registry"),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+        let environment = environment.unwrap();
+
+        let cargo_home_values: Vec<_> = environment
+            .iter()
+            .filter(|(key, _)| key == "CARGO_HOME")
+            .map(|(_, value)| Path::new(value))
+            .collect();
+        assert_eq!(cargo_home_values, [cargo_home.as_path()]);
+        assert!(!lane_home.join(".cargo/registry").exists());
+        assert!(std::fs::read_dir(&lane_home).unwrap().next().is_none());
+        assert!(std::fs::read_dir(&lane_cache).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn setup_outcome_preserves_unknown_fields_through_bounded_decode() {
+        let mut payload =
+            serde_json::to_value(Outcome::fallback(fallback_reasons::NO_GENERATIONS)).unwrap();
+        payload.as_object_mut().unwrap().insert(
+            "future_setup_fact".into(),
+            serde_json::json!({"kept": true}),
+        );
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let decoded: Outcome =
+            provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())
+                .unwrap();
+        let encoded = provenant_records::encode(&decoded).unwrap();
+        let round_trip: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(
+            round_trip.get("future_setup_fact"),
+            Some(&serde_json::json!({"kept": true}))
+        );
     }
 
     #[test]
@@ -571,15 +707,19 @@ mod tests {
                 Ok(())
             })
         };
-        assert_eq!(run("v1", "host"), Outcome::fallback("no_generations"));
+        assert_eq!(
+            run("v1", "host"),
+            Outcome::fallback(fallback_reasons::NO_GENERATIONS)
+        );
         generation(&state, "001", "v1", "host");
         generation(&state, "002", "v1", "host");
         generation(&state, "003", "v2", "other");
-        assert_eq!(
-            run("unknown", "host"),
-            Outcome::fallback("toolchain_mismatch")
-        );
-        assert_eq!(run("v1", "other"), Outcome::fallback("triple_mismatch"));
+        for (version, triple, reason) in [
+            ("unknown", "host", fallback_reasons::TOOLCHAIN_MISMATCH),
+            ("v1", "other", fallback_reasons::TRIPLE_MISMATCH),
+        ] {
+            assert_eq!(run(version, triple), Outcome::fallback(reason));
+        }
         assert_eq!(run("v1", "host").status, "seeded");
         assert_eq!(run("v1", "host"), Outcome::skipped("existing_target"));
     }
@@ -592,9 +732,9 @@ mod tests {
         generation(tmp.path(), "001", "v1", "host");
         let outcome = seed_target_with(tmp.path(), &cache, "v1", "host", |_, stage| {
             stage.mkdir(std::ffi::OsStr::new("partial"), 0o700).unwrap();
-            Err("clone_failed")
+            Err(fallback_reasons::CLONE_FAILED)
         });
-        assert_eq!(outcome, Outcome::fallback("clone_failed"));
+        assert_eq!(outcome, Outcome::fallback(fallback_reasons::CLONE_FAILED));
         assert_eq!(std::fs::read_dir(cache).unwrap().count(), 0);
     }
 
@@ -612,13 +752,16 @@ mod tests {
                 panic!("must not clone")
             })
         };
-        assert_eq!(run(), Outcome::fallback("manifest_invalid"));
+        assert_eq!(run(), Outcome::fallback(fallback_reasons::MANIFEST_INVALID));
         let _lock = crate::target_seed::lock_store(tmp.path()).unwrap();
-        assert_eq!(run(), Outcome::fallback("seed_lock_unavailable"));
+        assert_eq!(
+            run(),
+            Outcome::fallback(fallback_reasons::SEED_LOCK_UNAVAILABLE)
+        );
     }
 
     #[test]
-    fn target_incomplete_generation_falls_back() {
+    fn target_generation_without_complete_marker_is_not_selected() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let cache = tmp.path().join("cache");
@@ -631,10 +774,10 @@ mod tests {
                 panic!("must not clone")
             })
         };
-        assert_eq!(run(), Outcome::fallback("manifest_invalid"));
+        assert_eq!(run(), Outcome::fallback(fallback_reasons::MANIFEST_INVALID));
         std::fs::remove_file(dir.join("complete")).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-        assert_eq!(run(), Outcome::fallback("manifest_invalid"));
+        assert_eq!(run(), Outcome::fallback(fallback_reasons::MANIFEST_INVALID));
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
@@ -708,68 +851,66 @@ mod tests {
         );
         assert_eq!(
             outcome,
-            Outcome::fallback_detail("toolchain_unverified", codes::TOOLCHAIN_ENV_OVERRIDE)
+            Outcome::fallback_detail(
+                fallback_reasons::TOOLCHAIN_UNVERIFIED,
+                codes::TOOLCHAIN_ENV_OVERRIDE,
+            )
         );
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn target_clone_is_writable_and_cannot_change_seed() {
+    fn target_clones_are_private_and_writable_for_read_only_tree_shapes() {
         use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let cache = tmp.path().join("cache");
-        std::fs::create_dir(&cache).unwrap();
-        generation(tmp.path(), "001", "v1", "host");
-        let seed = crate::target_seed::store_path(tmp.path()).join("generations/001/target/file");
-        std::fs::write(&seed, b"seed").unwrap();
-        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o444)).unwrap();
-        assert_eq!(
-            seed_target_with(tmp.path(), &cache, "v1", "host", |src, dst| clone_target(
-                src,
-                dst,
-                &provenant_core::CancelToken::new()
-            ))
-            .status,
-            "seeded"
-        );
-        std::fs::write(cache.join("target/file"), b"lane").unwrap();
-        assert_eq!(std::fs::read(&seed).unwrap(), b"seed");
-    }
+        for nested_tree in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let cache = tmp.path().join("cache");
+            std::fs::create_dir(&cache).unwrap();
+            generation(tmp.path(), "001", "v1", "host");
+            let target = crate::target_seed::store_path(tmp.path()).join("generations/001/target");
+            let seed_directory = if nested_tree {
+                target.join("debug/deps")
+            } else {
+                target.clone()
+            };
+            std::fs::create_dir_all(&seed_directory).unwrap();
+            let seed = seed_directory.join("artifact");
+            std::fs::write(&seed, b"seed").unwrap();
+            std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o444)).unwrap();
+            if nested_tree {
+                std::fs::set_permissions(
+                    target.join("debug"),
+                    std::fs::Permissions::from_mode(0o555),
+                )
+                .unwrap();
+                std::fs::set_permissions(&seed_directory, std::fs::Permissions::from_mode(0o555))
+                    .unwrap();
+            }
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn target_clone_of_a_read_only_tree_is_private_and_writable() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let cache = tmp.path().join("cache");
-        std::fs::create_dir(&cache).unwrap();
-        generation(tmp.path(), "001", "v1", "host");
-        let target = crate::target_seed::store_path(tmp.path()).join("generations/001/target");
-        let nested = target.join("debug/deps");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(nested.join("artifact"), b"seed").unwrap();
-        let read_only = |path: &Path, mode| {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
-        };
-        read_only(&nested.join("artifact"), 0o444);
-        read_only(&nested, 0o555);
-        read_only(&target.join("debug"), 0o555);
-        assert_eq!(
-            seed_target_with(tmp.path(), &cache, "v1", "host", |src, dst| clone_target(
-                src,
-                dst,
-                &provenant_core::CancelToken::new()
-            ))
-            .status,
-            "seeded"
-        );
-        let lane = cache.join("target/debug/deps");
-        std::fs::write(lane.join("artifact"), b"lane").unwrap();
-        std::fs::write(lane.join("new"), b"lane").unwrap();
-        assert_eq!(std::fs::read(nested.join("artifact")).unwrap(), b"seed");
-        assert!(!nested.join("new").exists());
-        read_only(&target.join("debug"), 0o755);
-        read_only(&nested, 0o755);
+            let outcome = seed_target_with(tmp.path(), &cache, "v1", "host", |src, dst| {
+                clone_target(src, dst, &provenant_core::CancelToken::new())
+            });
+            assert_eq!(outcome.status, "seeded");
+            let lane_directory = if nested_tree {
+                cache.join("target/debug/deps")
+            } else {
+                cache.join("target")
+            };
+            std::fs::write(lane_directory.join("artifact"), b"lane").unwrap();
+            std::fs::write(lane_directory.join("new"), b"lane").unwrap();
+            assert_eq!(std::fs::read(&seed).unwrap(), b"seed");
+            assert!(!seed_directory.join("new").exists());
+
+            if nested_tree {
+                std::fs::set_permissions(
+                    target.join("debug"),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+                std::fs::set_permissions(&seed_directory, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -784,7 +925,7 @@ mod tests {
                 &provenant_core::CancelToken::new(),
                 &SeedBudget::exhausted()
             ),
-            Err("seed_budget_exhausted")
+            Err(fallback_reasons::SEED_BUDGET_EXHAUSTED)
         );
         assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_none());
     }

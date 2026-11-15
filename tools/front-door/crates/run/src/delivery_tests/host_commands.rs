@@ -297,7 +297,7 @@ fn budget_commit_uses_bounded_git_without_running_hooks()
 }
 
 #[test]
-fn writer_preparation_preserves_command_repository_fact_caps()
+fn writer_and_host_delivery_respect_command_repository_fact_caps()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{
         utility::UtilityError,
@@ -332,12 +332,12 @@ fn writer_preparation_preserves_command_repository_fact_caps()
         execution.state_root.as_path(),
         execution.project_id,
     )?;
+    assert_host_delivery_repository_fact_caps()?;
     Ok(())
 }
 
-#[test]
-fn host_delivery_repository_facts_use_command_caps()
--> std::result::Result<(), Box<dyn std::error::Error>> {
+fn assert_host_delivery_repository_fact_caps() -> std::result::Result<(), Box<dyn std::error::Error>>
+{
     use provenant_confinement::{
         utility::UtilityError,
         worktrees::{RepoFacts, WorktreeError},

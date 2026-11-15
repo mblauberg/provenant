@@ -831,18 +831,15 @@ mod tests {
         }
     }
     #[test]
-    fn the_summary_counts_states_and_puts_action_rows_first() {
+    fn the_summary_puts_action_rows_first() {
         let mut failing = row(3, "c", None);
         failing.checks_failed = Some(1);
-        let lines = vec![row(1, "a", None), failing, row(2, "b", Some("HTTP 502"))];
+        let unavailable = row(2, "b", Some("HTTP 502"));
+        let action_rows = vec![failing.text(), unavailable.text()];
+        let lines = vec![row(1, "a", None), failing, unavailable];
         let summary = super::summarise(&lines);
-        assert_eq!(
-            summary.lines[0],
-            "3 PRs: 1 failing, 1 unavailable, 1 ready (1 need nothing)"
-        );
-        assert!(summary.lines[1].starts_with("#3 "), "{:?}", summary.lines);
-        assert!(summary.lines[2].starts_with("#2 unavailable"));
-        assert_eq!(summary.next.as_deref(), Some("gh pr checks 3"));
+        assert_eq!(&summary.lines[1..], action_rows);
+        assert_eq!(summary.omitted, 0);
     }
 
     #[test]

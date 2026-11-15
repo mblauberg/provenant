@@ -908,6 +908,9 @@ impl RunStore {
         record.process_observation_valid.0 = checkpoint_readable;
         if let Some(bytes) = checkpoint {
             record.process_observation_valid.0 = false;
+            // This is a read-only projection of the stored observation. It is
+            // never serialised back, so newer fields remain untouched in the
+            // sealed source record while this reader consumes owned fields.
             #[derive(serde::Deserialize)]
             struct ProcessCheckpoint {
                 schema_version: u64,

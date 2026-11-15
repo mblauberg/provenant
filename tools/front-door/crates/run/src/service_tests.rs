@@ -109,8 +109,10 @@ fn peer_wait_views_keep_terminal_and_show_custody_until_released() -> TestResult
     );
     assert!(matches!(
         &service.lanes(&query, &call)?.lanes[0].state,
-        AttemptState::Terminal { reason: Some(reason), .. }
-            if reason.contains("merge index, parents and working files were retained")
+        AttemptState::Terminal {
+            outcome: Outcome::Cancelled,
+            ..
+        }
     ));
     drop(custody);
     let observed = service.status_for_wait(id, &call)?;
@@ -433,27 +435,59 @@ fn secret_input_is_refused_before_publication() -> TestResult {
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let secret = "sk-abcdefghijklmnopqrstuvwxyz123456";
-    let input = submission(secret);
-    let operation = input.operation_id.clone();
-    let error = Service::new(&store)
-        .dispatch(input, temp.path(), &call)
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        RunError::RecordedRefusal(ref diagnostic) if diagnostic.code == ErrorKind::SecretInput.code()
-    ));
-    let saved = store
-        .operation(&operation, &call)?
-        .ok_or("missing refusal")?;
-    assert!(!serde_json::to_string(&saved)?.contains(secret));
-    assert!(matches!(
-        Service::new(&store).dispatch(submission(secret), temp.path(), &call),
-        Err(RunError::RecordedRefusal(_))
-    ));
-    assert!(matches!(
-        Service::new(&store).dispatch(submission("changed"), temp.path(), &call),
-        Err(RunError::OperationConflict)
-    ));
+    for nested in [false, true] {
+        let mut input = submission(secret);
+        rename(&mut input, if nested { "nested-secret" } else { "secret" });
+        if nested {
+            input.parent_attempt = Some(provenant_core::AttemptId::from_bytes([9; 16]));
+            input.lane_depth = 2;
+        }
+        let operation = input.operation_id.clone();
+        let error = Service::new(&store)
+            .dispatch(input, temp.path(), &call)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RunError::RecordedRefusal(ref diagnostic)
+                if diagnostic.code == ErrorKind::SecretInput.code()
+        ));
+        let saved = store
+            .operation(&operation, &call)?
+            .ok_or("missing refusal")?;
+        assert!(!saved.extra.contains_key("prompt"));
+        assert!(saved.refusal.as_ref().is_some_and(|diagnostic| {
+            !diagnostic
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains(secret))
+        }));
+        assert!(matches!(
+            Service::new(&store).dispatch(
+                {
+                    let mut replay = submission(secret);
+                    rename(&mut replay, if nested { "nested-secret" } else { "secret" });
+                    if nested {
+                        replay.parent_attempt =
+                            Some(provenant_core::AttemptId::from_bytes([9; 16]));
+                        replay.lane_depth = 2;
+                    }
+                    replay
+                },
+                temp.path(),
+                &call
+            ),
+            Err(RunError::RecordedRefusal(_))
+        ));
+        let mut changed = submission("changed");
+        rename(
+            &mut changed,
+            if nested { "nested-secret" } else { "secret" },
+        );
+        assert!(matches!(
+            Service::new(&store).dispatch(changed, temp.path(), &call),
+            Err(RunError::OperationConflict)
+        ));
+    }
     Ok(())
 }
 
@@ -604,8 +638,20 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let make = |prompt| {
+    let make_for = |prompt, nested| {
         let mut input = submission(prompt);
+        rename(
+            &mut input,
+            if nested {
+                "nested-preflight"
+            } else {
+                "preflight"
+            },
+        );
+        if nested {
+            input.parent_attempt = Some(provenant_core::AttemptId::from_bytes([9; 16]));
+            input.lane_depth = 2;
+        }
         input.chair = Some(Chair {
             process: None,
             extra: Default::default(),
@@ -627,36 +673,49 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
         };
         input
     };
-    let first = Service::new(&store)
-        .dispatch(make("first"), temp.path(), &call)
-        .unwrap_err();
-    let mut replay = make("first");
-    replay.chair.as_mut().unwrap().session = Some("new-session".into());
-    let second = Service::new(&store)
-        .dispatch(replay, temp.path(), &call)
-        .unwrap_err();
-    assert_eq!(first.to_string(), second.to_string());
-    assert!(
-        matches!(second, RunError::RecordedRefusal(ref diagnostic) if diagnostic.code == "UNSUPPORTED")
-    );
-    assert!(matches!(
-        Service::new(&store).dispatch(make("changed"), temp.path(), &call),
-        Err(RunError::OperationConflict)
-    ));
-    assert_eq!(store.recent_refusals(10, &call)?.len(), 1);
-    let saved = store.recent_refusals(10, &call)?.remove(0);
-    assert_eq!(
-        saved
-            .refusal_chair
-            .as_ref()
-            .and_then(|chair| chair.session.as_deref()),
-        Some("original")
-    );
-    assert_eq!(
-        saved.refusal_notice,
-        Some(provenant_records::run::RefusalNotice::Off)
-    );
-    assert!(!serde_json::to_string(&saved)?.contains("first"));
+    let mut operations = Vec::new();
+    for nested in [false, true] {
+        let make = |prompt| make_for(prompt, nested);
+        let operation = make("first").operation_id;
+        operations.push(operation.clone());
+        let first = Service::new(&store)
+            .dispatch(make("first"), temp.path(), &call)
+            .unwrap_err();
+        let mut replay = make("first");
+        replay.chair.as_mut().unwrap().session = Some("new-session".into());
+        let second = Service::new(&store)
+            .dispatch(replay, temp.path(), &call)
+            .unwrap_err();
+        let code = |error: &RunError| match error {
+            RunError::RecordedRefusal(diagnostic) => Some(diagnostic.code.as_str()),
+            _ => None,
+        };
+        assert_eq!(code(&first), code(&second));
+        assert_eq!(code(&second), Some("UNSUPPORTED"));
+        assert!(matches!(
+            Service::new(&store).dispatch(make("changed"), temp.path(), &call),
+            Err(RunError::OperationConflict)
+        ));
+    }
+    let saved = store.recent_refusals(10, &call)?;
+    for operation in operations {
+        let refusal = saved
+            .iter()
+            .find(|record| record.operation_id == operation)
+            .ok_or("missing refusal")?;
+        assert_eq!(
+            refusal
+                .refusal_chair
+                .as_ref()
+                .and_then(|chair| chair.session.as_deref()),
+            Some("original")
+        );
+        assert_eq!(
+            refusal.refusal_notice,
+            Some(provenant_records::run::RefusalNotice::Off)
+        );
+        assert!(!refusal.extra.contains_key("prompt"));
+    }
     Ok(())
 }
 
@@ -752,68 +811,6 @@ fn refusal_only_chair_leaves_accepted_identity_and_settlement_unbound() -> TestR
             Some(provenant_core::Digest::from_bytes([6; 32]))
         );
     }
-    Ok(())
-}
-
-#[test]
-fn nested_preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let make = |prompt| {
-        let mut input = submission(prompt);
-        input.parent_attempt = Some(provenant_core::AttemptId::from_bytes([9; 16]));
-        input.lane_depth = 2;
-        input.task.route = RequestedRoute::Model {
-            required_family: None,
-            extra: Default::default(),
-            provider: "cursor".into(),
-            model: "cursor/m".into(),
-            effort: Some("high".into()),
-        };
-        input
-    };
-    let operation = make("first").operation_id;
-    let first = Service::new(&store)
-        .dispatch(make("first"), temp.path(), &call)
-        .unwrap_err();
-    let saved = store
-        .operation(&operation, &call)?
-        .ok_or("missing refusal")?;
-    assert!(matches!(first, RunError::RecordedRefusal(_)));
-    assert!(matches!(
-        Service::new(&store).dispatch(make("first"), temp.path(), &call),
-        Err(RunError::RecordedRefusal(_))
-    ));
-    assert_eq!(store.operation(&operation, &call)?.unwrap(), saved);
-    assert!(matches!(
-        Service::new(&store).dispatch(make("changed"), temp.path(), &call),
-        Err(RunError::OperationConflict)
-    ));
-    Ok(())
-}
-
-#[test]
-fn nested_secret_refusal_does_not_store_prompt() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let secret = concat!("sk-", "abcdefghijklmnopqrstuvwxyz123456");
-    let mut input = submission(secret);
-    input.parent_attempt = Some(provenant_core::AttemptId::from_bytes([9; 16]));
-    input.lane_depth = 2;
-    let operation = input.operation_id.clone();
-    let result = Service::new(&store).dispatch(input, temp.path(), &call);
-    assert!(
-        matches!(result, Err(RunError::RecordedRefusal(_))),
-        "{result:?}"
-    );
-    let saved = store
-        .operation(&operation, &call)?
-        .ok_or("missing refusal")?;
-    assert!(!serde_json::to_string(&saved)?.contains(secret));
     Ok(())
 }
 

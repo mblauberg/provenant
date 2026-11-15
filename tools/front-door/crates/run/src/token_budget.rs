@@ -77,19 +77,20 @@ mod tests {
             cache_read: Some(400),
             cache_write: Some(50),
             output_excluding_reasoning: Some(10),
+            reasoning: Some(5),
             ..UsageRecord::default()
         };
-        // 100 (uncached) + 50 (cache write) + 10 (output) = 160.
+        // 100 (uncached) + 50 (cache write) + 10 (output) + 5 (reasoning) = 165.
         // Cache read (400) is ignored.
-        assert_eq!(used(&usage), Some(160));
+        assert_eq!(used(&usage), Some(165));
         assert_eq!(
             judge(&usage, 150),
             Verdict::Over {
-                used: 160,
+                used: 165,
                 budget: 150
             }
         );
-        assert_eq!(judge(&usage, 200), Verdict::Within { used: 160 });
+        assert_eq!(judge(&usage, 200), Verdict::Within { used: 165 });
     }
 
     #[test]

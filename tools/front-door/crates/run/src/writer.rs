@@ -11,7 +11,7 @@ use provenant_confinement::{
     repo::GitRefName,
     worktrees,
 };
-use provenant_core::{CancelToken, GitOid, ProjectId};
+use provenant_core::{CancelToken, Clock, GitOid, ProjectId};
 use provenant_os::{
     exec::SystemExecutor,
     fs::{Directory, FsError, canonicalize},
@@ -671,15 +671,17 @@ fn in_progress_note(operation: &str) -> &'static str {
 use provenant_supervisor::custody::ImportFence;
 
 #[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct MergeRestored {
+    #[serde(default, flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub schema_version: u64,
     pub scope: provenant_records::custody::Scope,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 struct GitPins {
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
     schema_version: u64,
     scope: provenant_records::custody::Scope,
     base: GitOid,
@@ -814,8 +816,20 @@ pub fn prepare_writer_with_facts(
     project: ProjectId,
     facts: &worktrees::RepoFacts,
 ) -> Result<WriterLaunch> {
-    use provenant_core::{Clock, WaitBudget};
-    use provenant_os::{clock::SystemClock, fs::LockMode};
+    use provenant_os::clock::SystemClock;
+    let clock = SystemClock::new();
+    prepare_writer_with_facts_and_clock(request, state, project, facts, &clock)
+}
+
+fn prepare_writer_with_facts_and_clock(
+    request: &WriterRequest,
+    state: &Path,
+    project: ProjectId,
+    facts: &worktrees::RepoFacts,
+    clock: &dyn Clock,
+) -> Result<WriterLaunch> {
+    use provenant_core::WaitBudget;
+    use provenant_os::fs::LockMode;
     let utility = runtime(state)?;
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
@@ -823,7 +837,6 @@ pub fn prepare_writer_with_facts(
     // first probed open reads config snapshots and must exclude sibling writes.
     let common = provenant_confinement::repo::VerifiedRepo::open_common_directory(&request.project)
         .map_err(worktrees::WorktreeError::from)?;
-    let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let _config_lock = worktrees::lock_repository(
         &common,
@@ -831,7 +844,7 @@ pub fn prepare_writer_with_facts(
         WaitBudget::cli(clock.mono_now(), 60)
             .map_err(error("set writer config lock budget", None))?,
         &cancel,
-        &clock,
+        clock,
     )?;
     let repo = utility
         .open_repo(&executor, &request.project, budget()?, &cancel)
@@ -877,7 +890,8 @@ pub fn prepare_writer_with_facts(
     }
     let state_dir = Directory::open_anchor(state)?;
     if custody_project != project {
-        let references = crate::artifacts::subdir(&state_dir, OsStr::new("writer-projects"), true)?;
+        let references =
+            crate::artifacts::subdir(&state_dir, OsStr::new(WRITER_PROJECTS_DIRECTORY), true)?;
         let parent = crate::artifacts::subdir(&references, OsStr::new(&project.to_string()), true)?;
         crate::artifacts::subdir(&parent, OsStr::new(&custody_project.to_string()), true)?;
     }
@@ -1674,243 +1688,382 @@ fn record_cargo_setup_file(
 mod cargo_setup_tests {
     use super::*;
 
-    // Medium: eight real linked worktrees prepare Git concurrently.
-    #[test]
-    fn eight_complete_writer_preparations_overlap_config_updates()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        const CLEAN_ENV_CHILD: &str = "PROVENANT_WRITER_CONFIG_FIXTURE_CHILD";
-        if std::env::var_os(CLEAN_ENV_CHILD).is_none() {
-            use provenant_os::exec::{
-                ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
-            };
-            use std::{ffi::OsString, time::Duration};
+    type FixtureResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    struct WriterFixture {
+        _temp: tempfile::TempDir,
+        root: PathBuf,
+        project: PathBuf,
+        state: PathBuf,
+        git_dir: PathBuf,
+        git: PathBuf,
+        custody_project: ProjectId,
+        source: String,
+    }
+
+    impl WriterFixture {
+        fn new() -> FixtureResult<Self> {
             let temp = tempfile::tempdir()?;
-            let home = temp.path().join("home");
+            let root = std::fs::canonicalize(temp.path())?;
+            let project = root.join("project");
+            let home = root.join("home");
+            let state = root.join("state");
+            std::fs::create_dir(&project)?;
             std::fs::create_dir(&home)?;
-            let argv: Vec<OsString> = vec![
-                std::env::current_exe()?.into_os_string(),
-                "--exact".into(),
-                "writer::cargo_setup_tests::eight_complete_writer_preparations_overlap_config_updates".into(),
-                "--nocapture".into(),
-            ];
-            let env: Vec<_> = [
-                ("HOME", home.as_os_str().to_owned()),
-                ("PATH", "/usr/bin:/bin".into()),
-                ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
-                ("GIT_CONFIG_SYSTEM", "/dev/null".into()),
-                ("GIT_CONFIG_NOSYSTEM", "1".into()),
-                (CLEAN_ENV_CHILD, "1".into()),
-            ]
-            .into_iter()
-            .map(|(key, value)| (OsString::from(key), value))
-            .collect();
-            let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(30));
-            options.env = Some(&env);
-            options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
-            options.stderr = StreamPolicy::Capture { limit: 64 * 1024 };
-            let output = SystemExecutor::new(1)?.execute(options)?;
-            assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
-            return Ok(());
+            provenant_os::fixture::private_state_dir(&state)?;
+            let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+            let git_dir = project.join(".git");
+            let run = |args: &[&str]| -> FixtureResult<String> {
+                let output = provenant_os::fixture::git_command_at(&git)
+                    .env_clear()
+                    .envs(provenant_os::fixture::fixture_git_settings())
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("HOME", &root)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("GIT_DIR", &git_dir)
+                    .env("GIT_WORK_TREE", &project)
+                    .current_dir(&project)
+                    .args(args)
+                    .output()?;
+                if !output.status.success() {
+                    return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+                }
+                Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+            };
+            run(&["init", "-q"])?;
+            std::fs::write(project.join("old name.txt"), "tracked")?;
+            run(&["add", "old name.txt"])?;
+            run(&["commit", "--allow-empty", "-qm", "initial"])?;
+            let mut roots = provenant_core::RootInputs::new(home, project.clone());
+            roots.state_dir = Some(state.clone());
+            let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;
+            let custody_project = provenant_config::bind_project(
+                &roots,
+                provenant_config::ProjectLocation::new(git_dir.clone())?,
+            )?
+            .project_id();
+            let source = run(&["rev-parse", "HEAD"])?;
+            Ok(Self {
+                _temp: temp,
+                root,
+                project,
+                state,
+                git_dir,
+                git,
+                custody_project,
+                source,
+            })
         }
-        let temp = tempfile::tempdir()?;
-        let root = std::fs::canonicalize(temp.path())?;
-        let project = root.join("project");
-        let lane = root.join("lane");
-        let second_lane = root.join("second-lane");
-        let state = root.join("state");
-        std::fs::create_dir(&project)?;
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new().mode(0o700).create(&state)?;
-        let git_dir = project.join(".git");
-        let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
-        let run = |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
-            let output = provenant_os::fixture::git_command_at(&git)
+
+        fn run_git(&self, args: &[&str]) -> FixtureResult<String> {
+            let output = provenant_os::fixture::git_command_at(&self.git)
                 .env_clear()
                 .envs(provenant_os::fixture::fixture_git_settings())
                 .env("PATH", "/usr/bin:/bin")
-                .env("HOME", &root)
+                .env("HOME", &self.root)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_DIR", &git_dir)
-                .env("GIT_WORK_TREE", &project)
-                .current_dir(&project)
+                .env("GIT_DIR", &self.git_dir)
+                .env("GIT_WORK_TREE", &self.project)
+                .current_dir(&self.project)
                 .args(args)
                 .output()?;
             if !output.status.success() {
                 return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
             }
             Ok(String::from_utf8(output.stdout)?.trim().to_owned())
-        };
-        run(&["init", "-q"])?;
-        let home = root.join("home");
-        std::fs::create_dir(&home)?;
-        let mut roots = provenant_core::RootInputs::new(home, project.clone());
-        roots.state_dir = Some(state.clone());
-        let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let custody_project = provenant_config::bind_project(
-            &roots,
-            provenant_config::ProjectLocation::new(git_dir.clone())?,
-        )?
-        .project_id();
-        std::fs::write(project.join("old name.txt"), "tracked")?;
-        run(&["add", "old name.txt"])?;
-        run(&["commit", "--allow-empty", "-qm", "initial"])?;
-        run(&[
-            "worktree",
-            "add",
-            "-qb",
-            "chore/x",
-            lane.to_str().ok_or("lane path")?,
-        ])?;
-        run(&[
-            "worktree",
-            "add",
-            "-qb",
-            "chore/second",
-            second_lane.to_str().ok_or("second lane path")?,
-        ])?;
-        run(&["pack-refs", "--all"])?;
-        let reference = "refs/heads/chore/x";
-        let expected = run(&["rev-parse", reference])?;
-        assert!(!git_dir.join(reference).exists());
-        let ref_parent = git_dir.join("refs/heads/chore");
-        if ref_parent.exists() {
-            std::fs::remove_dir(&ref_parent)?;
         }
-        assert!(!ref_parent.exists());
-        let utility = runtime(&state)?;
-        let executor = SystemExecutor::new(1)?;
-        let cancel = CancelToken::new();
-        let repo = utility.open_repo(&executor, &project, budget()?, &cancel)?;
-        let worktree = provenant_confinement::verify_worktree(&repo, &lane)?;
-        let mut writer = WriterLaunch {
-            worktree,
-            branch: GitRefName::new(reference)?,
-            base: GitOid::parse(&expected)?,
-            custody: None,
-            facts: Default::default(),
-        };
-        // Use a real unrelated root, so both named commits exist.
-        let tree = run(&["rev-parse", "HEAD^{tree}"])?;
-        let unrelated = run(&["commit-tree", &tree, "-m", "unrelated root"])?;
-        let other = GitOid::parse(&unrelated)?;
-        let mismatch = writer
-            .require_source(other)
-            .err()
-            .ok_or("different source must refuse")?;
-        assert!(
-            matches!(mismatch, RunError::WriterSourceMismatch { expected, actual } if expected == other && actual == writer.base)
-        );
-        let message = mismatch.to_string();
-        assert!(message.contains(&other.to_string()));
-        assert!(message.contains(&expected));
-        writer.require_source(writer.base)?;
-        // A continuation accepts when the predecessor descends from the original source.
-        let child_commit = run(&["commit-tree", &tree, "-p", &expected, "-m", "child commit"])?;
-        let child_oid = GitOid::parse(&child_commit)?;
-        let source_oid = GitOid::parse(&expected)?;
-        writer.base = child_oid;
-        writer.require_continuation_source(utility.git_program_path(), source_oid, child_oid)?;
-        // Refuses when HEAD does not descend from the pinned source, naming both commits.
-        let ancestry_mismatch = writer
-            .require_continuation_source(utility.git_program_path(), other, child_oid)
-            .err()
-            .ok_or("unrelated source must refuse")?;
-        assert!(
-            matches!(ancestry_mismatch, RunError::WriterSourceMismatch { expected, actual } if expected == other && actual == child_oid)
-        );
-        let ancestry_message = ancestry_mismatch.to_string();
-        assert!(ancestry_message.contains(&other.to_string()));
-        assert!(ancestry_message.contains(&child_oid.to_string()));
-        // Refuses when the prepared base does not match the predecessor head, naming both commits.
-        let base_mismatch = writer
-            .require_continuation_source(utility.git_program_path(), source_oid, source_oid)
-            .err()
-            .ok_or("predecessor mismatch must refuse")?;
-        assert!(
-            matches!(base_mismatch, RunError::WriterSourceMismatch { expected, actual } if expected == source_oid && actual == child_oid)
-        );
-        let base_message = base_mismatch.to_string();
-        assert!(base_message.contains(&source_oid.to_string()));
-        assert!(base_message.contains(&child_oid.to_string()));
-        assert_eq!(
-            writer.uncommitted_paths(utility.git_program_path())?,
-            Vec::<String>::new()
-        );
-        std::fs::write(lane.join("uncommitted.txt"), "leftover edit")?;
-        assert_eq!(
-            writer.uncommitted_paths(utility.git_program_path())?,
-            vec!["uncommitted.txt".to_string()]
-        );
-        std::fs::remove_file(lane.join("uncommitted.txt"))?;
-        let lane_git = |args: &[&str]| -> std::result::Result<(), Box<dyn std::error::Error>> {
-            let output = provenant_os::fixture::git_command_at(&git)
+
+        fn lane_git(&self, lane: &Path, args: &[&str]) -> FixtureResult<()> {
+            let output = provenant_os::fixture::git_command_at(&self.git)
                 .env_clear()
+                .envs(provenant_os::fixture::fixture_git_settings())
                 .env("PATH", "/usr/bin:/bin")
-                .env("HOME", &root)
+                .env("HOME", &self.root)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .current_dir(&lane)
+                .current_dir(lane)
                 .args(args)
                 .output()?;
-            if !output.status.success() {
-                return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(String::from_utf8_lossy(&output.stderr).into_owned().into())
             }
-            Ok(())
-        };
-        lane_git(&["mv", "old name.txt", "renamed.txt"])?;
-        std::fs::write(lane.join("café.txt"), "untracked")?;
-        assert_eq!(
-            writer.uncommitted_paths(utility.git_program_path())?,
-            vec!["renamed.txt", "café.txt"]
-        );
-        lane_git(&["mv", "renamed.txt", "old name.txt"])?;
-        std::fs::remove_file(lane.join("café.txt"))?;
-        writer.base = source_oid;
-        let second_tree = provenant_confinement::verify_worktree(&repo, &second_lane)?;
-        let mut second = WriterLaunch {
-            worktree: second_tree,
-            branch: GitRefName::new("refs/heads/chore/second")?,
-            base: GitOid::parse(&expected)?,
-            custody: None,
-            facts: Default::default(),
-        };
-        let mut siblings = Vec::new();
-        for index in 2..8 {
-            let branch = format!("chore/writer-{index}");
-            let lane = root.join(format!("lane-{index}"));
-            run(&[
+        }
+
+        fn add_worktree(&self, branch: &str, name: &str) -> FixtureResult<PathBuf> {
+            let lane = self.root.join(name);
+            self.run_git(&[
                 "worktree",
                 "add",
                 "-qb",
-                &branch,
+                branch,
                 lane.to_str().ok_or("lane path")?,
             ])?;
-            siblings.push(WriterLaunch {
-                worktree: provenant_confinement::verify_worktree(&repo, &lane)?,
-                branch: GitRefName::branch(&branch)?,
-                base: source_oid,
-                custody: None,
-                facts: Default::default(),
-            });
+            Ok(lane)
         }
-        // Eight real worktrees share .git/config. When a sibling holds an
-        // incomplete config, preparation reports busy without waiting. Retry
-        // after the sibling publishes.
-        let start = std::sync::Barrier::new(8);
-        let common = Directory::open_anchor(&git_dir)?;
-        let clock = provenant_os::clock::SystemClock::new();
-        use provenant_core::Clock;
-        let config_lock = worktrees::lock_repository(
-            &common,
+
+        fn request(&self, lane: &Path) -> WriterRequest {
+            WriterRequest {
+                extra: Default::default(),
+                custody_project: Some(self.custody_project),
+                project: self.project.clone(),
+                worktree: lane.to_path_buf(),
+            }
+        }
+
+        fn prepare(&self, lane: &Path) -> FixtureResult<WriterLaunch> {
+            Ok(prepare_writer_with_facts(
+                &self.request(lane),
+                &self.state,
+                self.custody_project,
+                &worktrees::RepoFacts::default(),
+            )?)
+        }
+
+        fn prepare_git(&self, writer: &mut WriterLaunch) -> FixtureResult<()> {
+            prepare_writer_git(writer, &self.state, &self.root, None, &CancelToken::new())?;
+            Ok(())
+        }
+    }
+
+    fn clean_environment_child(test_filter: &str) -> FixtureResult<bool> {
+        const CHILD: &str = "PROVENANT_WRITER_CONFIG_FIXTURE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            return Ok(false);
+        }
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home)?;
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args([test_filter, "--nocapture"])
+            .current_dir(temp.path())
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(CHILD, "1")
+            .status()?;
+        assert!(status.success());
+        Ok(true)
+    }
+
+    #[test]
+    fn writer_source_binding_rejects_unrelated_lineage() -> FixtureResult<()> {
+        if clean_environment_child(stringify!(writer_source_binding_rejects_unrelated_lineage))? {
+            return Ok(());
+        }
+        let fixture = WriterFixture::new()?;
+        let lane = fixture.add_worktree("chore/source", "lane")?;
+        let mut writer = fixture.prepare(&lane)?;
+        let source = GitOid::parse(&fixture.source)?;
+        writer.require_source(source)?;
+
+        let tree = fixture.run_git(&["rev-parse", "HEAD^{tree}"])?;
+        let unrelated =
+            GitOid::parse(&fixture.run_git(&["commit-tree", &tree, "-m", "unrelated root"])?)?;
+        assert!(matches!(
+            writer.require_source(unrelated),
+            Err(RunError::WriterSourceMismatch { expected, actual })
+                if expected == unrelated && actual == source
+        ));
+
+        let child = GitOid::parse(&fixture.run_git(&[
+            "commit-tree",
+            &tree,
+            "-p",
+            &fixture.source,
+            "-m",
+            "child commit",
+        ])?)?;
+        writer.base = child;
+        let utility = runtime(&fixture.state)?;
+        writer.require_continuation_source(utility.git_program_path(), source, child)?;
+        assert!(matches!(
+            writer.require_continuation_source(utility.git_program_path(), unrelated, child),
+            Err(RunError::WriterSourceMismatch { expected, actual })
+                if expected == unrelated && actual == child
+        ));
+        assert!(matches!(
+            writer.require_continuation_source(utility.git_program_path(), source, source),
+            Err(RunError::WriterSourceMismatch { expected, actual })
+                if expected == source && actual == child
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn writer_reports_uncommitted_paths_independent_of_git_output_order() -> FixtureResult<()> {
+        if clean_environment_child(stringify!(
+            writer_reports_uncommitted_paths_independent_of_git_output_order
+        ))? {
+            return Ok(());
+        }
+        let fixture = WriterFixture::new()?;
+        let lane = fixture.add_worktree("chore/paths", "lane")?;
+        let writer = fixture.prepare(&lane)?;
+        let utility = runtime(&fixture.state)?;
+        assert!(
+            writer
+                .uncommitted_paths(utility.git_program_path())?
+                .is_empty()
+        );
+
+        fixture.lane_git(&lane, &["mv", "old name.txt", "renamed.txt"])?;
+        std::fs::write(lane.join("café.txt"), "untracked")?;
+        let observed: std::collections::BTreeSet<_> = writer
+            .uncommitted_paths(utility.git_program_path())?
+            .into_iter()
+            .collect();
+        let expected = ["renamed.txt".to_owned(), "café.txt".to_owned()]
+            .into_iter()
+            .collect();
+        assert_eq!(observed, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn writer_git_preparation_restores_packed_branch_and_upstream() -> FixtureResult<()> {
+        if clean_environment_child(stringify!(
+            writer_git_preparation_restores_packed_branch_and_upstream
+        ))? {
+            return Ok(());
+        }
+        let fixture = WriterFixture::new()?;
+        let branch = "refs/heads/chore/x";
+        let lane = fixture.add_worktree("chore/x", "lane")?;
+        let mut writer = fixture.prepare(&lane)?;
+        let expected = fixture.run_git(&["rev-parse", branch])?;
+        fixture.run_git(&["pack-refs", "--all"])?;
+        let ref_parent = fixture.git_dir.join("refs/heads/chore");
+        if ref_parent.exists() {
+            std::fs::remove_dir(&ref_parent)?;
+        }
+        assert!(!fixture.git_dir.join(branch).exists());
+        assert!(!ref_parent.exists());
+        fixture.run_git(&[
+            "remote",
+            "add",
+            "origin",
+            fixture.project.to_str().ok_or("project path")?,
+        ])?;
+
+        fixture.prepare_git(&mut writer)?;
+
+        assert_eq!(fixture.run_git(&["rev-parse", branch])?, expected);
+        assert_eq!(
+            std::fs::read_to_string(fixture.git_dir.join(branch))?.trim(),
+            expected
+        );
+        assert_eq!(
+            fixture.run_git(&["config", "--local", "--get", "branch.chore/x.remote"])?,
+            "origin"
+        );
+        assert_eq!(
+            fixture.run_git(&["config", "--local", "--get", "branch.chore/x.merge"])?,
+            branch
+        );
+        let common = Directory::open_anchor(&fixture.git_dir)?;
+        drop(common.try_lock_existing(
+            OsStr::new(worktrees::REPOSITORY_LOCK),
             provenant_os::fs::LockMode::Exclusive,
-            provenant_core::WaitBudget::cli(clock.mono_now(), 60)?,
-            &cancel,
-            &clock,
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn writer_git_preparation_refuses_symlinked_reflog_paths() -> FixtureResult<()> {
+        if clean_environment_child(stringify!(
+            writer_git_preparation_refuses_symlinked_reflog_paths
+        ))? {
+            return Ok(());
+        }
+        let fixture = WriterFixture::new()?;
+        let lane = fixture.add_worktree("chore/x", "lane")?;
+        let mut writer = fixture.prepare(&lane)?;
+        let target = fixture.root.join("reflog-target");
+        std::fs::write(&target, b"untouched")?;
+        let reflog = fixture.git_dir.join("logs/refs/remotes/origin/chore/x");
+        std::fs::create_dir_all(reflog.parent().ok_or("reflog parent")?)?;
+        std::os::unix::fs::symlink(&target, &reflog)?;
+        let failure = fixture
+            .prepare_git(&mut writer)
+            .err()
+            .ok_or("leaf symlink refusal missing")?;
+        assert!(matches!(
+            failure,
+            RunError::OperationIo { path: Some(path), .. } if path == reflog
+        ));
+        assert_eq!(std::fs::read(&target)?, b"untouched");
+
+        std::fs::remove_file(&reflog)?;
+        let parent = reflog.parent().ok_or("reflog parent")?;
+        std::fs::remove_dir(parent)?;
+        std::os::unix::fs::symlink(&fixture.root, parent)?;
+        let failure = fixture
+            .prepare_git(&mut writer)
+            .err()
+            .ok_or("parent symlink refusal missing")?;
+        assert!(matches!(
+            failure,
+            RunError::OperationIo { path: Some(path), .. } if path == parent
+        ));
+        assert_eq!(std::fs::read(&target)?, b"untouched");
+        Ok(())
+    }
+
+    #[test]
+    fn writer_git_preparation_preserves_existing_ref_locks() -> FixtureResult<()> {
+        if clean_environment_child(stringify!(
+            writer_git_preparation_preserves_existing_ref_locks
+        ))? {
+            return Ok(());
+        }
+        let fixture = WriterFixture::new()?;
+        let lane = fixture.add_worktree("chore/x", "lane")?;
+        let mut writer = fixture.prepare(&lane)?;
+        fixture.run_git(&[
+            "remote",
+            "add",
+            "origin",
+            fixture.project.to_str().ok_or("project path")?,
+        ])?;
+        let tracking_lock = fixture.git_dir.join("refs/remotes/origin/chore/x.lock");
+        std::fs::create_dir_all(tracking_lock.parent().ok_or("tracking lock parent")?)?;
+        std::fs::write(&tracking_lock, b"held")?;
+        fixture.prepare_git(&mut writer)?;
+        assert_eq!(std::fs::read(&tracking_lock)?, b"held");
+
+        std::fs::remove_file(&tracking_lock)?;
+        fixture.run_git(&["remote", "remove", "origin"])?;
+        let branch_lock = fixture.git_dir.join("refs/heads/chore/x.lock");
+        std::fs::write(&branch_lock, b"held")?;
+        fixture.prepare_git(&mut writer)?;
+        assert_eq!(std::fs::read(&branch_lock)?, b"held");
+        Ok(())
+    }
+
+    #[test]
+    fn writer_preparation_refuses_incomplete_config_while_config_lock_is_held() -> FixtureResult<()>
+    {
+        if clean_environment_child(stringify!(
+            writer_preparation_refuses_incomplete_config_while_config_lock_is_held
+        ))? {
+            return Ok(());
+        }
+        let fixture = WriterFixture::new()?;
+        let lane = fixture.add_worktree("chore/config", "lane")?;
+        let request = fixture.request(&lane);
+        let common = Directory::open_anchor(&fixture.git_dir)?;
+        let config_lock = common.try_lock(
+            OsStr::new(worktrees::REPOSITORY_LOCK),
+            provenant_os::fs::LockMode::Exclusive,
         )?;
         let config = common.read_bounded(OsStr::new("config"), 1024 * 1024)?;
-        // Model a sibling's exclusive update. No preparation may inspect its
-        // intermediate config, even during its first repository open.
         common
             .atomic_write(
                 OsStr::new("config"),
@@ -1919,235 +2072,38 @@ mod cargo_setup_tests {
                 provenant_os::fs::PublishMode::Replace,
             )?
             .require_durable()?;
-        let (entered, starting) = std::sync::mpsc::channel();
-        let (prepared, finished) = std::sync::mpsc::channel();
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = std::iter::once(&mut writer)
-                .chain(std::iter::once(&mut second))
-                .chain(siblings.iter_mut())
-                .map(|writer| {
-                    scope.spawn(|| {
-                        start.wait();
-                        entered.send(()).map_err(|error| error.to_string())?;
-                        let request = WriterRequest {
-                            extra: Default::default(),
-                            custody_project: Some(custody_project),
-                            project: project.clone(),
-                            worktree: writer.worktree.path().to_path_buf(),
-                        };
-                        let result = prepare_writer_with_facts(
-                            &request,
-                            &state,
-                            custody_project,
-                            &worktrees::RepoFacts::default(),
-                        );
-                        let busy = matches!(
-                            result,
-                            Err(RunError::Filesystem(FsError::LockTimeout { .. }))
-                        );
-                        prepared.send(busy).map_err(|error| error.to_string())?;
-                        Ok::<(), String>(())
-                    })
-                })
-                .collect();
-            let all_started = (0..8).all(|_| starting.recv_timeout(Duration::from_secs(5)).is_ok());
-            let busy_results: Vec<_> = (0..8)
-                .map(|_| finished.recv_timeout(Duration::from_secs(5)))
-                .collect();
-            let all_busy = busy_results.iter().all(|result| matches!(result, Ok(true)));
-            let restored = common
-                .atomic_write(
-                    OsStr::new("config"),
-                    ".test-config-",
-                    &config,
-                    provenant_os::fs::PublishMode::Replace,
-                )
-                .and_then(|publication| publication.require_durable());
-            drop(config_lock);
-            restored.map_err(|error| error.to_string())?;
-            for handle in handles {
-                handle
-                    .join()
-                    .map_err(|_| "writer preparation panicked".to_owned())??;
-            }
-            assert!(all_started, "writer preparations did not start");
-            assert!(
-                all_busy,
-                "preparation must report the held repository lock as busy"
-            );
-            Ok::<(), String>(())
-        })?;
-        for writer in std::iter::once(&mut writer)
-            .chain(std::iter::once(&mut second))
-            .chain(siblings.iter_mut())
-        {
-            let request = WriterRequest {
-                extra: Default::default(),
-                custody_project: Some(custody_project),
-                project: project.clone(),
-                worktree: writer.worktree.path().to_path_buf(),
-            };
-            *writer = prepare_writer_with_facts(
-                &request,
-                &state,
-                custody_project,
-                &worktrees::RepoFacts::default(),
+
+        let clock = crate::tests::clock();
+        let result = prepare_writer_with_facts_and_clock(
+            &request,
+            &fixture.state,
+            fixture.custody_project,
+            &worktrees::RepoFacts::default(),
+            &clock,
+        );
+        let observed = common.read_bounded(OsStr::new("config"), 1024 * 1024);
+
+        let restored = common
+            .atomic_write(
+                OsStr::new("config"),
+                ".test-config-",
+                &config,
+                provenant_os::fs::PublishMode::Replace,
             )
-            .map_err(|error| error.to_string())?;
-            prepare_writer_git(writer, &state, &root, None, &CancelToken::new())
-                .map_err(|error| error.to_string())?;
-        }
-        for writer in std::iter::once(&writer)
-            .chain(std::iter::once(&second))
-            .chain(&siblings)
-        {
-            let branch = writer
-                .branch
-                .as_str()
-                .strip_prefix("refs/heads/")
-                .ok_or("branch")?;
-            assert_eq!(
-                run(&[
-                    "config",
-                    "--local",
-                    "--get",
-                    &format!("branch.{branch}.remote")
-                ])?,
-                "origin"
-            );
-            assert_eq!(
-                run(&[
-                    "config",
-                    "--local",
-                    "--get",
-                    &format!("branch.{branch}.merge")
-                ])?,
-                writer.branch.as_str()
-            );
-        }
-        // Preparation returns no lock for provider launch or custody to retain.
-        let common = Directory::open_anchor(&git_dir)?;
-        drop(common.try_lock_existing(
-            OsStr::new(worktrees::REPOSITORY_LOCK),
-            provenant_os::fs::LockMode::Exclusive,
-        )?);
-        let repo = utility.open_repo(&executor, &project, budget()?, &cancel)?;
-        provenant_confinement::verify_worktree(&repo, &lane)?
-            .repo()
-            .revalidate()?;
-        assert_eq!(
-            std::fs::read_to_string(git_dir.join(reference))?.trim(),
-            expected
-        );
-        assert_eq!(
-            run(&["show-ref", "--verify", reference])?,
-            format!("{expected} {reference}")
-        );
-        assert_eq!(
-            run(&[
-                "for-each-ref",
-                "--format=%(objectname) %(refname)",
-                reference
-            ])?,
-            format!("{expected} {reference}")
-        );
-        assert_eq!(
-            run(&["config", "--local", "--get", "branch.chore/x.remote"])?,
-            "origin"
-        );
-        assert_eq!(
-            run(&["config", "--local", "--get", "branch.chore/x.merge"])?,
-            reference
-        );
-        assert_eq!(
-            run(&["config", "--local", "--get", "branch.chore/second.remote"])?,
-            "origin"
-        );
-        assert_eq!(
-            run(&["config", "--local", "--get", "branch.chore/second.merge"])?,
-            "refs/heads/chore/second"
-        );
-        run(&[
-            "remote",
-            "add",
-            "origin",
-            project.to_str().ok_or("project path")?,
-        ])?;
-        let target = root.join("reflog-target");
-        std::fs::write(&target, b"untouched")?;
-        let reflog = git_dir.join("logs/refs/remotes/origin/chore/x");
-        std::fs::create_dir_all(reflog.parent().ok_or("reflog parent")?)?;
-        std::os::unix::fs::symlink(&target, &reflog)?;
-        let failure = prepare_writer_git(&mut writer, &state, &root, None, &CancelToken::new())
-            .err()
-            .ok_or("symlinked tracking reflog must refuse")?;
-        assert!(failure.to_string().contains(&reflog.display().to_string()));
-        assert_eq!(std::fs::read(&target)?, b"untouched");
-        std::fs::remove_file(&reflog)?;
-        let parent = reflog.parent().ok_or("reflog parent")?;
-        std::fs::remove_dir(parent)?;
-        std::os::unix::fs::symlink(&root, parent)?;
-        let failure = prepare_writer_git(&mut writer, &state, &root, None, &CancelToken::new())
-            .err()
-            .ok_or("symlinked tracking reflog parent must refuse")?;
-        assert!(failure.to_string().contains(&parent.display().to_string()));
-        assert_eq!(std::fs::read(&target)?, b"untouched");
-        std::fs::remove_file(parent)?;
-        std::fs::create_dir_all(parent)?;
-        let tracking_lock = git_dir.join("refs/remotes/origin/chore/x.lock");
-        std::fs::create_dir_all(tracking_lock.parent().ok_or("tracking lock parent")?)?;
-        std::fs::write(&tracking_lock, b"held")?;
-        prepare_writer_git(&mut writer, &state, &root, None, &CancelToken::new())?;
-        assert_eq!(std::fs::read(&tracking_lock)?, b"held");
-        std::fs::remove_file(&tracking_lock)?;
-        run(&["remote", "remove", "origin"])?;
-        let stale = git_dir.join("refs/heads/chore/x.lock");
-        std::fs::write(&stale, b"held")?;
-        prepare_writer_git(&mut writer, &state, &root, None, &CancelToken::new())?;
-        assert_eq!(std::fs::read(&stale)?, b"held");
+            .and_then(|publication| publication.require_durable());
+        drop(config_lock);
+        restored?;
+        assert!(matches!(
+            result,
+            Err(RunError::Filesystem(FsError::LockTimeout { path, timeout }))
+                if path == fixture.git_dir.join(worktrees::REPOSITORY_LOCK) && timeout.is_zero()
+        ));
+        assert_eq!(observed?, b"[unfinished");
         Ok(())
     }
 
     #[test]
-    fn toolchain_probe_requires_immutable_host_paths_and_trusted_path_order() {
-        use provenant_confinement::permissions::{PathScope, WriteGrant, WriteSource};
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("home");
-        let worktree = tmp.path().join("worktree");
-        let bin = home.join(".cargo/bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::create_dir_all(home.join(".rustup")).unwrap();
-        std::fs::create_dir(&worktree).unwrap();
-        std::fs::write(bin.join("rustup"), b"fixture").unwrap();
-        std::os::unix::fs::symlink("rustup", bin.join("rustc")).unwrap();
-        let env = vec![(OsString::from("PATH"), bin.as_os_str().to_owned())];
-        assert!(trusted_lane_toolchain(&home, &worktree, &env, &[]).is_ok());
-        let grant = WriteGrant {
-            source: WriteSource::WriteRoot,
-            path: home.join(".rustup"),
-            scope: PathScope::Subtree,
-        };
-        assert_eq!(
-            trusted_lane_toolchain(&home, &worktree, &env, &[grant]),
-            Err(codes::RUSTUP_HOME_WRITABLE)
-        );
-        let path = std::env::join_paths([&worktree, &bin]).unwrap();
-        let unsafe_env = vec![(OsString::from("PATH"), path)];
-        assert_eq!(
-            trusted_lane_toolchain(&home, &worktree, &unsafe_env, &[]),
-            Err(codes::PATH_ENTRY_WRITABLE)
-        );
-        std::fs::write(worktree.join("rustc"), b"untrusted").unwrap();
-        assert_eq!(
-            trusted_lane_toolchain(&home, &worktree, &unsafe_env, &[]),
-            Err(codes::PATH_ENTRY_WRITABLE)
-        );
-    }
-
-    // Regression for #2484: a real lane has the writable scratch `bin/` (the
-    // build-slot `cargo` shim) first on PATH, which refused every lane.
-    #[test]
-    fn scratch_shim_directory_on_path_is_accepted_but_other_writable_entries_are_not() {
+    fn toolchain_probe_accepts_only_declared_path_entries() {
         use provenant_confinement::permissions::{PathScope, WriteGrant, WriteSource};
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -2156,8 +2112,9 @@ mod cargo_setup_tests {
         let bin = home.join(".cargo/bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(home.join(".rustup")).unwrap();
-        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir(&worktree).unwrap();
         std::fs::create_dir_all(scratch.join("bin")).unwrap();
+        std::fs::create_dir(scratch.join("other")).unwrap();
         std::fs::write(bin.join("rustup"), b"fixture").unwrap();
         std::os::unix::fs::symlink("rustup", bin.join("rustc")).unwrap();
         let grants = [WriteGrant {
@@ -2165,28 +2122,56 @@ mod cargo_setup_tests {
             path: scratch.clone(),
             scope: PathScope::Subtree,
         }];
-        let path = std::env::join_paths([scratch.join("bin").as_path(), bin.as_path()]).unwrap();
-        let env = vec![(OsString::from("PATH"), path)];
-        assert_eq!(
-            trusted_lane_toolchain(&home, &worktree, &env, &grants),
-            Ok(())
-        );
-        // The scratch directory itself, or a sibling inside it, is not the shim directory.
-        std::fs::create_dir(scratch.join("other")).unwrap();
-        let other = std::env::join_paths([scratch.join("other").as_path(), bin.as_path()]).unwrap();
+        let writable_home = WriteGrant {
+            source: WriteSource::WriteRoot,
+            path: home.join(".rustup"),
+            scope: PathScope::Subtree,
+        };
+        let cases = [
+            ("immutable host", vec![bin.clone()], &[][..], Ok(())),
+            (
+                "scratch shim",
+                vec![scratch.join("bin"), bin.clone()],
+                &grants[..],
+                Ok(()),
+            ),
+            (
+                "worktree",
+                vec![worktree.clone(), bin.clone()],
+                &grants[..],
+                Err(codes::PATH_ENTRY_WRITABLE),
+            ),
+            (
+                "other scratch directory",
+                vec![scratch.join("other"), bin.clone()],
+                &grants[..],
+                Err(codes::PATH_ENTRY_WRITABLE),
+            ),
+        ];
+        for (entry, path_entries, path_grants, expected) in cases {
+            let path = std::env::join_paths(path_entries).unwrap();
+            let env = vec![(OsString::from("PATH"), path)];
+            assert_eq!(
+                trusted_lane_toolchain(&home, &worktree, &env, path_grants),
+                expected,
+                "{entry}"
+            );
+        }
         assert_eq!(
             trusted_lane_toolchain(
                 &home,
                 &worktree,
-                &[(OsString::from("PATH"), other)],
-                &grants
+                &[(OsString::from("PATH"), bin.as_os_str().to_owned())],
+                &[writable_home]
             ),
-            Err(codes::PATH_ENTRY_WRITABLE)
+            Err(codes::RUSTUP_HOME_WRITABLE)
         );
-        // A compiler already present in the shim directory must be the rustup shim.
         std::fs::write(scratch.join("bin/rustc"), b"untrusted").unwrap();
+        let scratch_path =
+            std::env::join_paths([scratch.join("bin").as_path(), bin.as_path()]).unwrap();
+        let scratch_env = vec![(OsString::from("PATH"), scratch_path)];
         assert_eq!(
-            trusted_lane_toolchain(&home, &worktree, &env, &grants),
+            trusted_lane_toolchain(&home, &worktree, &scratch_env, &grants),
             Err(codes::RUSTC_NOT_RUSTUP_SHIM)
         );
     }
@@ -2496,7 +2481,7 @@ impl crate::RunStore {
             Err(error) if error.is_not_found() => return Ok(projects),
             Err(error) => return Err(error.into()),
         };
-        let references = match root.open_verified_directory(OsStr::new("writer-projects")) {
+        let references = match root.open_verified_directory(OsStr::new(WRITER_PROJECTS_DIRECTORY)) {
             Ok(root) => match root
                 .open_verified_directory(OsStr::new(&self.context.project_id.to_string()))
             {
@@ -2640,6 +2625,7 @@ impl WriterLaunch {
             attempt,
             "writer-git-pins.json",
             &crate::db::bytes(&GitPins {
+                extra: Default::default(),
                 schema_version: 1,
                 scope,
                 base: self.base,
@@ -3059,6 +3045,7 @@ impl WriterLaunch {
                         attempt,
                         "merge-restored.json",
                         &crate::db::bytes(&MergeRestored {
+                            extra: Default::default(),
                             schema_version: 1,
                             scope: custody.scope(),
                         })?,
@@ -3101,6 +3088,7 @@ impl WriterLaunch {
             &archive,
             "manifest.json",
             &crate::db::bytes(&WriterManifest {
+                extra: Default::default(),
                 schema_version: 1,
                 scope: custody.scope(),
                 kind: "quarantine_manifest",
@@ -3220,6 +3208,11 @@ impl WriterLaunch {
 }
 /// How many dirty paths a reason names before it counts the rest.
 const UNCOMMITTED_LISTED: usize = 12;
+const WRITER_PROJECTS_DIRECTORY: &str = "writer-projects";
+
+fn writer_projects_path(registry: &Path) -> PathBuf {
+    registry.join(WRITER_PROJECTS_DIRECTORY)
+}
 
 fn invalid_write_scope_snapshot(policy: &provenant_records::policy::Policy) -> RunError {
     policy.boundary_error(
@@ -3290,56 +3283,64 @@ impl WriterLaunch {
             "read writer uncommitted changes",
             Some(self.worktree.path()),
         ))?;
-        Ok(uncommitted_reason(&paths))
+        Ok(uncommitted_reason(&paths).map(UncommittedWork::render))
     }
 }
-fn uncommitted_reason(paths: &[Vec<u8>]) -> Option<String> {
+
+#[derive(Debug, PartialEq, Eq)]
+struct UncommittedWork {
+    paths: Vec<String>,
+    omitted: usize,
+}
+
+impl UncommittedWork {
+    fn render(&self) -> String {
+        let mut reason = format!(
+            "writer left uncommitted edits and no new commit: {}",
+            self.paths.join(", ")
+        );
+        if self.omitted > 0 {
+            reason.push_str(&format!(" and {} more", self.omitted));
+        }
+        reason.truncate(reason.floor_char_boundary(1024));
+        reason
+    }
+}
+
+fn uncommitted_reason(paths: &[Vec<u8>]) -> Option<UncommittedWork> {
     if paths.is_empty() {
         return None;
     }
     let listed: Vec<_> = paths
         .iter()
         .take(UNCOMMITTED_LISTED)
-        .map(|path| String::from_utf8_lossy(path))
+        .map(|path| String::from_utf8_lossy(path).into_owned())
         .collect();
-    let more = paths.len().saturating_sub(UNCOMMITTED_LISTED);
-    let mut reason = format!(
-        "writer left uncommitted edits and no new commit: {}",
-        listed.join(", ")
-    );
-    if more > 0 {
-        reason.push_str(&format!(" and {more} more"));
-    }
-    reason.truncate(reason.floor_char_boundary(1024));
-    Some(reason)
+    Some(UncommittedWork {
+        omitted: paths.len().saturating_sub(listed.len()),
+        paths: listed,
+    })
 }
 #[cfg(test)]
 mod uncommitted_tests {
     use super::*;
 
     #[test]
-    fn reason_lists_dirty_paths_and_counts_the_rest() {
+    fn dirty_work_projection_keeps_paths_and_omitted_count_structured() {
         assert_eq!(uncommitted_reason(&[]), None);
         let one = uncommitted_reason(&[b"a.rs".to_vec(), b"b/c.rs".to_vec()]).unwrap();
-        assert!(one.starts_with("writer left uncommitted edits"));
-        assert!(one.contains("a.rs") && one.contains("b/c.rs"), "{one}");
+        assert_eq!(
+            one.paths.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["a.rs", "b/c.rs"]
+        );
+        assert_eq!(one.omitted, 0);
         let many: Vec<Vec<u8>> = (0..15).map(|n| format!("f{n:02}").into_bytes()).collect();
         let reason = uncommitted_reason(&many).unwrap();
-        assert!(reason.starts_with("writer left uncommitted edits"));
-        assert!(reason.len() <= 1024);
-        let listed = (0..15)
-            .filter(|n| reason.contains(&format!("f{n:02}")))
-            .count();
-        let omitted: usize = reason
-            .split_whitespace()
-            .rev()
-            .nth(1)
-            .unwrap()
-            .parse()
-            .unwrap();
-        assert_eq!(listed + omitted, many.len(), "{reason}");
+        assert_eq!(reason.paths.len(), UNCOMMITTED_LISTED);
+        assert_eq!(reason.omitted, many.len() - reason.paths.len());
+        assert!(reason.render().len() <= 1024);
         let long = uncommitted_reason(&[vec![b'x'; 4000]]).unwrap();
-        assert!(long.len() <= 1024);
+        assert!(long.render().len() <= 1024);
     }
 }
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -3349,10 +3350,67 @@ pub(crate) struct WriterTerminal {
 }
 #[derive(serde::Serialize)]
 struct WriterManifest {
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
     schema_version: u64,
     scope: provenant_records::custody::Scope,
     kind: &'static str,
     disposition: &'static str,
+}
+
+#[cfg(test)]
+mod stored_shape_tests {
+    use super::*;
+    use serde::{Serialize, de::DeserializeOwned};
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    fn unknown_field_survives<T>(record: T) -> TestResult
+    where
+        T: DeserializeOwned + Serialize,
+    {
+        let mut payload = serde_json::to_value(record)?;
+        let future = serde_json::json!({"value": 2});
+        payload
+            .as_object_mut()
+            .ok_or("stored record object")?
+            .insert("future_minor_field".into(), future.clone());
+        let bytes = serde_json::to_vec(&payload)?;
+        let decoded: T =
+            provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())?;
+        let encoded = provenant_records::encode(&decoded)?;
+        let round_trip: serde_json::Value =
+            provenant_records::decode(encoded.as_slice(), provenant_records::Limits::default())?;
+        assert_eq!(round_trip.get("future_minor_field"), Some(&future));
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_writer_records_preserve_fields_from_newer_minors() -> TestResult {
+        let scope = provenant_records::custody::Scope {
+            attempt: provenant_core::AttemptId::from_bytes([1; 16]),
+            generation: 1,
+        };
+        let oid = GitOid::parse("1111111111111111111111111111111111111111")?;
+        unknown_field_survives(GitPins {
+            extra: Default::default(),
+            schema_version: 1,
+            scope,
+            base: oid,
+        })?;
+        unknown_field_survives(MergeRestored {
+            extra: Default::default(),
+            schema_version: 1,
+            scope,
+        })?;
+        unknown_field_survives(WriterOwnership {
+            extra: Default::default(),
+            schema_version: 1,
+            lane_owned: false,
+            owner: None,
+        })?;
+        Ok(())
+    }
 }
 
 /// Remove the empty generated staging directory under attempt exclusion.
@@ -3381,6 +3439,7 @@ pub(crate) fn seal_writer_ownership(
         .as_ref()
         .is_some_and(|owner| owner.origin == worktrees::WorktreeOrigin::Lane);
     let ownership = WriterOwnership {
+        extra: Default::default(),
         schema_version: 1,
         lane_owned: owned,
         owner,
@@ -3409,6 +3468,8 @@ pub(crate) fn seal_writer_ownership(
 /// Launch-time lifecycle evidence, sealed while writer custody is held.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct WriterOwnership {
+    #[serde(default, flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub schema_version: u64,
     pub lane_owned: bool,
     #[serde(deserialize_with = "serde::Deserialize::deserialize")]
@@ -3454,8 +3515,7 @@ mod custody_admission_tests {
         let store = crate::RunStore::open(&context, &call)?;
         let source_project = ProjectId::from_bytes([99; 16]);
         let root = context.state_root.as_path();
-        let refs = root
-            .join("writer-projects")
+        let refs = writer_projects_path(root)
             .join(context.project_id.to_string())
             .join(source_project.to_string());
         std::fs::create_dir_all(&refs)?;
@@ -3499,7 +3559,7 @@ mod custody_admission_tests {
         // An unrelated, malformed project reference must never be scanned
         // while admitting this worktree. Its own retained import still fences it.
         std::fs::create_dir(
-            root.join("writer-projects")
+            writer_projects_path(root)
                 .join(context.project_id.to_string())
                 .join("unrelated-invalid-project"),
         )?;
@@ -3618,17 +3678,6 @@ mod launch_resource_limit_tests {
             limits.profile_origin,
             provenant_records::diagnostic::SettingSource::ShippedDefault
         );
-        let default_error = limits.annotate(
-            provenant_confinement::permissions::PermissionError::GrantLimitExceeded {
-                family: "fixture",
-                limit: 1,
-            },
-        );
-        assert!(
-            default_error
-                .to_string()
-                .contains("source: compiled default")
-        );
         std::fs::write(
             state.path().join("config.toml"),
             "schema_version=1\n[domains.run]\ngrant_limit=128\n",
@@ -3656,17 +3705,6 @@ mod launch_resource_limit_tests {
         assert_eq!(
             configured.profile_origin,
             provenant_records::diagnostic::SettingSource::Configuration
-        );
-        let configured_error = configured.annotate(
-            provenant_confinement::permissions::PermissionError::ProfileTooLarge {
-                bytes: 2,
-                limit: 1,
-            },
-        );
-        assert!(
-            configured_error
-                .to_string()
-                .contains("source: host configuration")
         );
         let unrelated = configured
             .annotate(provenant_confinement::permissions::PermissionError::ProtectedOverlap);

@@ -16,6 +16,7 @@ pub fn decide(
         Publication::RestOrdered => Ok(PublishDecision {
             mode: PublishMode::RestOrdered,
             reason: "land.publish explicitly selects rest_ordered".into(),
+            extra: Default::default(),
         }),
         Publication::FastForward => {
             if method != MergeMethod::Merge {
@@ -32,6 +33,7 @@ pub fn decide(
                 mode: PublishMode::FastForward,
                 reason: "land.publish explicitly selects fast_forward and direct push is permitted"
                     .into(),
+                extra: Default::default(),
             })
         }
         Publication::Auto => {
@@ -39,17 +41,20 @@ pub fn decide(
                 return Ok(PublishDecision {
                     mode: PublishMode::RestOrdered,
                     reason: "the requested merge method requires forge publication".into(),
+                    extra: Default::default(),
                 });
             }
             if forge.may_push_directly(target)? {
                 Ok(PublishDecision {
                     mode: PublishMode::FastForward,
                     reason: "direct push is permitted".into(),
+                    extra: Default::default(),
                 })
             } else {
                 Ok(PublishDecision {
                     mode: PublishMode::RestOrdered,
                     reason: "direct push is not permitted".into(),
+                    extra: Default::default(),
                 })
             }
         }
@@ -70,6 +75,7 @@ pub fn decide_candidate(
             return Ok(PublishDecision {
                 mode: PublishMode::RestOrdered,
                 reason: "stack members require asynchronous forge publication".into(),
+                extra: Default::default(),
             });
         }
     }
@@ -99,6 +105,7 @@ pub fn decide_strategy(
             Ok(PublishDecision {
                 mode: PublishMode::Command,
                 reason: format!("land command port (source: {:?})", port.source),
+                extra: Default::default(),
             })
         },
         || {
@@ -268,28 +275,11 @@ mod tests {
     use crate::pr::landing::{
         fakes::{FakeForge, FakeRepo},
         ports::Approval,
+        test_support::LandingFixture,
     };
 
     fn candidate() -> Candidate {
-        let step = |number, head: &str, commit: &str| CandidateStep {
-            pr: EligiblePr {
-                number,
-                head: head.into(),
-                approval: format!("approval-{number}"),
-                approval_evidence: Vec::new(),
-                accepted: None,
-                base_branch: "main".into(),
-            },
-            commit: commit.into(),
-            tree: format!("tree-{number}"),
-        };
-        Candidate {
-            base: "base".into(),
-            steps: vec![step(1, "head-1", "step-1"), step(2, "head-2", "candidate")],
-            commit: "candidate".into(),
-            tree: "tree-2".into(),
-            ref_name: "land/test".into(),
-        }
+        LandingFixture::ordered_candidate()
     }
     fn prepare(forge: &mut FakeForge) {
         use crate::pr::landing::ports::{PullRequestInfo, PullRequestState};
@@ -588,20 +578,25 @@ mod tests {
         ));
         Ok(())
     }
-    fn ordered_revalidation_rejects(change: &str) {
+    #[derive(Clone, Copy)]
+    enum RevalidationChange {
+        Head,
+        Approval,
+        Base,
+    }
+    fn ordered_revalidation_rejects(change: RevalidationChange) {
         let mut forge = FakeForge::default();
         prepare(&mut forge);
         match change {
-            "head" => {
+            RevalidationChange::Head => {
                 forge.heads.insert(2, "new-head".into());
             }
-            "approval" => {
+            RevalidationChange::Approval => {
                 forge.approvals_at_head.remove(&(2, "head-2".into()));
             }
-            "base" => {
+            RevalidationChange::Base => {
                 forge.pull_requests.get_mut(&2).unwrap().base_branch = "other".into();
             }
-            _ => unreachable!(),
         }
         let mut repo = FakeRepo {
             target: "base".into(),
@@ -628,16 +623,14 @@ mod tests {
     }
 
     #[test]
-    fn ordered_revalidates_head() {
-        ordered_revalidation_rejects("head");
-    }
-    #[test]
-    fn ordered_revalidates_approval() {
-        ordered_revalidation_rejects("approval");
-    }
-    #[test]
-    fn ordered_revalidates_base() {
-        ordered_revalidation_rejects("base");
+    fn ordered_revalidation_rejects_every_changed_input_before_the_next_merge() {
+        for change in [
+            RevalidationChange::Head,
+            RevalidationChange::Approval,
+            RevalidationChange::Base,
+        ] {
+            ordered_revalidation_rejects(change);
+        }
     }
 
     #[test]

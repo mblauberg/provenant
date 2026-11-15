@@ -25,6 +25,8 @@ pub(super) fn failure(
 /// First and longest pause between retries of a transient GitHub read.
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_LAST: Duration = Duration::from_secs(15);
+const RATE_LIMIT_FALLBACK: Duration = Duration::from_secs(60);
+const UNKNOWN_RESET: &str = "unknown";
 
 /// Reads GitHub within one deadline, retrying transient failures with backoff.
 /// Persistent or non-transient failures return at once for the caller to refuse.
@@ -229,7 +231,7 @@ fn rate_delay_at(headers: &str, fallback: Duration, now: i64) -> (Duration, Stri
     // the retry time; otherwise retry after a minute rather than waiting for
     // that window to reset.
     let reset = reset.filter(|_| remaining == Some(0));
-    let fallback = fallback.max(Duration::from_secs(60));
+    let fallback = fallback.max(RATE_LIMIT_FALLBACK);
     let delay = retry
         .map(Duration::from_secs)
         .or_else(|| reset.map(|at| Duration::from_secs(at.saturating_sub(now).max(0) as u64)))
@@ -237,7 +239,7 @@ fn rate_delay_at(headers: &str, fallback: Duration, now: i64) -> (Duration, Stri
     // Report the time the chosen delay ends, whichever header chose it.
     let at = now.saturating_add(i64::try_from(delay.as_secs()).unwrap_or(i64::MAX));
     let label = if reset.is_none() && retry.is_none() {
-        "unknown".to_owned()
+        UNKNOWN_RESET.to_owned()
     } else {
         jiff::Timestamp::from_second(at).map_or_else(|_| at.to_string(), |time| time.to_string())
     };
@@ -345,61 +347,66 @@ mod tests {
 
     #[test]
     fn rate_limit_headers_include_429_and_retry_after_dates() {
-        assert!(is_rate_limit("HTTP/2 429 Too Many Requests", "", ""));
-        assert!(!is_rate_limit(
-            "HTTP/2 409 Conflict\r\nX-RateLimit-Remaining: 0",
-            "",
-            ""
-        ));
-        assert!(!is_rate_limit(
-            "HTTP/2 405 Method Not Allowed",
-            "not mergeable",
-            ""
-        ));
-        assert!(!is_rate_limit(
-            "",
-            "unexpected gh arguments: api --include repos/owner/repo/pulls/7",
-            ""
-        ));
-        let (delay, reset) = rate_delay(
-            "X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 4102444800\r\n",
-            Duration::from_secs(1),
-        );
-        assert!(delay > Duration::from_secs(60));
-        assert!(reset.starts_with("2100-01-01"), "{reset}");
-        // Without an explicit zero remaining count the reset belongs to an
-        // unrelated primary window and must not set the wait.
-        let (delay, reset) =
-            rate_delay("X-RateLimit-Reset: 4102444800\r\n", Duration::from_secs(1));
-        assert_eq!(delay, Duration::from_secs(60));
-        assert_eq!(reset, "unknown");
-        // Retry-After chooses the delay, so the reported time follows it, not
-        // the later primary reset.
-        // 2026-11-03T00:00:00Z; the retry ends 17 s later, not at the reset.
-        let (delay, reset) = rate_delay_at(
-            "Retry-After: 17\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 4102444800\r\n",
-            Duration::from_secs(1),
-            1_793_664_000,
-        );
-        assert_eq!(delay, Duration::from_secs(17));
-        assert_eq!(reset, "2026-11-03T00:00:17Z");
-        let (delay, _) = rate_delay("Retry-After: 17\r\n", Duration::from_secs(1));
-        assert_eq!(delay, Duration::from_secs(17));
-        let (delay, reset) = rate_delay(
-            "X-RateLimit-Remaining: 100\r\nX-RateLimit-Reset: 4102444800\r\n",
-            Duration::from_secs(1),
-        );
-        assert_eq!(delay, Duration::from_secs(60));
-        assert_eq!(reset, "unknown");
-        let (delay, reset) = rate_delay("", Duration::from_secs(1));
-        assert_eq!(delay, Duration::from_secs(60));
-        assert_eq!(reset, "unknown");
-        let (delay, reset) = rate_delay(
-            "Retry-After: Fri, 01 Jan 2100 00:00:00 GMT\r\n",
-            Duration::from_secs(1),
-        );
-        assert!(delay > Duration::from_secs(60));
-        assert!(reset.starts_with("2100-01-01"), "{reset}");
+        for (headers, stderr, stdout, expected) in [
+            ("HTTP/2 429 Too Many Requests", "", "", true),
+            (
+                "HTTP/2 409 Conflict\r\nX-RateLimit-Remaining: 0",
+                "",
+                "",
+                false,
+            ),
+            ("HTTP/2 405 Method Not Allowed", "not mergeable", "", false),
+            (
+                "",
+                "unexpected gh arguments: api --include repos/owner/repo/pulls/7",
+                "",
+                false,
+            ),
+        ] {
+            assert_eq!(is_rate_limit(headers, stderr, stdout), expected);
+        }
+        let now = "2026-11-03T00:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .unwrap()
+            .as_second();
+        let future = "2100-01-01T00:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .unwrap()
+            .as_second();
+        let reset = format!("X-RateLimit-Reset: {future}\r\n");
+        let primary = format!("X-RateLimit-Remaining: 0\r\n{reset}");
+        let not_exhausted = format!("X-RateLimit-Remaining: 100\r\n{reset}");
+        let retry_over_primary = format!("Retry-After: 17\r\n{primary}");
+        for (headers, expected_delay, known_reset) in [
+            (
+                primary.as_str(),
+                Duration::from_secs((future - now) as u64),
+                true,
+            ),
+            (reset.as_str(), RATE_LIMIT_FALLBACK, false),
+            (not_exhausted.as_str(), RATE_LIMIT_FALLBACK, false),
+            ("", RATE_LIMIT_FALLBACK, false),
+            ("Retry-After: 17\r\n", Duration::from_secs(17), true),
+            (retry_over_primary.as_str(), Duration::from_secs(17), true),
+            (
+                "Retry-After: Fri, 01 Jan 2100 00:00:00 GMT\r\n",
+                Duration::from_secs((future - now) as u64),
+                true,
+            ),
+        ] {
+            let (delay, label) = rate_delay_at(headers, Duration::from_secs(1), now);
+            assert_eq!(delay, expected_delay, "{headers}");
+            let expected_reset = if known_reset {
+                jiff::Timestamp::from_second(now + i64::try_from(expected_delay.as_secs()).unwrap())
+                    .unwrap()
+                    .to_string()
+            } else {
+                UNKNOWN_RESET.to_owned()
+            };
+            assert_eq!(label, expected_reset, "{headers}");
+        }
+        let configured = RATE_LIMIT_FALLBACK * 2;
+        assert_eq!(rate_delay_at("", configured, now).0, configured);
     }
 
     #[test]

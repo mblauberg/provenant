@@ -37,6 +37,7 @@ mod tests {
                 approval_evidence: Vec::new(),
                 accepted: None,
                 base_branch: "main".into(),
+                extra: Default::default(),
             })
             .collect()
     }
