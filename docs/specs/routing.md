@@ -80,6 +80,11 @@ unavailable because the diff is empty, selection proceeds with size unknown. If
 path or size metadata is incomplete, the resolver applies the configured
 unreadable-path floors and adds a warning to reviewer guidance.
 
+When a lane later adds or edits a nested review panel, the relay reuses the
+graph's admitted review base and the calling node's bound subject commit. It
+does not resolve refs again or substitute the current checkout head. If either
+pin is absent, no pinned diff is inferred.
+
 Use this command for the complete policy-selected panel:
 
 ```sh

@@ -211,12 +211,13 @@ pub fn serve_with_read(
                 .map_err(|error| refused("invalid_template", error))?;
             let config = crate::config_reads::read_for(&context.roots, "run")
                 .map_err(|error| refused("invalid_config", error.to_string()))?;
-            let resolvers = launch_resolvers_at_roots(
+            let resolvers = launch_resolvers_for_relay(
                 &context.roots,
                 &context.cwd,
                 &config.domains.routing.review,
                 &document,
-                None,
+                &checkpoint,
+                &parent,
             )
             .map_err(|error| refused("invalid_review", error))?;
             let patch_context = PatchContext {
@@ -383,12 +384,13 @@ pub fn serve_with_read(
                 .map_err(|error| refused("invalid_template", error))?;
             let config = crate::config_reads::read_for(&context.roots, "run")
                 .map_err(|error| refused("invalid_config", error.to_string()))?;
-            let resolvers = launch_resolvers_at_roots(
+            let resolvers = launch_resolvers_for_relay(
                 &context.roots,
                 &context.cwd,
                 &config.domains.routing.review,
                 &document,
-                None,
+                &checkpoint,
+                &parent,
             )
             .map_err(|error| refused("invalid_review", error))?;
             // The ID selects this graph; prepare checks each skip/replace target
@@ -907,6 +909,43 @@ pub fn launch_resolvers_at_roots(
     launch_resolvers_with(review, document, pinned_diff, |slot, family| {
         crate::route::resolve_review_family(roots, &slot.tier, family, &exclude)
     })
+}
+
+/// Dynamic relay patches inherit only the graph's admitted review base and
+/// the calling node's already-bound subject. Missing pins stay unpinned; the
+/// relay never resolves mutable refs or substitutes the host's current HEAD.
+fn launch_resolvers_for_relay(
+    roots: &provenant_core::Roots,
+    cwd: &std::path::Path,
+    review: &provenant_routing::ReviewConfig,
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    parent: &str,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
+    let review_range = relay_review_range(checkpoint, parent);
+    launch_resolvers_at_roots(
+        roots,
+        cwd,
+        review,
+        document,
+        review_range
+            .as_ref()
+            .map(|(base, subject)| (base.as_str(), subject.as_str())),
+    )
+}
+
+fn relay_review_range(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    parent: &str,
+) -> Option<(String, String)> {
+    let base = checkpoint.bases?.review?.to_string();
+    let subject = checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == parent)?
+        .source_commit
+        .clone()?;
+    Some((base, subject))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2628,6 +2667,154 @@ mod provisioning_tests {
 #[cfg(test)]
 mod panel_tests {
     use super::*;
+
+    // Spec: docs/specs/routing.md#pinned-review-selection
+    #[test]
+    fn relayed_review_panels_reuse_the_callers_pinned_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{GraphBaseBinding, GraphCheckpoint, GraphDocument};
+
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project)?;
+        let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+            let output = provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        git(&["init", "-q"])?;
+        git(&["commit", "--allow-empty", "-qm", "review base"])?;
+        let base = git(&["rev-parse", "HEAD"])?;
+
+        let release = project.join(".github/workflows/release.yml");
+        let credentials = project.join("credentials/identity.json");
+        std::fs::create_dir_all(release.parent().ok_or("release parent")?)?;
+        std::fs::create_dir_all(credentials.parent().ok_or("credentials parent")?)?;
+        std::fs::write(&release, "name: Release\n")?;
+        std::fs::write(&credentials, "{}\n")?;
+        git(&[
+            "add",
+            ".github/workflows/release.yml",
+            "credentials/identity.json",
+        ])?;
+        git(&["commit", "-qm", "touch configured protected paths"])?;
+        let protected_subject = git(&["rev-parse", "HEAD"])?;
+
+        git(&["checkout", "-q", "-b", "docs-only", &base])?;
+        let guide = project.join("docs/guide.md");
+        std::fs::create_dir_all(guide.parent().ok_or("docs parent")?)?;
+        std::fs::write(&guide, "Review guide\n")?;
+        git(&["add", "docs/guide.md"])?;
+        git(&["commit", "-qm", "touch docs only"])?;
+        let docs_subject = git(&["rev-parse", "HEAD"])?;
+
+        let mut root_inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        root_inputs.state_dir = Some(root.path().join("state"));
+        let roots = root_inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let review = provenant_routing::RoutingConfig::default().review;
+        let library = TemplateLibrary::bundled();
+        let limits = provenant_fabric_runtime::config::GraphLimits::default();
+        let worktree_layout = provenant_config::PortTable::builtin().worktree_layout;
+
+        for (subject, deep) in [(&protected_subject, true), (&docs_subject, false)] {
+            let document: GraphDocument = serde_json::from_value(json!({
+                "schema_version": 2,
+                "graph_id": "relay-review",
+                "review_base": base,
+                "nodes": [{
+                    "id": "caller",
+                    "access": "read_only",
+                    "prompt": "Caller",
+                    "route": {"alias": "senior"},
+                    "source": {"type": "commit", "commit": subject}
+                }]
+            }))?;
+            let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+                "schema_version": 2,
+                "graph_id": "relay-review",
+                "plan_digest": "fixture",
+                "nodes": [{
+                    "id": "caller",
+                    "state": "running",
+                    "source_commit": subject,
+                    "attempts": []
+                }]
+            }))?;
+            checkpoint.bases =
+                GraphBaseBinding::new(Some(provenant_core::GitOid::parse(&base)?), None);
+
+            let resolvers = launch_resolvers_for_relay(
+                &roots,
+                &project,
+                &review,
+                &document,
+                &checkpoint,
+                "caller",
+            )?;
+            let lenses = &resolvers["review-panel"];
+            if deep {
+                assert!(lenses.len() >= 8, "{lenses:?}");
+                for lens in ["correctness-spec", "reliability", "security-privacy"] {
+                    assert!(lenses.iter().any(|selected| selected == lens), "{lenses:?}");
+                }
+                for stage in ["review-frame", "review-verify", "review-synthesis"] {
+                    assert_eq!(resolvers[stage], vec!["true"]);
+                }
+            } else {
+                assert_eq!(lenses.len(), 1, "{lenses:?}");
+                for stage in ["review-frame", "review-verify", "review-synthesis"] {
+                    assert_eq!(resolvers[stage], vec!["false"]);
+                }
+            }
+
+            let mut document = document;
+            document.template_resolvers = resolvers.clone();
+            let patch: provenant_fabric_runtime::graph::patch::Patch =
+                serde_json::from_value(json!({
+                    "schema_version": 1,
+                    "expected_revision": 0,
+                    "idempotency_key": "nested-review",
+                    "nodes": [{"id": "review", "use": "review-panel"}]
+                }))?;
+            let admitted = provenant_fabric_runtime::graph::patch::admit_patch(
+                &mut LiveGraph {
+                    document: &document,
+                    checkpoint: &mut checkpoint,
+                },
+                Some("caller"),
+                &patch,
+                &PatchContext {
+                    library: &library,
+                    resolvers: &resolvers,
+                    limits: &limits,
+                    scan: &scan_for_secrets,
+                    journal: None,
+                    worktree_layout: worktree_layout.clone(),
+                },
+            )?;
+            assert!(!admitted.added.is_empty());
+            let expanded = &checkpoint.expansions.last().ok_or("relay expansion")?.nodes;
+            let review_leaves: Vec<_> = expanded
+                .iter()
+                .filter(|node| node.review_lens.is_some())
+                .collect();
+            assert_eq!(
+                review_leaves.len() >= 8,
+                deep,
+                "{} leaves",
+                review_leaves.len()
+            );
+        }
+        Ok(())
+    }
 
     // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
     #[test]
