@@ -1997,7 +1997,7 @@ fn provider_model_scope_defaults_overrides_and_pin_policy() {
             .unwrap()
             .contains("providers.cursor.out_of_scope_pin")
     );
-    let text = b"schema_version=1\n[providers.cursor]\nmodels=['*']\nout_of_scope_pin='allow'\n[providers.codex]\nmodels=['gpt-*']\nout_of_scope_pin='refuse'";
+    let text = b"schema_version=1\n[providers.cursor]\nmodels=['*']\nout_of_scope_pin='allow'\n[providers.codex]\nmodels=['gpt-*']\nout_of_scope_pin='refuse'\n[providers.agy]\nmodels=['gemini-*']\nout_of_scope_pin='allow'";
     let configured = load(&roots(), Some(text.as_slice())).unwrap();
     assert!(configured.providers["cursor"].permits_model("claude-sonnet"));
     assert!(!configured.providers["codex"].permits_model("other"));
@@ -2008,6 +2008,17 @@ fn provider_model_scope_defaults_overrides_and_pin_policy() {
     assert!(
         configured.providers["codex"]
             .pin_warning("codex", "other")
+            .is_none()
+    );
+    // Allow keeps a restrictive scope for routing but pins silently.
+    assert!(!configured.providers["agy"].permits_model("claude-opus"));
+    assert_eq!(
+        configured.providers["agy"].out_of_scope_pin,
+        OutOfScopePin::Allow
+    );
+    assert!(
+        configured.providers["agy"]
+            .pin_warning("agy", "claude-opus")
             .is_none()
     );
     assert!(matches!(

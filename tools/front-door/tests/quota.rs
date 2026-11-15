@@ -732,10 +732,7 @@ cat "$HOME/agy-usage"
     let second = rig.home.join(".agy-second");
     fs::create_dir_all(second.join("Library/Keychains"))?;
     fs::write(second.join("Library/Keychains/login.keychain-db"), "")?;
-    for (directory, email) in [
-        (&first, "one@example.test"),
-        (&second, "two@example.test"),
-    ] {
+    for (directory, email) in [(&first, "one@example.test"), (&second, "two@example.test")] {
         fs::write(directory.join("agy-email"), email)?;
         fs::write(
             directory.join("agy-usage"),

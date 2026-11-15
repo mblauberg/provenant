@@ -18,6 +18,7 @@ use std::{
 const OUTPUT_CAP: usize = 512 * 1024;
 const LANE_PAGE: &str = "100";
 const LISTING_TIME: Duration = Duration::from_secs(3);
+const COLLECTION_EXECUTOR_CONCURRENCY: usize = 4;
 
 pub struct Want {
     pub worktrees: bool,
@@ -171,7 +172,7 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
         commands: CommandPrefix::new(globals.state_dir.as_deref(), cwd),
         ..Default::default()
     };
-    let executor = match SystemExecutor::new(5) {
+    let executor = match SystemExecutor::new(COLLECTION_EXECUTOR_CONCURRENCY) {
         Ok(executor) => executor,
         Err(error) => {
             unavailable_sources(
@@ -525,7 +526,7 @@ esac
                 }
             }
         }
-        let executor = SystemExecutor::new(3).unwrap();
+        let executor = SystemExecutor::new(COLLECTION_EXECUTOR_CONCURRENCY).unwrap();
         let cli = Cli {
             exe: script,
             state_dir: None,

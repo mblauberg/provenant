@@ -633,8 +633,10 @@ fn provider_scope_filters_pools_and_refuses_explicit_pins() -> Result<(), Box<dy
 {
     let catalogue = Catalogue::bundled()?;
     let mut config = RoutingConfig::default();
-    let mut cursor = provenant_config::ProviderSettings::default();
-    cursor.models = Some(vec!["auto".into(), "composer-*".into(), "grok-*".into()]);
+    let cursor = provenant_config::ProviderSettings {
+        models: Some(vec!["auto".into(), "composer-*".into(), "grok-*".into()]),
+        ..provenant_config::ProviderSettings::default()
+    };
     for members in catalogue.pools.values() {
         for member in members
             .iter()
@@ -643,25 +645,31 @@ fn provider_scope_filters_pools_and_refuses_explicit_pins() -> Result<(), Box<dy
             assert!(cursor.permits_model(member.model.model()));
         }
     }
-    cursor.models = Some(vec!["auto".into()]);
-    config.provider_scopes.insert("cursor".into(), cursor);
-    let mut ctx = context(&catalogue, &config, now()?);
+    config.provider_scopes.insert(
+        "cursor".into(),
+        provenant_config::ProviderSettings {
+            models: Some(vec!["auto".into()]),
+            ..provenant_config::ProviderSettings::default()
+        },
+    );
     let pool = RouteRequest {
         choice: RouteChoice::NamedRoute(RouteName::parse("senior")?),
         ..request("cursor/auto")?
     };
-    // No selected pool candidate may escape the configured scope.
-    let result = resolve_with_seed(&pool, &ctx, "scope", 0)?;
-    assert!(result.adapter != "cursor" || result.model == "auto");
     let pin = request("cursor/grok-4.7")?;
-    assert!(resolve(&pin, &ctx).is_ok());
-    drop(ctx);
+    {
+        let ctx = context(&catalogue, &config, now()?);
+        // No selected pool candidate may escape the configured scope.
+        let result = resolve_with_seed(&pool, &ctx, "scope", 0)?;
+        assert!(result.adapter != "cursor" || result.model == "auto");
+        assert!(resolve(&pin, &ctx).is_ok());
+    }
     config
         .provider_scopes
         .get_mut("cursor")
         .unwrap()
         .out_of_scope_pin = provenant_config::OutOfScopePin::Refuse;
-    ctx = context(&catalogue, &config, now()?);
+    let ctx = context(&catalogue, &config, now()?);
     assert!(resolve(&pin, &ctx).is_err());
     Ok(())
 }

@@ -73,11 +73,12 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
     };
     // Test delivery budgets must also fit inside the enclosing guard budget.
     // Release builds retain the normal local deadline.
-    let deadline = started + if matches!(spec.handler, Handler::Guard) {
-        LOCAL_BUDGET.max(answer_budget())
-    } else {
-        LOCAL_BUDGET
-    };
+    let deadline = started
+        + if matches!(spec.handler, Handler::Guard) {
+            LOCAL_BUDGET.max(answer_budget())
+        } else {
+            LOCAL_BUDGET
+        };
     let client = spec.client;
     match spec.handler {
         Handler::ChairPrompt => crate::chair::hook(false, globals),
