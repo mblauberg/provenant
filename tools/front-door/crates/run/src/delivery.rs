@@ -222,7 +222,7 @@ impl FilteredLanePath {
 
     /// Find a bare executable name on the filtered PATH. The returned path is
     /// the original PATH candidate, preserving safe command symlinks.
-    pub fn resolve(&self, name: &str) -> Result<PathBuf, String> {
+    pub fn resolve(&self, name: &str) -> std::result::Result<PathBuf, String> {
         let name_path = Path::new(name);
         if name.is_empty()
             || name.contains('/')
