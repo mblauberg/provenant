@@ -263,7 +263,7 @@ fn command_lane_reads_its_supervisors_process_tree_through_the_cli() -> Result {
     let script = r#"
 set -eu
 test -n "$PROVENANT_PROCESS_TREE"
-/bin/sh -c '/bin/sleep 15 & wait' &
+/bin/sh -c '/bin/sleep 15 & wait' >/dev/null 2>&1 &
 child=$!
 # Ready only when a published sample shows the child's own child (the sleep);
 # the sampler publishes on its own cadence, so poll that condition, not a delay.
@@ -281,6 +281,10 @@ while :; do
     test "$attempt" -lt 50
     /bin/sleep 0.2
 done
+# The sample is taken; end the helper tree so the lane settles now.
+/usr/bin/pkill -P "$child" || true
+kill "$child" 2>/dev/null || true
+wait "$child" 2>/dev/null || true
 printf '%s\n' "$PROVENANT_PROCESS_TREE"
 /bin/cat "$TMPDIR/sample.json"
 "#;

@@ -224,3 +224,10 @@ name = "read_only_lane_builds_and_tests_cargo_in_scratch"
 issue = "#3300"
 owner = "chair"
 expires = 2026-12-14
+
+[[test]]
+package = "provenant-confinement"
+name = "worktrees::lifecycle_tests::ownership::dozen_writer_worktrees_claim_concurrently_without_registry_exclusion"
+issue = "#3306"
+owner = "chair"
+expires = 2026-12-14

@@ -85,6 +85,11 @@ serial-process = { max-threads = 1 }
 filter = 'package(=provenant) & binary(=graph_provider) & test(=uncatalogued_cli_model_launches_and_surfaces_provider_failure)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# Three real command lanes in turn, each waiting for a published process sample.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=command_adapter) & test(=command_lane_reads_its_supervisors_process_tree_through_the_cli)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 # Two data-home variants each launch four real graph providers against an open
 # WAL. Allow for shared-host contention without dropping session-read cases.
 [[profile.default.overrides]]
