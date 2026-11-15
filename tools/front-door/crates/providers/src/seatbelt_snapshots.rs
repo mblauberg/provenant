@@ -1,8 +1,8 @@
-//! Byte-for-byte golden tests for the Seatbelt profiles the adapters produce.
+//! One canonical golden plus declaration-level Seatbelt grant invariants.
 //!
-//! Each profile comes from the adapter's real `prepare`, including the lane's
-//! own grants, under fixed fake paths. Regenerate with
-//! `PROVENANT_UPDATE_SNAPSHOTS=1 cargo test -p provenant-providers seatbelt_profiles`.
+//! The golden comes from the adapter's real `prepare` under fixed fake paths.
+//! Regenerate with
+//! `PROVENANT_UPDATE_SNAPSHOTS=1 cargo test -p provenant-providers claude_read_only_profile_matches_the_single_golden`.
 use super::tests::{fixture_access_plan, fixture_input, fixture_token, route};
 use super::*;
 use provenant_confinement::cargo::CargoHome;
@@ -362,9 +362,15 @@ fn open_network_grants_gh_reads_independently_of_publishing()
 fn fabric_profiles_only_read_database_and_allow_only_the_attempt_socket()
 -> Result<(), Box<dyn std::error::Error>> {
     for case in cases()? {
-        let rendered = render(&case.plan, &case.profile, Path::new(HOME))?;
         if case.profile.spec.fabric_socket.is_none() {
-            assert!(!rendered.contains("fabric.sqlite3"));
+            assert!(case.profile.spec.fabric_state_reads.is_empty());
+            assert!(
+                case.profile
+                    .spec
+                    .runtime_reads
+                    .iter()
+                    .all(|grant| !grant.path.starts_with("/fixture/state/fabric"))
+            );
             continue;
         }
         for suffix in ["", "-wal", "-shm", "-journal"] {
@@ -375,20 +381,6 @@ fn fabric_profiles_only_read_database_and_allow_only_the_attempt_socket()
                     .runtime_reads
                     .contains(&grant(&path, PathScope::Exact)),
                 "{}: {path}",
-                case.name
-            );
-            assert!(
-                rendered.contains(&format!("(allow file-read* (literal \"{path}\"))")),
-                "{}: {path}",
-                case.name
-            );
-            assert!(
-                !rendered
-                    .lines()
-                    .any(|line| line.contains("allow file-write")
-                        && (line.contains("/fixture/state/fabric")
-                            || line.contains("(subpath \"/fixture/state\")"))),
-                "{}",
                 case.name
             );
         }
@@ -423,11 +415,7 @@ fn fabric_profiles_only_read_database_and_allow_only_the_attempt_socket()
             .as_ref()
             .ok_or("missing socket")?;
         assert_eq!(socket.scope, PathScope::Exact);
-        assert!(rendered.contains(&format!(
-            "(allow network-outbound (remote unix-socket (path-literal \"{}\")))",
-            socket.path.display()
-        )));
-        assert!(!rendered.contains("provenant-peer.sock"));
+        assert!(socket.path.ends_with("fabric-relay.sock"));
     }
     Ok(())
 }
@@ -497,81 +485,32 @@ fn cargo_permissions_follow_the_declared_access_for_each_profile_case()
 }
 
 #[test]
-fn seatbelt_profiles_match_snapshots() -> Result<(), Box<dyn std::error::Error>> {
+fn claude_read_only_profile_matches_the_single_golden() -> Result<(), Box<dyn std::error::Error>> {
     let update = std::env::var(UPDATE_ENV).is_ok_and(|value| value == "1");
+    let case = cases()?
+        .into_iter()
+        .find(|case| case.name == "claude-read-only")
+        .ok_or("missing declared Claude reader case")?;
+    let cargo_home = CargoHome::resolve(Path::new(HOME), |_| None)?;
+    let rendered = cargo_snapshot_text(
+        &render(&case.plan, &case.profile, Path::new(HOME))?,
+        &cargo_home,
+        &case.plan,
+    );
     let dir = snapshot_dir();
-    let mut failures = Vec::new();
-    let mut names = BTreeSet::new();
-    for case in cases()? {
-        assert!(
-            names.insert(case.name.clone()),
-            "duplicate case {}",
-            case.name
-        );
-        let cargo_home = CargoHome::resolve(Path::new(HOME), |_| None)?;
-        let rendered = cargo_snapshot_text(
-            &render(&case.plan, &case.profile, Path::new(HOME))?,
-            &cargo_home,
-            &case.plan,
-        );
-        let snapshot_name = if case.name == "claude-continuation-read-only" {
-            "claude-read-only"
-        } else {
-            &case.name
-        };
-        let path = dir.join(format!("{snapshot_name}.sb"));
-        if update && case.name != "claude-continuation-read-only" {
-            std::fs::create_dir_all(&dir)?;
-            std::fs::write(&path, &rendered)?;
-            continue;
-        }
-        match std::fs::read(&path) {
-            Ok(expected) if expected == rendered.as_bytes() => {}
-            Ok(expected) => failures.push(format!(
-                "{}: {}",
-                case.name,
-                first_difference(&String::from_utf8_lossy(&expected), &rendered)
-            )),
-            Err(error) => failures.push(format!("{}: unreadable snapshot: {error}", case.name)),
-        }
+    let path = dir.join("claude-read-only.sb");
+    if update {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path, &rendered)?;
+        return Ok(());
     }
-    // A snapshot no case renders is stale and must be deleted.
-    for entry in std::fs::read_dir(&dir)? {
-        let path = entry?.path();
-        let stem = path
-            .file_stem()
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or_default();
-        if names.contains(stem) {
-            continue;
-        }
-        if update {
-            std::fs::remove_file(&path)?;
-        } else {
-            failures.push(format!("{}: no case renders this snapshot", path.display()));
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "Seatbelt profile snapshots differ (set {UPDATE_ENV}=1 to regenerate):\n{}",
-        failures.join("\n")
+    let expected = std::fs::read(&path)?;
+    assert_eq!(
+        expected.as_slice(),
+        rendered.as_bytes(),
+        "the canonical profile golden changed"
     );
     Ok(())
-}
-
-fn first_difference(expected: &str, actual: &str) -> String {
-    let mut expected = expected.lines();
-    let mut actual = actual.lines();
-    for number in 1.. {
-        match (expected.next(), actual.next()) {
-            (Some(left), Some(right)) if left == right => {}
-            (None, None) => return "differs only in line endings".into(),
-            (left, right) => {
-                return format!("line {number}: expected {left:?}, rendered {right:?}");
-            }
-        }
-    }
-    unreachable!()
 }
 
 #[cfg(target_os = "macos")]

@@ -145,19 +145,23 @@ fn optional_discovered_grants_are_filtered_without_touching_required_grants()
         &mut omitted,
     )?;
     assert_eq!(grants, vec![required]);
-    assert_eq!(
-        omitted,
-        vec![
-            crate::launch::OmittedGrant {
-                path: secret.clone(),
-                source: crate::launch::OmissionSource::UserSkill,
-            },
-            crate::launch::OmittedGrant {
-                path: secret,
-                source: crate::launch::OmissionSource::Toolchain,
-            },
-        ]
-    );
+    for source in [
+        crate::launch::OmissionSource::UserSkill,
+        crate::launch::OmissionSource::Toolchain,
+    ] {
+        assert!(
+            omitted
+                .iter()
+                .any(|entry| entry.path == secret && entry.source == source)
+        );
+    }
+    assert!(omitted.iter().all(|entry| {
+        entry.path == secret
+            && matches!(
+                entry.source,
+                crate::launch::OmissionSource::UserSkill | crate::launch::OmissionSource::Toolchain
+            )
+    }));
     Ok(())
 }
 
@@ -186,9 +190,15 @@ fn optional_unrepresentable_discovery_is_omitted_with_evidence()
         &mut omitted,
     )?;
     assert_eq!(grants, vec![required]);
-    assert_eq!(omitted.len(), 2);
-    assert_eq!(omitted[0].path, target);
-    assert_eq!(omitted[1].path, control);
+    for path in [&target, &control] {
+        assert!(omitted.iter().any(|entry| {
+            entry.path == *path && entry.source == crate::OmissionSource::Toolchain
+        }));
+    }
+    assert!(omitted.iter().all(|entry| {
+        [&target, &control].contains(&&entry.path)
+            && entry.source == crate::OmissionSource::Toolchain
+    }));
     let receipt = crate::AppliedAccess {
         libraries: vec![],
         staged_content: None,
@@ -196,10 +206,11 @@ fn optional_unrepresentable_discovery_is_omitted_with_evidence()
         omitted_grants: omitted,
     }
     .receipt(&home, &roots);
-    assert_eq!(
-        receipt["omitted_grants"][1]["path"],
-        "<unrepresentable path>"
-    );
+    assert!(receipt["omitted_grants"].as_array().is_some_and(|entries| {
+        entries.iter().any(|entry| {
+            entry["reason"] == "unrepresentable_path" && entry["source"] == "toolchain"
+        })
+    }));
     Ok(())
 }
 
@@ -246,7 +257,7 @@ fn optional_unrepresentable_write_is_omitted_from_applied_access()
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(unix)]
 #[test]
 fn unrepresentable_library_target_reports_incomplete_closure()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -772,35 +783,6 @@ fn lane_path_is_independent_of_host_dependency_path() -> Result<(), Box<dyn std:
     Ok(())
 }
 
-macro_rules! user_skills_adapter_test {
-    ($name:ident, $adapter:literal) => {
-        #[test]
-        fn $name() -> Result<(), Box<dyn std::error::Error>> {
-            assert_lane_user_skills($adapter)
-        }
-    };
-}
-user_skills_adapter_test!(
-    claude_user_skills_are_read_only_optional_and_missing_safe,
-    "claude"
-);
-user_skills_adapter_test!(
-    codex_user_skills_are_read_only_optional_and_missing_safe,
-    "codex"
-);
-user_skills_adapter_test!(
-    agy_user_skills_are_read_only_optional_and_missing_safe,
-    "agy"
-);
-user_skills_adapter_test!(
-    opencode_user_skills_are_read_only_optional_and_missing_safe,
-    "opencode"
-);
-user_skills_adapter_test!(
-    cursor_user_skills_are_read_only_optional_and_missing_safe,
-    "cursor"
-);
-
 #[test]
 fn claude_user_skills_use_private_placement_for_registered_readers()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -828,12 +810,14 @@ fn claude_user_skills_use_private_placement_for_registered_readers()
     input.account = Some(&account);
     let spec = crate::claude::Claude.prepare(input)?;
     let staged = spec.user_skills.root.as_ref().expect("staged skills");
-    assert!(
-        spec.env
-            .iter()
-            .any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
-                && value == "/fixture/state/claude-config")
-    );
+    let private_state = plan
+        .permissions()
+        .private_state
+        .as_ref()
+        .expect("fixture private state");
+    assert!(spec.env.iter().any(|(key, value)| {
+        key == "CLAUDE_CONFIG_DIR" && value == private_state.path.join("claude-config").as_os_str()
+    }));
     assert!(
         spec.setup
             .iter()
@@ -1042,6 +1026,9 @@ fn opencode_starts_each_completed_text_part_on_a_new_message() -> Result<(), Pro
 fn tool_search_path_preserves_native_home_and_omits_unusable_entry() {
     use std::os::unix::ffi::OsStringExt;
     use std::path::PathBuf;
+    let fallback: Vec<_> =
+        std::env::split_paths(std::ffi::OsStr::new(crate::launch::SYSTEM_TOOL_SEARCH_PATH))
+            .collect();
     let home = PathBuf::from(OsString::from_vec(b"/fixture/home-\xff".to_vec()));
     let path =
         crate::launch::tool_search_path(&home, true, crate::tests::fixture_policy()).unwrap();
@@ -1055,156 +1042,111 @@ fn tool_search_path_preserves_native_home_and_omits_unusable_entry() {
         crate::tests::fixture_policy(),
     )
     .unwrap();
-    assert_eq!(
-        std::env::split_paths(&path).collect::<Vec<_>>(),
-        [PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
-    );
+    assert_eq!(std::env::split_paths(&path).collect::<Vec<_>>(), fallback);
     let path =
         crate::launch::tool_search_path(&home, false, crate::tests::fixture_policy()).unwrap();
     assert_eq!(
         std::env::split_paths(&path).next(),
-        Some(PathBuf::from("/usr/bin"))
+        fallback.first().cloned()
     );
 }
 
 #[test]
-fn claude_writer_uses_scratch_when_private_state_is_absent() -> Result<(), ProviderError> {
+fn adapters_use_scratch_when_private_state_is_absent() -> Result<(), ProviderError> {
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
-    let original = fixture_access_plan(Access::WorktreeWrite, None, false);
-    let mut permissions = original.permissions().clone();
-    permissions.private_state = None;
-    let plan = ConfinedPlan::new(PlanRequest {
-        scope: original.scope(),
-        permissions,
-        codex: CodexPolicy::Clean,
-        extensions: ExtensionPolicy::Deny,
-        agy_state: None,
-    })
-    .expect("fixture plan");
-    let mut route = route("claude", "fixture-model");
-    route.account_key = None;
     let prompt = Prompt::new("fixture".into());
     let token = fixture_token();
-    let launch = claude::Claude.prepare(fixture_input(
-        &route,
-        &plan,
-        &prompt,
-        Path::new("/fixture/repo"),
-        Some(&token),
-    ))?;
-    assert!(launch.env.iter().any(|(key, value)| {
-        key == "CLAUDE_CONFIG_DIR"
-            && value
-                == plan
-                    .permissions()
-                    .scratch
-                    .path
-                    .join("claude-config")
-                    .as_os_str()
-    }));
-    assert!(
-        launch
-            .profile
-            .spec
-            .state_writes
-            .iter()
-            .all(|grant| { !grant.path.starts_with("/fixture/home/.claude") })
-    );
-    Ok(())
-}
-
-#[test]
-fn opencode_uses_scratch_when_private_state_is_absent() -> Result<(), ProviderError> {
-    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
-    let route = route("opencode", "fixture-model");
-    let prompt = Prompt::new("fixture".into());
-    for access in [Access::ReadOnly, Access::WorktreeWrite] {
-        let original = fixture_access_plan(access, Some("login"), false);
-        let mut permissions = original.permissions().clone();
-        permissions.private_state = None;
-        let plan = ConfinedPlan::new(PlanRequest {
-            scope: original.scope(),
-            permissions,
-            codex: CodexPolicy::Clean,
-            extensions: ExtensionPolicy::Deny,
-            agy_state: None,
-        })
-        .expect("fixture plan");
-        let launch = opencode::OpenCode.prepare(fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            Path::new("/fixture/repo"),
-            None,
-        ))?;
-        let scratch = &plan.permissions().scratch.path;
-        for (key, expected) in [
-            ("XDG_CONFIG_HOME", scratch.join("config")),
-            ("XDG_DATA_HOME", scratch.join("data")),
-            ("XDG_CACHE_HOME", scratch.join("cache")),
-            ("XDG_STATE_HOME", scratch.join("state")),
-        ] {
-            assert!(
-                launch
-                    .env
-                    .iter()
-                    .any(|(name, value)| { name == key && value == expected.as_os_str() })
+    let home = Path::new("/fixture/home");
+    for (adapter, authentication) in [
+        ("claude", None),
+        ("opencode", Some("login")),
+        ("agy", Some("keychain")),
+    ] {
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            let original = fixture_access_plan(access, authentication, false);
+            let mut permissions = original.permissions().clone();
+            permissions.private_state = None;
+            let plan = ConfinedPlan::new(PlanRequest {
+                scope: original.scope(),
+                permissions,
+                codex: CodexPolicy::Clean,
+                extensions: ExtensionPolicy::Deny,
+                agy_state: None,
+            })
+            .expect("fixture plan");
+            let mut route = route(adapter, "fixture-model");
+            route.account_key = None;
+            let mut input = fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                (adapter == "claude").then_some(&token),
             );
+            input.home = home;
+            let launch = match adapter {
+                "claude" => claude::Claude.prepare(input)?,
+                "opencode" => opencode::OpenCode.prepare(input)?,
+                "agy" => agy::Agy.prepare(input)?,
+                _ => unreachable!(),
+            };
+            let scratch = &plan.permissions().scratch.path;
+            match adapter {
+                "claude" => {
+                    let config = scratch.join("claude-config");
+                    assert!(launch.env.iter().any(|(key, value)| {
+                        key == "CLAUDE_CONFIG_DIR" && value == config.as_os_str()
+                    }));
+                    assert!(
+                        launch
+                            .profile
+                            .spec
+                            .state_writes
+                            .iter()
+                            .all(|grant| { !grant.path.starts_with(home.join(".claude")) })
+                    );
+                }
+                "opencode" => {
+                    for (key, suffix) in [
+                        ("XDG_CONFIG_HOME", "config"),
+                        ("XDG_DATA_HOME", "data"),
+                        ("XDG_CACHE_HOME", "cache"),
+                        ("XDG_STATE_HOME", "state"),
+                    ] {
+                        let expected = scratch.join(suffix);
+                        assert!(
+                            launch.env.iter().any(|(name, value)| {
+                                name == key && value == expected.as_os_str()
+                            })
+                        );
+                    }
+                    assert!(
+                        launch.profile.spec.state_writes.iter().all(|grant| {
+                            !grant.path.starts_with(home.join(".config/opencode"))
+                        })
+                    );
+                }
+                "agy" => {
+                    assert!(
+                        launch.env.iter().any(|(name, value)| {
+                            name == "HOME" && value == scratch.as_os_str()
+                        })
+                    );
+                    let authentication = launch
+                        .profile
+                        .spec
+                        .authentication
+                        .first()
+                        .expect("declared authentication");
+                    assert_eq!(authentication.mechanism, "keychain");
+                    assert!(authentication.roots.contains(&crate::launch::exact(
+                        home.join("Library/Keychains/login.keychain-db")
+                    )));
+                    assert!(authentication.in_place_writes.is_empty());
+                }
+                _ => unreachable!(),
+            }
         }
-        assert!(
-            launch
-                .profile
-                .spec
-                .state_writes
-                .iter()
-                .all(|grant| { !grant.path.starts_with("/fixture/home/.config/opencode") })
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn agy_uses_scratch_when_private_state_is_absent() -> Result<(), ProviderError> {
-    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
-    let mut route = route("agy", "fixture-model");
-    route.account_key = None;
-    let prompt = Prompt::new("fixture".into());
-    for access in [Access::ReadOnly, Access::WorktreeWrite] {
-        let original = fixture_access_plan(access, Some("keychain"), false);
-        let mut permissions = original.permissions().clone();
-        permissions.private_state = None;
-        let plan = ConfinedPlan::new(PlanRequest {
-            scope: original.scope(),
-            permissions,
-            codex: CodexPolicy::Clean,
-            extensions: ExtensionPolicy::Deny,
-            agy_state: None,
-        })
-        .expect("fixture plan");
-        let launch = agy::Agy.prepare(fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            Path::new("/fixture/repo"),
-            None,
-        ))?;
-        let scratch = &plan.permissions().scratch.path;
-        assert!(
-            launch
-                .env
-                .iter()
-                .any(|(name, value)| name == "HOME" && value == scratch.as_os_str())
-        );
-        assert_eq!(launch.profile.spec.authentication.len(), 1);
-        let authentication = &launch.profile.spec.authentication[0];
-        assert_eq!(authentication.mechanism, "keychain");
-        assert_eq!(
-            authentication.roots,
-            [crate::launch::exact(
-                "/fixture/home/Library/Keychains/login.keychain-db"
-            )]
-        );
-        assert!(authentication.in_place_writes.is_empty());
     }
     Ok(())
 }

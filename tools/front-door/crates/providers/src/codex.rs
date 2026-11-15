@@ -127,12 +127,14 @@ fn prepare(
         })?;
         argv.extend(["resume".into(), continuation.session().into()]);
     }
+    argv.extend(["--json", "--skip-git-repo-check", "--ignore-rules"].map(OsString::from));
+    argv.extend(
+        crate::launch::CODEX_NATIVE_ARGUMENTS
+            .iter()
+            .map(OsString::from),
+    );
     argv.extend(
         [
-            "--json",
-            "--skip-git-repo-check",
-            "--ignore-rules",
-            "--dangerously-bypass-approvals-and-sandbox",
             "-c",
             "service_tier=\"default\"",
             "-m",
@@ -557,55 +559,65 @@ mod usage_limit_tests {
     }
 
     #[test]
-    fn a_plan_usage_limit_holds_the_account_until_its_named_reset() {
+    fn usage_limits_hold_the_declared_scope_until_the_named_reset() {
         let now = at("2026-11-10T12:00:00+00:00[UTC]");
-        let plan = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Nov 14th, 2026 3:05 PM.";
-        let Some(E::QuotaLimited {
-            pool,
-            resets_in_seconds,
-            ..
-        }) = usage_limit(plan, Some(&now))
-        else {
-            panic!("a usage limit is typed");
-        };
-        assert_eq!(pool.as_deref(), Some(provenant_quota::ACCOUNT_ROUTE));
-        assert_eq!(resets_in_seconds, Some(4 * 86_400 + 3 * 3_600 + 300));
-        for (text, reset) in [
-            (
-                "You've hit your usage limit. Try again at 3:05 PM.",
-                Some(11_100),
-            ),
-            ("You've hit your usage limit. Try again at 12:30 AM.", None),
-            (
-                "You've hit your usage limit. Try again in 2 days 3 hours.",
-                Some(183_600),
-            ),
-            ("You've hit your usage limit. Try again later.", None),
-            ("You've hit your usage limit. Try again at teatime.", None),
-        ] {
-            assert!(
-                matches!(
-                    usage_limit(text, Some(&now)),
-                    Some(E::QuotaLimited { resets_in_seconds, .. }) if resets_in_seconds == reset
-                ),
-                "{text}"
-            );
+        enum Expected {
+            Limited(Option<&'static str>, Option<i64>),
+            NoLimit,
         }
-    }
-
-    #[test]
-    fn a_model_usage_limit_holds_only_that_model() {
-        let now = at("2026-11-10T12:00:00+00:00[UTC]");
-        let text = "You've hit your usage limit for GPT-5.3-Codex-Spark. Switch to another model now, or try again at 3:05 PM.";
-        assert!(matches!(
-            usage_limit(text, Some(&now)),
-            Some(E::QuotaLimited {
-                pool: None,
-                resets_in_seconds: Some(11_100),
-                ..
-            })
-        ));
-        assert!(usage_limit("stream disconnected before completion", Some(&now)).is_none());
+        let cases = [
+            (
+                "account plan",
+                "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Nov 14th, 2026 3:05 PM.",
+                Expected::Limited(
+                    Some(provenant_quota::ACCOUNT_ROUTE),
+                    Some(4 * 86_400 + 3 * 3_600 + 300),
+                ),
+            ),
+            (
+                "account reset without date",
+                "You've hit your usage limit. Try again at 3:05 PM.",
+                Expected::Limited(Some(provenant_quota::ACCOUNT_ROUTE), Some(11_100)),
+            ),
+            (
+                "account midnight without date",
+                "You've hit your usage limit. Try again at 12:30 AM.",
+                Expected::Limited(Some(provenant_quota::ACCOUNT_ROUTE), None),
+            ),
+            (
+                "account relative reset",
+                "You've hit your usage limit. Try again in 2 days 3 hours.",
+                Expected::Limited(Some(provenant_quota::ACCOUNT_ROUTE), Some(183_600)),
+            ),
+            (
+                "model limit",
+                "You've hit your usage limit for GPT-5.3-Codex-Spark. Switch to another model now, or try again at 3:05 PM.",
+                Expected::Limited(None, Some(11_100)),
+            ),
+            (
+                "unrelated interruption",
+                "stream disconnected before completion",
+                Expected::NoLimit,
+            ),
+        ];
+        for (scope, text, expected) in cases {
+            let actual = usage_limit(text, Some(&now));
+            match expected {
+                Expected::Limited(expected_pool, expected_reset) => {
+                    let Some(E::QuotaLimited {
+                        pool,
+                        resets_in_seconds,
+                        ..
+                    }) = actual
+                    else {
+                        panic!("{scope} is a typed usage limit");
+                    };
+                    assert_eq!(pool.as_deref(), expected_pool, "{scope}");
+                    assert_eq!(resets_in_seconds, expected_reset, "{scope}");
+                }
+                Expected::NoLimit => assert!(actual.is_none(), "{scope}"),
+            }
+        }
     }
 }
 

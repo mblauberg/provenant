@@ -382,18 +382,47 @@ mod tests {
     }
 
     #[test]
-    fn skill_locations_declare_installed_release_provenance() {
-        for spec in provenant_records::ADAPTER_SPECS
+    fn declared_skill_install_roots_can_supply_linked_skills()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        let source = home.join("skills");
+        let destination = home.join("attempt/skills");
+        std::fs::create_dir_all(&source)?;
+        let install_roots: Vec<_> = provenant_records::ADAPTER_SPECS
             .iter()
             .filter(|spec| spec.skills.is_some())
-        {
-            let releases = Path::new(provenant_core::DEFAULT_STATE_SUFFIX).join("releases");
-            assert!(
+            .flat_map(|spec| {
                 spec.skill_install_roots
                     .iter()
-                    .any(|root| Path::new(root) == releases)
+                    .map(|root| (spec.name, PathBuf::from(*root)))
+            })
+            .collect();
+        assert!(!install_roots.is_empty());
+        let mut expected = Vec::new();
+        for (index, (adapter, root)) in install_roots.iter().enumerate() {
+            let linked_name = format!("installed-{index}");
+            let installed = home.join(root).join(format!("example-{index}"));
+            std::fs::create_dir_all(&installed)?;
+            let bytes = format!("installed skill from {adapter}").into_bytes();
+            std::fs::write(installed.join("SKILL.md"), &bytes)?;
+            symlink(&installed, source.join(&linked_name))?;
+            expected.push((*adapter, PathBuf::from(linked_name).join("SKILL.md"), bytes));
+        }
+
+        let roots = provenant_core::CredentialRoots::for_home(&home);
+        let staged = capture(&source, &destination, &home, &roots, 16 * 1024);
+        for (adapter, relative, bytes) in expected {
+            assert!(
+                staged.setup.iter().any(|step| matches!(
+                    step,
+                    SetupStep::WriteFile { path, bytes: staged_bytes }
+                        if path == &destination.join(&relative) && staged_bytes == &bytes
+                )),
+                "skill install root for {adapter} did not stage"
             );
         }
+        Ok(())
     }
 
     #[test]

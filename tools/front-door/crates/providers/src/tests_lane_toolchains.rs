@@ -402,15 +402,11 @@ fn node_tool_stores_are_read_only() -> Result<(), ProviderError> {
             .is_some_and(|spec| spec.launch.model)
     }) {
         let id = entry.adapter.id();
-        // Claude shares the same launch helpers; its account setup needs
-        // identities, so its writer lane is covered by its own test.
-        if id != "codex" {
-            continue;
-        }
+        let declared = provenant_records::AdapterSpec::get(id).expect("registered adapter spec");
         let mut route = route(id, "fixture-model");
         route.account_key = None;
         for access in [Access::ReadOnly, Access::WorktreeWrite] {
-            let plan = fixture_access_plan(access, (id == "codex").then_some("login"), false);
+            let plan = fixture_access_plan(access, declared.authentication, false);
             let launch = entry.adapter.prepare(fixture_input(
                 &route,
                 &plan,
@@ -477,11 +473,15 @@ fn node_tool_stores_are_read_only() -> Result<(), ProviderError> {
 /// binary over it. Lanes cannot create hard links, so the placeholder stays and
 /// running it fails with ENOEXEC. Lanes run the host's pnpm as it is.
 #[test]
-fn lanes_run_the_installed_pnpm_instead_of_downloading_a_pinned_one() -> Result<(), ProviderError> {
+fn lanes_run_the_installed_pnpm_instead_of_downloading_a_pinned_one()
+-> Result<(), Box<dyn std::error::Error>> {
     if !["/opt/homebrew", "/usr/local"]
         .iter()
         .any(|prefix| Path::new(prefix).join("bin/node").exists())
     {
+        provenant_test_support::skip_sandbox_dependent_test(
+            "host Node is unavailable for the Homebrew pnpm integration probe",
+        )?;
         return Ok(());
     }
     let mut route = route("codex", "fixture-model");
@@ -524,11 +524,15 @@ fn lanes_run_the_installed_pnpm_instead_of_downloading_a_pinned_one() -> Result<
 /// host's store setting and skip the pre-run dependency check, so `pnpm run`
 /// uses the native install as it is.
 #[test]
-fn lanes_run_a_natively_installed_worktree_without_reinstalling() -> Result<(), ProviderError> {
+fn lanes_run_a_natively_installed_worktree_without_reinstalling()
+-> Result<(), Box<dyn std::error::Error>> {
     if !["/opt/homebrew", "/usr/local"]
         .iter()
         .any(|prefix| Path::new(prefix).join("bin/node").exists())
     {
+        provenant_test_support::skip_sandbox_dependent_test(
+            "host Node is unavailable for the native pnpm install probe",
+        )?;
         return Ok(());
     }
     let mut route = route("codex", "fixture-model");
@@ -566,6 +570,9 @@ fn lanes_read_the_host_pnpm_store_but_cannot_write_it() -> Result<(), Box<dyn st
         .iter()
         .any(|prefix| Path::new(prefix).join("bin/node").exists())
     {
+        provenant_test_support::skip_sandbox_dependent_test(
+            "host Node is unavailable for the pnpm store access probe",
+        )?;
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
@@ -598,62 +605,13 @@ fn lanes_read_the_host_pnpm_store_but_cannot_write_it() -> Result<(), Box<dyn st
 
 #[test]
 fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderError> {
-    let cases: &[(&str, &[&str])] = &[
-        (
-            "claude",
-            &[
-                ".claude/settings.json",
-                ".claude/hooks/run",
-                ".claude/CLAUDE.md",
-                ".claude/skills/test/SKILL.md",
-                ".claude/ide/state",
-                ".claude/jobs/job",
-                ".claude/state/file",
-                ".claude/teams/team",
-            ],
-        ),
-        (
-            "codex",
-            &[
-                ".codex/config.toml",
-                ".codex/rules/default.rules",
-                ".codex/skills/test/SKILL.md",
-                ".codex/hooks/run",
-                ".codex/extensions/test",
-            ],
-        ),
-        (
-            "opencode",
-            &[
-                ".config/opencode/opencode.json",
-                ".config/opencode/plugins/run.js",
-                ".config/opencode/skills/test/SKILL.md",
-            ],
-        ),
-        (
-            "agy",
-            &[
-                ".gemini/settings.json",
-                ".gemini/config/mcp_config.json",
-                ".gemini/config/plugins/run",
-                ".gemini/antigravity-cli/sidecars/run",
-                ".gemini/antigravity-cli/plugin_data/file",
-                ".gemini/antigravity-cli/knowledge/file",
-            ],
-        ),
-        (
-            "cursor",
-            &[
-                ".cursor/hooks.json",
-                ".cursor/extensions/run",
-                ".cursor/skills/test/SKILL.md",
-                ".cursor/plans/plan",
-                ".cursor/ai-tracking/file",
-            ],
-        ),
-    ];
     let prompt = Prompt::new("fixture prompt".into());
-    for &(id, forbidden) in cases {
+    let host_home = std::path::Path::new("/fixture/home");
+    for declared in provenant_records::ADAPTER_SPECS
+        .iter()
+        .filter(|spec| spec.install.is_some() && spec.launch.model)
+    {
+        let id = declared.name;
         let adapter = REGISTRY
             .iter()
             .find(|entry| entry.adapter.id() == id)
@@ -684,15 +642,30 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
             (id == "claude").then(|| fixture_token().for_account("opaque-account", account_dir));
         // Synthetic continuation covers every adapter and mode.
         let continuation = Continuation::from_outcome(id, &outcome, &route, "fixture", false)?;
+        let install = declared.install.expect("filtered install declaration");
+        let mut host_config_roots = vec![host_home.join(install.home)];
+        if let Some(config) = install.default_home_config {
+            host_config_roots.push(host_home.join(config));
+        }
+        if let Some(skills) = declared.skills {
+            host_config_roots.push(host_home.join(skills.fallback).join(skills.suffix));
+        }
+        host_config_roots.extend(
+            declared
+                .skill_install_roots
+                .iter()
+                .map(|root| host_home.join(root)),
+        );
+        host_config_roots.extend(
+            [".npm", ".cache/node", "Library/pnpm", ".local/share/pnpm"]
+                .into_iter()
+                .map(|path| host_home.join(path)),
+        );
         for access in [Access::ReadOnly, Access::WorktreeWrite] {
             for session in [Session::Fresh, Session::Resume] {
                 let plan = fixture_access_plan(
                     access,
-                    match id {
-                        "codex" | "cursor" | "opencode" => Some("login"),
-                        "agy" => Some("keychain"),
-                        _ => None,
-                    },
+                    declared.authentication,
                     session == Session::Resume,
                 );
                 let mut input = fixture_input(
@@ -705,17 +678,13 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
                 input.account = account.as_ref();
                 input.continuation = (session == Session::Resume).then_some(&continuation);
                 let launch = adapter.prepare(input)?;
-                for relative in forbidden
-                    .iter()
-                    .copied()
-                    .chain([".npm/_cacache/content", ".npm/_logs/log"])
-                {
-                    let path = std::path::Path::new("/fixture/home").join(relative);
+                for path in &host_config_roots {
                     let writable = launch
                         .profile
                         .spec
-                        .state_writes
+                        .tool_writes
                         .iter()
+                        .chain(&launch.profile.spec.state_writes)
                         .chain(
                             launch
                                 .profile
@@ -726,7 +695,7 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
                         )
                         .chain(std::iter::once(&plan.permissions().scratch))
                         .chain(&plan.permissions().private_state)
-                        .any(|grant| covers(grant, &path));
+                        .any(|grant| overlaps_skill(grant, path));
                     assert!(!writable, "{id} {access:?} {session:?}: {}", path.display());
                 }
             }
@@ -1335,8 +1304,7 @@ fn native_and_confined_writers_receive_the_same_seed_environment() -> Result<(),
     let mut route = route("codex", "fixture-model");
     route.account_key = None;
     let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
-    let native =
-        |key: &str| (key == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
+    let native = |key: &str| (key == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
     for sandboxed in [true, false] {
         let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
         if !sandboxed {
@@ -1370,8 +1338,7 @@ fn fresh_codex_home_setup_never_includes_provider_history() -> Result<(), Provid
     let mut route = route("codex", "fixture-model");
     route.account_key = None;
     let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
-    let native =
-        |key: &str| (key == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
+    let native = |key: &str| (key == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
     for sandboxed in [true, false] {
         let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
         if !sandboxed {
@@ -1414,8 +1381,7 @@ fn native_adapter_finalisation_supplies_cargo_environment_without_tool_discovery
     route.account_key = None;
     let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
     let token = fixture_token();
-    let native =
-        |key: &str| (key == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
+    let native = |key: &str| (key == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
     let mut input = fixture_input(
         &route,
         &plan,

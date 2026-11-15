@@ -107,6 +107,7 @@ const MODEL_ON_WIRE: bool = true;
 /// The default config directory's keychain service. A non-default
 /// `CLAUDE_CONFIG_DIR` appends [`keychain_suffix`].
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+pub(crate) const OAUTH_REFRESH_LOCK: &str = "provenant-oauth-refresh.lock";
 /// Refresh when the access token expires within this window.
 const REFRESH_WINDOW_MS: u64 = 15 * 60 * 1000;
 /// After a refresh, the CLI may keep a token that is inside the window; accept
@@ -399,6 +400,58 @@ pub(super) fn refresh_with_policy(
     minimum_budget_ms: u64,
     force: bool,
 ) -> Result<OauthToken, ProviderError> {
+    let clock = SystemClock::new();
+    refresh_with_clock_and_lock_observer(
+        executor,
+        login,
+        now_ms,
+        deadline_ms,
+        authority,
+        minimum_budget_ms,
+        force,
+        &clock,
+        &|_| {},
+    )
+}
+
+/// Exercise the public refresh path with a controlled clock and lock-boundary
+/// observer. The observer runs immediately before the real lock acquisition.
+#[cfg(test)]
+pub(crate) fn refresh_with_policy_using_clock(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+    authority: Option<&CredentialAuthority>,
+    minimum_budget_ms: u64,
+    force: bool,
+    clock: &dyn Clock,
+    before_lock: &dyn Fn(&Directory),
+) -> Result<OauthToken, ProviderError> {
+    refresh_with_clock_and_lock_observer(
+        executor,
+        login,
+        now_ms,
+        deadline_ms,
+        authority,
+        minimum_budget_ms,
+        force,
+        clock,
+        before_lock,
+    )
+}
+
+fn refresh_with_clock_and_lock_observer(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+    authority: Option<&CredentialAuthority>,
+    minimum_budget_ms: u64,
+    force: bool,
+    clock: &dyn Clock,
+    before_lock: &dyn Fn(&Directory),
+) -> Result<OauthToken, ProviderError> {
     let source = credential_source(login)?;
     let io_deadline = std::cell::Cell::new(deadline_ms);
     if let Some(authority) = authority {
@@ -505,7 +558,6 @@ pub(super) fn refresh_with_policy(
     }
     // Stable inode, never removed: reread storage under this cross-process
     // lock in case another caller already refreshed the token.
-    let clock = SystemClock::new();
     // A future deadline preserves sub-second waits despite WaitBudget's
     // one-second minimum for its duration constructor.
     let wait_micros = budget(Duration::from_secs(60))?.as_micros() as u64;
@@ -516,9 +568,10 @@ pub(super) fn refresh_with_policy(
     let wait = WaitBudget::nonblocking(deadline);
     let directory = Directory::open_anchor(login.config_dir)
         .map_err(|_| ProviderError::CredentialUnavailable)?;
+    before_lock(&directory);
     let refresh_lock = directory
         .lock(
-            OsStr::new("provenant-oauth-refresh.lock"),
+            OsStr::new(OAUTH_REFRESH_LOCK),
             LockMode::Exclusive,
             wait,
             &CancelToken::new(),
@@ -625,6 +678,37 @@ pub fn refresh_for_account_authorised(
         Some(authority),
     )
 }
+
+/// Test seam for the same account/status path with deterministic lock time and
+/// a state observer at the real refresh-lock boundary.
+#[cfg(test)]
+pub(crate) fn refresh_for_account_authorised_using_clock(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    account: &crate::identity::RegisteredAccount,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+    authority: &CredentialAuthority,
+    clock: &dyn Clock,
+    before_lock: &dyn Fn(&Directory),
+) -> Result<OauthToken, ProviderError> {
+    authority
+        .check(&credential_source(login)?, now_ms())
+        .map_err(|error| match error {
+            ProviderError::CredentialUnavailable => ProviderError::RefreshDeferred,
+            other => other,
+        })?;
+    refresh_account_with_clock_and_lock_observer(
+        executor,
+        login,
+        account,
+        now_ms,
+        deadline_ms,
+        Some(authority),
+        clock,
+        before_lock,
+    )
+}
 fn refresh_account(
     executor: &dyn Executor,
     login: &Login<'_>,
@@ -632,6 +716,29 @@ fn refresh_account(
     now_ms: &dyn Fn() -> u64,
     deadline_ms: u64,
     authority: Option<&CredentialAuthority>,
+) -> Result<OauthToken, ProviderError> {
+    let clock = SystemClock::new();
+    refresh_account_with_clock_and_lock_observer(
+        executor,
+        login,
+        account,
+        now_ms,
+        deadline_ms,
+        authority,
+        &clock,
+        &|_| {},
+    )
+}
+
+fn refresh_account_with_clock_and_lock_observer(
+    executor: &dyn Executor,
+    login: &Login<'_>,
+    account: &crate::identity::RegisteredAccount,
+    now_ms: &dyn Fn() -> u64,
+    deadline_ms: u64,
+    authority: Option<&CredentialAuthority>,
+    clock: &dyn Clock,
+    before_lock: &dyn Fn(&Directory),
 ) -> Result<OauthToken, ProviderError> {
     if account.adapter() != "claude" || login.config_dir != account.directory() {
         return Err(ProviderError::IdentityMismatch);
@@ -697,7 +804,17 @@ fn refresh_account(
     check()?;
     let token = match lane_token(login)? {
         Some(token) => Ok(token),
-        None => refresh_if_expiring(executor, login, now_ms, deadline_ms, authority),
+        None => refresh_with_clock_and_lock_observer(
+            executor,
+            login,
+            now_ms,
+            deadline_ms,
+            authority,
+            MIN_LIFETIME_MS,
+            false,
+            clock,
+            before_lock,
+        ),
     };
     check()?;
     let mut token = token.map_err(|error| match error {
@@ -787,16 +904,11 @@ fn prepare(
     });
     argv.push(session_id.clone().into());
     argv.extend(
-        [
-            "--permission-mode",
-            "bypassPermissions",
-            "--tools",
-            "default",
-            "--model",
-            input.route.model.as_str(),
-        ]
-        .map(OsString::from),
+        crate::launch::CLAUDE_NATIVE_ARGUMENTS
+            .iter()
+            .map(OsString::from),
     );
+    argv.extend(["--model".into(), input.route.model.as_str().into()]);
     if let Some(effort) = &input.route.effort {
         argv.extend(["--effort".into(), effort.into()]);
     }
@@ -1367,27 +1479,20 @@ mod overload_tests {
     }
 
     #[test]
-    fn permission_denial_with_answer_is_a_note() {
-        let events = decode(br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"result":"done","permission_denials":[{"tool_name":"Read"}]}"#).unwrap();
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, E::DeniedNote { action } if action == "Read"))
-        );
-        assert!(events.iter().any(|event| matches!(event, E::Terminal)));
-        assert!(!events.iter().any(|event| matches!(event, E::Denied { .. })));
-    }
-
-    #[test]
-    fn permission_denial_without_answer_is_a_note() {
-        let events = decode(br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"result":"","permission_denials":[{"tool_name":"Read"}]}"#).unwrap();
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, E::DeniedNote { action } if action == "Read"))
-        );
-        assert!(events.iter().any(|event| matches!(event, E::Terminal)));
-        assert!(!events.iter().any(|event| matches!(event, E::Denied { .. })));
+    fn permission_denials_are_notes_with_or_without_an_answer() {
+        for result in ["done", ""] {
+            let input = format!(
+                "{{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"{result}\",\"permission_denials\":[{{\"tool_name\":\"Read\"}}]}}"
+            );
+            let events = decode(input.as_bytes()).unwrap();
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, E::DeniedNote { action } if action == "Read"))
+            );
+            assert!(events.iter().any(|event| matches!(event, E::Terminal)));
+            assert!(!events.iter().any(|event| matches!(event, E::Denied { .. })));
+        }
     }
 
     #[test]
@@ -1618,20 +1723,63 @@ mod overload_tests {
     }
 
     #[test]
-    fn result_529_is_typed_overload_with_provider_reason() {
-        let events = decode(br#"{"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"api_error_status":529,"result":"Overloaded"}"#).unwrap();
-        assert!(events.contains(&E::ModelOverloaded {
-            message: "Overloaded".into()
-        }));
-        let events = decode(br#"{"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"api_error_status":500,"result":"Overloaded"}"#).unwrap();
-        assert!(events.contains(&E::Error));
-        let events = decode(br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"api_error_status":529,"result":"ok"}"#).unwrap();
-        assert!(events.contains(&E::Terminal));
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, E::ModelOverloaded { .. }))
-        );
+    fn overload_causes_are_typed_across_result_and_assistant_events() {
+        enum Expected {
+            Overloaded(&'static str, bool),
+            Error,
+            Terminal,
+        }
+        let mut cases = vec![
+            (
+                br#"{"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"api_error_status":529,"result":"Overloaded"}"#.to_vec(),
+                Expected::Overloaded("Overloaded", false),
+            ),
+            (
+                br#"{"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"api_error_status":500,"result":"Overloaded"}"#.to_vec(),
+                Expected::Error,
+            ),
+            (
+                br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"api_error_status":529,"result":"ok"}"#.to_vec(),
+                Expected::Terminal,
+            ),
+            (
+                br#"{"type":"assistant","session_id":"s","is_api_error_message":true,"api_error_status":529,"message":{"role":"assistant","model":"<synthetic>","content":[]}}"#.to_vec(),
+                Expected::Overloaded("provider overloaded", true),
+            ),
+        ];
+        for error in ["overloaded", "overloaded_error"] {
+            cases.push((
+                format!(
+                    r#"{{"type":"assistant","session_id":"s","error":"{error}","is_api_error_message":true,"message":{{"role":"assistant","model":"<synthetic>","content":[{{"type":"text","text":"service unavailable"}}]}}}}"#
+                )
+                .into_bytes(),
+                Expected::Overloaded("service unavailable", true),
+            ));
+        }
+
+        for (wire, expected) in cases {
+            let events = decode(&wire).expect("provider event decodes");
+            match expected {
+                Expected::Overloaded(message, has_session) => {
+                    assert!(events.iter().any(|event| matches!(
+                        event,
+                        E::ModelOverloaded { message: actual } if actual == message
+                    )));
+                    if has_session {
+                        assert!(events.contains(&E::Session("s".into())));
+                    }
+                }
+                Expected::Error => assert!(events.contains(&E::Error)),
+                Expected::Terminal => {
+                    assert!(events.contains(&E::Terminal));
+                    assert!(
+                        !events
+                            .iter()
+                            .any(|event| matches!(event, E::ModelOverloaded { .. }))
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1712,27 +1860,6 @@ mod overload_tests {
             !events
                 .iter()
                 .any(|event| matches!(event, E::QuotaLimited { .. }))
-        );
-    }
-
-    #[test]
-    fn assistant_typed_overload_keeps_reason_and_session() {
-        for error in ["overloaded", "overloaded_error"] {
-            let raw = format!(
-                r#"{{"type":"assistant","session_id":"s","error":"{error}","is_api_error_message":true,"message":{{"role":"assistant","model":"<synthetic>","content":[{{"type":"text","text":"service unavailable"}}]}}}}"#
-            );
-            let events = decode(raw.as_bytes()).unwrap();
-            assert!(events.contains(&E::Session("s".into())));
-            assert!(events.contains(&E::ModelOverloaded {
-                message: "service unavailable".into()
-            }));
-        }
-        let raw = br#"{"type":"assistant","session_id":"s","is_api_error_message":true,"api_error_status":529,"message":{"role":"assistant","model":"<synthetic>","content":[]}}"#;
-        assert!(
-            decode(raw)
-                .unwrap()
-                .iter()
-                .any(|event| matches!(event, E::ModelOverloaded { .. }))
         );
     }
 }

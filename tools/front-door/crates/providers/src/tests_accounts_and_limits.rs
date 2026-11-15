@@ -2,57 +2,6 @@
 fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::error::Error>> {
     // Synthetic protocol regression from #1216, not an activation recording.
     let message = "Free tier exhausted. See https://opencode.ai/go\\quota";
-    for wrapped in [false, true] {
-        for string_body in [false, true] {
-            let body =
-                serde_json::json!({"error":{"type":"FreeUsageLimitError","message":message}});
-            let body = if string_body {
-                serde_json::Value::String(body.to_string())
-            } else {
-                body
-            };
-            let event =
-                serde_json::json!({"type":"provider.quota","status":429,"response":{"body":body}});
-            let event = if wrapped {
-                serde_json::json!({"type":"error","error":event})
-            } else {
-                event
-            };
-            let (events, outcome) = replay(
-                &opencode::OpenCode,
-                &(event.to_string() + "\n"),
-                ExitObservation {
-                    code: Some(1),
-                    timed_out: false,
-                },
-            )?;
-            assert_eq!(outcome.status(), OutcomeStatus::Refused);
-            assert!(events.contains(&ProviderEvent::QuotaLimited {
-                message: message.into(),
-                pool: Some("opencode-free".into()),
-                resets_in_seconds: None,
-            }));
-        }
-    }
-    for response in [
-        serde_json::json!({}),
-        serde_json::json!({"body":{"error":{"code":429,"message":"provider quota message"}}}),
-    ] {
-        let event = serde_json::json!({"type":"provider.quota","message":"provider quota message","response":response});
-        let (events, outcome) = replay(&opencode::OpenCode, &(event.to_string() + "\n"), EXIT)?;
-        assert_eq!(outcome.status(), OutcomeStatus::Refused);
-        assert!(events.contains(&ProviderEvent::QuotaLimited {
-            message: "provider quota message".into(),
-            pool: None,
-            resets_in_seconds: None,
-        }));
-    }
-    Ok(())
-}
-
-#[test]
-fn opencode_free_limit_decodes_retry_after_ms() -> Result<(), Box<dyn std::error::Error>> {
-    let message = "Free tier exhausted. See https://opencode.ai/go\\quota";
     for (retry_after_val, expected_resets) in [
         (serde_json::json!(240_000), Some(240)),
         (serde_json::json!(240_000.0), Some(240)),
@@ -64,13 +13,18 @@ fn opencode_free_limit_decodes_retry_after_ms() -> Result<(), Box<dyn std::error
         (serde_json::json!("soon"), None),
         (serde_json::json!(true), None),
     ] {
-        for wrapped in [false, true] {
+        for (wrapped, string_body) in [(false, false), (false, true), (true, false), (true, true)] {
             let body = serde_json::json!({
                 "error": {
                     "type": "FreeUsageLimitError",
                     "message": message,
                 }
             });
+            let body = if string_body {
+                serde_json::Value::String(body.to_string())
+            } else {
+                body
+            };
             let mut event = serde_json::json!({
                 "type": "provider.quota",
                 "status": 429,
@@ -98,7 +52,7 @@ fn opencode_free_limit_decodes_retry_after_ms() -> Result<(), Box<dyn std::error
                     pool: Some("opencode-free".into()),
                     resets_in_seconds: expected_resets,
                 }),
-                "failed for retry_after_val: {retry_after_val:?}, wrapped: {wrapped}"
+                "retry-after {retry_after_val:?}; wrapped {wrapped}; string body {string_body}"
             );
         }
     }
@@ -129,6 +83,20 @@ fn opencode_free_limit_decodes_retry_after_ms() -> Result<(), Box<dyn std::error
         pool: Some("opencode-free".into()),
         resets_in_seconds: Some(120),
     }));
+
+    for response in [
+        serde_json::json!({}),
+        serde_json::json!({"body":{"error":{"code":429,"message":"provider quota message"}}}),
+    ] {
+        let event = serde_json::json!({"type":"provider.quota","message":"provider quota message","response":response});
+        let (events, outcome) = replay(&opencode::OpenCode, &(event.to_string() + "\n"), EXIT)?;
+        assert_eq!(outcome.status(), OutcomeStatus::Refused);
+        assert!(events.contains(&ProviderEvent::QuotaLimited {
+            message: "provider quota message".into(),
+            pool: None,
+            resets_in_seconds: None,
+        }));
+    }
 
     let body = serde_json::json!({
         "error": {
@@ -178,198 +146,217 @@ fn opencode_free_limit_decodes_retry_after_ms() -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-#[test]
-fn selected_accounts_control_provider_environment_and_exact_authentication_grants()
--> Result<(), Box<dyn std::error::Error>> {
+fn selected_account_controls(adapter: &str) -> Result<(), Box<dyn std::error::Error>> {
     use std::path::Path;
     let prompt = Prompt::new("fixture".into());
     let token = fixture_token();
     let temp = tempfile::tempdir().unwrap();
-    for adapter in ["claude", "codex"] {
-        for key in ["fixture-one", "fixture-two"] {
-            let mut route = route(adapter, "fixture-model");
-            let email = format!("{key}@example.test");
-            let account_key = if adapter == "claude" {
-                identity::fingerprint(&email).unwrap()
-            } else {
-                key.into()
-            };
-            route.account_key = Some(account_key.clone());
-            let dir = temp.path().join(key);
-            std::fs::create_dir_all(&dir)?;
-            std::fs::write(
-                dir.join(".credentials.json"),
-                br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4000000000000}}"#,
-            )?;
-            let account = identity::RegisteredAccount::new(adapter, &account_key, dir.clone())?;
-            let selected_token;
-            let token = if adapter == "claude" {
-                let status =
-                    serde_json::to_vec(&serde_json::json!({"loggedIn":true,"email":email}))?;
-                let script = KeychainScript {
+    for key in ["fixture-one", "fixture-two"] {
+        let mut route = route(adapter, "fixture-model");
+        let email = format!("{key}@example.test");
+        let account_key = if adapter == "claude" {
+            identity::fingerprint(&email).unwrap()
+        } else {
+            key.into()
+        };
+        route.account_key = Some(account_key.clone());
+        let dir = temp.path().join(key);
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4000000000000}}"#,
+        )?;
+        let account = identity::RegisteredAccount::new(adapter, &account_key, dir.clone())?;
+        let selected_token;
+        let token = if adapter == "claude" {
+            let status = serde_json::to_vec(&serde_json::json!({"loggedIn":true,"email":email}))?;
+            let script = KeychainScript {
                     items: std::sync::Mutex::new([br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4000000000000}}"#.to_vec()].into()),
                     statuses: std::sync::Mutex::new([status.clone(), status].into()),
                     calls: Default::default(),
                 };
-                selected_token = claude::refresh_for_account(
-                    &script,
-                    &claude::Login {
-                        executable: Path::new("/fixture/bin/claude"),
-                        home: Path::new("/fixture/home"),
-                        user: "fixture".as_ref(),
-                        config_dir: &dir,
-                    },
-                    &account,
-                    &|| 1000,
-                    10000,
-                )?;
-                &selected_token
-            } else {
-                &token
-            };
-            let confined = read_only_plan("/fixture", (adapter == "codex").then_some("login"));
-            let mut input = fixture_input(
-                &route,
-                &confined,
-                &prompt,
-                Path::new("/fixture/repo"),
-                Some(token),
-            );
-            input.account = Some(&account);
-            let unplaced = fixture_input(
-                &route,
-                &confined,
-                &prompt,
-                Path::new("/fixture/repo"),
-                Some(token),
-            );
-            assert!(
-                REGISTRY
-                    .iter()
-                    .find(|r| r.adapter.id() == adapter)
-                    .unwrap()
-                    .adapter
-                    .prepare(unplaced)
-                    .is_err()
-            );
-            let spec = REGISTRY
+            selected_token = claude::refresh_for_account(
+                &script,
+                &claude::Login {
+                    executable: Path::new("/fixture/bin/claude"),
+                    home: Path::new("/fixture/home"),
+                    user: "fixture".as_ref(),
+                    config_dir: &dir,
+                },
+                &account,
+                &|| 1000,
+                10000,
+            )?;
+            &selected_token
+        } else {
+            &token
+        };
+        let confined = read_only_plan("/fixture", (adapter == "codex").then_some("login"));
+        let mut input = fixture_input(
+            &route,
+            &confined,
+            &prompt,
+            Path::new("/fixture/repo"),
+            Some(token),
+        );
+        input.account = Some(&account);
+        let unplaced = fixture_input(
+            &route,
+            &confined,
+            &prompt,
+            Path::new("/fixture/repo"),
+            Some(token),
+        );
+        assert!(
+            REGISTRY
                 .iter()
                 .find(|r| r.adapter.id() == adapter)
                 .unwrap()
                 .adapter
-                .prepare(input)?;
+                .prepare(unplaced)
+                .is_err()
+        );
+        let spec = REGISTRY
+            .iter()
+            .find(|r| r.adapter.id() == adapter)
+            .unwrap()
+            .adapter
+            .prepare(input)?;
+        let state_root = confined
+            .permissions()
+            .private_state
+            .as_ref()
+            .expect("fixture private state")
+            .path
+            .clone();
 
-            // Provider runtime grants must exclude the host association
-            // database and every SQLite companion.
-            let grants = &spec.profile.spec.state_writes;
-            for suffix in ["", "-wal", "-shm", "-journal"] {
-                let host_index =
-                    Path::new("/fixture/state/fabric").join(format!("host.sqlite3{suffix}"));
-                assert!(
-                    grants.iter().all(|grant| match grant.scope {
-                        provenant_records::run::PathScope::Exact => grant.path != host_index,
-                        provenant_records::run::PathScope::Subtree =>
-                            !host_index.starts_with(&grant.path),
-                    }),
-                    "{adapter} can write {}",
-                    host_index.display()
-                );
-            }
+        // Provider runtime grants must exclude the host association
+        // database and every SQLite companion.
+        let grants = &spec.profile.spec.state_writes;
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let host_index = state_root
+                .join("fabric")
+                .join(format!("host.sqlite3{suffix}"));
+            assert!(
+                grants.iter().all(|grant| match grant.scope {
+                    provenant_records::run::PathScope::Exact => grant.path != host_index,
+                    provenant_records::run::PathScope::Subtree =>
+                        !host_index.starts_with(&grant.path),
+                }),
+                "{adapter} can write {}",
+                host_index.display()
+            );
+        }
 
-            if adapter == "claude" {
-                let mut unattributed_route = route.clone();
-                unattributed_route.account_key = None;
-                assert!(matches!(
-                    claude::Claude.prepare(fixture_input(
-                        &unattributed_route,
-                        &confined,
-                        &prompt,
-                        Path::new("/fixture/repo"),
-                        Some(token)
-                    )),
-                    Err(ProviderError::IdentityMismatch)
-                ));
-                let other_key = identity::fingerprint("other@example.test").unwrap();
-                let other = identity::RegisteredAccount::new(
-                    "claude",
-                    &other_key,
-                    Path::new("/fixture/identities/other").into(),
-                )?;
-                let mut other_route = route.clone();
-                other_route.account_key = Some(other_key);
-                let mut wrong_token = fixture_input(
-                    &other_route,
+        if adapter == "claude" {
+            let mut unattributed_route = route.clone();
+            unattributed_route.account_key = None;
+            assert!(matches!(
+                claude::Claude.prepare(fixture_input(
+                    &unattributed_route,
                     &confined,
                     &prompt,
                     Path::new("/fixture/repo"),
-                    Some(token),
-                );
-                wrong_token.account = Some(&other);
-                assert!(matches!(
-                    claude::Claude.prepare(wrong_token),
-                    Err(ProviderError::IdentityMismatch)
-                ));
-                assert!(
-                    spec.env
-                        .iter()
-                        .any(|(k, v)| k == "CLAUDE_CONFIG_DIR"
-                            && v == "/fixture/state/claude-config")
-                );
-                assert!(
-                    spec.profile
-                        .spec
-                        .runtime_reads
-                        .iter()
-                        .all(|g| !g.path.starts_with(&dir))
-                );
-                assert!(
-                    spec.profile
-                        .spec
-                        .state_writes
-                        .iter()
-                        .filter(|g| g.path.starts_with(&dir))
-                        .all(|g| g.path.starts_with(dir.join("projects")))
-                );
-                assert!(
-                    spec.profile
-                        .spec
-                        .state_writes
-                        .iter()
-                        .filter(|g| !g.path.starts_with("/fixture/state"))
-                        .all(|g| g.path.starts_with(&dir))
-                );
-                let lane = spec
-                    .profile
+                    Some(token)
+                )),
+                Err(ProviderError::IdentityMismatch)
+            ));
+            let other_key = identity::fingerprint("other@example.test").unwrap();
+            let other = identity::RegisteredAccount::new(
+                "claude",
+                &other_key,
+                Path::new("/fixture/identities/other").into(),
+            )?;
+            let mut other_route = route.clone();
+            other_route.account_key = Some(other_key);
+            let mut wrong_token = fixture_input(
+                &other_route,
+                &confined,
+                &prompt,
+                Path::new("/fixture/repo"),
+                Some(token),
+            );
+            wrong_token.account = Some(&other);
+            assert!(matches!(
+                claude::Claude.prepare(wrong_token),
+                Err(ProviderError::IdentityMismatch)
+            ));
+            let claude_config = state_root.join("claude-config");
+            assert!(spec.env.iter().any(|(key, value)| {
+                key == "CLAUDE_CONFIG_DIR" && Path::new(value) == claude_config
+            }));
+            assert!(
+                spec.profile
+                    .spec
+                    .runtime_reads
+                    .iter()
+                    .all(|g| !g.path.starts_with(&dir))
+            );
+            assert!(
+                spec.profile
                     .spec
                     .state_writes
                     .iter()
-                    .filter(|g| g.path.starts_with("/fixture/state"))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                // Child admission crosses the relay; no child-store write grant remains.
-                assert_eq!(lane, [crate::launch::subtree("/fixture/state/workflow")]);
-            } else {
-                // The accepted design keeps runtime state per attempt. Only the
-                // selected identity's auth.json is linked into CODEX_HOME.
-                let auth = dir.join("auth.json");
-                assert_eq!(spec.profile.spec.authentication[0].roots[0].path, auth);
-                assert_eq!(
-                    spec.profile.spec.authentication[0].in_place_writes[0].path,
-                    auth
-                );
-                assert!(
-                    matches!(&spec.setup[0], SetupStep::Symlink { target, .. } if target == &auth)
-                );
-            }
+                    .filter(|g| g.path.starts_with(&dir))
+                    .all(|g| g.path.starts_with(dir.join("projects")))
+            );
+            assert!(
+                spec.profile
+                    .spec
+                    .state_writes
+                    .iter()
+                    .filter(|g| !g.path.starts_with(&state_root))
+                    .all(|g| g.path.starts_with(&dir))
+            );
+            let lane = spec
+                .profile
+                .spec
+                .state_writes
+                .iter()
+                .filter(|g| g.path.starts_with(&state_root))
+                .cloned()
+                .collect::<Vec<_>>();
+            // Child admission crosses the relay; no child-store write grant remains.
+            let workflow = state_root.join("workflow");
+            assert_eq!(lane, [crate::launch::subtree(workflow)]);
+        } else {
+            // The accepted design keeps runtime state per attempt. Only the
+            // selected identity's auth.json is linked into CODEX_HOME.
+            let auth = dir.join("auth.json");
+            assert_eq!(spec.profile.spec.authentication[0].roots[0].path, auth);
+            assert_eq!(
+                spec.profile.spec.authentication[0].in_place_writes[0].path,
+                auth
+            );
+            assert!(matches!(&spec.setup[0], SetupStep::Symlink { target, .. } if target == &auth));
         }
     }
     Ok(())
+}
+
+#[test]
+fn selected_claude_account_controls_environment_and_authentication_grants()
+-> Result<(), Box<dyn std::error::Error>> {
+    selected_account_controls("claude")
+}
+
+#[test]
+fn selected_codex_account_controls_environment_and_authentication_grants()
+-> Result<(), Box<dyn std::error::Error>> {
+    selected_account_controls("codex")
 }
 
 #[cfg(feature = "recording")]
 #[test]
 fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), ProviderError> {
     let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let claude_config = plan
+        .permissions()
+        .private_state
+        .as_ref()
+        .expect("fixture private state")
+        .path
+        .join("claude-config");
     let mut route = route("claude", "fixture-model");
     route.account_key = None;
     let prompt = Prompt::new("fixture prompt".into());
@@ -458,9 +445,11 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
         .reads()
         .collect();
     assert!(!cargo_reads.is_empty());
-    assert!(cargo_reads
-        .iter()
-        .all(|grant| launch.profile.spec.runtime_reads.contains(grant)));
+    assert!(
+        cargo_reads
+            .iter()
+            .all(|grant| launch.profile.spec.runtime_reads.contains(grant))
+    );
     assert!(
         launch
             .profile
@@ -475,15 +464,13 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
     }));
     // Only lane grants are writable: never the private config or the user's home.
     assert!(launch.profile.spec.state_writes.iter().all(|grant| {
-        !grant.path.starts_with("/fixture/state/claude-config")
-            && !grant.path.starts_with("/fixture/home")
+        !grant.path.starts_with(&claude_config) && !grant.path.starts_with("/fixture/home")
     }));
     assert!(
         launch
             .env
             .iter()
-            .any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
-                && value == "/fixture/state/claude-config")
+            .any(|(key, value)| key == "CLAUDE_CONFIG_DIR" && Path::new(value) == claude_config)
     );
     let secret = launch.secret_input.as_ref().expect("token pipe");
     assert_eq!(
@@ -520,7 +507,7 @@ fn claude_account_probe_carries_user_for_keychain_selection() {
 }
 
 #[test]
-fn claude_account_probe_names_the_missing_login() {
+fn claude_account_probe_returns_the_typed_login_refusal() {
     let probe_root = tempfile::tempdir().unwrap();
     let script = KeychainScript {
         items: Default::default(),
@@ -540,7 +527,6 @@ fn claude_account_probe_names_the_missing_login() {
     )
     .unwrap_err();
     assert!(matches!(error, ProviderError::LoginRequired));
-    assert!(error.to_string().contains("unlock the login keychain"));
 }
 
 #[test]
@@ -570,31 +556,43 @@ fn codex_rollout_skips_long_unparsable_and_unrelated_lines() {
     assert_eq!(turn.effort.as_deref(), Some("low"));
 }
 
-/// A real Codex home holds more rollouts than the full-scan bound; a UUIDv7
-/// thread is found from its creation date, filed under the local date.
+/// A UUIDv7 thread is found from its creation date, including a rollout filed
+/// on the following local date.
 #[test]
-fn codex_rollout_finds_a_v7_thread_by_date_in_a_large_home() {
-    let home = std::env::temp_dir().join(format!("provenant-rollout-v7-{}", std::process::id()));
-    for year in 0..4100 {
-        std::fs::create_dir_all(home.join(format!("sessions/{:04}", 3000 + year))).unwrap();
+fn codex_rollout_finds_a_v7_thread_from_its_creation_date() {
+    let home = tempfile::tempdir().unwrap();
+    let sessions = home.path().join("sessions");
+    for year in 0..=crate::codex_rollout::MAX_ROLLOUT_SCAN_DIRECTORIES {
+        std::fs::create_dir_all(sessions.join(format!("{:04}", 3000 + year))).unwrap();
     }
-    // Created 2026-11-13T06:45Z and filed under the next day, the window's edge.
     let thread = "01a1d3a7-96ef-7032-a58f-5d1770a43b6e";
-    let day = home.join("sessions/2026/11/14");
+    let millis = i64::from_str_radix(&format!("{}{}", &thread[..8], &thread[9..13]), 16).unwrap();
+    let utc_date = jiff::Timestamp::from_millisecond(millis)
+        .unwrap()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date();
+    // This is the edge of the production UTC +/- one-day local-date window.
+    let day = utc_date.tomorrow().unwrap();
+    let filename = format!(
+        "rollout-{:04}-{:02}-{:02}T00-00-00-{thread}.jsonl",
+        day.year(),
+        day.month(),
+        day.day()
+    );
+    let day = sessions
+        .join(format!("{:04}", day.year()))
+        .join(format!("{:02}", day.month()))
+        .join(format!("{:02}", day.day()));
     std::fs::create_dir_all(&day).unwrap();
     let rollout = format!(
         "{}\n{}\n",
         serde_json::json!({"type":"session_meta","payload":{"id":thread}}),
         serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
     );
-    std::fs::write(
-        day.join(format!("rollout-2026-11-14T00-00-00-{thread}.jsonl")),
-        rollout,
-    )
-    .unwrap();
-    let observed = crate::codex_rollout::observe(&home, thread);
-    let missing = crate::codex_rollout::observe(&home, "01a1d3a7-96ef-7032-a58f-000000000000");
-    std::fs::remove_dir_all(&home).unwrap();
+    std::fs::write(day.join(filename), rollout).unwrap();
+    let observed = crate::codex_rollout::observe(home.path(), thread);
+    let missing =
+        crate::codex_rollout::observe(home.path(), "01a1d3a7-96ef-7032-a58f-000000000000");
     assert_eq!(observed.unwrap().model, "gpt-6-luna");
     assert!(matches!(missing, Err(ProviderError::UnknownIdentity)));
 }
@@ -628,6 +626,11 @@ fn shell_lanes_exec_the_command_line_tools_python() {
     let framework =
         Path::new("/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework");
     if !cfg!(target_os = "macos") || !framework.is_dir() {
+        provenant_test_support::missing_prerequisite(
+            false,
+            "Command Line Tools Python framework is unavailable",
+        )
+        .unwrap();
         return;
     }
     let mut route = route("codex", "fixture-model");

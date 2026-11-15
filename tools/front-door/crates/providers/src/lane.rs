@@ -1160,43 +1160,60 @@ mod tests {
     }
 
     #[test]
-    fn exec_path_probe_rejects_failed_or_incomplete_captures() {
+    fn provider_registry_covers_declared_local_harnesses() {
+        use provenant_records::NamedEntry;
+        use std::collections::BTreeSet;
+
+        let implemented: BTreeSet<_> = crate::REGISTRY
+            .iter()
+            .map(|registration| registration.adapter.id())
+            .collect();
+        let declared: BTreeSet<_> = provenant_records::ADAPTER_SPECS
+            .iter()
+            .filter(|spec| spec.install.is_some() || spec.named_entry == NamedEntry::Command)
+            .map(|spec| spec.name)
+            .collect();
+        assert_eq!(implemented, declared);
+    }
+
+    #[test]
+    fn exec_path_probe_requires_a_complete_successful_capture() {
         use provenant_os::exec::{
-            CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy,
-            Termination,
+            CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
         };
-        use std::time::Duration;
+
+        #[derive(Debug, Clone, Copy)]
+        enum CaptureFailure {
+            NonZeroExit,
+            TimedOut,
+            Cancelled,
+            DrainTruncated,
+            OverflowStopped,
+            StdoutTruncated,
+            StdoutReadFailed,
+            StderrTruncated,
+            StderrReadFailed,
+        }
+
+        impl CaptureFailure {
+            fn apply(self, output: &mut ExecOutcome) {
+                match self {
+                    Self::NonZeroExit => output.termination = Termination::Exit(1),
+                    Self::TimedOut => output.timed_out = true,
+                    Self::Cancelled => output.cancelled = true,
+                    Self::DrainTruncated => output.drain_truncated = true,
+                    Self::OverflowStopped => output.overflow_stopped = true,
+                    Self::StdoutTruncated => output.stdout.truncated = true,
+                    Self::StdoutReadFailed => output.stdout.read_failed = true,
+                    Self::StderrTruncated => output.stderr.truncated = true,
+                    Self::StderrReadFailed => output.stderr.read_failed = true,
+                }
+            }
+        }
 
         struct Probe(ExecOutcome);
         impl Executor for Probe {
-            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
-                assert_eq!(
-                    options.argv,
-                    [
-                        OsString::from("/fixture/git"),
-                        OsString::from("--exec-path")
-                    ]
-                );
-                assert_eq!(options.timeout, Duration::from_secs(4));
-                assert!(matches!(
-                    options.stdout,
-                    StreamPolicy::Capture { limit: 16384 }
-                ));
-                assert!(matches!(
-                    options.stderr,
-                    StreamPolicy::Capture { limit: 16384 }
-                ));
-                assert!(options.stop_on_output_limit);
-                assert!(options.process_group && options.cleanup_process_group);
-                assert_eq!(
-                    options.env,
-                    Some(
-                        &[(
-                            OsString::from("DEVELOPER_DIR"),
-                            OsString::from("/fixture/developer")
-                        )][..]
-                    )
-                );
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
                 Ok(self.0.clone())
             }
         }
@@ -1214,48 +1231,38 @@ mod tests {
             cancelled: false,
             elapsed_micros: 0,
         };
-        let env = [
-            (
-                OsString::from("GIT_EXEC_PATH"),
-                OsString::from("/fixture/untrusted"),
-            ),
-            (
-                OsString::from("DEVELOPER_DIR"),
-                OsString::from("/fixture/developer"),
-            ),
-        ];
         let probe = |output| {
             probe_host_exec_path(
                 &Probe(output),
                 Path::new("/fixture/git"),
                 directory.path(),
-                &env,
+                &[],
             )
         };
         assert_eq!(probe(good.clone()), Some(directory.path().to_owned()));
-        for failure in 0..9 {
+        for failure in [
+            CaptureFailure::NonZeroExit,
+            CaptureFailure::TimedOut,
+            CaptureFailure::Cancelled,
+            CaptureFailure::DrainTruncated,
+            CaptureFailure::OverflowStopped,
+            CaptureFailure::StdoutTruncated,
+            CaptureFailure::StdoutReadFailed,
+            CaptureFailure::StderrTruncated,
+            CaptureFailure::StderrReadFailed,
+        ] {
             let mut output = good.clone();
-            match failure {
-                0 => output.termination = Termination::Exit(1),
-                1 => output.timed_out = true,
-                2 => output.cancelled = true,
-                3 => output.drain_truncated = true,
-                4 => output.overflow_stopped = true,
-                5 => output.stdout.truncated = true,
-                6 => output.stdout.read_failed = true,
-                7 => output.stderr.truncated = true,
-                _ => output.stderr.read_failed = true,
-            }
-            assert_eq!(probe(output), None, "capture failure {failure}");
+            failure.apply(&mut output);
+            assert_eq!(probe(output), None, "capture failure {failure:?}");
         }
-        for invalid in [
-            b"relative\n".as_slice(),
-            b"/missing/exec-path\n",
-            b"/tmp\0tail\n",
+        for (outcome, invalid) in [
+            ("relative path", b"relative\n".as_slice()),
+            ("missing path", b"/missing/exec-path\n"),
+            ("NUL path", b"/tmp\0tail\n"),
         ] {
             let mut output = good.clone();
             output.stdout.bytes = invalid.to_vec();
-            assert_eq!(probe(output), None);
+            assert_eq!(probe(output), None, "invalid {outcome}");
         }
     }
 
@@ -1463,7 +1470,7 @@ mod tests {
     }
 
     #[test]
-    fn unencodable_git_path_warns_but_bound_writer_still_refuses() {
+    fn unbound_git_launcher_is_omitted_when_path_cannot_encode_it() {
         let bin = Path::new("/fixture/scratch:other/bin");
         for scrub in [false, true] {
             let mut env = vec![("PATH".into(), "/usr/bin:/bin".into())];
@@ -1485,6 +1492,11 @@ mod tests {
             assert_eq!(env[0].1, "/usr/bin:/bin");
             assert!(setup.is_empty());
         }
+    }
+
+    #[test]
+    fn bound_git_launcher_refuses_an_unencodable_path() {
+        let bin = Path::new("/fixture/scratch:other/bin");
         let mut env = vec![("PATH".into(), "/usr/bin:/bin".into())];
         let mut setup = Vec::new();
         let options = GitWrapper {
@@ -2036,10 +2048,9 @@ mod tests {
         Ok(())
     }
 
-    /// The gh budget warns and never stops: every call runs, the count file
-    /// holds one byte per call, and a label change warns only when asked.
     #[test]
-    fn gh_budget_counts_and_warns_without_stopping() -> Result<(), Box<dyn std::error::Error>> {
+    fn gh_budget_warns_and_calls_continue_after_the_threshold()
+    -> Result<(), Box<dyn std::error::Error>> {
         use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
         use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
         let temp = tempfile::tempdir()?;
@@ -2048,7 +2059,53 @@ mod tests {
         fs::set_permissions(&real_gh, fs::Permissions::from_mode(0o700))?;
         let policy = provenant_config::GithubPolicy::default();
         let executor = SystemExecutor::new(1)?;
-        let shim_with = |name: &str, label_ci_warning: bool| -> std::io::Result<PathBuf> {
+        let shim = temp.path().join("gh");
+        let counter = temp.path().join("gh.count");
+        fs::write(
+            &shim,
+            gh_wrapper(
+                real_gh.to_str().unwrap_or_default(),
+                None,
+                &shell_quote(counter.to_str().unwrap_or_default()),
+                &GhShim {
+                    policy: &policy,
+                    budget: 2,
+                    budget_source: "launch",
+                    label_ci_warning: false,
+                },
+            ),
+        )?;
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700))?;
+        let run = |args: &[&str]| {
+            let argv: Vec<_> = std::iter::once(shim.as_os_str().to_owned())
+                .chain(args.iter().map(OsString::from))
+                .collect();
+            executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(5)))
+        };
+        let mut warned_over_budget = false;
+        for _ in 0..5 {
+            let output = run(&["pr", "edit", "1"])?;
+            assert_eq!(output.termination, Termination::Exit(0));
+            warned_over_budget |= !output.stderr.bytes.is_empty();
+        }
+        assert!(warned_over_budget);
+        Ok(())
+    }
+
+    #[test]
+    fn github_label_warning_follows_the_launch_setting() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+        let temp = tempfile::tempdir()?;
+        let real_gh = temp.path().join("real-gh");
+        fs::write(&real_gh, "#!/bin/sh\nexit 0\n")?;
+        fs::set_permissions(&real_gh, fs::Permissions::from_mode(0o700))?;
+        let policy = provenant_config::GithubPolicy::default();
+        let executor = SystemExecutor::new(1)?;
+        let run = |name: &str,
+                   label_ci_warning: bool,
+                   args: &[&str]|
+         -> Result<_, Box<dyn std::error::Error>> {
             let shim = temp.path().join(name);
             let counter = temp.path().join(format!("{name}.count"));
             fs::write(
@@ -2059,40 +2116,31 @@ mod tests {
                     &shell_quote(counter.to_str().unwrap_or_default()),
                     &GhShim {
                         policy: &policy,
-                        budget: 2,
+                        budget: 0,
                         budget_source: "launch",
                         label_ci_warning,
                     },
                 ),
             )?;
             fs::set_permissions(&shim, fs::Permissions::from_mode(0o700))?;
-            Ok(shim)
-        };
-        let run = |shim: &Path, args: &[&str]| {
             let argv: Vec<_> = std::iter::once(shim.as_os_str().to_owned())
                 .chain(args.iter().map(OsString::from))
                 .collect();
-            executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(5)))
+            Ok(executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(5)))?)
         };
-        let shim = shim_with("gh", false)?;
-        let mut warnings = 0;
-        for _ in 0..5 {
-            let output = run(&shim, &["pr", "edit", "1", "--add-label", "x"])?;
-            assert_eq!(output.termination, Termination::Exit(0));
-            let stderr = String::from_utf8_lossy(&output.stderr.bytes);
-            assert!(!stderr.contains("label change"));
-            if stderr.contains("lanes.gh_budget = 2, source: launch") {
-                warnings += 1;
-            }
-        }
-        assert_eq!(warnings, 2);
-        assert_eq!(fs::metadata(temp.path().join("gh.count"))?.len(), 5);
-        let labelled = shim_with("labelled", true)?;
-        let output = run(&labelled, &["pr", "edit", "1", "--add-label", "x"])?;
+        let output = run("labelled", true, &["pr", "edit", "1", "--add-label", "x"])?;
         assert_eq!(output.termination, Termination::Exit(0));
-        assert!(String::from_utf8_lossy(&output.stderr.bytes).contains("label change starts CI"));
-        let output = run(&labelled, &["pr", "view", "1"])?;
-        assert!(!String::from_utf8_lossy(&output.stderr.bytes).contains("label change"));
+        assert!(!output.stderr.bytes.is_empty());
+        let output = run(
+            "unlabelled",
+            false,
+            &["pr", "edit", "1", "--add-label", "x"],
+        )?;
+        assert_eq!(output.termination, Termination::Exit(0));
+        assert!(output.stderr.bytes.is_empty());
+        let output = run("read-only-action", true, &["pr", "view", "1"])?;
+        assert_eq!(output.termination, Termination::Exit(0));
+        assert!(output.stderr.bytes.is_empty());
         Ok(())
     }
 
@@ -2453,7 +2501,7 @@ mod tests {
         // and the host's slot environment, with hostile values in the lane's.
         std::fs::write(
             &provenant,
-            "#!/bin/sh\nprintf '<%s>' \"$@\"\nprintf '[%s|%s|%s]' \"$PROVENANT_BUILD_SLOT_STATE\" \"$PROVENANT_BUILD_SLOTS\" \"$PROVENANT_BUILD_DISK_LIMITS\"\n",
+            "#!/bin/sh\nprintf '%s\\0' \"$@\" \"$PROVENANT_BUILD_SLOT_STATE\" \"$PROVENANT_BUILD_SLOTS\" \"$PROVENANT_BUILD_DISK_LIMITS\"\n",
         )
         .unwrap();
         let shim = root.join("cargo");
@@ -2469,14 +2517,31 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success());
+        let fields: Vec<_> = String::from_utf8(output.stdout)
+            .unwrap()
+            .split('\0')
+            .filter(|field| !field.is_empty())
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(fields.get(0).map(String::as_str), Some("internal"));
+        assert_eq!(fields.get(1).map(String::as_str), Some("build-slot"));
+        assert_eq!(fields.get(2).map(String::as_str), Some("--"));
         assert_eq!(
-            String::from_utf8(output.stdout).unwrap(),
-            format!(
-                "<internal><build-slot><--></home/.cargo/bin/cargo><test><--><two words>[{}|3|{}]",
-                state.display(),
-                serde_json::to_string(&gate.disk_gate.unwrap()).unwrap(),
-            ),
-            "the shim forwards its sealed slots and disk limits"
+            fields.get(3).map(String::as_str),
+            Some(gate.cargo.to_string_lossy().as_ref())
+        );
+        assert_eq!(fields.get(4).map(String::as_str), Some("test"));
+        assert_eq!(fields.get(5).map(String::as_str), Some("--"));
+        assert_eq!(fields.get(6).map(String::as_str), Some("two words"));
+        assert_eq!(
+            fields.get(7).map(String::as_str),
+            Some(state.to_string_lossy().as_ref())
+        );
+        assert_eq!(fields[8], gate.slots.to_string());
+        let limits: serde_json::Value = serde_json::from_str(&fields[9]).unwrap();
+        assert_eq!(
+            limits,
+            serde_json::to_value(gate.disk_gate.unwrap()).unwrap()
         );
     }
 

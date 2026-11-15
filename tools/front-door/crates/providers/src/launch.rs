@@ -521,6 +521,84 @@ pub enum Session {
     Resume,
 }
 
+/// Native approval controls used by provider launch builders. The outer
+/// confinement profile remains the authority for filesystem and network access.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeLaunchControl {
+    Arguments {
+        adapter: &'static str,
+        arguments: &'static [&'static str],
+    },
+    OpenCodePermissions {
+        adapter: &'static str,
+        permissions: OpenCodeNativePermissions,
+    },
+}
+
+#[cfg(test)]
+impl NativeLaunchControl {
+    pub(crate) const fn adapter(self) -> &'static str {
+        match self {
+            Self::Arguments { adapter, .. } | Self::OpenCodePermissions { adapter, .. } => adapter,
+        }
+    }
+}
+
+/// OpenCode's own prompt defaults. Path-specific entries still come from the
+/// launch plan and stay subject to the outer confinement profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OpenCodeNativePermissions {
+    pub(crate) default_key: &'static str,
+    pub(crate) default_value: &'static str,
+    pub(crate) external_directory_key: &'static str,
+    pub(crate) read_key: &'static str,
+    pub(crate) path_value: &'static str,
+}
+
+pub(crate) const CLAUDE_NATIVE_ARGUMENTS: &[&str] = &[
+    "--permission-mode",
+    "bypassPermissions",
+    "--tools",
+    "default",
+];
+pub(crate) const CODEX_NATIVE_ARGUMENTS: &[&str] = &["--dangerously-bypass-approvals-and-sandbox"];
+pub(crate) const AGY_NATIVE_ARGUMENTS: &[&str] = &["--dangerously-skip-permissions"];
+pub(crate) const CURSOR_NATIVE_ARGUMENTS: &[&str] = &["--force"];
+pub(crate) const OPENCODE_NATIVE_PERMISSIONS: OpenCodeNativePermissions =
+    OpenCodeNativePermissions {
+        default_key: "*",
+        default_value: "allow",
+        external_directory_key: "external_directory",
+        read_key: "read",
+        path_value: "allow",
+    };
+
+/// One source for provider-native approval controls and their launch tests.
+#[cfg(test)]
+pub(crate) const NATIVE_LAUNCH_CONTROLS: &[NativeLaunchControl] = &[
+    NativeLaunchControl::Arguments {
+        adapter: "claude",
+        arguments: CLAUDE_NATIVE_ARGUMENTS,
+    },
+    NativeLaunchControl::Arguments {
+        adapter: "codex",
+        arguments: CODEX_NATIVE_ARGUMENTS,
+    },
+    NativeLaunchControl::Arguments {
+        adapter: "agy",
+        arguments: AGY_NATIVE_ARGUMENTS,
+    },
+    NativeLaunchControl::Arguments {
+        adapter: "cursor",
+        arguments: CURSOR_NATIVE_ARGUMENTS,
+    },
+    NativeLaunchControl::OpenCodePermissions {
+        adapter: "opencode",
+        permissions: OPENCODE_NATIVE_PERMISSIONS,
+    },
+];
+
 /// Checks shared by every adapter, returning its access and session mode.
 pub(crate) fn admit(
     adapter: &'static str,
@@ -599,6 +677,8 @@ pub(crate) fn admit(
 }
 
 /// Preserve native tool paths and omit an optional entry that PATH cannot encode.
+pub(crate) const SYSTEM_TOOL_SEARCH_PATH: &str = "/usr/bin:/bin";
+
 pub(crate) fn tool_search_path(
     home: &Path,
     include_cargo: bool,
@@ -618,7 +698,7 @@ pub(crate) fn tool_search_path(
             )?;
         }
     }
-    path.push("/usr/bin:/bin");
+    path.push(SYSTEM_TOOL_SEARCH_PATH);
     Ok(path)
 }
 
@@ -2008,10 +2088,31 @@ pub(crate) fn uuid_v4(mut bytes: [u8; 16]) -> String {
 #[cfg(test)]
 mod git_config_quote_tests {
     #[test]
-    fn quote_preserves_git_metacharacters() {
-        assert_eq!(
-            super::git_config_quote("Ann \"Lee\""),
-            "\"Ann \\\"Lee\\\"\""
-        );
+    fn git_config_identity_round_trips_metacharacters() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("identity.gitconfig");
+        let identity = "Ann \"Lee\"; $HOME `git` \\ path\twith tab";
+        std::fs::write(
+            &config,
+            format!("[user]\n\tname = {}\n", super::git_config_quote(identity)),
+        )
+        .unwrap();
+        let output = provenant_os::fixture::git_command()
+            .args(["config", "--file"])
+            .arg(&config)
+            .args(["--get", "user.name"])
+            .env_remove("GIT_CONFIG_COUNT")
+            .env_remove("GIT_CONFIG_KEY_0")
+            .env_remove("GIT_CONFIG_KEY_1")
+            .env_remove("GIT_CONFIG_KEY_2")
+            .env_remove("GIT_CONFIG_KEY_3")
+            .env_remove("GIT_CONFIG_VALUE_0")
+            .env_remove("GIT_CONFIG_VALUE_1")
+            .env_remove("GIT_CONFIG_VALUE_2")
+            .env_remove("GIT_CONFIG_VALUE_3")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout.strip_suffix(b"\n"), Some(identity.as_bytes()));
     }
 }
