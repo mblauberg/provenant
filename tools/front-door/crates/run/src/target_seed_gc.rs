@@ -181,6 +181,9 @@ mod tests {
             host_triple: "fixture".into(),
             commit: "fixture".into(),
             profile: "dev".into(),
+            cargo_profile: provenant_config::LaneBuildSettings::default()
+                .cargo_build_profile(&[])
+                .expect("default Cargo profile is UTF-8"),
             features: vec![],
             flags: vec![],
         };

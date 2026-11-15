@@ -1,7 +1,7 @@
 //! Bind native package-manager caches to host locations when an adapter uses
 //! private HOME/XDG roots. Only cache and store paths cross this boundary.
 //!
-//! Recognized configuration is deliberately narrow: npm `cache` from its user
+//! Recognised configuration is deliberately narrow: npm `cache` from its user
 //! config or an explicit/trusted PREFIX config, and pnpm `cacheDir`/`storeDir`
 //! from project config or global `config.yaml`. Only absolute literal global
 //! paths are copied into environment selectors; legacy global pnpm `.npmrc`
