@@ -395,18 +395,18 @@ mod tests {
         let legacy = home.join(provenant_core::LEGACY_V1_STATE_SUFFIX);
         let before = tree(&legacy)?;
         let plan = plan(&state, &home)?.ok_or("hand-off planned")?;
-        let mut preflighted = false;
+        let preflighted = std::cell::Cell::new(false);
         let mut stopped = false;
         let done = run(
             &plan,
             &install_roots(&home)?,
             |_| {
                 assert!(!state.exists());
-                preflighted = true;
+                preflighted.set(true);
                 Ok(())
             },
             || {
-                assert!(preflighted);
+                assert!(preflighted.get());
                 assert!(!state.exists());
                 stopped = true;
                 Ok(())

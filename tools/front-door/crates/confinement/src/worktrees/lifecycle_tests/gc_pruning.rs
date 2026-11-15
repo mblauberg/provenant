@@ -2,8 +2,9 @@ use super::*;
 
 #[test]
 fn interrupted_linked_retirement_replays_its_reference_step() -> Result<(), Box<dyn Error>> {
+    use crate::worktrees::RetirementIntent;
     use provenant_records::custody::{
-        RemovalEvidence, RetirementDecision, RetirementIntent, RetirementStep, RetirementStepState,
+        RemovalEvidence, RetirementDecision, RetirementStep, RetirementStepState,
     };
 
     struct UnavailableForge<'a>(&'a HostRetirementFixture);

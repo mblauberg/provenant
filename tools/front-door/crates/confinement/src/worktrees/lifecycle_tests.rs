@@ -310,7 +310,7 @@ impl HostRetirementFixture {
             },
         };
         let tree = verify_worktree(context.repo, &lane.path)?;
-        let worktree = acquire_worktree_subject(&tree)?;
+        let worktree = acquire_worktree_subject(tree.repo())?;
         for subject in [&branch, &worktree] {
             self.store.acquire_custody(
                 self.project,

@@ -270,8 +270,8 @@ fn execute(
                 Worktree::SeedBuild => unreachable!(),
                 Worktree::Create { branch, base } => {
                     let info = worktrees::create(context, WorktreeCreate { branch, base }, cancel)?;
-                    let verified =
-                        provenant_confinement::verify_worktree(context.repo, &info.path)?;
+                    let verified = provenant_confinement::verify_worktree(context.repo, &info.path)
+                        .map_err(WorktreeError::from)?;
                     let mut subjects = vec![worktrees::acquire_worktree_subject(verified.repo())?];
                     if let Some(branch) = info.branch.as_deref().and_then(|reference| {
                         provenant_confinement::repo::GitRefName::new(reference).ok()
@@ -2768,9 +2768,7 @@ mod gc_preview_tests {
 
     #[test]
     fn gc_reports_keep_retirement_projections_and_never_infer_them_from_removed_rows() {
-        use provenant_records::custody::{
-            LandingPredicate, LandingSource, RemovalOutcome, SubjectKind,
-        };
+        use provenant_records::custody::{LandingPredicate, LandingSource, RemovalOutcome};
         let project = provenant_core::ProjectId::from_bytes([9; 16]);
         let tip = GitOid::parse(&"a1".repeat(20)).unwrap();
         let lane = worktrees::WorktreeInfo {

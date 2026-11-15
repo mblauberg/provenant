@@ -1788,8 +1788,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         Ok(self
             .preparation_skipped_routes(key, reference)?
             .unwrap_or_default()
-            .iter()
-            .flat_map(|route| provenant_records::SkippedAccount::read(&route.extra))
+            .into_iter()
+            .flat_map(|route| route.skipped_accounts)
             .collect())
     }
 

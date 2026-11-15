@@ -232,7 +232,7 @@ fn custody_checkout(
     let executor = SystemExecutor::new(1)?;
     let cancel = CancelToken::new();
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
-    Ok(runtime.open_read_repo(&executor, path, budget, &cancel)?)
+    Ok(runtime.open_repo(&executor, path, budget, &cancel)?)
 }
 
 pub fn checkout_branch(roots: &Roots, path: &Path) -> Result<Option<String>, EdgeError> {

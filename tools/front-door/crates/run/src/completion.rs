@@ -719,7 +719,7 @@ mod tests {
         let attempt = store.attempt_dir(id, false)?;
         let mut result = decoded();
         result.result = Handoff::from_json(&snapshot("stopped_early"))?.fenced();
-        store.capture_handoff(&attempt, &old, &result)?;
+        store.capture_handoff(&attempt, &old, &result)??;
         store
             .db
             .execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;

@@ -267,7 +267,9 @@ mod graph_writer_admission_tests {
             let admission_seconds = 30;
             let budget = WaitBudget::cli(clock.mono_now(), admission_seconds + 1).unwrap();
             let errors = match scenario {
-                "release" => vec![WorktreeError::RegistryLockTimeout; 2],
+                "release" => std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout)
+                    .take(2)
+                    .collect(),
                 "held" => std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout)
                     .take(10)
                     .collect(),

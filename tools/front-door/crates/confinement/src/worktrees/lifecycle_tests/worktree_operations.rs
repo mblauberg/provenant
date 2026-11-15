@@ -917,7 +917,6 @@ fn explicit_discard_publishes_recoverable_data_before_removing_work() -> Result<
     let owner = TestContext::new(&fixture)?;
     let context = owner.context();
     let created = gc_owned_lane(&owner, &context, "scratch/archive")?;
-    let worktree_path = fs::canonicalize(&created.path)?;
     let retirement = HostRetirementFixture::new(&owner)?;
     retirement.seed_lane(&context, &created)?;
     let worktree_subject = acquire_worktree_subject_at(&context, &created.path)?;

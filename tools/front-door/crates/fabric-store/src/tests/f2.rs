@@ -863,7 +863,7 @@ fn a_reused_worktree_path_keeps_each_incarnation_custody() {
         reference,
         tip,
         RetirementDecision::RetireWorktree {
-            authority: actor.actor(),
+            authority: actor.actor().ok_or("chair holder")?,
             evidence: evidence.clone(),
         },
     )

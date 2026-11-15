@@ -264,7 +264,7 @@ pub(super) fn run(
                             "op":"run", "template":"steward", "name":graph_name(operation),
                         }),
                         budget,
-                        &CancelToken::new(),
+                        &provenant_core::CancelToken::new(),
                     )
                     .map_err(|error| LaunchError::Uncertain(error.to_string()))?;
                 classify_launch(&result)

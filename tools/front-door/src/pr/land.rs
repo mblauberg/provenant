@@ -748,10 +748,17 @@ pub(super) fn batch_follow_up(
         let steps = follow_up(git, project, &tracking.view, head, globals, workers)?;
         return Ok(serde_json::to_value(steps)?);
     }
+    let state = roots::resolve(
+        globals,
+        roots::Workspace::Checkout,
+        roots::Product::Optional,
+    )?
+    .roots
+    .state;
     let rest = super::rest_pull(
         &|argv| {
             super::forge_execute(
-                state,
+                state.as_path(),
                 project,
                 argv,
                 &provenant_config::ports::Request::within(std::time::Duration::from_secs(60)),

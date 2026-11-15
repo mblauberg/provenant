@@ -611,7 +611,7 @@ fn forge_none_skips_builtin_gh_even_when_it_is_available()
         &fixture.writer.project,
         "gh",
         &["pr", "list"],
-        Stage::PullRequest,
+        WriterDeliveryStage::PullRequest,
     );
     assert!(result.is_err());
     assert!(

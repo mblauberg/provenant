@@ -1232,7 +1232,7 @@ mod tests {
                 matches!(result, Err(LandingError::RunFailed { cause, .. }) if matches!(*cause, LandingError::Pending(_)))
             );
             assert!(world.forge.merges.is_empty() && world.repo.push_attempts.is_empty());
-            assert!(world.gate.observed.is_empty());
+            assert!(world.gate.inner.observed.is_empty());
         }
         Ok(())
     }
@@ -1268,7 +1268,7 @@ mod tests {
         assert!(world.forge.merges.is_empty());
         assert!(world.forge.merge_attempts.is_empty());
         assert!(world.repo.push_attempts.is_empty());
-        assert!(world.gate.observed.is_empty());
+        assert!(world.gate.inner.observed.is_empty());
         assert!(!world.state.path().join("landing").exists());
         Ok(())
     }

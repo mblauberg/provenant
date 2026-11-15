@@ -311,10 +311,10 @@ impl HostDeliveryContext {
                     let executor = SystemExecutor::new(1).map_err(std::io::Error::other)?;
                     let fallback = provenant_core::CancelToken::new();
                     self.facts
-                        .with_executor(
+                        .with_executor::<_, Box<dyn std::error::Error + Send + Sync>>(
                             &executor,
                             self.cancellation.as_ref().unwrap_or(&fallback),
-                            |executor| executor.execute(options).map_err(std::io::Error::other),
+                            |executor| executor.execute(options).map_err(Into::into),
                         )
                         .map_err(std::io::Error::other)
                 },

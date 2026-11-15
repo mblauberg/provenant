@@ -2222,7 +2222,14 @@ mod tests {
             let candidate = attempt.join("provider-state/candidate-0");
             fs::create_dir(candidate.join("cache"))?;
             fs::write(candidate.join("cache/payload"), "regenerable")?;
-            let report = sweep(&store, &context, days, days * DAY_MICROS, false, &call)?;
+            let report = sweep(
+                &store,
+                &context,
+                days,
+                DAY_MICROS.saturating_mul(days as i64),
+                false,
+                &call,
+            )?;
             assert!(
                 report
                     .errors
