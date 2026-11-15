@@ -470,6 +470,40 @@ impl CustodyLease {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }
+    #[cfg(feature = "fixture")]
+    pub(crate) fn record_fixture_spawned_provider(
+        &mut self,
+        attempt: &Directory,
+        guardian: crate::census::ProcessIdentity,
+        provider: crate::census::ProcessIdentity,
+    ) -> Result<()> {
+        if self.launched
+            || self.lease.is_none()
+            || self.reservation.launch_state != LaunchState::Prepared
+        {
+            return Err(CustodyError::Fenced);
+        }
+        let metadata = attempt.metadata()?;
+        let mut reservation = self.reservation.clone();
+        reservation.attempt_device = Some(metadata.device);
+        reservation.attempt_inode = Some(metadata.inode);
+        reservation.launch_state = LaunchState::Spawned;
+        reservation.guardian = Some(guardian);
+        reservation.provider = Some(provider);
+        reservation.unresolved_cleanup = false;
+        reservation.census_incomplete = false;
+        reservation.validate()?;
+        write_record(
+            &self.directory,
+            "reservation.json",
+            &reservation,
+            PublishMode::Replace,
+        )?
+        .require_durable()?;
+        self.reservation = reservation;
+        self.launched = true;
+        Ok(())
+    }
     /// A preparation failure before handoff has no child to fence. Explicit
     /// withdrawal keeps crashes conservative: dropping a lease never clears it.
     pub fn withdraw_unlaunched(self) -> Result<()> {

@@ -6761,23 +6761,14 @@ mod steer_terminal_identity_tests {
             generation: 1,
         };
 
-        let lease = provenant_supervisor::fixture::acquire_writer(
+        let mut lease = provenant_supervisor::fixture::acquire_writer(
             slot.try_clone()?,
             scope,
             call.lock_budget(),
             &cancel,
             &clock,
         )?;
-        drop(lease);
-
-        // Model the durable spawned reservation, then reopen it through the
-        // same verified recovery owner used by Run settlement.
-        let reservation_path = slot_path
-            .join(scope.attempt.to_string())
-            .join("reservation.json");
-        let mut reservation: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&reservation_path)?)?;
-        let boot = reservation["boot"].as_str().ok_or("reservation boot")?;
+        let boot = "fixture-recorded-boot-v1";
         let guardian = provenant_supervisor::census::ProcessIdentity {
             boot: boot.to_owned(),
             pid: 40,
@@ -6790,19 +6781,15 @@ mod steer_terminal_identity_tests {
             pid: 41,
             native_start: 2,
             group_id: 41,
-            session_id: 41,
+            session_id: 40,
         };
-        let attempt_metadata = attempt.metadata()?;
-        reservation["launch_state"] = serde_json::json!("spawned");
-        reservation["attempt_device"] = serde_json::json!(attempt_metadata.device);
-        reservation["attempt_inode"] = serde_json::json!(attempt_metadata.inode);
-        reservation["guardian"] = serde_json::to_value(guardian)?;
-        reservation["provider"] = serde_json::to_value(&provider)?;
-        reservation["unresolved_cleanup"] = serde_json::json!(false);
-        reservation["census_incomplete"] = serde_json::json!(false);
-        std::fs::write(&reservation_path, serde_json::to_vec(&reservation)?)?;
-
-        let recovery = custody::acquire_recovery(slot, scope, call.lock_budget(), &cancel, &clock)?;
+        provenant_supervisor::fixture::record_spawned_provider(
+            &mut lease,
+            &attempt,
+            guardian,
+            provider.clone(),
+        )?;
+        let recovery = lease.into_recovery()?;
         assert!(!attempt_path.join("reservation.json").exists());
         let completion = Completion::Recovered(Some(&recovery));
         let observed = completion
