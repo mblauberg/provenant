@@ -197,7 +197,14 @@ impl RunStore {
         }) {
             return Err(RunError::Validation("worktree identifier"));
         }
-        let digest = input.request.digest()?;
+        // The chair is a per-submission proposal, not request identity: a
+        // replay of the same refused operation from a new chair session is
+        // the same request, and the first record keeps its original chair.
+        let digest = CanonicalRequest {
+            chair: None,
+            ..input.request.clone()
+        }
+        .digest()?;
         let refusal_notice = input
             .request
             .task
