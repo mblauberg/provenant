@@ -590,7 +590,7 @@ fn ignore_file_warnings(globals: &Globals, roots: &provenant_core::Roots) -> Vec
     let Ok(checkout) = roots::selected_project(globals.project.as_deref(), true) else {
         return Vec::new();
     };
-    let layout = match roots::project_layout(roots, &checkout) {
+    let layout = match roots::project_layout_read_only(roots, &checkout) {
         Ok(layout) => layout,
         Err(error) => {
             return vec![format!(
@@ -599,7 +599,10 @@ fn ignore_file_warnings(globals: &Globals, roots: &provenant_core::Roots) -> Vec
         }
     };
     let Some(owner) = layout.project() else {
-        return Vec::new();
+        return vec![
+            "warning: provider ignore files unchecked: primary checkout layout could not be verified"
+                .into(),
+        ];
     };
     provenant_cli::ignore_files::layout_warnings(
         owner,
