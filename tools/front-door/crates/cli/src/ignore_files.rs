@@ -38,6 +38,8 @@ pub enum IgnoreFinding {
         line: usize,
         pattern: String,
         path: PathBuf,
+        /// The adapter's indexing-only ignore files, named in the warning.
+        indexing: &'static [&'static str],
     },
     /// The declared file exists but was not read, so nothing is known.
     Unreadable {
@@ -67,6 +69,7 @@ pub fn findings<'a>(
                             line,
                             pattern,
                             path: path.to_path_buf(),
+                            indexing: spec.indexing_ignore_files,
                         });
                     }
                 }
@@ -171,10 +174,20 @@ pub fn warning(finding: &IgnoreFinding, remedy: &str) -> String {
             line,
             pattern,
             path,
-        } => format!(
-            "warning: {adapter} lanes cannot read or write worktrees under {}: {file}:{line} `{pattern}` hides it from {adapter}; {remedy}",
-            path.display()
-        ),
+            indexing,
+        } => {
+            let mut text = format!(
+                "warning: {adapter} lanes cannot read or write worktrees under {}: {file}:{line} `{pattern}` hides it from {adapter}; {remedy}",
+                path.display()
+            );
+            if !indexing.is_empty() {
+                text.push_str(&format!(
+                    "; {file} controls what {adapter} agents may access, while {} only controls indexing, so moving the pattern there keeps worktrees out of indexing without hiding them from lanes",
+                    indexing.join(" or ")
+                ));
+            }
+            text
+        }
         IgnoreFinding::Unreadable {
             adapter,
             file,
@@ -361,6 +374,16 @@ mod tests {
                 spec.name
             );
             assert!(layout_warnings(unrelated.path(), state.path(), [spec]).is_empty());
+            // The warning names each declared indexing-only file as the place
+            // that keeps worktrees out of indexing without hiding them.
+            for warning in layout_warnings(listing.path(), state.path(), [spec]) {
+                for file in spec.indexing_ignore_files {
+                    assert!(warning.contains(file), "{}: {warning}", spec.name);
+                }
+            }
+            for file in spec.indexing_ignore_files {
+                assert!(!spec.ignore_files.contains(file), "{}: {file}", spec.name);
+            }
         }
     }
 

@@ -189,6 +189,10 @@ pub struct AdapterSpec {
     /// launch preparation warn (`provenant_cli::ignore_files`); they never
     /// edit the file.
     pub ignore_files: &'static [&'static str],
+    /// Checkout-root files through which the provider only skips paths when
+    /// indexing; they never hide a path from the lane's agent. The ignore-file
+    /// warning names them as the place to keep worktrees out of indexing.
+    pub indexing_ignore_files: &'static [&'static str],
     pub compaction_env: Option<&'static str>,
     pub allowance_prefix: Option<&'static str>,
     /// Local allowance windows governing models under allowance_prefix.
@@ -437,6 +441,7 @@ adapter_specs! { $;
         shell_prefix: Some(("bin/claude-shell", "CLAUDE_CODE_SHELL_PREFIX")),
         context_directory_arg: Some("--add-dir"),
         ignore_files: &[],
+        indexing_ignore_files: &[],
         compaction_env: Some("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
         allowance_prefix: None,
         allowance_windows: &[],
@@ -522,6 +527,7 @@ adapter_specs! { $;
         shell_prefix: None,
         context_directory_arg: None,
         ignore_files: &[],
+        indexing_ignore_files: &[],
         compaction_env: None,
         allowance_prefix: None,
         allowance_windows: &[],
@@ -606,6 +612,7 @@ adapter_specs! { $;
         shell_prefix: None,
         context_directory_arg: None,
         ignore_files: &[".cursorignore"],
+        indexing_ignore_files: &[".cursorindexingignore"],
         compaction_env: None,
         allowance_prefix: None,
         allowance_windows: &[],
@@ -694,6 +701,7 @@ adapter_specs! { $;
         shell_prefix: None,
         context_directory_arg: None,
         ignore_files: &[],
+        indexing_ignore_files: &[],
         compaction_env: None,
         allowance_prefix: None,
         allowance_windows: &[],
@@ -780,6 +788,7 @@ adapter_specs! { $;
         shell_prefix: None,
         context_directory_arg: None,
         ignore_files: &[],
+        indexing_ignore_files: &[],
         compaction_env: None,
         allowance_prefix: Some("opencode-go/"),
         allowance_windows: &["five_hour", "seven_day", "thirty_day"],
@@ -860,6 +869,7 @@ adapter_specs! { $;
         shell_prefix: None,
         context_directory_arg: None,
         ignore_files: &[],
+        indexing_ignore_files: &[],
         compaction_env: None,
         allowance_prefix: None,
         allowance_windows: &[],
@@ -939,6 +949,7 @@ adapter_specs! { $;
         shell_prefix: None,
         context_directory_arg: None,
         ignore_files: &[],
+        indexing_ignore_files: &[],
         compaction_env: None,
         allowance_prefix: None,
         allowance_windows: &[],
@@ -1017,6 +1028,7 @@ adapter_specs! { $;
         shell_prefix: None,
         context_directory_arg: None,
         ignore_files: &[],
+        indexing_ignore_files: &[],
         compaction_env: None,
         allowance_prefix: None,
         allowance_windows: &[],

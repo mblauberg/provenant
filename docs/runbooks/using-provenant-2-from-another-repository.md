@@ -49,8 +49,10 @@ ignore files to a nested worktree: Cursor reads `.cursorignore`, so a
 `.worktrees/` line there hides each Cursor lane's own worktree from it. The
 adapter declares those files; `provenant hosts doctor` (run in the checkout)
 and launch preparation warn when one hides the worktree root, and never edit
-the file. Keep the line and move lane worktrees to a root it does not list
-with the `worktree_layout` port (`default` and `roots` in
+the file. To keep worktrees out of IDE indexing, list them in the indexing-only
+file instead (Cursor: `.cursorindexingignore`), which does not hide them from
+lanes; the warning names it. Or keep the line and move lane worktrees to a root
+it does not list with the `worktree_layout` port (`default` and `roots` in
 `.provenant/ports.json`). Check what Provenant will use with:
 
 ```sh
