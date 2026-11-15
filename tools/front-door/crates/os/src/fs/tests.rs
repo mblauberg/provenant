@@ -593,11 +593,16 @@ fn non_utf8_names_reach_the_os_without_replacement() {
     let temp = tempfile::tempdir().unwrap();
     let dir = Directory::open_anchor(temp.path()).unwrap();
     let name = OsString::from_vec(b"raw-\xff".to_vec());
-    let file = std::fs::OpenOptions::new()
+    let file = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(temp.path().join(&name))
-        .unwrap();
+    {
+        Ok(file) => file,
+        // APFS and similar filesystems refuse non-UTF-8 names, so no raw name can reach them.
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => return,
+        Err(error) => panic!("create raw-name file: {error}"),
+    };
     drop(file);
     assert_eq!(names(&dir), std::slice::from_ref(&name));
     dir.open_read(&name).unwrap();

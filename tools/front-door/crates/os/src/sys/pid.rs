@@ -668,10 +668,8 @@ fn startup_churn_is_retried_but_a_table_that_never_settles_stays_incomplete() {
             |delay| backoffs.push(delay),
         );
         assert_eq!(calls, expected_calls);
-        assert_eq!(
-            backoffs.len(),
-            calls - usize::from(calls > 0 && gap != Some(OccupancyGap::DescriptorsDenied))
-        );
+        // Every retry, and only a retry, is preceded by one backoff.
+        assert_eq!(backoffs.len(), calls - 1);
         assert!(
             backoffs
                 .iter()
@@ -2161,7 +2159,8 @@ mod tests {
         let file = crate::sys::fs::open_source(&path)?;
         assert_eq!(
             check_root_owned_executable_chain(&path, &file),
-            Err(ExecutableChainRefusal::AncestorNotRootOwned)
+            // The user-owned executable is refused before its ancestors are walked.
+            Err(ExecutableChainRefusal::ExecutableNotRootOwned)
         );
         Ok(())
     }
