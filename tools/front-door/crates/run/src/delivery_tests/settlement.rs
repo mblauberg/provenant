@@ -572,23 +572,52 @@ fn prepare_labels_environment_path_failures() -> std::result::Result<(), Box<dyn
 }
 
 #[test]
-fn prepare_labels_unavailable_gh_executable() -> std::result::Result<(), Box<dyn std::error::Error>>
-{
+fn prepare_seals_the_builtin_forge_executable_only_when_selected()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
     fixture.request.open_pr = true;
     fixture.environment.retain(|(key, _)| key != "PATH");
-    let reason = fixture.prepare().expect_err("PATH is unset").to_string();
-    for part in ["Prepare", "gh executable", "gh is unavailable", "PATH"] {
-        assert!(reason.contains(part), "{reason}");
-    }
-    fixture.environment.push(("PATH".into(), "".into()));
-    let reason = fixture
-        .prepare()
-        .expect_err("gh is unavailable")
-        .to_string();
-    for part in ["Prepare", "gh executable", "gh is unavailable", "PATH"] {
-        assert!(reason.contains(part), "{reason}");
-    }
+    assert!(fixture.prepare().is_err());
+    Ok(())
+}
+
+#[test]
+fn forge_none_skips_builtin_gh_even_when_it_is_available()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.request.open_pr = true;
+    let marker = fixture.root.join("gh-called");
+    let gh = fixture.root.join("gh");
+    fixture.executable(
+        &gh,
+        &format!("#!/bin/sh\n: > '{}'\nexit 0\n", marker.display()),
+    )?;
+    fixture.environment.retain(|(key, _)| key != "PATH");
+    fixture
+        .environment
+        .insert(0, ("PATH".into(), fixture.root.as_os_str().to_owned()));
+    let config = fixture.writer.project.join(".provenant");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(
+        config.join("ports.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
+            "forge": {"source": "project", "backend": {"kind": "none"}}
+        }))?,
+    )?;
+
+    let host = fixture.prepare()?;
+    let result = host.command(
+        &fixture.writer.project,
+        "gh",
+        &["pr", "list"],
+        Stage::PullRequest,
+    );
+    assert!(result.is_err());
+    assert!(
+        !marker.exists(),
+        "none must not invoke the builtin forge adapter"
+    );
     Ok(())
 }
 

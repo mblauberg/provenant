@@ -1078,6 +1078,9 @@ printf 'agy 1.0.0\n'
     std::fs::write(&cargo, b"#!/bin/sh\n")?;
     std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o700))?;
     let codex_route = provenant_records::ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
         extra: Default::default(),
         adapter: "codex".into(),
         model: "fixture-model".into(),
@@ -1089,6 +1092,7 @@ printf 'agy 1.0.0\n'
         exclusions: Vec::new(),
         eligibility: provenant_records::RouteEligibility::Eligible,
         readiness: provenant_records::RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 100,
@@ -1154,11 +1158,13 @@ printf 'agy 1.0.0\n'
     let coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
+        &project,
         &home,
         &confinement.plan.permissions().scratch.path,
         &codex_runtime,
         &state,
         &std::collections::BTreeMap::new(),
+        &provenant_records::policy::Policy::default(),
     )
     .expect("sandboxed lanes receive their optional build-slot shim");
     assert!(
@@ -1178,11 +1184,13 @@ printf 'agy 1.0.0\n'
     let skipped_coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
+        &project,
         &home,
         &confinement.plan.permissions().scratch.path,
         Path::new("relative-runtime"),
         &state,
         &std::collections::BTreeMap::new(),
+        &provenant_records::policy::Policy::default(),
     )
     .expect("an unrepresentable shim leaves launch preparation intact");
     assert!(skipped_coordination_reads.is_empty());

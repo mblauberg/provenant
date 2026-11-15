@@ -543,6 +543,9 @@ fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std
         Some(refusal.observed_unix_seconds + 60)
     );
     let resolved = ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
         extra: Default::default(),
         adapter: "opencode".into(),
         model: "opencode-go/example".into(),
@@ -554,6 +557,7 @@ fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std
         exclusions: vec![],
         eligibility: RouteEligibility::Eligible,
         readiness: RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: i64::MAX,

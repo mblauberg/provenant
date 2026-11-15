@@ -139,18 +139,12 @@ pub(crate) fn selection_evidence(
         evidence.priors = provenant_telemetry::route_outcomes::priors(outcomes)
             .map_err(|e| e.to_string())?
             .into_iter()
-            .filter_map(|prior| {
-                Some(provenant_routing::RoutePrior {
-                    model: ModelId::parse(&prior.model).ok()?,
-                    pool: prior.pool,
-                    role: prior.role,
-                    successes: prior.successes,
-                    failures: prior.failures,
-                    source: format!(
-                        "{}:project/{}:recent/1000",
-                        prior.source, identity.identity.project
-                    ),
-                })
+            .map(|mut prior| {
+                prior.source = format!(
+                    "{}:project/{}:recent/1000",
+                    prior.source, identity.identity.project
+                );
+                prior
             })
             .collect();
         evidence.live_lanes_known = true;
@@ -999,10 +993,7 @@ pub(super) fn resolve_dispatch_excluding_family(
                             )) => provenant_records::RouteExclusionReason::UnknownPartialHeadroom,
                             _ => provenant_records::RouteExclusionReason::AdmissionRefused,
                         };
-                        redraw.extra.insert(
-                            "cause".into(),
-                            serde_json::to_value(cause).map_err(|_| RoutingError::Catalogue)?,
-                        );
+                        redraw.cause = Some(cause);
                     }
                     resolved = replacement;
                     continue;
@@ -1077,6 +1068,7 @@ pub(super) fn record_pool_redraw(
     }
     let mut redraws = previous.redraws.clone();
     redraws.push(provenant_records::RouteSelectionRedraw {
+        cause: None,
         extra: Default::default(),
         rejected_pick: previous.pick.clone(),
         roll: previous.roll,
@@ -1258,6 +1250,7 @@ pub fn resolve_review_family(
                             let mut probe = selected.clone();
                             probe.account_key = Some(key.to_owned());
                             probe.readiness = RouteReadiness::Ready {
+                                availability_warning: None,
                                 extra: Default::default(), availability_ref: "preview".into(), expires_unix_seconds: now + 60,
                             };
                             let spent = records.iter().any(|record| record.account.adapter == selected.adapter && record.account.account_key == key && super::output::spent(record, now));
@@ -1328,10 +1321,8 @@ pub fn depletion_facts(
     let tried = std::iter::once(stopped)
         .chain(tried)
         .filter_map(|record| record.applied_route.as_ref())
-        .filter_map(|route| match route.extra.get("host_native") {
-            Some(name) => Some(Target::HostNative {
-                name: name.as_str()?.to_owned(),
-            }),
+        .filter_map(|route| match &route.host_native {
+            Some(name) => Some(Target::HostNative { name: name.clone() }),
             None => Some(Target::Route {
                 model: ModelId::parse(route.model.as_deref()?).ok()?,
                 account: route.account_key.clone(),
@@ -1355,25 +1346,13 @@ pub fn depletion_facts(
         })
         .collect();
     let profile = &stopped.profile;
+    let selection_context = route
+        .selection_context
+        .clone()
+        .ok_or("the stopped route has no selection context")?;
     let intent = provenant_routing::RouteIntent {
-        workload: if matches!(
-            stopped.requested_route,
-            provenant_records::run::RequestedRoute::Review { .. }
-        ) {
-            provenant_routing::Workload::Review
-        } else {
-            match profile
-                .knobs
-                .get("routing.workload")
-                .and_then(serde_json::Value::as_str)
-            {
-                Some("read_heavy") => provenant_routing::Workload::ReadHeavy,
-                Some("edit_heavy") => provenant_routing::Workload::EditHeavy,
-                Some("review") => provenant_routing::Workload::Review,
-                _ => provenant_routing::Workload::General,
-            }
-        },
-        writes: !stopped.write_grants.is_empty(),
+        workload: selection_context.workload,
+        writes: selection_context.writes,
         network: None,
         image_input: false,
         skill_location: profile.require_skill_location,

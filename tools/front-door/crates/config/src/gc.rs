@@ -11,6 +11,7 @@ use std::{
 pub enum RetentionTrigger {
     Custody,
     Gc,
+    Pressure,
     FullGc,
     Settlement,
     MergeObservation,
@@ -55,31 +56,44 @@ pub struct RetentionBytes {
     pub observation: ByteObservation,
 }
 
-/// Byte accounting is part of the class contract, shared by preview and apply.
+/// Owning subsystem, rather than an unchecked source path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RetentionMeasurement {
-    AllocatedTree,
-    OwnerDefined,
+pub enum RetentionOwner {
+    Confinement,
+    Telemetry,
+    FabricStore,
+    Run,
+    Workflow,
+    FabricRuntime,
+    Install,
+    Cli,
+    Config,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct RetentionClass {
     pub class: RetentionKind,
-    pub owner: &'static str,
-    pub measurement: RetentionMeasurement,
+    pub owner: RetentionOwner,
+    pub adapter: RetentionAdapter,
     pub eligibility: RetentionEligibility,
     pub eligibility_detail: &'static str,
-    /// Effective config keys, interpreted by the owner.
+    /// Effective schema paths; keyed maps use the schema's placeholder.
     pub settings: &'static [&'static str],
     pub triggers: &'static [RetentionTrigger],
 }
 
-const GC: &[RetentionTrigger] = &[RetentionTrigger::Gc];
+const GC: &[RetentionTrigger] = &[RetentionTrigger::Gc, RetentionTrigger::Pressure];
+const GC_AGE: &[RetentionTrigger] = &[RetentionTrigger::Gc];
 const FULL_GC: &[RetentionTrigger] = &[RetentionTrigger::FullGc];
-const GC_SETTLEMENT: &[RetentionTrigger] = &[RetentionTrigger::Gc, RetentionTrigger::Settlement];
+const GC_SETTLEMENT: &[RetentionTrigger] = &[
+    RetentionTrigger::Gc,
+    RetentionTrigger::Pressure,
+    RetentionTrigger::Settlement,
+];
 const GC_SETTLEMENT_MERGE: &[RetentionTrigger] = &[
     RetentionTrigger::Gc,
+    RetentionTrigger::Pressure,
     RetentionTrigger::Settlement,
     RetentionTrigger::MergeObservation,
 ];
@@ -89,8 +103,8 @@ const NEVER: &[RetentionTrigger] = &[RetentionTrigger::Never];
 
 macro_rules! retention_classes {
     ($($kind:ident => {
-        owner: $owner:literal,
-        measure: $measure:ident,
+        owner: $owner:ident,
+        adapter: $adapter:ident,
         eligibility: $eligibility:ident,
         detail: $detail:literal,
         settings: [$($setting:literal),* $(,)?],
@@ -100,12 +114,35 @@ macro_rules! retention_classes {
         #[serde(rename_all = "snake_case")]
         pub enum RetentionKind { $($kind),+ }
 
+        /// Required operations are generated from the declaration, with no default
+        /// implementation that could silently skip a newly added class.
+        pub trait RetentionCollector {
+            type Error;
+            $(fn $adapter(&mut self) -> Result<(), Self::Error>;)+
+        }
+        pub trait RetentionMeasurements {
+            $(fn $adapter(&self) -> ByteObservation;)+
+        }
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum RetentionAdapter { $($kind),+ }
+        impl RetentionAdapter {
+            pub const fn kind(self) -> RetentionKind {
+                match self { $(Self::$kind => RetentionKind::$kind),+ }
+            }
+            pub fn collect<C: RetentionCollector>(self, context: &mut C) -> Result<(), C::Error> {
+                match self { $(Self::$kind => context.$adapter()),+ }
+            }
+            pub fn measure<M: RetentionMeasurements>(self, context: &M) -> ByteObservation {
+                match self { $(Self::$kind => context.$adapter()),+ }
+            }
+        }
+
         /// The single declaration of every retained byte class, owner and effective policy.
         pub const RETENTION_CLASSES: &[RetentionClass] = &[
             $(RetentionClass {
                 class: RetentionKind::$kind,
-                owner: $owner,
-                measurement: RetentionMeasurement::$measure,
+                owner: RetentionOwner::$owner,
+                adapter: RetentionAdapter::$kind,
                 eligibility: RetentionEligibility::$eligibility,
                 eligibility_detail: $detail,
                 settings: &[$($setting),*],
@@ -117,136 +154,144 @@ macro_rules! retention_classes {
 
 retention_classes! {
     LaneCargoCaches => {
-        owner: "confinement/cache",
-        measure: AllocatedTree,
+        owner: Confinement,
+        adapter: lane_cargo_caches,
         eligibility: Declared,
         detail: "settled lane; verified cache owner and free writer custody",
         settings: ["gc.idle_days", "gc.lane_cargo_cache_max"],
         triggers: GC_SETTLEMENT
     },
     ObservationLedgers => {
-        owner: "telemetry/ledger",
-        measure: OwnerDefined,
+        owner: Telemetry,
+        adapter: observation_ledgers,
         eligibility: Declared,
         detail: "permanent attempt evidence",
         settings: [],
         triggers: NEVER
     },
     RetirementRecords => {
-        owner: "fabric-store/custody",
-        measure: OwnerDefined,
+        owner: FabricStore,
+        adapter: retirement_records,
         eligibility: Declared,
         detail: "durable retirement intent and step outcomes for audit and recovery",
         settings: [],
         triggers: NEVER
     },
     RefGenerationSequences => {
-        owner: "confinement/worktrees/ref-ledger",
-        measure: OwnerDefined,
+        owner: Confinement,
+        adapter: ref_generation_sequences,
         eligibility: Declared,
         detail: "permanent repository ref generation high-water marks",
         settings: [],
         triggers: NEVER
     },
     Staging => {
-        owner: "staging_gc",
-        measure: OwnerDefined,
+        owner: Cli,
+        adapter: staging,
         eligibility: Declared,
         detail: "free ingest/install item lock and idle age",
         settings: ["gc.idle_days"],
         triggers: GC
     },
     ProviderState => {
-        owner: "run/retention",
-        measure: OwnerDefined,
+        owner: Run,
+        adapter: provider_state,
         eligibility: Declared,
         detail: "terminal; free publication/writer custody; no retained private Git",
         settings: ["retention.provider_state_days", "retention.logs_days"],
-        triggers: GC
+        triggers: GC_AGE
     },
     ChairLogs => {
-        owner: "workflow/log",
-        measure: OwnerDefined,
+        owner: Workflow,
+        adapter: chair_logs,
         eligibility: Declared,
         detail: "owner transaction after replay horizon",
         settings: ["retention.chair_log_days", "retention.chair_log_replay_days", "retention.chair_log_entries", "retention.chair_log_bytes"],
         triggers: FULL_GC
     },
     TargetSeeds => {
-        owner: "run/target_seed_gc",
-        measure: AllocatedTree,
+        owner: Run,
+        adapter: target_seeds,
         eligibility: Declared,
         detail: "free store/clone and staging build locks",
         settings: ["domains.fabric.lanes.cargo_seed.max_generations", "domains.fabric.lanes.cargo_seed.max_bytes"],
         triggers: GC
     },
     BuildDirectories => {
-        owner: "run/build_dir_gc",
-        measure: AllocatedTree,
+        owner: Run,
+        adapter: build_directories,
         eligibility: Declared,
         detail: "GC boundary and free Cargo profile locks",
         settings: ["domains.fabric.lanes.build_dir_max_bytes", "domains.fabric.lanes.build_dir_grace_seconds", "gc.free_floor"],
         triggers: GC
     },
     GitWorktrees => {
-        owner: "confinement/worktrees + custody/retirement",
-        measure: AllocatedTree,
+        owner: Confinement,
+        adapter: git_worktrees,
         eligibility: Declared,
         detail: "free custody and census; clean Git; subsumed tip or idle retirement",
-        settings: ["gc.idle_days", "gc.regenerable", "gc.keep", "gc.foreign_worktrees", "gc.integration_branches", "gc.keep_paths", "gc.remote_branches", "gc.remote_min_tip_age_days"],
+        settings: ["gc.idle_days", "gc.projects.{project}.regenerable", "gc.projects.{project}.keep", "gc.projects.{project}.foreign_worktrees", "gc.projects.{project}.integration_branches", "gc.projects.{project}.keep_paths", "gc.projects.{project}.remote_branches", "gc.projects.{project}.remote_min_tip_age_days"],
         triggers: GC_SETTLEMENT_MERGE
     },
     QuotaHistory => {
-        owner: "cli/quota_history",
-        measure: OwnerDefined,
+        owner: Cli,
+        adapter: quota_history,
         eligibility: Declared,
         detail: "whole-line append and atomic rotation",
         settings: [],
         triggers: APPEND
     },
     Usage => {
-        owner: "telemetry/usage",
-        measure: OwnerDefined,
+        owner: Telemetry,
+        adapter: usage,
         eligibility: Declared,
         detail: "whole-line append and atomic rotation",
         settings: [],
         triggers: APPEND
     },
     GraphCheckpoints => {
-        owner: "fabric-runtime/graph/journal",
-        measure: OwnerDefined,
+        owner: FabricRuntime,
+        adapter: graph_checkpoints,
         eligibility: Declared,
         detail: "terminal checkpoint older than configured retention",
         settings: ["gc.graph_checkpoint_days"],
         triggers: FULL_GC
     },
     ManagedReleases => {
-        owner: "install",
-        measure: OwnerDefined,
+        owner: Install,
+        adapter: managed_releases,
         eligibility: Declared,
         detail: "inactive managed release not in use",
         settings: [],
         triggers: INSTALL
     },
     PayloadCap => {
-        owner: "run/retention",
-        measure: OwnerDefined,
+        owner: Run,
+        adapter: payload_cap,
         eligibility: Declared,
         detail: "unpinned payload above the configured cap",
         settings: ["retention.payload_cap_bytes"],
         triggers: GC
     },
     AttemptScratch => {
-        owner: "run/retention",
-        measure: OwnerDefined,
+        owner: Run,
+        adapter: attempt_scratch,
         eligibility: Declared,
         detail: "settled attempt; evidence captured and private Git import complete",
         settings: ["retention.provider_state_days"],
         triggers: GC_SETTLEMENT
     },
+    PortReceipts => {
+        owner: Config,
+        adapter: port_receipts,
+        eligibility: Declared,
+        detail: "admission: terminal attempt and proven release; other commands: declared receipt lifetime",
+        settings: [],
+        triggers: GC_AGE
+    },
     DiscardArchives => {
-        owner: "confinement/worktrees/archive",
-        measure: AllocatedTree,
+        owner: Confinement,
+        adapter: discard_archives,
         eligibility: Declared,
         detail: "published discard archive older than the configured recovery window",
         settings: ["gc.discard_archive_days"],
@@ -255,7 +300,8 @@ retention_classes! {
 }
 
 /// One scheduler for retention adapters. Full GC includes regular GC classes;
-/// pressure GC excludes full-only history and checkpoints. Never ages custody fences.
+/// Pressure collection runs only explicitly pressure-safe adapters; it never ages
+/// provider state or full-only history and checkpoints. Never ages custody fences.
 pub fn retention_schedule(
     trigger: RetentionTrigger,
 ) -> impl Iterator<Item = &'static RetentionClass> {
@@ -649,6 +695,58 @@ impl DiskLimits {
     }
 }
 
+/// Policy rule that decides measured free space below `gc.critical_free`.
+pub const DISK_FLOOR: &str = "DISK_FLOOR";
+
+/// The disk thresholds plus the effective [`DISK_FLOOR`] strength and the
+/// layer that set it: everything a dispatch, admission or new-build decision
+/// needs. Built by the host and serialised unchanged into the build shim, so
+/// every consumer takes the same decision.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct DiskGate {
+    pub limits: DiskLimits,
+    pub strength: provenant_records::policy::Strength,
+    pub source: provenant_records::policy::Source,
+}
+impl DiskGate {
+    pub fn new(limits: DiskLimits, policy: &provenant_records::policy::Policy) -> Self {
+        let rule = policy.rule(DISK_FLOOR);
+        Self {
+            limits,
+            strength: rule.rule.strength,
+            source: rule.source,
+        }
+    }
+
+    /// The one deciding point for measured low space. Below `gc.free_floor`
+    /// it warns and proceeds; below `gc.critical_free` the declared
+    /// `DISK_FLOOR` rule decides (warn by default; `refuse` or `off` when
+    /// configured). Every message names the figures, their sources and the
+    /// remedy. A failure to write a record is an integrity error elsewhere,
+    /// never this decision.
+    pub fn decide(&self, free: u64) -> provenant_records::policy::Effect {
+        use provenant_records::policy::{Effect, Facts, Policy};
+        let level = self.limits.level(free);
+        let detail = format!(
+            "{}; next: run `provenant gc --free-floor {}B`",
+            self.limits.detail(free),
+            self.limits.free_floor
+        );
+        match level {
+            DiskLevel::Ready => Effect::Proceed,
+            DiskLevel::Warning => Effect::Warn(detail),
+            DiskLevel::Critical => {
+                let mut policy = Policy::default();
+                policy.overlay(
+                    &BTreeMap::from([(DISK_FLOOR.to_owned(), self.strength)]),
+                    self.source,
+                );
+                policy.check(DISK_FLOOR, Facts::violation(detail))
+            }
+        }
+    }
+}
+
 impl GcSettings {
     pub fn disk_limits(&self, state: &Path) -> std::io::Result<DiskLimits> {
         use provenant_records::diagnostic::SettingSource::{Configuration, ShippedDefault};
@@ -771,6 +869,11 @@ pub enum ForeignWorktrees {
     #[default]
     Collect,
 }
+impl ForeignWorktrees {
+    /// The configuration spellings. Schema metadata and the generated
+    /// reference read this one declaration; a schema test deserialises each.
+    pub const NAMES: [&'static str; 2] = ["keep", "collect"];
+}
 
 /// Remote deletion is independent of local preservation evidence.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -779,6 +882,10 @@ pub enum RemoteBranches {
     Never,
     #[default]
     Managed,
+}
+impl RemoteBranches {
+    /// The configuration spellings, declared once like [`ForeignWorktrees::NAMES`].
+    pub const NAMES: [&'static str; 2] = ["never", "managed"];
 }
 
 impl Default for ProjectGcSettings {
@@ -863,7 +970,8 @@ mod tests {
             let encoded = serde_json::to_vec(&class.class).unwrap();
             let decoded: RetentionKind = serde_json::from_slice(&encoded).unwrap();
             assert_eq!(decoded, class.class);
-            assert!(!class.owner.is_empty() && !class.eligibility_detail.is_empty());
+            assert!(!class.eligibility_detail.is_empty());
+            assert_eq!(class.adapter.kind(), class.class);
             for trigger in class.triggers {
                 let encoded = serde_json::to_vec(trigger).unwrap();
                 let decoded: RetentionTrigger = serde_json::from_slice(&encoded).unwrap();
@@ -1342,6 +1450,69 @@ mod disk_limit_tests {
             defaults.critical_free_source,
             provenant_records::diagnostic::SettingSource::ShippedDefault
         );
+        Ok(())
+    }
+
+    /// Low space warns by default; the declared rule alone can make it
+    /// refuse or silence it, and every report carries figures, sources and remedy.
+    #[test]
+    fn disk_gate_effect_follows_the_declared_disk_floor_rule()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_records::policy::{Effect, Policy, Source, Strength};
+        let temp = tempfile::tempdir()?;
+        let limits = GcSettings {
+            free_floor: Some("100B".into()),
+            critical_free: Some("50B".into()),
+            ..Default::default()
+        }
+        .disk_limits(temp.path())?;
+        let shipped = DiskGate::new(limits, &Policy::default());
+        assert_eq!(shipped.strength, Strength::Warn);
+        assert_eq!(shipped.source, Source::CompiledDefault);
+        for strength in provenant_records::policy::table()
+            .iter()
+            .find(|rule| rule.code == DISK_FLOOR)
+            .ok_or("DISK_FLOOR is declared")?
+            .strengths()
+        {
+            let mut policy = Policy::default();
+            policy.overlay(
+                &BTreeMap::from([(DISK_FLOOR.to_owned(), strength)]),
+                Source::Host,
+            );
+            let gate = DiskGate::new(limits, &policy);
+            assert_eq!((gate.strength, gate.source), (strength, Source::Host));
+            let decoded: DiskGate = serde_json::from_slice(&serde_json::to_vec(&gate)?)?;
+            for free in [0, 49, 50, 99, 100] {
+                let effect = decoded.decide(free);
+                let expected_kind = match limits.level(free) {
+                    DiskLevel::Ready => "proceed",
+                    DiskLevel::Warning => "warn",
+                    DiskLevel::Critical => match strength {
+                        Strength::Refuse => "refuse",
+                        Strength::Warn => "warn",
+                        Strength::Off => "proceed",
+                    },
+                };
+                let kind = match &effect {
+                    Effect::Proceed => "proceed",
+                    Effect::Warn(_) => "warn",
+                    Effect::Refuse(_) => "refuse",
+                };
+                assert_eq!(kind, expected_kind, "{strength:?} at {free}");
+                if let Some(message) = effect.message() {
+                    for fact in [
+                        &format!("{free} bytes"),
+                        "gc.free_floor",
+                        "gc.critical_free",
+                        limits.critical_free_source.description(),
+                        "provenant gc",
+                    ] {
+                        assert!(message.contains(fact), "{fact}: {message}");
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

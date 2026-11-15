@@ -160,6 +160,7 @@ mod tests {
     fn attempt() -> AttemptFact {
         let path = PathWire::from_relative(&RelativePath::parse("out.md").unwrap()).unwrap();
         AttemptFact {
+            routing_context: Some(Default::default()),
             context: None,
             attempt_id: AttemptId::from_bytes([1; 16]),
             key: provenant_records::WorkKey::new(ProjectId::from_bytes([4; 16]), "g", "n", 1)

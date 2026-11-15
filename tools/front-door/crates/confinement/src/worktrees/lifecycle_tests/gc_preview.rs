@@ -844,14 +844,10 @@ fn foreign_gc_retires_a_landed_unowned_worktree_with_a_typed_outcome() -> Result
         },
         &cancel(),
     )?;
-    let subject = provenant_records::custody::Subject::new(
-        provenant_records::custody::SubjectKind::Worktree,
-        canonical.to_string_lossy().into_owned(),
-    );
     // A landed foreign lane is retired with its declared output, with the
     // integration-target evidence recorded against the worktree subject.
     assert!(report.removals.iter().any(|removal| {
-        removal.subject == subject
+        worktree_subject_matches_path(&removal.subject, &canonical)
             && matches!(
                 &removal.outcome,
                 provenant_records::custody::RemovalOutcome::Removed { .. }

@@ -364,6 +364,9 @@ impl CredentialRoots {
         roots
     }
 
+    /// Keep every declaration. Only an exact repeat of path, scope and kind
+    /// is dropped, so a store declared at a Codex home's path keeps its own
+    /// protection and the package exception cannot absorb it.
     pub fn add(
         &mut self,
         path: impl Into<PathBuf>,
@@ -375,7 +378,7 @@ impl CredentialRoots {
         if self
             .entries
             .iter()
-            .any(|entry| entry.path == path && entry.scope == scope)
+            .any(|entry| entry.path == path && entry.scope == scope && entry.kind == kind)
         {
             return;
         }
@@ -389,6 +392,46 @@ impl CredentialRoots {
 
     pub fn add_entry(&mut self, root: CredentialRoot) {
         self.add(root.path, root.scope, root.source, root.kind);
+    }
+
+    /// Add each declaration's resolved spelling, then give every spelling of
+    /// a declared location each declaration at or beneath that location. A
+    /// store declared through an alias of a Codex home therefore protects
+    /// both spellings, and no spelling keeps only the weaker package exception.
+    pub fn with_aliases<E>(
+        mut self,
+        mut resolve: impl FnMut(&Path) -> Result<PathBuf, E>,
+    ) -> Result<Self, E> {
+        let declarations = self.entries.clone();
+        let resolved = declarations
+            .iter()
+            .map(|root| resolve(&root.path))
+            .collect::<Result<Vec<_>, E>>()?;
+        for (root, location) in declarations.iter().zip(&resolved) {
+            self.add(
+                location.clone(),
+                root.scope,
+                root.source.clone(),
+                root.kind.clone(),
+            );
+        }
+        for (spelling, location) in declarations.iter().map(|root| &root.path).zip(&resolved) {
+            if spelling == location {
+                continue;
+            }
+            for (root, root_location) in declarations.iter().zip(&resolved) {
+                let Ok(rest) = root_location.strip_prefix(location) else {
+                    continue;
+                };
+                let path = if rest.as_os_str().is_empty() {
+                    spelling.clone()
+                } else {
+                    spelling.join(rest)
+                };
+                self.add(path, root.scope, root.source.clone(), root.kind.clone());
+            }
+        }
+        Ok(self)
     }
 
     pub fn entries(&self) -> &[CredentialRoot] {
@@ -421,10 +464,13 @@ impl CredentialRoots {
         })
     }
 
+    /// A read of a standalone Codex release package beneath a declared Codex
+    /// home, which no other declaration protects. The exception is relative
+    /// to the Codex home alone; any overlapping store keeps the path refused.
     pub fn is_codex_standalone_package(&self, path: &Path) -> bool {
         self.entries.iter().any(|root| {
             root.kind == CredentialKind::CodexHome && codex_standalone_path(path, &root.path)
-        })
+        }) && self.refusal(path, CredentialScope::Subtree, true).is_none()
     }
 
     pub fn overlaps(&self, path: &Path) -> bool {
@@ -724,5 +770,106 @@ mod tests {
             Err(RootError::Resolution { .. })
         ));
         Ok(())
+    }
+
+    /// The package exception never absorbs another declaration, whichever
+    /// order declarations arrive in and whichever spelling names them.
+    #[test]
+    fn codex_package_exception_applies_only_where_no_other_declaration_protects() {
+        use CredentialKind::{CodexHome, Store};
+        use CredentialScope::{Exact, Subtree};
+        let home = Path::new("/fixture/real/.codex");
+        let alias = Path::new("/fixture/home/.codex");
+        let release = |base: &Path| base.join("packages/standalone/releases/1.0");
+        // An alias spelling resolves to the real Codex home; every other path is real.
+        let resolve = |path: &Path| -> Result<PathBuf, ()> {
+            Ok(path
+                .strip_prefix(alias)
+                .map_or_else(|_| path.to_owned(), |rest| home.join(rest)))
+        };
+        type Declaration = (&'static str, CredentialScope, CredentialKind);
+        let cases: &[(&str, &[Declaration], bool)] = &[
+            (
+                "codex home alone",
+                &[("/fixture/home/.codex", Subtree, CodexHome)],
+                true,
+            ),
+            (
+                "store after codex home at the same path",
+                &[
+                    ("/fixture/home/.codex", Subtree, CodexHome),
+                    ("/fixture/home/.codex", Subtree, Store),
+                ],
+                false,
+            ),
+            (
+                "store before codex home at the same path",
+                &[
+                    ("/fixture/home/.codex", Subtree, Store),
+                    ("/fixture/home/.codex", Subtree, CodexHome),
+                ],
+                false,
+            ),
+            (
+                "store at the resolved spelling of the codex home",
+                &[
+                    ("/fixture/home/.codex", Subtree, CodexHome),
+                    ("/fixture/real/.codex", Subtree, Store),
+                ],
+                false,
+            ),
+            (
+                "store at an alias of the codex home",
+                &[
+                    ("/fixture/real/.codex", Subtree, CodexHome),
+                    ("/fixture/home/.codex", Subtree, Store),
+                ],
+                false,
+            ),
+            (
+                "exact store inside the release",
+                &[
+                    ("/fixture/home/.codex", Subtree, CodexHome),
+                    (
+                        "/fixture/real/.codex/packages/standalone/releases/1.0/auth.json",
+                        Exact,
+                        Store,
+                    ),
+                ],
+                false,
+            ),
+            (
+                "unrelated store",
+                &[
+                    ("/fixture/home/.codex", Subtree, CodexHome),
+                    ("/fixture/home/.codex-work", Subtree, Store),
+                ],
+                true,
+            ),
+        ];
+        for (name, declarations, exempt) in cases {
+            let mut roots = CredentialRoots::default();
+            for (path, scope, kind) in *declarations {
+                roots.add(*path, *scope, "fixture", kind.clone());
+            }
+            let roots = roots.with_aliases(resolve).unwrap();
+            for spelling in [alias, home] {
+                let package = release(spelling);
+                assert_eq!(
+                    roots.refusal(&package, Subtree, true).is_none(),
+                    *exempt,
+                    "{name}: read {}",
+                    package.display()
+                );
+                assert_eq!(
+                    roots.is_codex_standalone_package(&package),
+                    *exempt,
+                    "{name}"
+                );
+                // The exception never confers writes or reaches the home itself.
+                assert!(roots.refuses(&package, Subtree, false), "{name}: write");
+                assert!(roots.refuses(spelling, Subtree, true), "{name}: home");
+            }
+        }
     }
 }

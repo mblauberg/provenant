@@ -11,6 +11,7 @@
             .ok_or("third receipt")?
             .candidates
             .push(RouteSelectionCandidate {
+                ranking: Default::default(),
                 extra: Default::default(),
                 pacing_detail: None,
                 model: "codex/paid".into(),

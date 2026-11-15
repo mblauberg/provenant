@@ -71,31 +71,27 @@ pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Resul
         &cancel,
     )?;
     assert_eq!(fs::read(&marker_path)?, marker_bytes);
-    let receipts = fs::read_dir(&rig.state)?
-        .filter_map(std::result::Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("port-command-")
-        })
-        .map(|entry| -> Result<serde_json::Value> {
-            Ok(serde_json::from_slice(&fs::read(entry.path())?)?)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    assert!(receipts.iter().any(|receipt| {
-        receipt["owner"] == "naming"
-            && receipt["phase"] == "derive"
-            && receipt["source"] == "project"
-            && receipt["backend"] == "repository_command"
-            && receipt.get("argv").is_none()
-    }));
-    assert!(receipts.iter().any(|receipt| {
-        receipt["owner"] == "post_create"
-            && receipt["phase"] == "create"
-            && receipt["source"] == "project"
-            && receipt.get("argv").is_none()
-    }));
+    let inventory = provenant_config::port_command_receipts(&rig.state)?;
+    assert!(inventory.complete, "{:?}", inventory.issues);
+    for (owner, phase) in [("naming", "derive"), ("post_create", "create")] {
+        let receipt = &inventory
+            .entries
+            .iter()
+            .find(|entry| entry.receipt.owner == owner && entry.receipt.phase == phase)
+            .ok_or("missing setup command receipt")?
+            .receipt;
+        assert_eq!(receipt.source, provenant_records::PortSource::Project);
+        assert_eq!(
+            receipt.backend,
+            provenant_records::PortCommandBackend::RepositoryCommand
+        );
+        assert_eq!(
+            receipt.lifetime,
+            provenant_records::PortReceiptLifetime::AgeDays {
+                days: provenant_config::DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS,
+            }
+        );
+    }
 
     ports.naming.backend = provenant_config::PortBackend::Command {
         command: provenant_config::PortCommand {

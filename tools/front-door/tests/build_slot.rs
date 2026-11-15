@@ -74,9 +74,10 @@ impl Rig {
             .args(args)
             .env("PROVENANT_BUILD_SLOT_STATE", &self.state)
             .env("PROVENANT_BUILD_SLOTS", slots.to_string())
-            .env_remove("PROVENANT_BUILD_SLOT")
+            .env_remove(provenant_core::consumer_env::BUILD_SLOT)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
+        set_builtin_admission(&mut command);
         command
     }
 
@@ -95,6 +96,20 @@ impl Rig {
         self.log()
             .is_ok_and(|log| log.iter().any(|line| line.starts_with(word)))
     }
+}
+
+fn set_builtin_admission(command: &mut Command) {
+    command
+        .env(
+            provenant_core::consumer_env::BUILD_ADMISSION_BACKEND,
+            serde_json::to_string(&provenant_config::PortBackend::Builtin)
+                .expect("the builtin backend serializes"),
+        )
+        .env(
+            provenant_core::consumer_env::BUILD_ADMISSION_SOURCE,
+            serde_json::to_string(&provenant_config::PortSource::Builtin)
+                .expect("the builtin source serializes"),
+        );
 }
 
 fn stderr_of(child: &mut Child) -> Result<String> {
@@ -262,27 +277,68 @@ fn an_unusable_slot_directory_does_not_stop_the_build() -> Result {
 }
 
 #[test]
-fn missing_settings_run_the_build_ungated_with_one_warning() -> Result {
+fn missing_builtin_slot_settings_still_run_the_build() -> Result {
     let rig = Rig::new()?;
-    // Nothing from whoever ran the suite may reach the shim: a lane's own
-    // marker or slot settings would decide this test.
+    // The test clears inherited state, then supplies only the typed backend
+    // metadata and verifies that absent Builtin slot settings do not queue Cargo.
     let began = Instant::now();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_provenant"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
+    command
         .args(["internal", "build-slot", "--"])
         .arg(&rig.cargo)
         .arg("build")
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    set_builtin_admission(&mut command);
+    let mut child = command.spawn()?;
     assert!(finish(&mut child, Duration::from_secs(10))?);
-    assert!(stderr_of(&mut child)?.contains("settings are missing or invalid"));
+    assert!(rig.started("end"), "Cargo ran without a slot grant");
     assert!(
         began.elapsed() < Duration::from_secs(10),
         "an ungated build took {:?}",
         began.elapsed()
     );
+    Ok(())
+}
+
+#[test]
+fn absent_or_malformed_port_metadata_does_not_start_cargo() -> Result {
+    let rig = Rig::new()?;
+    let builtin = serde_json::to_string(&provenant_config::PortBackend::Builtin)?;
+    let source = serde_json::to_string(&provenant_config::PortSource::Builtin)?;
+    let cases = [
+        (None, Some(source.as_str())),
+        (Some("{"), Some(source.as_str())),
+        (Some(builtin.as_str()), None),
+        (Some(builtin.as_str()), Some("\"unknown\"")),
+    ];
+    for (backend, source) in cases {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
+        command
+            .args(["internal", "build-slot", "--"])
+            .arg(&rig.cargo)
+            .arg("build")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(backend) = backend {
+            command.env(
+                provenant_core::consumer_env::BUILD_ADMISSION_BACKEND,
+                backend,
+            );
+        }
+        if let Some(source) = source {
+            command.env(provenant_core::consumer_env::BUILD_ADMISSION_SOURCE, source);
+        }
+        assert!(
+            !command.status()?.success(),
+            "invalid metadata must fail closed"
+        );
+        assert!(!rig.started("end"), "invalid metadata must not run Cargo");
+    }
     Ok(())
 }
 
@@ -294,12 +350,14 @@ fn the_shims_exit_code_is_the_builds() -> Result {
         .command(1, &["no-such-subcommand-exits-zero"])
         .status()?;
     assert!(status.success());
-    let failing = Command::new(env!("CARGO_BIN_EXE_provenant"))
+    let mut failing_command = Command::new(env!("CARGO_BIN_EXE_provenant"));
+    failing_command
         .args(["internal", "build-slot", "--", "/bin/sh", "-c", "exit 7"])
         .env_remove("PROVENANT_BUILD_SLOT_STATE")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
+        .stderr(Stdio::null());
+    set_builtin_admission(&mut failing_command);
+    let failing = failing_command.status()?;
     assert_eq!(failing.code(), Some(7));
     Ok(())
 }
@@ -320,30 +378,50 @@ fn busy_slot_never_blocks_a_build() -> Result {
 #[test]
 fn disk_policy_applies_before_starting_a_new_build() -> Result {
     use provenant_records::diagnostic::SettingSource;
-    for (critical, starts) in [(0, true), (u64::MAX, false)] {
-        let rig = Rig::new()?;
-        rig.provision(1)?;
-        let limits = provenant_config::DiskLimits {
-            free_floor: u64::MAX,
-            free_floor_source: SettingSource::Configuration,
-            critical_free: critical,
-            critical_free_source: SettingSource::ShippedDefault,
-        };
-        let mut child = rig
-            .command(1, &["build"])
-            .env(
-                "PROVENANT_BUILD_DISK_LIMITS",
-                serde_json::to_string(&limits)?,
-            )
-            .spawn()?;
-        let completed = finish(&mut child, Duration::from_secs(10))?;
-        assert_eq!(completed, starts);
-        assert_eq!(rig.started("start"), starts);
-        let message = stderr_of(&mut child)?;
-        assert!(message.contains("gc.free_floor"));
-        assert!(message.contains("gc.critical_free"));
-        assert!(message.contains("host configuration"));
-        assert!(message.contains("shipped default"));
+    use provenant_records::policy::{Policy, Source, Strength};
+    for strength in Strength::ALL {
+        let mut policy = Policy::default();
+        policy.overlay(
+            &std::collections::BTreeMap::from([(
+                provenant_config::DISK_FLOOR.to_owned(),
+                strength,
+            )]),
+            Source::Host,
+        );
+        let effective = policy.rule(provenant_config::DISK_FLOOR).rule.strength;
+        for (critical, below) in [(0, false), (u64::MAX, true)] {
+            let rig = Rig::new()?;
+            rig.provision(1)?;
+            let gate = provenant_config::DiskGate::new(
+                provenant_config::DiskLimits {
+                    free_floor: u64::MAX,
+                    free_floor_source: SettingSource::Configuration,
+                    critical_free: critical,
+                    critical_free_source: SettingSource::ShippedDefault,
+                },
+                &policy,
+            );
+            let mut child = rig
+                .command(1, &["build"])
+                .env("PROVENANT_BUILD_DISK_LIMITS", serde_json::to_string(&gate)?)
+                .spawn()?;
+            let starts = !(below && effective == Strength::Refuse);
+            let completed = finish(&mut child, Duration::from_secs(10))?;
+            assert_eq!(completed, starts);
+            assert_eq!(rig.started("start"), starts);
+            // Whatever is reported names the figures and their sources.
+            let message = stderr_of(&mut child)?;
+            if !(below && effective == Strength::Off) {
+                for fact in [
+                    "gc.free_floor",
+                    "gc.critical_free",
+                    "host configuration",
+                    "shipped default",
+                ] {
+                    assert!(message.contains(fact), "{fact}: {message}");
+                }
+            }
+        }
     }
     Ok(())
 }

@@ -80,9 +80,18 @@ fn from_rest(rest: super::RestPull) -> Pull {
         closed_at: rest.closed_at,
     }
 }
-pub(super) fn pull(project: &Path, number: &str) -> Result<Pull> {
+pub(super) fn pull(state: &Path, project: &Path, number: &str) -> Result<Pull> {
     Ok(from_rest(super::rest_pull(
-        &|argv| super::execute(project, argv),
+        &|argv| {
+            super::forge_execute(
+                state,
+                project,
+                argv,
+                &provenant_config::ports::Request::within(std::time::Duration::from_secs(60)),
+                false,
+                None,
+            )
+        },
         number,
     )?))
 }
@@ -675,11 +684,13 @@ impl BatchTracking {
     reason = "bound forge reads for attribution"
 )]
 pub(super) fn batch_track(
+    state: &Path,
     project: &Path,
     number: u64,
     globals: &provenant_cli::Globals,
 ) -> Result<BatchTracking> {
     let reader = super::wait::Reader {
+        state,
         project,
         deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
         retry_command: format!("provenant land {number}"),
@@ -737,7 +748,19 @@ pub(super) fn batch_follow_up(
         let steps = follow_up(git, project, &tracking.view, head, globals, workers)?;
         return Ok(serde_json::to_value(steps)?);
     }
-    let rest = super::rest_pull(&|argv| super::execute(project, argv), &number.to_string())?;
+    let rest = super::rest_pull(
+        &|argv| {
+            super::forge_execute(
+                state,
+                project,
+                argv,
+                &provenant_config::ports::Request::within(std::time::Duration::from_secs(60)),
+                false,
+                None,
+            )
+        },
+        &number.to_string(),
+    )?;
     let repository = rest.base.repo.as_ref().map(|repo| repo.full_name.clone());
     let pull = from_rest(rest);
     if !pull.cross_repository
@@ -1041,7 +1064,7 @@ pub(crate) fn graph_land(
         };
     }
     let Some(number) = request.pull_request else {
-        return match super::pull_for_branch(project, branch, head) {
+        return match super::pull_for_branch(state, project, branch, head) {
             Ok(pull) => LandObservation::Identified {
                 pull_request: pull.number,
             },

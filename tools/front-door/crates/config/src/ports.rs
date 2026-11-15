@@ -1,5 +1,9 @@
 //! One sourced, versioned declaration for repository integration ports.
 use provenant_records::{CanonicalV1, FileDigest};
+pub use provenant_records::{
+    DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, PortCommandBackend, PortCommandDisposition,
+    PortCommandReceipt, PortReceiptLifetime, PortSource,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -14,19 +18,21 @@ pub const PORTS_CONFIG: &str = ".provenant/ports.json";
 pub const PORTS_SCHEMA_VERSION: u16 = 2;
 
 mod evidence;
+mod forge;
+mod request;
 pub use evidence::{
-    PortCommandReceiptProof, PortEvidenceError, port_command_receipt_proof, record_port_command,
+    PortCommandPublication, PortCommandReceiptCollectionLock, PortCommandReceiptEntry,
+    PortCommandReceiptInventory, PortCommandReceiptProof, PortEvidenceError, PortReceiptIssue,
+    port_command_receipt_proof, port_command_receipts, record_port_command,
+    remove_port_command_receipt, try_lock_port_command_receipts,
 };
+pub use forge::{
+    Adapter, Forge, ForgeOperation, ForgePort, ForgeResponse, HeadersObservation, PortError,
+    PortExecution, REST_API_VERSION_HEADER, dispatch_port_backend, land_backend,
+};
+pub use request::Request;
 const MAX_PORTS_BYTES: u64 = 65_536;
 const BRANCH_TOKEN: &str = "<branch>";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PortSource {
-    Builtin,
-    Host,
-    Project,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortBackendKind {
@@ -81,17 +87,6 @@ impl PortCommand {
 
 /// Typed result from executing a repository command port. The bounded process
 /// capture is retained as evidence; callers decide whether to render it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PortCommandDisposition {
-    Succeeded,
-    Unknown,
-    Refused,
-    TimedOut,
-    Cancelled,
-    Failed,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortCommandExecution {
     pub command_digest: FileDigest,
@@ -143,7 +138,7 @@ const COMMAND_CONTEXT_ENV: &[&str] = &[
     "RUSTUP_TOOLCHAIN",
 ];
 
-fn command_environment(
+pub fn port_command_environment(
     ambient: impl IntoIterator<Item = (OsString, OsString)>,
     explicit: &[(OsString, OsString)],
 ) -> Vec<(OsString, OsString)> {
@@ -173,6 +168,34 @@ pub fn execute_port_command(
     timeout: Duration,
     cancel: &provenant_core::CancelToken,
 ) -> PortCommandExecution {
+    execute_port_command_with_input(
+        executor,
+        command,
+        cwd,
+        arguments,
+        environment,
+        None,
+        timeout,
+        cancel,
+    )
+}
+
+/// Execute a declared command with optional operation input, preserving the same
+/// filtered environment, declared exit outcomes and bounded capture.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "command execution carries one bounded operation context"
+)]
+pub fn execute_port_command_with_input(
+    executor: &dyn provenant_os::exec::Executor,
+    command: &PortCommand,
+    cwd: &Path,
+    arguments: &[OsString],
+    environment: &[(OsString, OsString)],
+    input: Option<&[u8]>,
+    timeout: Duration,
+    cancel: &provenant_core::CancelToken,
+) -> PortCommandExecution {
     use provenant_os::exec::{ExecOptions, StreamPolicy, Termination};
     let command_digest = command.digest();
     if !command.valid() {
@@ -187,8 +210,9 @@ pub fn execute_port_command(
     let ambient = COMMAND_CONTEXT_ENV
         .iter()
         .filter_map(|name| std::env::var_os(*name).map(|value| (OsString::from(*name), value)));
-    let env = command_environment(ambient, environment);
+    let env = port_command_environment(ambient, environment);
     let mut options = ExecOptions::new(&argv, cwd, timeout);
+    options.stdin = input;
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture {
         limit: 8 * 1024 * 1024,
@@ -479,15 +503,6 @@ impl PortEntry for VerifyPort {
     }
 }
 impl PortEntry for LandPort {
-    fn backend_unavailable_reason(&self) -> Option<&'static str> {
-        match self.backend {
-            LandBackend::Builtin => None,
-            LandBackend::Command { .. } => {
-                Some("landing command strategy wiring is not implemented")
-            }
-            LandBackend::None => Some("the effective declaration disables this port"),
-        }
-    }
     fn source(&self) -> PortSource {
         self.source
     }
@@ -588,6 +603,7 @@ macro_rules! declare_ports {
 }
 
 declare_ports! {
+    forge: Port,
     verify: VerifyPort,
     land: LandPort,
     ci_observation: Port,
@@ -597,6 +613,7 @@ declare_ports! {
     tracker: Port,
     release: Port,
     admission: Port,
+    build_admission: Port,
 }
 
 fn apply_layer(
@@ -738,6 +755,85 @@ impl Default for PortTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_declared_port_has_a_resolved_source_consumer() {
+        fn visit(directory: &Path, files: &mut Vec<(PathBuf, String)>) -> io::Result<()> {
+            for entry in fs::read_dir(directory)? {
+                let path = entry?.path();
+                if path.is_dir() {
+                    visit(&path, files)?;
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    if path.ends_with("crates/config/src/ports.rs")
+                        || path
+                            .file_name()
+                            .is_some_and(|name| name.to_string_lossy().ends_with("_tests.rs"))
+                    {
+                        continue;
+                    }
+                    files.push((path.clone(), fs::read_to_string(path)?));
+                }
+            }
+            Ok(())
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        visit(&root.join("src"), &mut files).unwrap();
+        visit(&root.join("crates"), &mut files).unwrap();
+        // A category can add operations without acquiring another transport.
+        // Credentials/tool installation are separate concerns; these markers
+        // identify repository data operations rather than executable discovery.
+        for (path, source) in &files {
+            let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+            if path
+                .components()
+                .any(|component| component.as_os_str().to_string_lossy().contains("tests"))
+            {
+                continue;
+            }
+            assert!(
+                !production.contains("Command::new(\"gh\")"),
+                "direct forge process bypasses its port: {}",
+                path.display()
+            );
+            assert!(
+                !production.contains("Gh::in_checkout("),
+                "private forge adapter bypasses the shared port: {}",
+                path.display()
+            );
+            let forge_operation = production.contains("\"gh\"")
+                && ["\"pr\",", "\"api\",", "\"repo\",", "\"issue\","]
+                    .iter()
+                    .any(|operation| production.contains(operation));
+            if forge_operation {
+                assert!(
+                    production.contains("ForgePort") || production.contains("forge_execute("),
+                    "repository forge operation has no shared port consumer: {}",
+                    path.display()
+                );
+            }
+        }
+        for name in PortTable::PORT_NAMES {
+            let found = files.iter().any(|(_, source)| {
+                let resolves = source.contains("PortTable::read_for")
+                    || source.contains("PortTable::read_for_inspection");
+                let field = source.contains(&format!(".{name}"));
+                let layout_helper = *name == "worktree_layout"
+                    && [
+                        "managed_writer_path(",
+                        "managed_writer_branch(",
+                        "worktree_roots_under(",
+                    ]
+                    .iter()
+                    .any(|helper| source.contains(helper));
+                resolves && (field || layout_helper)
+            });
+            assert!(
+                found,
+                "port {name} has no source consumer resolving through PortTable"
+            );
+        }
+    }
 
     #[test]
     fn the_port_table_and_backend_cases_round_trip_from_the_declarations() {
@@ -891,7 +987,7 @@ mod tests {
                 ("SSH_AUTH_SOCK".into(), "agent".into()),
             ]);
         let result: BTreeMap<_, _> =
-            command_environment(ambient, &[("PATH".into(), "explicit".into())])
+            port_command_environment(ambient, &[("PATH".into(), "explicit".into())])
                 .into_iter()
                 .collect();
         for name in COMMAND_CONTEXT_ENV {

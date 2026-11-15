@@ -1336,7 +1336,7 @@ fn native_and_confined_writers_receive_the_same_seed_environment() -> Result<(),
     route.account_key = None;
     let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
     let native =
-        |key: &str| (key == provenant_confinement::run_config::SANDBOX_ENV).then(|| "off".into());
+        |key: &str| (key == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
     for sandboxed in [true, false] {
         let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
         if !sandboxed {
@@ -1371,7 +1371,7 @@ fn fresh_codex_home_setup_never_includes_provider_history() -> Result<(), Provid
     route.account_key = None;
     let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
     let native =
-        |key: &str| (key == provenant_confinement::run_config::SANDBOX_ENV).then(|| "off".into());
+        |key: &str| (key == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
     for sandboxed in [true, false] {
         let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
         if !sandboxed {
@@ -1415,7 +1415,7 @@ fn native_adapter_finalisation_supplies_cargo_environment_without_tool_discovery
     let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
     let token = fixture_token();
     let native =
-        |key: &str| (key == provenant_confinement::run_config::SANDBOX_ENV).then(|| "off".into());
+        |key: &str| (key == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
     let mut input = fixture_input(
         &route,
         &plan,

@@ -2341,6 +2341,48 @@ pub(crate) fn read_status_rows(
             .ok_or(FacadeError::StateCorrupt)?
             .clone());
     }
+    let rows = local_status_rows(target, edge, session, cancel, |clock| {
+        let left = wait_remaining(deadline, cancel)?;
+        Ok(WaitBudget::up_to(
+            clock.mono_now(),
+            provenant_core::DurationMicros::from_micros(
+                u64::try_from(left.as_micros()).unwrap_or(u64::MAX),
+            ),
+        ))
+    })?;
+    wait_remaining(deadline, cancel)?;
+    Ok(rows)
+}
+
+/// The one final snapshot a wait takes after its deadline: the target's rows
+/// from the local store, read without blocking. Remote sources get nothing
+/// past the original budget, so a lane's relay read is refused and peer
+/// enrichment sees an expired budget.
+pub(crate) fn final_status_rows(
+    target: &provenant_cli::Target,
+    edge: &provenant_cli::run::Edge<'_>,
+    session: &mut Option<Context>,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    if provenant_cli::fabric::in_lane() {
+        return Err(FacadeError::Timeout.into());
+    }
+    local_status_rows(target, edge, session, &CancelToken::new(), |clock| {
+        Ok(WaitBudget::up_to(
+            clock.mono_now(),
+            provenant_core::DurationMicros::from_micros(0),
+        ))
+    })
+}
+
+/// A target's rows from this host's graph checkpoint, enriched within the
+/// peer budget `peer_budget` chooses once the local read is done.
+fn local_status_rows(
+    target: &provenant_cli::Target,
+    edge: &provenant_cli::run::Edge<'_>,
+    session: &mut Option<Context>,
+    cancel: &CancelToken,
+    peer_budget: impl FnOnce(&SystemClock) -> Result<WaitBudget, FacadeError>,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
     let context = match session {
         Some(context) => context,
         None => session.insert(
@@ -2361,15 +2403,8 @@ pub(crate) fn read_status_rows(
     };
     let mut rows = status_rows(&graph_snapshot(checkpoint), &target);
     let clock = SystemClock::new();
-    let left = wait_remaining(deadline, cancel)?;
-    let budget = WaitBudget::up_to(
-        clock.mono_now(),
-        provenant_core::DurationMicros::from_micros(
-            u64::try_from(left.as_micros()).unwrap_or(u64::MAX),
-        ),
-    );
+    let budget = peer_budget(&clock)?;
     enrich_status_rows_within(&mut rows, context, &clock, cancel, budget)?;
-    wait_remaining(deadline, cancel)?;
     Ok(rows)
 }
 

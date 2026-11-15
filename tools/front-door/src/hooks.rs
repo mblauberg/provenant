@@ -107,33 +107,22 @@ fn diagnostic(message: &str) {
         message.chars().take(5000).collect::<String>()
     );
 }
-// Denial output must obey the hook's real-time protocol budget.
-#[allow(clippy::disallowed_methods)]
-fn deny(reason: &str) -> u8 {
-    let response = serde_json::json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}});
-    let mut bytes = response.to_string().into_bytes();
-    bytes.push(b'\n');
-    if hook_io::write_stdout(&bytes, Instant::now() + LOCAL_BUDGET).is_ok() {
-        0
-    } else {
-        diagnostic("hook input rejected: bounded-input error; denial response unavailable");
-        2
-    }
+// The guard only offers queued human answers; shell and file policy belong to
+// confinement. Input it cannot use (another harness's event shape, a timeout or a
+// malformed body) therefore abstains with a diagnostic and never denies a tool.
+fn abstain(reason: &str) -> u8 {
+    diagnostic(&format!("answer delivery skipped: {reason}"));
+    0
 }
 fn guard(globals: &Globals, deadline: Instant, client: Option<Harness>, event_name: &str) -> u8 {
-    let input = match hook_io::read_stdin(INPUT_CAP, deadline) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return deny(
-                "hook input rejected: bounded-input error (unreadable, oversized or timed out)",
-            );
-        }
+    let Ok(input) = hook_io::read_stdin(INPUT_CAP, deadline) else {
+        return abstain("hook input unreadable, oversized or timed out");
     };
     let parsed = serde_json::from_slice::<GuardInput>(&input)
         .ok()
         .filter(|v| v.hook_event_name == event_name);
     let Some(event) = parsed else {
-        return deny("hook input rejected: bounded-input error (malformed event)");
+        return abstain("hook event not recognised");
     };
     match guard_reply(
         globals,
@@ -142,7 +131,7 @@ fn guard(globals: &Globals, deadline: Instant, client: Option<Harness>, event_na
         provenant_cli::fabric::in_lane(),
         client,
     ) {
-        Err(reason) => deny(reason),
+        Err(reason) => abstain(reason),
         Ok(Some(bytes)) => {
             if hook_io::write_stdout(&bytes, deadline).is_err() {
                 diagnostic(
@@ -170,10 +159,10 @@ fn guard_reply(
         {
             PathBuf::from(value)
         }
-        _ => return Err("hook input rejected: bounded-input error (invalid cwd)"),
+        _ => return Err("hook event has an invalid cwd"),
     };
     if event.tool_name.is_empty() {
-        return Err("hook input rejected: bounded-input error (invalid tool)");
+        return Err("hook event has no tool");
     }
     if event.tool_name == "Bash"
         && !event
@@ -181,7 +170,7 @@ fn guard_reply(
             .get("command")
             .is_some_and(serde_json::Value::is_string)
     {
-        return Err("hook input rejected: bounded-input error (invalid Bash command)");
+        return Err("hook event has an invalid Bash command");
     }
     if in_lane {
         return Ok(None);
@@ -214,7 +203,7 @@ fn guard_reply(
         let config = provenant_cli::config_reads::show_for(&resolved.roots, "hook")?
             .domains
             .fabric;
-        let label = std::env::var_os("PROVENANT_AGENT_LABEL");
+        let label = std::env::var_os(provenant_core::consumer_env::AGENT_LABEL);
         let reader = crate::local_answers::LocalReader {
             root: &resolved.roots.state,
             workspace: &cwd,

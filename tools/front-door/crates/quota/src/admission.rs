@@ -546,6 +546,9 @@ mod admission_tests {
     use super::*;
     fn route() -> ResolvedRoute {
         ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
             extra: Default::default(),
             adapter: "claude".into(),
             model: "exact/model".into(),
@@ -557,6 +560,7 @@ mod admission_tests {
             exclusions: vec![],
             eligibility: provenant_records::RouteEligibility::Eligible,
             readiness: RouteReadiness::Ready {
+                availability_warning: None,
                 extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: 9999,
@@ -597,9 +601,8 @@ mod admission_tests {
     fn stale_availability_warning_does_not_bypass_exhaustion() {
         let mut route = route();
         route.readiness = RouteReadiness::Ready {
-            extra: [("availability_warning".into(), serde_json::json!("stale"))]
-                .into_iter()
-                .collect(),
+            availability_warning: Some("stale".into()),
+            extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 1050,
         };
@@ -620,9 +623,8 @@ mod admission_tests {
         let stale_auth = [stale_auth];
         assert!(admission(&stale_auth).check(&route).is_ok());
         route.readiness = RouteReadiness::Ready {
-            extra: [("availability_warning".into(), serde_json::json!("stale"))]
-                .into_iter()
-                .collect(),
+            availability_warning: Some("stale".into()),
+            extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 950,
         };
@@ -660,6 +662,17 @@ mod admission_tests {
         route.model = "opencode-go/mimo-v2.6-flash".into();
         route.account_key = Some("go".into());
         route.pool_selection = Some(provenant_records::RouteSelectionReceipt {
+            selection_rule: provenant_records::route_selection::SelectionRule::WeightedDraw,
+            considered_exclusions: Vec::new(),
+            exploration: provenant_records::route_selection::Exploration {
+                extra: Default::default(),
+                selected: false,
+                percent: 0,
+                enabled: false,
+                source: "fixture".into(),
+            },
+            weight_source: provenant_records::route_selection::WeightSource::Catalogue,
+            account_load: None,
             extra: Default::default(),
             pool: "senior".into(),
             candidates: vec![],
@@ -923,6 +936,7 @@ mod admission_tests {
         let account = record(QuotaStatus::Available).account;
         let mut route = route();
         route.readiness = RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 99_999,
@@ -954,6 +968,7 @@ mod admission_tests {
         let account = record(QuotaStatus::Available).account;
         let mut route = route();
         route.readiness = RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 99_999,
@@ -1019,6 +1034,7 @@ mod admission_tests {
         let account = record(QuotaStatus::Available).account;
         let mut route = route();
         route.readiness = RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 99_999,
@@ -1218,6 +1234,9 @@ mod refusal_scope_tests {
     #[test]
     fn refusals_expire_only_for_matching_identity_pool_observation_or_reset() {
         let route = ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
             extra: Default::default(),
             adapter: "claude".into(),
             model: "exact".into(),
@@ -1229,6 +1248,7 @@ mod refusal_scope_tests {
             exclusions: vec![],
             eligibility: provenant_records::RouteEligibility::Eligible,
             readiness: RouteReadiness::Ready {
+                availability_warning: None,
                 extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: 5000,
@@ -1348,6 +1368,9 @@ mod refusal_scope_tests {
     #[test]
     fn grouped_pool_exhaustion_blocks_only_models_in_that_pool() {
         let route = |model: &str| ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
             extra: Default::default(),
             adapter: "agy".into(),
             model: model.into(),
@@ -1359,6 +1382,7 @@ mod refusal_scope_tests {
             exclusions: vec![],
             eligibility: provenant_records::RouteEligibility::Eligible,
             readiness: RouteReadiness::Ready {
+                availability_warning: None,
                 extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: 5000,

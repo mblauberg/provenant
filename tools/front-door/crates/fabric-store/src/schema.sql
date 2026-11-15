@@ -38,11 +38,10 @@ CREATE INDEX custody_chair ON custody(chair,state,seq);
 CREATE INDEX custody_project ON custody(project,state,seq);
 CREATE TABLE retirements (
  project TEXT NOT NULL, id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0),
- kind TEXT NOT NULL, subject TEXT NOT NULL, record BLOB NOT NULL,
- PRIMARY KEY(project,id),
- FOREIGN KEY(project,kind,subject) REFERENCES custody(project,kind,subject)
+ pending INTEGER NOT NULL CHECK(pending IN (0,1)), record BLOB NOT NULL,
+ PRIMARY KEY(project,id)
 ) STRICT;
-CREATE INDEX retirement_subject ON retirements(project,kind,subject,revision);
+CREATE INDEX retirement_pending ON retirements(project,pending);
 CREATE TABLE coordination_operations (
  project TEXT NOT NULL, id TEXT NOT NULL, actor TEXT NOT NULL,
  request BLOB NOT NULL, result BLOB NOT NULL,

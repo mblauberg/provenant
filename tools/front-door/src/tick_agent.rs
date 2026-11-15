@@ -364,17 +364,17 @@ pub fn stop(home: &Path) -> Result<bool, AgentError> {
     }
 }
 
-/// Reset needs the executing oneshot service stopped as well as its timer.
+/// Cut-over needs the executing oneshot service stopped as well as its timer.
 /// Disabling a systemd timer alone does not stop an already dispatched tick.
-pub fn stop_for_reset(home: &Path) -> Result<bool, AgentError> {
+pub fn quiesce(home: &Path) -> Result<bool, AgentError> {
     if cfg!(target_os = "linux") {
-        stop_timer_for_reset_with(|args| systemctl(args, home))
+        quiesce_timer_with(|args| systemctl(args, home))
     } else {
         stop(home)
     }
 }
 
-fn stop_timer_for_reset_with(
+fn quiesce_timer_with(
     mut run: impl FnMut(&[&OsStr]) -> Result<(bool, String), AgentError>,
 ) -> Result<bool, AgentError> {
     use peer_agent::ServiceState;
@@ -421,11 +421,6 @@ fn stop_timer_for_reset_with(
         }
     }
     Ok(true)
-}
-
-/// Retire the former scheduler even when its plist has already disappeared.
-pub fn retire_gc(home: &Path) -> Result<(), AgentError> {
-    stop_with(home, "dev.provenant.gc", launchctl).map(|_| ())
 }
 
 fn stop_with(
@@ -532,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn timer_reset_requires_both_timer_and_dispatched_service_to_be_quiescent() {
+    fn timer_shutdown_requires_both_timer_and_dispatched_service_to_be_quiescent() {
         use peer_agent::ServiceState;
         for (output, expected) in [
             ((true, "LoadState=loaded\nActiveState=inactive"), None),
@@ -547,7 +542,7 @@ mod tests {
             ),
         ] {
             let mut service_stopped = false;
-            let result = stop_timer_for_reset_with(|args| {
+            let result = quiesce_timer_with(|args| {
                 if args[0] == "stop" && args[1] == "provenant-tick.service" {
                     service_stopped = true;
                 }

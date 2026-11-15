@@ -48,29 +48,39 @@ fn resource_pressure_and_busy_caps_never_queue_default_admission() -> TestResult
 }
 
 #[test]
-fn admission_uses_only_the_critical_threshold_for_refusal() -> TestResult {
-    for writer in [false, true] {
-        for free in [49, 50, 99, 100] {
-            let temp = tempfile::tempdir()?;
-            let (clock, cancel) = (clock(), CancelToken::new());
-            let call = call(&clock, &cancel);
-            let store = RunStore::open(&context(temp.path())?, &call)?;
-            std::fs::write(
-                store.writer_registry.join("config.toml"),
-                "schema_version=1\n[gc]\nfree_floor='100B'\ncritical_free='50B'\n",
-            )?;
-            let id = starting(&store, &lane(80, writer), &call)?;
-            let attempt = store.attempt_dir(id, false)?;
-            let mut facts = HostFacts::new(100);
-            facts.disk = free;
-            let result = store.admit(id, &attempt, &facts, &clock, &cancel);
-            if free < 50 {
-                assert!(matches!(
-                    result,
-                    Err(RunError::Admission(AdmissionError::Disk { floor: 50, .. }))
-                ));
-            } else {
-                assert!(matches!(result?.state, AttemptState::Running { .. }));
+fn admission_follows_the_declared_disk_floor_policy() -> TestResult {
+    use provenant_records::policy::Strength;
+    for strength in Strength::ALL {
+        let name = serde_json::to_value(strength)?;
+        let name = name.as_str().ok_or("strength name")?;
+        for writer in [false, true] {
+            for free in [49, 50, 99, 100] {
+                let temp = tempfile::tempdir()?;
+                let (clock, cancel) = (clock(), CancelToken::new());
+                let call = call(&clock, &cancel);
+                let store = RunStore::open(&context(temp.path())?, &call)?;
+                std::fs::write(
+                    store.writer_registry.join("config.toml"),
+                    format!(
+                        "schema_version=1\n[knobs]\n'policy.{}'='{name}'\n[gc]\nfree_floor='100B'\ncritical_free='50B'\n",
+                        provenant_config::DISK_FLOOR
+                    ),
+                )?;
+                let id = starting(&store, &lane(80, writer), &call)?;
+                let attempt = store.attempt_dir(id, false)?;
+                let mut facts = HostFacts::new(100);
+                facts.disk = free;
+                let result = store.admit(id, &attempt, &facts, &clock, &cancel);
+                // Lane class never matters: only a declared refuse below
+                // gc.critical_free holds admission.
+                if strength == Strength::Refuse && free < 50 {
+                    assert!(matches!(
+                        result,
+                        Err(RunError::Admission(AdmissionError::Disk { floor: 50, .. }))
+                    ));
+                } else {
+                    assert!(matches!(result?.state, AttemptState::Running { .. }));
+                }
             }
         }
     }

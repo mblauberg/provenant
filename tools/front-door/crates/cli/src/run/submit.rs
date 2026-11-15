@@ -290,6 +290,28 @@ pub fn submit(
     submit_with_host(session, edge, submission, call, None)
 }
 
+/// The launch policy a submission seals: host knobs, then project rules,
+/// then dispatch overrides. The disk precheck decides under this same policy.
+fn submission_policy(
+    config: &provenant_config::ResolvedConfig<crate::domains::Domains>,
+    project: &str,
+    profile: &provenant_records::run::HarnessProfile,
+    extra: &provenant_records::ExtraFields,
+) -> provenant_records::policy::Policy {
+    let mut dispatch = provenant_config::policy::dispatch(profile);
+    if let Some(value) = extra.get("policy_overrides")
+        && let Ok(values) = serde_json::from_value::<
+            std::collections::BTreeMap<String, provenant_records::policy::Strength>,
+        >(value.clone())
+    {
+        dispatch.extend(values);
+    }
+    config
+        .domains
+        .policy
+        .resolve_with_knobs(project, &config.knobs, &dispatch)
+}
+
 /// A failed writer disk precheck: either the volumes could not be observed, or
 /// the measured free space is below the floor. Only the latter is `DiskFloor`.
 #[derive(Debug)]
@@ -325,6 +347,7 @@ impl From<DiskCheck> for String {
 
 pub(super) fn check_writer_disk(
     settings: &provenant_config::GcSettings,
+    policy: &provenant_records::policy::Policy,
     state: &Path,
     worktree: &Path,
     project: &Path,
@@ -332,6 +355,7 @@ pub(super) fn check_writer_disk(
 ) -> Result<(), DiskCheck> {
     check_writer_disk_with_collection(
         settings,
+        policy,
         state,
         worktree,
         home,
@@ -399,17 +423,19 @@ pub(super) fn pressure_collection(state: &Path, home: &Path, project: &Path) -> 
 #[cfg(test)]
 pub(super) fn check_writer_disk_with(
     settings: &provenant_config::GcSettings,
+    policy: &provenant_records::policy::Policy,
     state: &Path,
     worktree: &Path,
     home: &Path,
     available: impl FnMut(&Path) -> Result<u64, String>,
 ) -> Result<(), DiskCheck> {
-    check_writer_disk_with_collection(settings, state, worktree, home, available, || 0)
+    check_writer_disk_with_collection(settings, policy, state, worktree, home, available, || 0)
 }
 
 #[allow(clippy::print_stderr)]
 pub(super) fn check_writer_disk_with_collection(
     settings: &provenant_config::GcSettings,
+    policy: &provenant_records::policy::Policy,
     state: &Path,
     worktree: &Path,
     home: &Path,
@@ -437,9 +463,14 @@ pub(super) fn check_writer_disk_with_collection(
                     (limiting, minimum) = (path, bytes);
                 }
             }
-            match limits.level(minimum) {
-                provenant_config::DiskLevel::Critical => {
-                    eprintln!("provenant: {}", limits.detail(minimum));
+            // Admission and new builds take this same declared decision.
+            match provenant_config::DiskGate::new(limits, policy).decide(minimum) {
+                provenant_records::policy::Effect::Proceed => {}
+                provenant_records::policy::Effect::Warn(message) => eprintln!(
+                    "provenant: warning: {message}; on {}; dispatching",
+                    limiting.display()
+                ),
+                provenant_records::policy::Effect::Refuse(_) => {
                     return Err(DiskCheck::Low {
                         path: limiting.to_path_buf(),
                         available: minimum,
@@ -448,11 +479,6 @@ pub(super) fn check_writer_disk_with_collection(
                         origin: limits.critical_free_source,
                     });
                 }
-                provenant_config::DiskLevel::Warning => eprintln!(
-                    "provenant: warning: {}; dispatching",
-                    limits.detail(minimum)
-                ),
-                provenant_config::DiskLevel::Ready => {}
             }
         }
         Ok(())
@@ -572,6 +598,12 @@ fn submit_with_launcher(
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     let config = crate::config_reads::read_for(edge.roots, "run")
         .map_err(|error| Fail::config(Status::Invalid, error))?;
+    let profile = match &submission.task.attempt.sealed_profile {
+        Some(profile) => profile.clone(),
+        None => config
+            .dispatch_profile(&submission.knobs)
+            .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?,
+    };
     // Nested proposals are checked by the host before provider preparation.
     // A confined parent cannot open a sibling worktree to sample its volume.
     if parent_attempt.is_none() {
@@ -581,6 +613,12 @@ fn submit_with_launcher(
                 let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
                 check_writer_disk(
                     &config.gc,
+                    &submission_policy(
+                        &config,
+                        &session.context.project_id.to_string(),
+                        &profile,
+                        &task.attempt.extra,
+                    ),
                     edge.roots.state.as_path(),
                     &writer.worktree,
                     &writer.project,
@@ -611,12 +649,6 @@ fn submit_with_launcher(
             }
         }
     }
-    let profile = match &submission.task.attempt.sealed_profile {
-        Some(profile) => profile.clone(),
-        None => config
-            .dispatch_profile(&submission.knobs)
-            .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?,
-    };
     let task = {
         let task = submission.task;
         {
@@ -662,18 +694,11 @@ fn submit_with_launcher(
                     task_profile.extra.insert(key.into(), value.clone());
                 }
             }
-            let mut dispatch_policy = provenant_config::policy::dispatch(&task_profile);
-            if let Some(value) = attempt.extra.get("policy_overrides")
-                && let Ok(values) = serde_json::from_value::<
-                    std::collections::BTreeMap<String, provenant_records::policy::Strength>,
-                >(value.clone())
-            {
-                dispatch_policy.extend(values);
-            }
-            let policy = config.domains.policy.resolve_with_knobs(
+            let policy = submission_policy(
+                &config,
                 &session.context.project_id.to_string(),
-                &config.knobs,
-                &dispatch_policy,
+                &task_profile,
+                &attempt.extra,
             );
             task_profile
                 .extra

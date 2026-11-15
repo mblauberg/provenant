@@ -216,6 +216,58 @@ fn terminal_checkpoint_with_superseded_header_is_retired() {
 }
 
 #[test]
+fn interrupted_terminal_collection_resumes_derived_cleanup() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let fixture: StoredCheckpoint = stored_fixture();
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    drop(journal);
+
+    let directory = base.join("fabric/graphs").join(project.to_string());
+    let prompt_blobs = || {
+        std::fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("graph-g-test.prompt-"))
+            })
+            .count()
+    };
+    assert!(prompt_blobs() > 0);
+    FileJournal::set_advance_error(&root, project, "g-test", Some("interrupted cleanup")).unwrap();
+    let pending = directory.join("pending");
+    std::fs::create_dir_all(&pending).unwrap();
+    std::fs::write(pending.join("g-test.pending"), b"1").unwrap();
+    std::fs::remove_file(directory.join("graph-g-test.json")).unwrap();
+
+    assert_eq!(
+        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        1
+    );
+    assert_eq!(prompt_blobs(), 0);
+    assert!(!directory.join("graph-g-test.advance-error").exists());
+    assert!(!pending.join("g-test.pending").exists());
+    assert!(directory.join("graph-g-test.reserved").exists());
+    assert_eq!(
+        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        0
+    );
+}
+
+#[test]
 fn interrupted_marker_and_sentinel_publications_converge() {
     use super::journal::{CRASH_POINT, CrashPoint};
     use std::panic::{AssertUnwindSafe, catch_unwind};

@@ -30,8 +30,8 @@ use provenant_records::landing::{
     Authority, LandMember, LandRequest, LandingId, LandingRecord, MemberOutcome, ReviewProof,
 };
 use provenant_records::landing::{
-    CandidateKind, CleanupDebt, CleanupDebtItem, Dependencies, LandingChanged, LandingContext,
-    MemberProgress, OutboxEntry, PublicationGuarantee, Submission,
+    CandidateKind, CleanupDebt, CleanupDebtItem, Dependencies, LandingContext, MemberProgress,
+    PublicationGuarantee, Submission,
 };
 
 /// The landing port every publisher uses.
@@ -77,9 +77,10 @@ fn record_path(state: &Path, id: &LandingId) -> PathBuf {
     request_dir(state, id.request).join(format!("{id}.json"))
 }
 
-fn decode_record(bytes: &[u8]) -> Result<LandingRecord, LandingError> {
-    let record: LandingRecord = serde_json::from_slice(bytes)
-        .map_err(|error| LandingError::Failed(format!("read landing record: {error}")))?;
+fn decode_record(reader: impl std::io::Read) -> Result<LandingRecord, LandingError> {
+    let record: LandingRecord =
+        provenant_records::decode(reader, provenant_records::Limits::default())
+            .map_err(|error| LandingError::Failed(format!("read landing record: {error}")))?;
     validate_request(&record.request)?;
     let saved_policy = LandPolicy::from_plan(&record.resolved_plan)
         .map_err(|error| LandingError::Failed(format!("invalid saved policy: {error}")))?;
@@ -131,21 +132,23 @@ fn decode_record(bytes: &[u8]) -> Result<LandingRecord, LandingError> {
 }
 
 pub fn read_record(state: &Path, id: &LandingId) -> Result<Option<LandingRecord>, LandingError> {
-    match std::fs::read(record_path(state, id)) {
-        Ok(bytes) => {
-            let record = decode_record(&bytes)?;
-            if &record.id != id {
-                return Err(LandingError::Failed(
-                    "landing record identity mismatch".into(),
-                ));
-            }
-            Ok(Some(record))
+    let path = record_path(state, id);
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(LandingError::Failed(format!(
+                "read landing record {id}: {error}"
+            )));
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(LandingError::Failed(format!(
-            "read landing record {id}: {error}"
-        ))),
+    };
+    let record = decode_record(file)?;
+    if &record.id != id {
+        return Err(LandingError::Failed(
+            "landing record identity mismatch".into(),
+        ));
     }
+    Ok(Some(record))
 }
 
 /// The records are the registry. Only generations of this pinned input are read;
@@ -173,9 +176,9 @@ fn latest_record(
         if path.extension().is_none_or(|extension| extension != "json") {
             continue;
         }
-        let bytes = std::fs::read(path)
+        let file = std::fs::File::open(path)
             .map_err(|error| LandingError::Failed(format!("read landing generation: {error}")))?;
-        let record = decode_record(&bytes)?;
+        let record = decode_record(file)?;
         if record.id.request != key {
             return Err(LandingError::Failed("landing request key mismatch".into()));
         }
@@ -600,6 +603,7 @@ fn validate_request(request: &LandRequest) -> Result<(), LandingError> {
 
 impl LandingOwner for Owner<'_> {
     fn submit(&mut self, mut request: LandRequest) -> Result<LandingId, LandingError> {
+        let publication_port = super::resolve_land_port(self.repo.project_path(), self.state)?;
         if request.members.is_empty() {
             return Err(LandingError::Failed("no pull requests selected".into()));
         }
@@ -618,9 +622,19 @@ impl LandingOwner for Owner<'_> {
         } else {
             latest_record(self.state, key, request.parent.as_ref())?
         };
+        let saved_port = previous
+            .as_ref()
+            .map(|record| {
+                LandPolicy::from_plan(&record.resolved_plan).map(|policy| policy.publication_port)
+            })
+            .transpose()
+            .map_err(|error| LandingError::Failed(format!("read saved landing port: {error}")))?;
         let changed_selection = previous
             .as_ref()
-            .is_some_and(|record| selection_changed(&request, record));
+            .is_some_and(|record| selection_changed(&request, record))
+            || saved_port
+                .as_ref()
+                .is_some_and(|saved| saved != &publication_port);
         let selected_parent = previous.as_ref().map(|record| record.id.clone());
         let (mut record, capability_warning, fresh) = if let Some(record) =
             previous.filter(|_| !changed_selection)
@@ -649,9 +663,10 @@ impl LandingOwner for Owner<'_> {
                     "a landing generation requires a parent".into(),
                 ));
             }
-            let effective_policy = self.policy.for_request(&request).map_err(|error| {
+            let mut effective_policy = self.policy.for_request(&request).map_err(|error| {
                 LandingError::Failed(format!("resolve request policy: {error}"))
             })?;
+            effective_policy.publication_port = publication_port.clone();
             let (mut capabilities, mut capability_warning) = match self.forge.capabilities(&target)
             {
                 Ok(capabilities) => (capabilities, None),
@@ -710,7 +725,6 @@ impl LandingOwner for Owner<'_> {
                 cleanup_debt: CleanupDebt::default(),
                 restack_mappings: Vec::new(),
                 subscribers: request.subscribers.clone(),
-                outbox: Vec::new(),
                 consumer_cursors: Vec::new(),
                 applied_observations: Default::default(),
                 passes: 0,
@@ -990,20 +1004,6 @@ impl LandingOwner for Owner<'_> {
                 .warnings
                 .push(format!("cleanup debt inventory unavailable: {error}")),
         }
-        let event = LandingChanged {
-            id: id.clone(),
-            generation: record.generation,
-            revision: record.revision,
-            operation: record.operation.clone(),
-            outcomes: record.outcomes.clone(),
-            evidence: record.evidence.clone(),
-            deduplication_key: format!("landing:{id}:{}:{}", record.generation, record.revision),
-        };
-        record.outbox.push(OutboxEntry {
-            event,
-            delivered_to: Default::default(),
-            attempts: 0,
-        });
         if !self.shadow {
             write_record(self.state, &record)?;
             if let Err(error) =
@@ -1232,13 +1232,82 @@ mod tests {
                 matches!(result, Err(LandingError::RunFailed { cause, .. }) if matches!(*cause, LandingError::Pending(_)))
             );
             assert!(world.forge.merges.is_empty() && world.repo.push_attempts.is_empty());
-            assert!(world.gate.polls.is_empty());
+            assert!(world.gate.observed.is_empty());
         }
         Ok(())
     }
 
     #[test]
-    fn stored_record_roundtrips_pinned_plan_and_event_delivery()
+    fn disabled_landing_port_refuses_before_forge_and_publication_effects()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = world(1)?;
+        std::fs::write(
+            world.state.path().join("ports.json"),
+            br#"{"schema_version":2,"land":{"source":"host","backend":{"kind":"none"}}}"#,
+        )?;
+        let result = {
+            let mut owner = Owner {
+                forge: &mut world.forge,
+                repo: &mut world.repo,
+                runner: &mut world.gate,
+                alarms: &mut world.alarms,
+                state: world.state.path(),
+                policy: &world.policy,
+                gate: &world.definition,
+                reviews: &world.reviews,
+                review_scope: world.review_scope.clone(),
+                shadow: false,
+                last: None,
+            };
+            owner.submit(LandRequest {
+                members: members(&[1]),
+                ..Default::default()
+            })
+        };
+        assert!(matches!(result, Err(LandingError::PortUnavailable { .. })));
+        assert!(world.forge.merges.is_empty());
+        assert!(world.forge.merge_attempts.is_empty());
+        assert!(world.repo.push_attempts.is_empty());
+        assert!(world.gate.observed.is_empty());
+        assert!(!world.state.path().join("landing").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn landing_record_decode_is_bounded_and_rejects_duplicates_and_removed_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = world(1)?;
+        let (_, record) = submit(
+            &mut world,
+            LandRequest {
+                members: members(&[1]),
+                ..Default::default()
+            },
+        )?;
+        let bytes = serde_json::to_vec(&record)?;
+
+        let oversized =
+            vec![b' '; usize::try_from(provenant_records::Limits::default().max_bytes + 1)?];
+        assert!(decode_record(oversized.as_slice()).is_err());
+
+        let duplicate = format!(
+            r#"{{"schema_version":2,{}"#,
+            std::str::from_utf8(&bytes[1..])?
+        );
+        assert!(decode_record(duplicate.as_bytes()).is_err());
+
+        let mut old_shape: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let object = old_shape
+            .as_object_mut()
+            .ok_or("landing record must be an object")?;
+        object.insert("outbox".into(), serde_json::json!([]));
+        let old_shape = serde_json::to_vec(&old_shape)?;
+        assert!(decode_record(old_shape.as_slice()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn stored_record_roundtrips_pinned_plan_and_subscriber_cursor()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_records::landing::{ConsumerCursor, Subscriber};
         let mut world = world(1)?;
@@ -1259,8 +1328,8 @@ mod tests {
             subscriber: subscriber.clone(),
             revision: record.revision,
         });
-        record.outbox[0].delivered_to.insert(subscriber);
-        let decoded: LandingRecord = serde_json::from_slice(&serde_json::to_vec(&record)?)?;
+        let bytes = serde_json::to_vec(&record)?;
+        let decoded = decode_record(bytes.as_slice())?;
         assert_eq!(decoded, record);
         assert!(
             record
@@ -1590,7 +1659,6 @@ mod tests {
             )?;
             record.revision = 0;
             record.passes = 0;
-            record.outbox.clear();
             Ok(record)
         };
         // Both proposals observe the same parent before either mutation commits.

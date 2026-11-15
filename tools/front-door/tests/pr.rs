@@ -12,6 +12,7 @@ const OTHER: &str = "2222222222222222222222222222222222222222";
 
 fn rig() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
+    support::configure_fake_forge_ports(&rig.state, &rig.project, &std::env::current_exe()?)?;
     let bin = rig.root.join("bin");
     fs::create_dir(&bin)?;
     let gh = bin.join("gh");
@@ -836,6 +837,15 @@ fn fake_gh(args: &[String]) -> Result<u8> {
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--forge-port") {
+        return match support::fake_forge_port(&args) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                let _ = writeln!(io::stderr(), "fake forge port: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let result = if args
         .first()
         .is_some_and(|arg| matches!(arg.as_str(), "pr" | "api"))

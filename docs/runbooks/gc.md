@@ -23,14 +23,24 @@ provenant --project /absolute/path/to/repo gc --apply --json
 
 ## What is removed and when
 
-GC dispatches from `RETENTION_CLASSES`. Caches and build profiles are considered
-before worktrees. Preview and apply use allocated tree bytes without following
-links; APFS clones may share physical blocks, so the change in volume free space
-can differ. Partial observations and failed paths remain visible in JSON and text.
+GC executes the typed adapters in `RETENTION_CLASSES` for its trigger; full GC
+includes ordinary GC classes. Pressure collection runs only adapters that declare
+the pressure trigger, preserving its project-scoped scratch/payload pass without
+ageing provider state or collecting checkpoints. Tick enters the same path.
+Provider state, scratch and payload-cap policies run as separate scheduled
+adapters. The declaration
+also owns settings and subsystem ownership; adding a class requires collection
+and measurement implementations. Preview and apply measure allocated tree bytes
+without following links; APFS clones may share physical blocks, so the change in
+volume free space can differ. Partial observations and failed paths remain
+visible in JSON and text. Byte rows come from each adapter; unavailable
+observations remain explicit rather than appearing as zero. Checkpoint bytes are the allocated journal tree before the
+pass; the other existing removal adapters report reclaimed or reclaimable bytes.
 
-`gc.free_floor` is an advisory collection target. New builds warn below it and
-stop only below `gc.critical_free` (2 GiB by default); diagnostics show the effective
-threshold and source. Settlement releases private Cargo output and attempt scratch
+`gc.free_floor` is an advisory collection target. Below it, and below
+`gc.critical_free` (2 GiB by default), dispatch, admission and new builds warn
+and continue; diagnostics show the effective thresholds and sources. A host that
+wants a hard floor sets the `policy.DISK_FLOOR` knob to `refuse`. Settlement releases private Cargo output and attempt scratch
 without waiting for worktree removal. Registry and Git downloads live in the host CARGO_HOME and are owned by Cargo,
 not lane retention. Lanes fetch into those stores by default; with
 `domains.fabric.lanes.cargo_source_writes = false` they are read-only and a missing
@@ -67,6 +77,20 @@ Record a ref's reported head before recreating it. Configure regenerable and kee
 paths before collecting output; undeclared ignored files such as local databases
 prevent removal. See [worktrees](../worktrees.md) and
 [lane recovery](lane-lifecycle.md#recovery) for uncertain custody.
+
+Port command receipts live under `port-receipts/<owner>/` as versioned records.
+Admission receipts stay until the attempt is terminal and its release is proven.
+Naming and post-create receipts declare a 30-day default age in the record.
+Release proof is removed after its sibling receipts so an interrupted pass can
+resume. Receipt byte observations count record lengths; their reclaimed bytes
+are reported separately. A receipt whose publication is visible but whose directory sync is unconfirmed is reported as
+visible evidence with a durability warning. Unknown or unreadable records are
+reported and retained.
+
+Graph checkpoint GC also resumes interrupted collection: under the existing
+graph lock, a reserved name with no checkpoint permits removal of remaining
+prompt blobs, sidecars and pending markers. The name reservation remains so a
+collected identity is never reused. A busy graph is skipped for a later pass.
 
 On macOS the tick agent schedules collection; other installs schedule
 `provenant tick` themselves. Inspect the tick logs when a sweep fails.

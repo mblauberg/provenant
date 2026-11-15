@@ -1466,11 +1466,7 @@ impl BinaryRunOwner<'_> {
                 if !self.allow_remote && !remote_batches.is_empty() {
                     return Err(FacadeError::ConfinementRefused { resource: None });
                 }
-                let wait_config =
-                    provenant_cli::config_reads::read_for(&self.factory.context.roots, "wait")
-                        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-                let interval =
-                    std::time::Duration::from_millis(wait_config.domains.wait.local_interval_ms);
+                let cadence = crate::status_wait::local_cadence(&self.factory.context.roots)?;
                 let local_session = if local_indices.is_empty() {
                     None
                 } else {
@@ -1484,7 +1480,7 @@ impl BinaryRunOwner<'_> {
                     .map(|session| session.store.observation_paths())
                     .unwrap_or_default();
                 let mut observation =
-                    crate::status_wait::LocalObservation::subscribe(&event_paths, interval);
+                    crate::status_wait::LocalObservation::subscribe(&event_paths, cadence);
                 let remote_pending = !remote_batches.is_empty();
                 let observation_extra = |observation: &crate::status_wait::LocalObservation| {
                     let mut extra = provenant_records::ExtraFields::default();
@@ -1515,7 +1511,7 @@ impl BinaryRunOwner<'_> {
                         .collect();
                 let mut read_local = !local_indices.is_empty();
                 let mut read_remote = !remote_batches.is_empty();
-                let interval_micros = interval.as_micros() as u64;
+                let interval_micros = observation.interval().as_micros() as u64;
                 let mut next_remote_poll = self
                     .factory
                     .clock

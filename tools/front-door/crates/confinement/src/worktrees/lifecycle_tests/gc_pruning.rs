@@ -1,6 +1,148 @@
 use super::*;
 
 #[test]
+fn interrupted_linked_retirement_replays_its_reference_step() -> Result<(), Box<dyn Error>> {
+    use provenant_records::custody::{
+        RemovalEvidence, RetirementDecision, RetirementIntent, RetirementStep,
+        RetirementStepState,
+    };
+
+    struct UnavailableForge<'a>(&'a HostRetirementFixture);
+    impl RetirementFeeds for UnavailableForge<'_> {
+        fn authority(&self) -> Result<provenant_core::ActorId, String> {
+            self.0.authority()
+        }
+
+        fn custody(&self, lane: &WorktreeInfo) -> Result<(), String> {
+            self.0.custody(lane)
+        }
+
+        fn forge(&self, _branch: &GitRefName) -> ForgeObservation {
+            ForgeObservation::Unknown("fixture forge unavailable".into())
+        }
+
+        fn fresh_forge(&self, branch: &GitRefName) -> ForgeObservation {
+            self.forge(branch)
+        }
+
+        fn integration_bases(&self) -> Vec<(String, GitOid)> {
+            self.0.integration_bases()
+        }
+
+        fn remote_guard(
+            &self,
+            context: &WorktreeContext<'_>,
+            branch: &str,
+            tip: GitOid,
+            min_days: u64,
+        ) -> Result<(), String> {
+            self.0.remote_guard(context, branch, tip, min_days)
+        }
+    }
+
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let lane = gc_owned_lane(&test, &context, "d12-replay")?;
+    let custody = HostRetirementFixture::new(&test)?;
+    custody.seed_lane(&context, &lane)?;
+    let owner = lane
+        .owner
+        .as_ref()
+        .map_err(|error| io::Error::other(error.to_string()))?
+        .as_ref()
+        .ok_or("fixture lane has no owner")?;
+    let reference = owner.reference.clone().ok_or("fixture lane has no ref owner")?;
+    let reference_name = GitRefName::new(&reference.reference)?;
+    let worktree = acquire_worktree_subject_at(&context, &lane.path)?;
+    let evidence = gc_landing_evidence(&fixture, lane.head)?;
+    let decision = RetirementDecision::Discard {
+        authority: custody.actor,
+        evidence: RemovalEvidence::Landing { evidence },
+    };
+    let record = custody
+        .begin_retirement(RetirementIntent {
+            project: test.binding.project_id(),
+            related_subjects: vec![worktree.clone()],
+            reference,
+            expected_tip: lane.head,
+            decision: decision.clone(),
+        })?
+        .ok_or("fixture retirement has no durable owner")?;
+    let retirement_id = record.id.clone();
+
+    let path = lane.path.to_str().ok_or("fixture worktree path is not UTF-8")?;
+    let removed = fixture.run(&["worktree", "remove", "--", path])?;
+    assert_eq!(removed.termination, Termination::Exit(0));
+    custody.advance_retirement(
+        &record,
+        RetirementStep::Worktree {
+            subject: worktree,
+        },
+        RetirementStepState::Completed {
+            evidence: decision.evidence().clone(),
+        },
+    )?;
+    assert_eq!(ref_tip(&context, &reference_name, &cancel())?, Some(lane.head));
+
+    let unavailable = UnavailableForge(&custody);
+    let pending = resume_pending_retirements(&context, &custody, &unavailable, &cancel())?;
+    assert!(pending.iter().any(|record| {
+        record.outcomes.iter().any(|outcome| {
+            outcome.step == RetirementStep::Reference
+                && !matches!(&outcome.state, RetirementStepState::Completed { .. })
+        })
+    }));
+    assert_eq!(ref_tip(&context, &reference_name, &cancel())?, Some(lane.head));
+
+    let resumed = resume_pending_retirements(&context, &custody, &custody, &cancel())?;
+    let completed = resumed
+        .iter()
+        .find(|record| record.id == retirement_id)
+        .ok_or("pending retirement was not returned")?;
+    assert!(completed.outcomes.iter().all(|outcome| matches!(
+        &outcome.state,
+        RetirementStepState::Completed { .. }
+    )));
+    assert_eq!(ref_tip(&context, &reference_name, &cancel())?, None);
+
+    fixture.run(&["branch", "d12-explicit-ref"])?;
+    let explicit_name = GitRefName::branch("d12-explicit-ref")?;
+    let explicit_owner = RefLedger::for_context(&context)?.observe_local_branch(
+        &explicit_name,
+        lane.head,
+        &test.clock,
+        &cancel(),
+    )?;
+    let explicit_decision = RetirementDecision::Discard {
+        authority: custody.actor,
+        evidence: RemovalEvidence::ExplicitDiscard { archive: None },
+    };
+    let explicit = custody
+        .begin_retirement(RetirementIntent {
+            project: test.binding.project_id(),
+            related_subjects: Vec::new(),
+            reference: explicit_owner.ownership(),
+            expected_tip: lane.head,
+            decision: explicit_decision,
+        })?
+        .ok_or("explicit ref retirement has no durable owner")?;
+    let explicit_id = explicit.id;
+    let explicit_resumed =
+        resume_pending_retirements(&context, &custody, &custody, &cancel())?;
+    let explicit_completed = explicit_resumed
+        .iter()
+        .find(|record| record.id == explicit_id)
+        .ok_or("explicit ref retirement was not returned")?;
+    assert!(explicit_completed.outcomes.iter().all(|outcome| matches!(
+        &outcome.state,
+        RetirementStepState::Completed { .. }
+    )));
+    assert_eq!(ref_tip(&context, &explicit_name, &cancel())?, None);
+    Ok(())
+}
+
+#[test]
 fn removal_preparation_allows_shared_launch_lock() -> Result<(), Box<dyn Error>> {
     struct PreparationProbe<'a> {
         inner: &'a dyn Executor,
@@ -481,12 +623,8 @@ fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Bo
             let session = CensusSession::new(&counting, &test_context.clock);
             context.workers = &session;
             let report = run(&context)?;
-            let subject = provenant_records::custody::Subject::new(
-                provenant_records::custody::SubjectKind::Worktree,
-                lane.path.to_string_lossy(),
-            );
             assert!(report.removals.iter().any(|removal| {
-                removal.subject == subject
+                worktree_subject_matches_path(&removal.subject, &lane.path)
                     && matches!(
                         &removal.outcome,
                         provenant_records::custody::RemovalOutcome::Removed { .. }
@@ -690,21 +828,15 @@ fn gc_settlement_error_retains_ref_and_continues() -> Result<(), Box<dyn Error>>
         },
         &cancel(),
     )?;
-    let worktree_subject = |lane: &WorktreeInfo| {
-        provenant_records::custody::Subject::new(
-            provenant_records::custody::SubjectKind::Worktree,
-            lane.path.to_string_lossy(),
-        )
-    };
     assert!(report.removals.iter().any(|removal| {
-        removal.subject == worktree_subject(&first)
+        worktree_subject_matches_path(&removal.subject, &first.path)
             && matches!(
                 &removal.outcome,
                 provenant_records::custody::RemovalOutcome::Removed { .. }
             )
     }));
     assert!(report.removals.iter().any(|removal| {
-        removal.subject == worktree_subject(&second)
+        worktree_subject_matches_path(&removal.subject, &second.path)
             && matches!(
                 &removal.outcome,
                 provenant_records::custody::RemovalOutcome::Removed { .. }

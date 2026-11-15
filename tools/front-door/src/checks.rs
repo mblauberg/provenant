@@ -4,9 +4,7 @@ use provenant_cli::{
     Check, Globals,
     check::{CheckError, CheckPage, GitContext},
 };
-use provenant_config::{
-    PortBackend, PortCommandDisposition, PortSource, PortTable, Release, Targets,
-};
+use provenant_config::{PortCommandDisposition, PortSource, PortTable, Release, Targets};
 use provenant_core::CancelToken;
 use provenant_os::exec::SystemExecutor;
 use provenant_os::fs;
@@ -52,6 +50,8 @@ enum ReleasePortFailure {
     InvalidOutput,
     #[error("cannot record release command evidence")]
     Evidence,
+    #[error("release command evidence is visible but durability is unconfirmed: {0}")]
+    EvidenceVisible(String),
     #[error("cannot start release command executor")]
     Executor,
 }
@@ -324,21 +324,26 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     selector,
                 );
                 let ports = PortTable::read_for(Some(&project), roots.state.as_path())?;
-                match ports.release.backend {
-                    PortBackend::Builtin => Ok(provenant_cli::check::release_page(
-                        git, range, selector, &page,
-                    )?),
-                    PortBackend::Command { command } => command_release_page(
-                        &project,
-                        roots.state.as_path(),
-                        command,
-                        ports.release.source,
-                        range,
-                        selector,
-                        &page,
-                    ),
-                    PortBackend::None => Err(ReleasePortFailure::Disabled.into()),
-                }
+                provenant_config::dispatch_port_backend(
+                    &ports.release.backend,
+                    || {
+                        Ok(provenant_cli::check::release_page(
+                            git, range, &selector, &page,
+                        )?)
+                    },
+                    |command| {
+                        command_release_page(
+                            &project,
+                            roots.state.as_path(),
+                            command.clone(),
+                            ports.release.source,
+                            range,
+                            &selector,
+                            &page,
+                        )
+                    },
+                    || Err(ReleasePortFailure::Disabled.into()),
+                )
             })
         }
     }?;
@@ -402,8 +407,23 @@ fn command_release_page(
         "{}:{range_key}",
         CanonicalV1::file_digest(project.as_os_str().as_encoded_bytes())
     );
-    provenant_config::record_port_command(state, "release", source, "check", &key, &execution)
-        .map_err(|_| ReleasePortFailure::Evidence)?;
+    match provenant_config::record_port_command(
+        state,
+        "release",
+        source,
+        "check",
+        &key,
+        &execution,
+        provenant_config::PortReceiptLifetime::AgeDays {
+            days: provenant_config::DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS,
+        },
+    ) {
+        Ok(provenant_config::PortCommandPublication::Durable) => {}
+        Ok(provenant_config::PortCommandPublication::VisibleDurabilityUnconfirmed { cause }) => {
+            return Err(ReleasePortFailure::EvidenceVisible(cause).into());
+        }
+        Err(_) => return Err(ReleasePortFailure::Evidence.into()),
+    }
     let output: ReleaseCommandOutput = output?;
     let normalized =
         serde_json::to_vec(&output.findings).map_err(|_| ReleasePortFailure::InvalidOutput)?;

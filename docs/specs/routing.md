@@ -71,11 +71,19 @@ Account load and outcome priors rank eligible members. Priors use attributed,
 comparable quality outcomes, with exploration among eligible members;
 host failures are not quality observations, while a validated successful
 completed-before-budget result remains one. Missing outcome evidence stays
-neutral. Account ranking scales reset-adjusted usable headroom by sourced
+neutral. The producer and resolver share one prior-role derivation: an explicit
+role wins, otherwise review workload uses `review`, work with writes uses
+`writer`, and other work uses `task`. Attempts retain typed workload and write
+facts so role-less work contributes comparable priors.
+
+Selection rules, exclusion sources, exploration and weights are typed receipt
+fields. Candidate ranking and route diagnostics have typed owners; unknown
+forward fields alone use `ExtraFields`. Malformed known fields fail decoding.
+Account ranking scales reset-adjusted usable headroom by sourced
 penalties and divides by one plus live lanes.
 
 - Why: capability is a preference, while attributed comparable outcomes supply the evidence that adjusts declared route weights.
-- Test: `crates/routing/src/tests/quality.rs::outcome_priors_and_exploration_rank_eligible_members`; `crates/routing/src/tests/quality.rs::account_ranking_uses_reset_adjusted_headroom_and_live_load_independent_of_order`; `crates/telemetry/src/tests.rs::route_priors_count_only_attributed_comparable_quality_outcomes`
+- Test: `crates/routing/src/tests/quality.rs::outcome_priors_and_exploration_rank_eligible_members`; `crates/routing/src/tests/quality.rs::account_ranking_uses_reset_adjusted_headroom_and_live_load_independent_of_order`; `crates/telemetry/src/tests.rs::route_priors_count_only_attributed_comparable_quality_outcomes`; `crates/telemetry/src/tests.rs::prior_key_table_is_shared_by_outcome_producer_and_route_consumer`; `crates/records/tests/forward_compatibility.rs::typed_route_selection_roundtrips_and_rejects_malformed_fields`
 
 ## Capacity is not quota
 

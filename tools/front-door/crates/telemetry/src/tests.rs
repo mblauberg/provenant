@@ -38,6 +38,7 @@ fn prices(rate: Option<u64>) -> PriceTable {
 }
 fn fact(number: u64, input: Option<u64>) -> AttemptFact {
     AttemptFact {
+        routing_context: Some(Default::default()),
         context: None,
         attempt_id: AttemptId::from_bytes(u128::from(number).to_be_bytes()),
         key: provenant_records::WorkKey::new(
@@ -1441,43 +1442,42 @@ fn route_outcomes_zero_success_and_unknown_time_remain_unknown() {
 
 #[test]
 fn pool_preferences_and_fallbacks_are_not_hash_comparisons() {
+    use provenant_records::route_selection::{ExclusionRule, ExclusionSource, SelectionRule};
     let mut receipt: provenant_records::RouteSelectionReceipt = serde_json::from_value(json!({
-        "pool": "senior", "candidates": [], "roll": 1, "total_weight": 100,
-        "pick": "p/m", "selection_rule": "weighted_draw"
+        "pool":"senior", "candidates":[], "roll":1, "total_weight":100, "pick":"p/m",
+        "selection_rule":"weighted_draw", "considered_exclusions":[], "weight_source":"catalogue",
+        "exploration":{"selected":false,"percent":10,"enabled":true,"source":"fixture"}
     }))
     .unwrap();
-    assert!(crate::route_outcomes::hash_assigned(&receipt));
-    for rule in [
-        "model_choice_override",
-        "first_zero_weight_ready",
-        "first_standby_ready",
-        "first_unavailable",
+    for (rule, assigned) in [
+        (SelectionRule::WeightedDraw, true),
+        (SelectionRule::ExplorationDraw, true),
+        (SelectionRule::ModelChoiceOverride, false),
+        (SelectionRule::FirstZeroWeightReady, false),
+        (SelectionRule::FirstStandbyReady, false),
+        (SelectionRule::FirstRecoverableUnavailable, false),
+        (SelectionRule::FirstUnavailable, false),
     ] {
-        receipt.extra.insert("selection_rule".into(), json!(rule));
-        assert!(!crate::route_outcomes::hash_assigned(&receipt));
+        receipt.selection_rule = rule;
+        assert_eq!(crate::route_outcomes::hash_assigned(&receipt), assigned);
     }
-    receipt
-        .extra
-        .insert("selection_rule".into(), json!("weighted_draw"));
+    receipt.selection_rule = SelectionRule::WeightedDraw;
     receipt.total_weight = 0;
     assert!(!crate::route_outcomes::hash_assigned(&receipt));
     receipt.total_weight = 100;
-    // A standing configuration exclusion shapes every draw alike; a graph
-    // restart's exclusion of its predecessor's model makes the draw conditional.
-    receipt.extra.insert(
-        "considered_exclusions".into(),
-        json!(["source=config selector=model p/old"]),
-    );
-    assert!(crate::route_outcomes::hash_assigned(&receipt));
-    receipt.extra.insert(
-        "considered_exclusions".into(),
-        json!([
-            "source=config selector=model p/old",
-            "source=graph selector=model p/n"
-        ]),
-    );
-    assert!(!crate::route_outcomes::hash_assigned(&receipt));
-    receipt.extra.remove("considered_exclusions");
+    for (source, assigned) in [
+        (ExclusionSource::Config, true),
+        (ExclusionSource::Graph, false),
+        (ExclusionSource::Flag, false),
+    ] {
+        receipt.considered_exclusions = vec![ExclusionRule {
+            extra: Default::default(),
+            source,
+            selector: "model p/old".into(),
+        }];
+        assert_eq!(crate::route_outcomes::hash_assigned(&receipt), assigned);
+    }
+    receipt.considered_exclusions.clear();
     receipt.redraws.push(
         serde_json::from_value(
             json!({"rejected_pick":"p/n", "roll":0, "total_weight":100, "reason":"refused"}),
@@ -1724,8 +1724,46 @@ fn route_priors_count_only_attributed_comparable_quality_outcomes() {
         ),
     ])
     .unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!((rows[0].successes, rows[0].failures), (3, 2));
-    assert_eq!(rows[0].role, "review");
-    assert!(!rows[0].source.is_empty());
+    let review = rows.iter().find(|prior| prior.role == "review").unwrap();
+    assert_eq!((review.successes, review.failures), (3, 2));
+    assert!(!review.source.is_empty());
+    let task = rows.iter().find(|prior| prior.role == "task").unwrap();
+    assert_eq!((task.successes, task.failures), (1, 0));
+}
+
+#[test]
+fn prior_key_table_is_shared_by_outcome_producer_and_route_consumer() {
+    use provenant_routing::{PriorKey, Workload};
+    for (workload, writes, explicit_role, expected) in [
+        (Workload::General, true, None, "writer"),
+        (Workload::General, false, None, "task"),
+        (Workload::ReadHeavy, false, None, "task"),
+        (Workload::EditHeavy, true, None, "writer"),
+        (Workload::Review, false, None, "review"),
+        (Workload::Review, true, None, "review"),
+        (Workload::Review, true, Some("audit"), "audit"),
+    ] {
+        let key = PriorKey::for_attempt(workload, writes, explicit_role);
+        assert_eq!(key.as_str(), expected);
+        let mut fact = fact(1, None);
+        fact.routing_context = Some(provenant_records::route_selection::RouteAttemptContext {
+            extra: Default::default(),
+            workload,
+            writes,
+        });
+        fact.tier = Some("senior".into());
+        fact.context = explicit_role.map(|role| provenant_records::run::WorkContext {
+            role: Some(role.into()),
+            ..Default::default()
+        });
+        let priors = crate::route_outcomes::priors([crate::route_outcomes::Evidence {
+            fact,
+            access: Some("stored_launch".into()),
+            pool: Some("senior".into()),
+            partial: false,
+        }])
+        .unwrap();
+        let prior = priors.first().expect("role-less work contributes a prior");
+        assert_eq!(prior.role, key.as_str());
+    }
 }

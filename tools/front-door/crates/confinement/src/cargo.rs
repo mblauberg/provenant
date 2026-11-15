@@ -133,11 +133,11 @@ impl CargoHome {
                     .to_string(),
             ),
             (
-                "PROVENANT_CARGO_SOURCE_WRITES",
+                provenant_core::consumer_env::CARGO_SOURCE_WRITES,
                 self.source_writes.to_string(),
             ),
             (
-                "PROVENANT_CARGO_SOURCE_WRITES_SOURCE",
+                provenant_core::consumer_env::CARGO_SOURCE_WRITES_SOURCE,
                 self.source_writes_source.to_owned(),
             ),
         ];

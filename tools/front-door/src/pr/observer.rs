@@ -13,7 +13,9 @@
 //!
 //! A commit is any head: a pull request head, a `land/**` candidate or a
 //! landed commit.
-use super::gh::{Forge, Gh, Response, rate_limit_reset};
+use super::gh::{Response, rate_limit_reset};
+use provenant_config::ports::Request;
+use provenant_config::{Forge, ForgePort};
 mod port;
 use provenant_os::fs::{Directory, LockMode, PublishMode};
 use serde::{Deserialize, Serialize};
@@ -30,6 +32,8 @@ pub(crate) const POLL: Duration = Duration::from_secs(5);
 const PAGE: usize = 100;
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_LAST: Duration = Duration::from_secs(15);
+/// The longest a retry pause runs before it looks at cancellation again.
+const PAUSE_SLICE: Duration = Duration::from_millis(50);
 const RATE_FILE: &str = "rate-limit.json";
 const RATE_LOCK: &str = "rate-limit.lock";
 const CACHE_LIMIT: u64 = 16 * 1024 * 1024;
@@ -59,6 +63,7 @@ pub(crate) struct Check {
 pub(crate) enum ObserveError {
     #[error("GitHub rate limit; reset {reset}")]
     RateLimited { reset: jiff::Timestamp },
+    /// The request's deadline passed or its caller cancelled it.
     #[error("CI wait expired")]
     Expired,
     #[error("{0}")]
@@ -82,33 +87,18 @@ impl Clock for WallClock {
     }
 }
 
-/// `gh api` in the project checkout, each request bounded by the read budget.
-pub(crate) struct GhTransport {
-    project: PathBuf,
-    left: Duration,
-}
-impl Forge for GhTransport {
-    fn bound(&mut self, left: Duration) {
-        self.left = left;
-    }
-    #[allow(clippy::disallowed_methods, reason = "forge transport timing boundary")]
-    fn get(&mut self, path: &str, etag: Option<&str>) -> std::io::Result<Response> {
-        let left = self
-            .left
-            .clamp(Duration::from_secs(1), Duration::from_secs(60));
-        Gh::in_checkout(self.project.clone(), left).get(path, etag)
-    }
-}
-
 /// Resolve the selected repository through the selected observation transport context.
 #[allow(clippy::disallowed_methods, reason = "forge transport timing boundary")]
 pub(crate) fn repository_for_project(
     state: &Path,
     project: &Path,
-    budget: Duration,
+    request: &Request,
 ) -> Result<String, ObserveError> {
-    let mut forge = port::select_transport(state, project, budget)?;
-    let response = forge.get(REPOSITORY_CONTEXT_PATH, None).map_err(|error| {
+    if request.remaining().is_zero() {
+        return Err(ObserveError::Expired);
+    }
+    let mut forge = port::select_transport(state, project, request)?;
+    let response = port::get(&mut forge, REPOSITORY_CONTEXT_PATH, None).map_err(|error| {
         ObserveError::Unavailable(format!("cannot identify repository: {error}"))
     })?;
     if let Some(reset) = rate_limit_reset(&response, jiff::Timestamp::now().as_second()) {
@@ -167,13 +157,6 @@ struct Cadence {
     near_end: Duration,
     conditional_requests: bool,
 }
-
-#[derive(Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct WaitDomain {
-    wait: provenant_cli::wait::Settings,
-}
-static WAIT_SECTIONS: [provenant_config::DomainSection; 1] = [provenant_cli::wait::SECTION];
 
 fn adaptive_freshness(
     cached: &Cached,
@@ -359,24 +342,21 @@ pub(crate) struct Observer<F, C> {
     next_poll_interval: Duration,
 }
 
-impl Observer<port::SelectedTransport, WallClock> {
+impl Observer<ForgePort, WallClock> {
     /// Select the configured CI transport once, then share the observer cache.
     pub(crate) fn open(
         state: &Path,
         project: &Path,
         repository: &str,
-        budget: Duration,
+        request: &Request,
     ) -> Result<Self, ObserveError> {
-        let transport = port::select_transport(state, project, budget)?;
+        let transport = port::select_transport(state, project, request)?;
         let roots = settings_roots(state, project).map_err(|error| {
             ObserveError::Unavailable(format!("cannot read CI cadence configuration: {error}"))
         })?;
-        let sections = provenant_config::DomainSections::<WaitDomain>::new(&WAIT_SECTIONS);
-        let settings = provenant_config::read_with_domains(&roots, &sections)
-            .map(|config| config.domains.wait)
-            .map_err(|error| {
-                ObserveError::Unavailable(format!("cannot read CI cadence configuration: {error}"))
-            })?;
+        let (settings, _) = provenant_cli::wait::Settings::resolve(&roots).map_err(|error| {
+            ObserveError::Unavailable(format!("cannot read CI cadence configuration: {error}"))
+        })?;
         Self::with_settings(state, repository, transport, WallClock, settings)
     }
 }
@@ -474,7 +454,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         &mut self,
         relative_path: &str,
         max_age: Duration,
-        budget: Duration,
+        request: &Request,
     ) -> Result<Value, ObserveError> {
         if !valid_resource_path(relative_path) {
             return Err(ObserveError::Unavailable(
@@ -503,10 +483,10 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                 reset: timestamp(reset),
             });
         }
-        if budget.is_zero() {
+        if request.remaining().is_zero() {
             return Err(ObserveError::Expired);
         }
-        self.forge.bound(budget);
+        self.forge.bind(request);
         let previous = cached.map(|entry| entry.page);
         let fetched =
             self.page(&path, previous.as_ref(), identity)
@@ -543,12 +523,13 @@ impl<F: Forge, C: Clock> Observer<F, C> {
 
     /// Every check reported for `commit`. A zero `max_age` forces a fresh read;
     /// any nonzero value enables the configured adaptive cadence. Transient
-    /// failures are retried within `budget`; a rate limit returns at once.
+    /// failures are retried within `request`'s remaining time, and every page
+    /// read shares its deadline and cancellation; a rate limit returns at once.
     pub(crate) fn checks(
         &mut self,
         commit: &str,
         max_age: Duration,
-        budget: Duration,
+        request: &Request,
     ) -> Result<Vec<Check>, ObserveError> {
         if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(ObserveError::Unavailable(format!(
@@ -558,11 +539,16 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         let start = self.clock.now();
         let deadline = start
             .checked_add(
-                jiff::SignedDuration::try_from(budget).unwrap_or(jiff::SignedDuration::MAX),
+                jiff::SignedDuration::try_from(request.remaining())
+                    .unwrap_or(jiff::SignedDuration::MAX),
             )
             .unwrap_or(jiff::Timestamp::MAX);
+        self.forge.bind(request);
         let mut retries = 0_u32;
         loop {
+            if request.is_cancelled() {
+                return Err(ObserveError::Expired);
+            }
             let now = self.clock.now();
             // A recorded limit skips this read; the caller's next poll retries.
             if let Some(reset) = self.rate_limited(now) {
@@ -574,7 +560,6 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             if left.is_zero() {
                 return Err(ObserveError::Expired);
             }
-            self.forge.bound(left);
             // The per-commit lock only shares one read between waiters. A busy
             // lock is skipped: this waiter reads unlocked rather than queue.
             let lock = format!("{commit}.lock");
@@ -658,7 +643,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                         if left <= delay {
                             return Err(ObserveError::Unavailable(message));
                         }
-                        self.clock.sleep(delay);
+                        self.pause(delay, request);
                         retries = retries.saturating_add(1);
                         continue;
                     }
@@ -677,6 +662,17 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                     "CI evidence is incomplete or belongs to another head".into(),
                 )
             });
+        }
+    }
+
+    /// Pause between retries on the observer's clock, ending early when the
+    /// request is cancelled.
+    fn pause(&self, delay: Duration, request: &Request) {
+        let mut left = delay;
+        while !left.is_zero() && !request.is_cancelled() {
+            let slice = left.min(PAUSE_SLICE);
+            self.clock.sleep(slice);
+            left = left.saturating_sub(slice);
         }
     }
 
@@ -765,7 +761,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         prune: fn(Value) -> Value,
     ) -> Result<Page, Fetch> {
         let etag = request_etag(self.cadence, previous);
-        let response = self.forge.get(path, etag).map_err(|error| {
+        let response = port::get(&mut self.forge, path, etag).map_err(|error| {
             let message = format!("cannot read CI: {error}");
             if matches!(
                 error.kind(),
@@ -1093,63 +1089,93 @@ mod tests {
             Observer::with(state, "Owner/Repo", self.clone(), self.clone()).expect("observer")
         }
     }
+    fn forge_response(response: Response) -> provenant_config::ForgeResponse {
+        provenant_config::ForgeResponse {
+            status: Some(response.status),
+            headers: provenant_config::HeadersObservation::Present {
+                status: response.status,
+                values: response.headers,
+            },
+            body: response.body,
+            execution: provenant_config::PortExecution {
+                disposition: provenant_config::PortCommandDisposition::Succeeded,
+                outcome: None,
+            },
+        }
+    }
+
     impl Forge for Shared {
-        fn get(&mut self, path: &str, etag: Option<&str>) -> io::Result<Response> {
-            self.pass();
-            let delay = self.with(|world| {
-                world.requests.push((path.into(), etag.map(str::to_owned)));
-                world.delay
-            });
-            self.sleep(delay);
-            self.with(|world| {
-                let mut headers = BTreeMap::new();
-                let now = world.now_ms / 1000;
-                if std::mem::take(&mut world.past_limit) {
-                    headers.insert("retry-after".into(), "0".into());
-                    return Ok(Response {
-                        status: 429,
+        fn request(
+            &mut self,
+            operation: provenant_config::ForgeOperation,
+            _budget: Duration,
+        ) -> Result<provenant_config::ForgeResponse, provenant_config::PortError> {
+            let provenant_config::ForgeOperation::Api { path, etag, .. } = operation else {
+                return Err(provenant_config::PortError::Response(
+                    "expected API request",
+                ));
+            };
+            let path = path.as_str();
+            let etag = etag.as_deref();
+            let response = (|| -> io::Result<Response> {
+                self.pass();
+                let delay = self.with(|world| {
+                    world.requests.push((path.into(), etag.map(str::to_owned)));
+                    world.delay
+                });
+                self.sleep(delay);
+                self.with(|world| {
+                    let mut headers = BTreeMap::new();
+                    let now = world.now_ms / 1000;
+                    if std::mem::take(&mut world.past_limit) {
+                        headers.insert("retry-after".into(), "0".into());
+                        return Ok(Response {
+                            status: 429,
+                            headers,
+                            body: Vec::new(),
+                        });
+                    }
+                    if let Some(until) = world.limited_until.filter(|until| *until > now) {
+                        headers.insert("x-ratelimit-remaining".into(), "0".into());
+                        headers.insert("x-ratelimit-reset".into(), until.to_string());
+                        return Ok(Response {
+                            status: 403,
+                            headers,
+                            body: br#"{"message":"API rate limit exceeded"}"#.to_vec(),
+                        });
+                    }
+                    let commit = path
+                        .split("/commits/")
+                        .nth(1)
+                        .and_then(|rest| rest.split('/').next())
+                        .unwrap_or_default();
+                    let body = if path.contains("/check-runs?") {
+                        world.runs.get(commit).cloned()
+                    } else {
+                        world.statuses.get(commit).cloned()
+                    }
+                    .unwrap_or_else(|| json!([]));
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    body.to_string().hash(&mut hasher);
+                    let tag = format!("W/\"{:x}\"", hasher.finish());
+                    headers.insert("etag".into(), tag.clone());
+                    if etag == Some(tag.as_str()) {
+                        return Ok(Response {
+                            status: 304,
+                            headers,
+                            body: Vec::new(),
+                        });
+                    }
+                    world.full_reads += 1;
+                    Ok(Response {
+                        status: 200,
                         headers,
-                        body: Vec::new(),
-                    });
-                }
-                if let Some(until) = world.limited_until.filter(|until| *until > now) {
-                    headers.insert("x-ratelimit-remaining".into(), "0".into());
-                    headers.insert("x-ratelimit-reset".into(), until.to_string());
-                    return Ok(Response {
-                        status: 403,
-                        headers,
-                        body: br#"{"message":"API rate limit exceeded"}"#.to_vec(),
-                    });
-                }
-                let commit = path
-                    .split("/commits/")
-                    .nth(1)
-                    .and_then(|rest| rest.split('/').next())
-                    .unwrap_or_default();
-                let body = if path.contains("/check-runs?") {
-                    world.runs.get(commit).cloned()
-                } else {
-                    world.statuses.get(commit).cloned()
-                }
-                .unwrap_or_else(|| json!([]));
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                body.to_string().hash(&mut hasher);
-                let tag = format!("W/\"{:x}\"", hasher.finish());
-                headers.insert("etag".into(), tag.clone());
-                if etag == Some(tag.as_str()) {
-                    return Ok(Response {
-                        status: 304,
-                        headers,
-                        body: Vec::new(),
-                    });
-                }
-                world.full_reads += 1;
-                Ok(Response {
-                    status: 200,
-                    headers,
-                    body: serde_json::to_vec(&body)?,
+                        body: serde_json::to_vec(&body)?,
+                    })
                 })
-            })
+            })()
+            .map_err(provenant_config::PortError::Executor)?;
+            Ok(forge_response(response))
         }
     }
     impl Clock for Shared {
@@ -1183,25 +1209,40 @@ mod tests {
         }
     }
     impl Forge for ResourceForge {
-        fn get(&mut self, path: &str, etag: Option<&str>) -> io::Result<Response> {
-            self.0
-                .lock()
-                .expect("requests")
-                .push((path.into(), etag.map(str::to_owned)));
-            let headers = BTreeMap::from([("etag".into(), "stable".into())]);
-            if etag == Some("stable") {
-                Ok(Response {
-                    status: 304,
-                    headers,
-                    body: Vec::new(),
-                })
-            } else {
-                Ok(Response {
-                    status: 200,
-                    headers,
-                    body: br#"{"number":12,"state":"open"}"#.to_vec(),
-                })
-            }
+        fn request(
+            &mut self,
+            operation: provenant_config::ForgeOperation,
+            _budget: Duration,
+        ) -> Result<provenant_config::ForgeResponse, provenant_config::PortError> {
+            let provenant_config::ForgeOperation::Api { path, etag, .. } = operation else {
+                return Err(provenant_config::PortError::Response(
+                    "expected API request",
+                ));
+            };
+            let path = path.as_str();
+            let etag = etag.as_deref();
+            let response = (|| -> io::Result<Response> {
+                self.0
+                    .lock()
+                    .expect("requests")
+                    .push((path.into(), etag.map(str::to_owned)));
+                let headers = BTreeMap::from([("etag".into(), "stable".into())]);
+                if etag == Some("stable") {
+                    Ok(Response {
+                        status: 304,
+                        headers,
+                        body: Vec::new(),
+                    })
+                } else {
+                    Ok(Response {
+                        status: 200,
+                        headers,
+                        body: br#"{"number":12,"state":"open"}"#.to_vec(),
+                    })
+                }
+            })()
+            .map_err(provenant_config::PortError::Executor)?;
+            Ok(forge_response(response))
         }
     }
 
@@ -1212,10 +1253,18 @@ mod tests {
         let mut observer = Observer::with(state.path(), "Owner/Repo", forge.clone(), Shared::new())
             .expect("observer");
         let first = observer
-            .resource("pulls/12", Duration::ZERO, Duration::from_secs(30))
+            .resource(
+                "pulls/12",
+                Duration::ZERO,
+                &Request::within(Duration::from_secs(30)),
+            )
             .expect("first resource");
         let second = observer
-            .resource("pulls/12", Duration::ZERO, Duration::from_secs(30))
+            .resource(
+                "pulls/12",
+                Duration::ZERO,
+                &Request::within(Duration::from_secs(30)),
+            )
             .expect("conditional resource");
         assert_eq!(first, second);
         let requests = forge.requests();
@@ -1265,16 +1314,24 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         std::fs::write(&path, serde_json::to_vec(&ports).expect("encode ports"))
             .expect("write command port");
         assert_eq!(
-            repository_for_project(state.path(), project.path(), Duration::from_secs(30))
-                .expect("selected command repository"),
+            repository_for_project(
+                state.path(),
+                project.path(),
+                &Request::within(Duration::from_secs(30)),
+            )
+            .expect("selected command repository"),
             "owner/repo"
         );
 
         ports.ci_observation.backend = provenant_config::PortBackend::None;
         std::fs::write(&path, serde_json::to_vec(&ports).expect("encode ports"))
             .expect("write disabled port");
-        let error = repository_for_project(state.path(), project.path(), Duration::from_secs(30))
-            .expect_err("none must fail before any request");
+        let error = repository_for_project(
+            state.path(),
+            project.path(),
+            &Request::within(Duration::from_secs(30)),
+        )
+        .expect_err("none must fail before any request");
         assert!(error.to_string().contains("disabled"), "{error}");
     }
 
@@ -1299,7 +1356,7 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
                         let shared = shared.clone();
                         scope.spawn(move || {
                             shared.enter();
-                            observer.checks(HEAD, POLL, Duration::from_secs(60))
+                            observer.checks(HEAD, POLL, &Request::within(Duration::from_secs(60)))
                         })
                     })
                     .collect();
@@ -1334,14 +1391,22 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         let dir = state();
         let first = shared
             .observer(dir.path())
-            .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+            .checks(
+                HEAD,
+                Duration::ZERO,
+                &Request::within(Duration::from_secs(60)),
+            )
             .expect("first");
         assert_eq!(shared.with(|world| world.full_reads), 2);
         // A one-shot reader in another process accepts no age, yet an unchanged
         // head costs only conditional requests.
         let again = shared
             .observer(dir.path())
-            .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+            .checks(
+                HEAD,
+                Duration::ZERO,
+                &Request::within(Duration::from_secs(60)),
+            )
             .expect("again");
         assert_eq!(again, first);
         assert_eq!(shared.with(|world| world.full_reads), 2);
@@ -1360,7 +1425,11 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         });
         let changed = shared
             .observer(dir.path())
-            .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+            .checks(
+                HEAD,
+                Duration::ZERO,
+                &Request::within(Duration::from_secs(60)),
+            )
             .expect("changed");
         assert_eq!(changed[0].bucket, "fail");
         assert_eq!(shared.with(|world| world.full_reads), 3);
@@ -1380,7 +1449,11 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         let dir = state();
         let error = shared
             .observer(dir.path())
-            .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+            .checks(
+                HEAD,
+                Duration::ZERO,
+                &Request::within(Duration::from_secs(60)),
+            )
             .expect_err("limited");
         let at = jiff::Timestamp::from_second(reset).expect("reset");
         assert!(
@@ -1392,7 +1465,7 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         // Another waiter, on another head, holds off without asking again.
         let error = shared
             .observer(dir.path())
-            .checks(OTHER, POLL, Duration::from_secs(60))
+            .checks(OTHER, POLL, &Request::within(Duration::from_secs(60)))
             .expect_err("still limited");
         assert!(matches!(error, ObserveError::RateLimited { .. }), "{error}");
         assert_eq!(shared.requests(), 1);
@@ -1400,7 +1473,7 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         let before = shared.with(|world| world.now_ms);
         let error = shared
             .observer(dir.path())
-            .checks(HEAD, POLL, Duration::from_secs(300))
+            .checks(HEAD, POLL, &Request::within(Duration::from_secs(300)))
             .expect_err("skips the poll");
         assert!(matches!(error, ObserveError::RateLimited { .. }), "{error}");
         assert_eq!(shared.with(|world| world.now_ms), before);
@@ -1412,7 +1485,7 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         });
         let checks = shared
             .observer(dir.path())
-            .checks(HEAD, POLL, Duration::from_secs(300))
+            .checks(HEAD, POLL, &Request::within(Duration::from_secs(300)))
             .expect("after reset");
         assert_eq!(checks[0].bucket, "pass");
     }
@@ -1430,13 +1503,21 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         let dir = state();
         let error = shared
             .observer(dir.path())
-            .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+            .checks(
+                HEAD,
+                Duration::ZERO,
+                &Request::within(Duration::from_secs(60)),
+            )
             .expect_err("skips the poll");
         assert!(matches!(error, ObserveError::RateLimited { .. }), "{error}");
         shared.with(|world| world.now_ms += 1000);
         let checks = shared
             .observer(dir.path())
-            .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+            .checks(
+                HEAD,
+                Duration::ZERO,
+                &Request::within(Duration::from_secs(60)),
+            )
             .expect("next poll");
         assert_eq!(checks[0].bucket, "pass");
     }
@@ -1453,7 +1534,11 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         let dir = state();
         shared
             .observer(dir.path())
-            .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+            .checks(
+                HEAD,
+                Duration::ZERO,
+                &Request::within(Duration::from_secs(60)),
+            )
             .expect("checks");
         let repository = std::fs::read_dir(dir.path().join("ci-observer"))
             .expect("root")
@@ -1499,7 +1584,11 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
             });
             let checks = shared
                 .observer(dir.path())
-                .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+                .checks(
+                    HEAD,
+                    Duration::ZERO,
+                    &Request::within(Duration::from_secs(60)),
+                )
                 .expect("checks");
             let status = crate::pr::status::class_of(HEAD, &checks);
             let gate = match crate::pr::landing::adapters::gate_checks(checks).1 {
@@ -1526,21 +1615,36 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         let mut world_pages = vec![first, second];
         struct Paged(Shared, Vec<Value>);
         impl Forge for Paged {
-            fn get(&mut self, path: &str, etag: Option<&str>) -> io::Result<Response> {
-                let index: usize = path
-                    .rsplit("&page=")
-                    .next()
-                    .and_then(|n| n.parse().ok())
-                    .unwrap_or(1);
-                if path.contains("/check-runs?") {
-                    let body = self
-                        .1
-                        .get(index - 1)
-                        .cloned()
-                        .unwrap_or_else(|| json!({"check_runs":[]}));
-                    self.0.with(|world| world.runs.insert(HEAD.into(), body));
-                }
-                self.0.get(path, etag)
+            fn request(
+                &mut self,
+                operation: provenant_config::ForgeOperation,
+                _budget: Duration,
+            ) -> Result<provenant_config::ForgeResponse, provenant_config::PortError> {
+                let provenant_config::ForgeOperation::Api { path, etag, .. } = operation else {
+                    return Err(provenant_config::PortError::Response(
+                        "expected API request",
+                    ));
+                };
+                let path = path.as_str();
+                let etag = etag.as_deref();
+                let response = (|| -> io::Result<Response> {
+                    let index: usize = path
+                        .rsplit("&page=")
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(1);
+                    if path.contains("/check-runs?") {
+                        let body = self
+                            .1
+                            .get(index - 1)
+                            .cloned()
+                            .unwrap_or_else(|| json!({"check_runs":[]}));
+                        self.0.with(|world| world.runs.insert(HEAD.into(), body));
+                    }
+                    port::get(&mut self.0, path, etag)
+                })()
+                .map_err(provenant_config::PortError::Executor)?;
+                Ok(forge_response(response))
             }
         }
         let mut paged = Observer::with(
@@ -1551,7 +1655,11 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         )
         .expect("observer");
         let checks = paged
-            .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+            .checks(
+                HEAD,
+                Duration::ZERO,
+                &Request::within(Duration::from_secs(60)),
+            )
             .expect("pages");
         assert_eq!(checks.len(), PAGE + 1);
         world_pages.truncate(1);
@@ -1563,7 +1671,11 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         )
         .expect("observer");
         let error = lost
-            .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+            .checks(
+                HEAD,
+                Duration::ZERO,
+                &Request::within(Duration::from_secs(60)),
+            )
             .expect_err("lost page");
         assert!(matches!(error, ObserveError::Unavailable(_)), "{error}");
     }
@@ -1622,7 +1734,11 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         let dir = state();
         let checks = shared
             .observer(dir.path())
-            .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+            .checks(
+                HEAD,
+                Duration::ZERO,
+                &Request::within(Duration::from_secs(60)),
+            )
             .expect("checks");
         assert_eq!(checks[0].excerpt, "Build failed\nsrc/main.rs:12");
         assert!(
@@ -1727,17 +1843,32 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
     fn a_server_error_is_retried_and_a_refusal_is_not() {
         struct Failing(Shared, Vec<u16>);
         impl Forge for Failing {
-            fn get(&mut self, path: &str, etag: Option<&str>) -> io::Result<Response> {
-                if let Some(status) = self.1.pop() {
-                    self.0
-                        .with(|world| world.requests.push((path.into(), None)));
-                    return Ok(Response {
-                        status,
-                        headers: BTreeMap::new(),
-                        body: b"{}".to_vec(),
-                    });
-                }
-                self.0.get(path, etag)
+            fn request(
+                &mut self,
+                operation: provenant_config::ForgeOperation,
+                _budget: Duration,
+            ) -> Result<provenant_config::ForgeResponse, provenant_config::PortError> {
+                let provenant_config::ForgeOperation::Api { path, etag, .. } = operation else {
+                    return Err(provenant_config::PortError::Response(
+                        "expected API request",
+                    ));
+                };
+                let path = path.as_str();
+                let etag = etag.as_deref();
+                let response = (|| -> io::Result<Response> {
+                    if let Some(status) = self.1.pop() {
+                        self.0
+                            .with(|world| world.requests.push((path.into(), None)));
+                        return Ok(Response {
+                            status,
+                            headers: BTreeMap::new(),
+                            body: b"{}".to_vec(),
+                        });
+                    }
+                    port::get(&mut self.0, path, etag)
+                })()
+                .map_err(provenant_config::PortError::Executor)?;
+                Ok(forge_response(response))
             }
         }
         let shared = Shared::new();
@@ -1757,7 +1888,11 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         .expect("observer");
         assert_eq!(
             retried
-                .checks(HEAD, Duration::ZERO, Duration::from_secs(60))
+                .checks(
+                    HEAD,
+                    Duration::ZERO,
+                    &Request::within(Duration::from_secs(60))
+                )
                 .expect("retried")
                 .len(),
             1
@@ -1770,7 +1905,11 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         )
         .expect("observer");
         assert!(matches!(
-            refused.checks(HEAD, Duration::ZERO, Duration::from_secs(60)),
+            refused.checks(
+                HEAD,
+                Duration::ZERO,
+                &Request::within(Duration::from_secs(60))
+            ),
             Err(ObserveError::Unavailable(_))
         ));
     }

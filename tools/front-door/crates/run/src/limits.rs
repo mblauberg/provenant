@@ -31,7 +31,9 @@ pub fn lane_limits(
     // it: the budget is then reported to the agent, not enforced.
     let live = crate::token_budget::enforces(provider);
     let nonzero = |limit: Limit| (limit.value > 0).then_some(limit);
-    let knob = |name: &str, source| {
+    // Each knob limit reports the layer that set it, from the sealed profile.
+    let knob = |name: &str| {
+        let source = provenant_config::knob_source(&task.profile, name);
         task.profile
             .knob_u64(name)
             .and_then(|value| nonzero(Limit::new(value, source, LimitStrength::Default)))
@@ -72,10 +74,10 @@ pub fn lane_limits(
         // Wrap-up must spend its remaining allowance in the same session;
         // a context restart here would reset that allowance on another route.
         context_handoff: (writer && !task.profile.extra.contains_key("budget_wrap_up"))
-            .then(|| knob("lanes.context_handoff_tokens", LimitSource::Template))
+            .then(|| knob("lanes.context_handoff_tokens"))
             .flatten(),
         deadline_seconds,
-        repair_cycles: knob("lanes.max_repair_cycles", LimitSource::Template),
+        repair_cycles: knob("lanes.max_repair_cycles"),
         gh_invocations: gh_budget(&task.profile),
     };
     // Raises the owner asked for with `retry --extend`; the command refused a
@@ -119,7 +121,7 @@ pub fn writer_budget_limits(
     let source = |field: &str, knob: &str| -> LimitSource {
         context
             .and_then(|context| context.budget_sources.get(field).copied())
-            .unwrap_or_else(|| knob_source(profile, knob))
+            .unwrap_or_else(|| provenant_config::knob_source(profile, knob))
     };
     let source_budget = source("token_budget", "lanes.token_budget");
     if source_budget != LimitSource::Default
@@ -168,17 +170,6 @@ pub fn writer_budget_limits(
     (budget.filter(|budget| budget.value > 0), policy)
 }
 
-/// The layer that set knob `name` for this profile (`launch`, `host` or
-/// `default`), as `dispatch_profile` recorded it.
-pub(crate) fn knob_source(profile: &HarnessProfile, name: &str) -> LimitSource {
-    profile
-        .extra
-        .get(provenant_config::KNOB_SOURCES)
-        .and_then(|sources| sources.get(name))
-        .and_then(|source| serde_json::from_value(source.clone()).ok())
-        .unwrap_or(LimitSource::Default)
-}
-
 /// The advisory `gh` invocation budget, from `lanes.gh_budget`. 0 is off.
 pub fn gh_budget(profile: &HarnessProfile) -> Option<Limit> {
     let value = profile
@@ -187,7 +178,7 @@ pub fn gh_budget(profile: &HarnessProfile) -> Option<Limit> {
     (value > 0).then(|| {
         Limit::new(
             value,
-            knob_source(profile, "lanes.gh_budget"),
+            provenant_config::knob_source(profile, "lanes.gh_budget"),
             LimitStrength::Advisory,
         )
     })
@@ -241,6 +232,11 @@ mod tests {
         task.profile
             .knobs
             .insert("lanes.context_handoff_tokens".into(), 200_000.into());
+        // The sealed profile names the layer that set the knob.
+        task.profile.extra.insert(
+            provenant_config::KNOB_SOURCES.into(),
+            serde_json::json!({"lanes.context_handoff_tokens": "host"}),
+        );
         task.provider_timeout_seconds = 3600;
         let caps = HostCaps {
             runtime_seconds: Some(600),
@@ -252,7 +248,7 @@ mod tests {
         );
         assert_eq!(
             found(&limits.context_handoff),
-            Some((200_000, LimitSource::Template))
+            Some((200_000, LimitSource::Host))
         );
         assert_eq!(
             found(&limits.deadline_seconds),

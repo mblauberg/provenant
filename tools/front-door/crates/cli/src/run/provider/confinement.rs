@@ -148,7 +148,7 @@ pub(super) fn project_scratch_reads(project: &Path) -> Vec<PathGrant> {
     let Ok(project) = std::fs::canonicalize(project) else {
         return Vec::new();
     };
-    [".provenant/scratch", ".agent-run"]
+    [provenant_config::repository_files::SCRATCH, ".agent-run"]
         .map(|name| project.join(name))
         .into_iter()
         .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()))
@@ -537,7 +537,7 @@ pub(super) fn apply_sandbox_mode(
     environment: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>,
     route: &mut provenant_records::run::RouteRecord,
 ) {
-    use provenant_confinement::run_config::SANDBOX_ENV;
+    use provenant_core::consumer_env::SANDBOX;
     if let Some(policy) = task
         .profile
         .extra
@@ -563,8 +563,8 @@ pub(super) fn apply_sandbox_mode(
             .and_then(|sources| sources.get("lanes.sandbox_floor"))
             .and_then(serde_json::Value::as_str).unwrap_or("default"),
     }));
-    environment.retain(|(name, _)| name != SANDBOX_ENV);
-    environment.push((SANDBOX_ENV.into(), mode.env_value().into()));
+    environment.retain(|(name, _)| name != SANDBOX);
+    environment.push((SANDBOX.into(), mode.env_value().into()));
     route.extra.insert(
         provenant_records::run::SANDBOX_ROUTE_FIELD.into(),
         serde_json::json!(mode),
@@ -658,6 +658,17 @@ pub(super) fn credential_roots(
     settings: &provenant_providers::accounts::Settings,
 ) -> Result<provenant_core::CredentialRoots, String> {
     use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
+    // An adapter's declared root kind (the Codex package exception, for one)
+    // belongs to its default account directory alone, whichever declaration
+    // names it; every other path is a plain store.
+    let kind = |adapter: &str, path: &Path| {
+        AdapterSpec::get(adapter)
+            .and_then(|spec| {
+                let (_, fallback) = spec.default_account_directory?;
+                (path == home.join(fallback)).then(|| (*spec.default_account_root_kind).clone())
+            })
+            .unwrap_or(CredentialKind::Store)
+    };
     let mut roots = CredentialRoots::for_home(home);
     for entry in settings.entries.values() {
         let source = format!("account registry: {}/{}", entry.adapter, entry.label);
@@ -666,7 +677,7 @@ pub(super) fn credential_roots(
                 path.clone(),
                 CredentialScope::Subtree,
                 source.clone(),
-                CredentialKind::Store,
+                kind(entry.adapter.as_str(), path),
             );
         }
     }
@@ -718,11 +729,7 @@ pub(super) fn credential_roots(
                 spec.name
             )
         };
-        let kind = if path == home.join(fallback) {
-            (*spec.default_account_root_kind).clone()
-        } else {
-            CredentialKind::Store
-        };
+        let kind = kind(spec.name, &path);
         roots.add(path, CredentialScope::Subtree, source, kind);
     }
     let host_roots = registry
@@ -732,17 +739,13 @@ pub(super) fn credential_roots(
     for root in host_roots {
         roots.add(root.path, root.scope, root.source, root.kind);
     }
-    // Keep both the declaration and its resolved alias. A candidate can use
+    // Keep both the declaration and its resolved alias, and give every
+    // spelling of one location all of its declarations. A candidate can use
     // either spelling, and no credential file contents are opened here.
-    let declarations = roots.entries().to_vec();
-    for root in declarations {
-        let resolved = provenant_confinement::permissions::resolve_boundary_path(&root.path)
-            .map_err(|error| error.to_string())?;
-        if resolved != root.path {
-            roots.add(resolved, root.scope, root.source, root.kind);
-        }
-    }
-    Ok(roots)
+    roots.with_aliases(|path| {
+        provenant_confinement::permissions::resolve_boundary_path(path)
+            .map_err(|error| error.to_string())
+    })
 }
 
 pub fn declared_credentials(

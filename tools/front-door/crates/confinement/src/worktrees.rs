@@ -313,6 +313,8 @@ pub enum WorktreeError {
 pub enum GitMutationOperation {
     #[error("git bundle create")]
     BundleCreate,
+    #[error("git update-ref (preservation)")]
+    PreserveRef,
     #[error("git merge --ff-only")]
     FastForward,
     #[error("git worktree add")]

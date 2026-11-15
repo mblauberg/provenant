@@ -133,6 +133,19 @@ replayable authority.
   `crates/supervisor/src/custody_tests.rs::contradictory_never_spawned_records_never_prove_absence`
 - Owner: `crates/os/src/fs.rs`
 
+### Build admission is a sourced port
+
+Sandboxed Cargo shims use `PortTable.build_admission`, independently of attempt
+admission: builtin uses host slots and the effective disk policy, command runs
+the repository wrapper around Cargo, and none omits admission. The host freezes
+the backend/source in `PROVENANT_BUILD_ADMISSION_BACKEND` and
+`PROVENANT_BUILD_ADMISSION_SOURCE`. Native launches retain their host toolchain;
+no shim is installed for them. Local-Cargo policy still applies to every shim
+backend. Wrapper execution streams Cargo output without a host-state receipt.
+- Why: build coordination varies by repository without changing attempt custody.
+- Test: `crates/providers/src/lane.rs::the_cargo_shim_hands_the_command_to_the_build_slot_gate`
+- Owner: `crates/providers/src/lane.rs`; `src/build_slot.rs`
+
 ### Bounded execution
 
 Captures and frames are bounded; an oversized frame is decoder loss, never a
@@ -157,6 +170,9 @@ lane grant validation consume it. File declarations retain exact scope.
 Credential directories are denied after every grant. The standalone Codex
 release package read exception is relative to its declared Codex home; it
 confers no writes and never exempts another overlapping credential declaration.
+Every declaration is kept, whatever its order or kind; each spelling of a
+declared location carries every declaration made at or beneath any spelling of
+it, so a store registered at a Codex home or its alias stays refused.
 
 A component named `.claude`, `.codex`, `.cursor` or `.gemini` does not establish
 a credential boundary. Project-local agent configuration overlaps warn with
@@ -172,6 +188,7 @@ access. An optional root that resolves into a declared credential root is
 omitted with a warning.
 - Why: one broad grant silently voids the boundary.
 - Test: `crates/confinement/src/permissions/tests/validation.rs::every_declared_credential_root_protects_grants_and_enclosing_paths`;
+  `crates/core/src/roots.rs::codex_package_exception_applies_only_where_no_other_declaration_protects`;
   `crates/cli/src/run/provider/tests_retained_state_and_workspace.rs::source_cwd_matches_declared_admission_for_registered_worktree_locations`;
   `src/fabric/interface.rs::explanation_and_preparation_share_worktree_admission`;
   `crates/confinement/src/permissions/tests/validation.rs::directory_discovery_keeps_literal_scope_and_refuses_symlinks`

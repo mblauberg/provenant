@@ -144,7 +144,7 @@ fn no_flags_compact_view_shows_all_configured_accounts_including_exhausted() -> 
 fn account_quota_is_unavailable_inside_a_lane() -> Result {
     let mut rig = quota_rig()?;
     rig.env
-        .push((provenant_run::LANE_DEPTH_ENV.into(), "1".into()));
+        .push((provenant_core::consumer_env::LANE_DEPTH.into(), "1".into()));
 
     let missing = rig.state.join("missing-project");
     let missing = missing.to_str().ok_or("non-UTF-8 fixture path")?;
@@ -951,6 +951,9 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
             pools: &[],
         };
         let mut route = ResolvedRoute {
+            selection_context: Default::default(),
+            diagnostics: Default::default(),
+            user_skills: true,
             extra: Default::default(),
             adapter: provider.into(),
             model: "fixture-model".into(),
@@ -962,6 +965,7 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
             exclusions: vec![],
             eligibility: RouteEligibility::Eligible,
             readiness: RouteReadiness::Ready {
+                availability_warning: None,
                 extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: at + 60,

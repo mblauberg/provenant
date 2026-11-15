@@ -370,10 +370,9 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         assert_eq!(launch.route.provider.as_deref(), Some(adapter));
         fs::write(rig.state.join("config.toml"), config(1))?;
         assert!(
-            launch
-                .environment
-                .iter()
-                .any(|(key, value)| key == provenant_run::LANE_DEPTH_ENV && value == "1")
+            launch.environment.iter().any(|(key, value)| key
+                == provenant_core::consumer_env::LANE_DEPTH
+                && value == "1")
         );
         let confinement = launch.confinement.as_ref().ok_or("confinement")?;
         assert_eq!(
@@ -581,7 +580,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
 /// Fake provider: as a lane's shell would, start Provenant from the lane
 /// environment the host pinned, then publish through the CLI overflow path.
 pub(crate) fn lane_provider() -> Result {
-    if std::env::var(provenant_run::LANE_DEPTH_ENV).as_deref() == Ok("2") {
+    if std::env::var(provenant_core::consumer_env::LANE_DEPTH).as_deref() == Ok("2") {
         let mut prompt = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut prompt)?;
         let state = PathBuf::from(std::env::var_os("CODEX_HOME").ok_or("child CODEX_HOME")?);

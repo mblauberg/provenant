@@ -166,7 +166,7 @@ fn kept_unproven_worktree(
     provenant_records::custody::RemovalRecord {
         project,
         subject: provenant_records::custody::Subject::new(
-            provenant_records::custody::SubjectKind::Worktree,
+            provenant_records::custody::SubjectKind::Path,
             path.to_string_lossy(),
         ),
         tip,
@@ -193,17 +193,13 @@ fn settlement_error(error: Box<dyn std::error::Error>) -> crate::worktrees::Erro
 fn retirement_records_for_receipt(
     context: &provenant_confinement::worktrees::WorktreeContext<'_>,
     port: &dyn provenant_confinement::worktrees::RetirementPort,
+    feeds: &dyn provenant_confinement::worktrees::RetirementFeeds,
     project: provenant_core::ProjectId,
     path: &Path,
     receipt: &serde_json::Value,
     cancel: &provenant_core::CancelToken,
 ) -> Result<Vec<provenant_records::custody::RemovalRecord>, Box<dyn std::error::Error>> {
     use provenant_records::custody::{Subject, SubjectKind};
-    match std::fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-        Ok(_) => return Err("worktree removal is not confirmed".into()),
-    }
     let id = receipt["retirement_id"]
         .as_str()
         .ok_or("pruning receipt has no retirement id")?;
@@ -219,22 +215,21 @@ fn retirement_records_for_receipt(
             .cloned()
             .ok_or("pruning receipt has no expected tip")?,
     )?;
-    let worktree = Subject::new(
-        SubjectKind::Worktree,
-        path.to_str().ok_or("worktree path is not valid UTF-8")?,
-    );
     if context.binding.project_id() != project || subject.kind != SubjectKind::Ref {
         return Err("pruning receipt has an invalid reference anchor".into());
     }
-    let recovered =
-        provenant_confinement::worktrees::resume_pending_retirements(context, port, cancel)?;
-    let retirement = match recovered.into_iter().find(|record| record.id == id) {
-        Some(record) => Some(record),
-        None => port.retirement_for_subject(project, &worktree)?,
-    };
-    let Some(retirement) = retirement else {
+    let Some(mut retirement) = port.retirement_for_subject(project, &subject)? else {
         return Err("pruning receipt has no custody retirement owner".into());
     };
+    let worktree = retirement
+        .related_subjects
+        .iter()
+        .find(|related| {
+            related.kind == SubjectKind::Worktree
+                && related.worktree_path().as_deref() == Some(path)
+        })
+        .cloned()
+        .ok_or("durable retirement has no matching worktree incarnation")?;
     if retirement.id != id
         || retirement.project != project
         || retirement.subject != subject
@@ -246,20 +241,23 @@ fn retirement_records_for_receipt(
     {
         return Err("pruning receipt does not match its durable retirement".into());
     }
-    let records = retirement.removals();
-    if !records.iter().any(|record| {
-        record.subject == worktree
-            && matches!(
-                &record.outcome,
-                provenant_records::custody::RemovalOutcome::Removed {
-                    retirement_id,
-                    ..
-                } if retirement_id == &retirement.id
+    let _ =
+        provenant_confinement::worktrees::resume_pending_retirements(context, port, feeds, cancel)?;
+    retirement = port
+        .retirement_for_subject(project, &subject)?
+        .ok_or("pruning receipt has no custody retirement owner")?;
+    if retirement.id != id
+        || !retirement.related_subjects.contains(&worktree)
+        || retirement.outcomes.iter().any(|outcome| {
+            !matches!(
+                &outcome.state,
+                provenant_records::custody::RetirementStepState::Completed { .. }
             )
-    }) {
-        return Err("durable retirement has no completed worktree projection".into());
+        })
+    {
+        return Err("durable retirement still has an unfinished linked step".into());
     }
-    Ok(records)
+    Ok(retirement.removals())
 }
 
 fn release_settled_cache(
@@ -657,6 +655,8 @@ fn collect_owned_worktree_with(
     let mut pruning_intent = replayed.clone();
     let collection_error = std::cell::RefCell::new(None::<String>);
     let final_reason = std::cell::Cell::new(retention_reason);
+    let retention_owner =
+        crate::retention_owner::Owner::new(roots, &settled.roots.home, &writer.project);
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
         let config = provenant_cli::config_reads::read_for(roots, "gc")?;
         let settings = config
@@ -676,7 +676,8 @@ fn collect_owned_worktree_with(
                 (|| -> Result<_, Box<dyn std::error::Error>> {
                 if let Some(replayed_receipt) = replayed.as_mut() {
                     if replayed_receipt["state"] == "pruned"
-                        || replayed_receipt["recovered_from_intent"] == true
+                        || (replayed_receipt["state"] == "pruning"
+                            && replayed_receipt["recovered_from_intent"] == true)
                     {
                         if replayed_receipt["schema_version"] != 2 {
                             return Err(
@@ -686,6 +687,7 @@ fn collect_owned_worktree_with(
                         let confirmed = retirement_records_for_receipt(
                             context,
                             &retirement,
+                            &retention_owner,
                             settled.project_id,
                             &writer.worktree,
                             replayed_receipt,
@@ -695,6 +697,10 @@ fn collect_owned_worktree_with(
                             records.extend(confirmed.iter().cloned());
                         }
                         replayed_receipt["removal_records"] = serde_json::to_value(&confirmed)?;
+                        replayed_receipt["state"] = serde_json::json!("pruned");
+                        replayed_receipt.as_object_mut().map(|object| {
+                            object.remove("retryable");
+                        });
                         if let Some(object) = replayed_receipt.as_object_mut() {
                             object.remove("recovered_from_intent");
                         }
@@ -921,6 +927,7 @@ fn collect_owned_worktree_with(
                 let records = retirement_records_for_receipt(
                     context,
                     &retirement,
+                    &retention_owner,
                     settled.project_id,
                     &writer.worktree,
                     intent,
@@ -932,7 +939,13 @@ fn collect_owned_worktree_with(
             },
         )?)
     })();
-    let mut receipt = if let Some(receipt) = replayed {
+    let mut receipt = if let Some(mut receipt) = replayed {
+        if receipt["state"] == "pruning" {
+            receipt["retryable"] = serde_json::json!(true);
+            if let Err(error) = &result {
+                receipt["cleanup_warning"] = serde_json::json!(error.to_string());
+            }
+        }
         receipt
     } else {
         match result {
@@ -972,6 +985,8 @@ fn collect_owned_worktree_with(
                 if let Some(mut pruned) =
                     replay_worktree_settlement(pruning_intent.as_ref(), &writer.worktree)?
                 {
+                    pruned["state"] = serde_json::json!("pruning");
+                    pruned["retryable"] = serde_json::json!(true);
                     pruned["cleanup_warning"] = serde_json::json!(error.to_string());
                     pruned
                 } else {
@@ -1046,8 +1061,6 @@ fn collect_owned_worktree_with(
             let settings = retention_config
                 .gc
                 .project_settings(&settled.project_id.to_string(), &writer.project);
-            let retention_owner =
-                crate::retention_owner::Owner::new(roots, &settled.roots.home, &writer.project);
             let sweep =
                 crate::lane_cleanup::Sweep::new(false).with_retention(&retention_owner, &settings);
             let outcomes = crate::worktrees::with_context_using_facts(

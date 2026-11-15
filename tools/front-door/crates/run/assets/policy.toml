@@ -917,6 +917,16 @@ threshold = "domains.fabric.lanes.start_spacing_ms"
 justification = "Startup spacing is configured; a lane of the same class started within the window, and the start is still recorded."
 
 [[rule]]
+code = "DISK_FLOOR"
+site = "config/src/gc.rs#DiskGate::decide"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.DISK_FLOOR"
+threshold = "gc.critical_free"
+justification = "Measured free space below gc.critical_free warns with the figures, their sources and the remedy; submission, admission and new builds share this one decision. Refuse holds new work until space is reclaimed; a record that cannot be written still fails as data integrity."
+
+[[rule]]
 code = "GUARDIAN_DISK"
 site = "src/disk_guard.rs#LaneDisk::below_floor"
 boundary = "none"

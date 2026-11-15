@@ -305,10 +305,10 @@ printf '%s\n' "$PROVENANT_PROCESS_TREE"
         ("memory-sandboxed", false),
     ] {
         rig.env
-            .retain(|(key, _)| key != provenant_supervisor::process_tree::ENV);
+            .retain(|(key, _)| key != provenant_core::consumer_env::PROCESS_TREE);
         if foreign {
             rig.env.push((
-                provenant_supervisor::process_tree::ENV.into(),
+                provenant_core::consumer_env::PROCESS_TREE.into(),
                 "/foreign/process-tree.json".into(),
             ));
         }
@@ -446,6 +446,69 @@ fn command_dispatch_launches_with_normal_store_semantics() -> Result {
         lane["settlement"]["reason"]
     );
     Ok(())
+}
+
+/// A repository with no Provenant files, scripts, build files or instruction
+/// files runs a lane, and the lane leaves nothing in it beyond the repository
+/// paths Provenant declares it creates (`repository_files`) and the lane
+/// worktree roots the worktree-layout port names.
+#[test]
+fn a_bare_repository_runs_a_lane_and_gains_only_declared_paths() -> Result {
+    use provenant_config::repository_files::{Access, REPOSITORY_FILES};
+    if !available()? {
+        return Ok(());
+    }
+    let rig = rig(json!({"pass":{"argv":["/bin/sh","-c","printf 'hello\\n'"]}}))?;
+    let _cleanup = rig.process_cleanup();
+    let before = repository_entries(&rig.project)?;
+    assert!(
+        REPOSITORY_FILES
+            .iter()
+            .all(|file| !before.contains(std::path::Path::new(file.path))),
+        "the fixture repository is not bare: {before:?}"
+    );
+    let submitted = dispatch(&rig, "pass", 10)?;
+    let lane = settled(&rig, attempt_id(&submitted)?)?;
+    assert_eq!(lane["state"], "succeeded", "{lane}");
+    let worktree_roots = provenant_config::PortTable::builtin().worktree_layout.roots;
+    let created: Vec<_> = REPOSITORY_FILES
+        .iter()
+        .filter(|file| file.access == Access::Created)
+        .map(|file| std::path::Path::new(file.path))
+        .chain(worktree_roots.iter().map(std::path::PathBuf::as_path))
+        .collect();
+    for entry in repository_entries(&rig.project)?.difference(&before) {
+        assert!(
+            created
+                .iter()
+                .any(|path| path.starts_with(entry) || entry.starts_with(path)),
+            "undeclared repository path {}",
+            entry.display()
+        );
+    }
+    Ok(())
+}
+
+/// Every path below `project`, relative to it, except Git's own directory.
+fn repository_entries(
+    project: &std::path::Path,
+) -> Result<std::collections::BTreeSet<std::path::PathBuf>> {
+    let mut entries = std::collections::BTreeSet::new();
+    let mut pending = vec![std::path::PathBuf::new()];
+    while let Some(relative) = pending.pop() {
+        for entry in fs::read_dir(project.join(&relative))? {
+            let entry = entry?;
+            let path = relative.join(entry.file_name());
+            if path == std::path::Path::new(".git") {
+                continue;
+            }
+            if entry.file_type()?.is_dir() {
+                pending.push(path.clone());
+            }
+            entries.insert(path);
+        }
+    }
+    Ok(entries)
 }
 
 #[test]
@@ -824,33 +887,31 @@ printf 'private-output\n'
         "security/linux|security/linux\n"
     );
 
-    let mut receipts = Vec::new();
-    for entry in fs::read_dir(&rig.state)? {
-        let entry = entry?;
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with("port-command-verify-tier-")
-        {
-            receipts.push(serde_json::from_slice::<Value>(&fs::read(entry.path())?)?);
-        }
-    }
-    assert_eq!(receipts.len(), 1);
-    let receipt = &receipts[0];
-    assert_eq!(receipt["owner"], "verify");
-    assert_eq!(receipt["backend"], "repository_command");
-    assert_eq!(receipt["source"], "project");
-    assert_eq!(receipt["phase"], "tier");
-    assert_eq!(receipt["outcome"], "succeeded");
-    assert_eq!(receipt["exit_code"], 0);
-    assert_eq!(receipt["command_digest"], command.digest().to_string());
-    assert!(receipt["request_key_digest"].as_str().is_some());
-    assert!(receipt["stdout_digest"].as_str().is_some());
-    assert!(
-        receipt["capture_complete"]
-            .as_bool()
-            .ok_or("capture_complete")?
+    let inventory = provenant_config::port_command_receipts(&rig.state)?;
+    assert!(inventory.complete, "{:?}", inventory.issues);
+    let receipt = &inventory
+        .entries
+        .iter()
+        .find(|entry| entry.receipt.owner == "verify" && entry.receipt.phase == "tier")
+        .ok_or("missing verify receipt")?
+        .receipt;
+    assert_eq!(
+        receipt.schema_version(),
+        provenant_records::PORT_COMMAND_RECEIPT_SCHEMA_VERSION
     );
+    assert_eq!(
+        receipt.backend,
+        provenant_records::PortCommandBackend::RepositoryCommand
+    );
+    assert_eq!(receipt.source, provenant_records::PortSource::Project);
+    assert_eq!(
+        receipt.outcome,
+        provenant_records::PortCommandDisposition::Succeeded
+    );
+    assert_eq!(receipt.exit_code, Some(0));
+    assert_eq!(receipt.command_digest, command.digest());
+    assert!(receipt.stdout_digest.is_some());
+    assert!(receipt.capture_complete);
     let receipt_text = serde_json::to_string(receipt)?;
     assert!(!receipt_text.contains("verify-port.sh"));
     assert!(!receipt_text.contains("private-output"));
@@ -891,16 +952,15 @@ printf 'executed\n' > verify-call.txt
     assert_eq!(result["data"]["backend"], "none");
     assert_eq!(result["error"]["code"], "VERIFY_UNAVAILABLE");
     assert!(!marker.exists());
-    for entry in fs::read_dir(&rig.state)? {
-        let entry = entry?;
-        assert!(
-            !entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("port-command-verify-tier-"),
-            "disabled verify port wrote command evidence"
-        );
-    }
+    let inventory = provenant_config::port_command_receipts(&rig.state)?;
+    assert!(inventory.complete, "{:?}", inventory.issues);
+    assert!(
+        inventory
+            .entries
+            .iter()
+            .all(|entry| { entry.receipt.owner != "verify" || entry.receipt.phase != "tier" }),
+        "disabled verify port wrote command evidence"
+    );
     Ok(())
 }
 

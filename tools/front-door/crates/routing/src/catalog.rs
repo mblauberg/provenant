@@ -8,14 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PacingPolicy {
-    Pace,
-    Spend,
-    Max,
-    Off,
-}
+pub use provenant_records::route_selection::PacingPolicy;
 
 /// Provider defaults remain directly under `[pacing]`; account profiles live
 /// under `[pacing.accounts.<account>]`.
@@ -1109,10 +1102,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("outcome_priors.exploration_percent", 0, 100),
     FieldMetadata::int("capability_preferences.{selector}.{capability}", 1, 100),
     FieldMetadata::new("review.floors.{floor}.paths", "list"),
-    FieldMetadata::enumeration(
-        "review.floors.{floor}.tier",
-        &["routine", "substantial", "crucial", "terminal"],
-    ),
+    FieldMetadata::enumeration("review.floors.{floor}.tier", &crate::review::FLOOR_TIERS),
     FieldMetadata::new("review.floors.{floor}.lenses", "list"),
     FieldMetadata::new("review.shapes.{shape}.frame", "bool"),
     FieldMetadata::int("review.shapes.{shape}.verifiers", 0, 32),
@@ -1801,6 +1791,17 @@ mod tests {
                 let mut route = resolve(&request_for(model.as_str())?, &context)?;
                 route.effort = Some("high".into());
                 route.pool_selection = Some(provenant_records::RouteSelectionReceipt {
+                    selection_rule: provenant_records::route_selection::SelectionRule::WeightedDraw,
+                    considered_exclusions: Vec::new(),
+                    exploration: provenant_records::route_selection::Exploration {
+                        extra: Default::default(),
+                        selected: false,
+                        percent: 0,
+                        enabled: false,
+                        source: "fixture".into(),
+                    },
+                    weight_source: provenant_records::route_selection::WeightSource::Catalogue,
+                    account_load: None,
                     extra: Default::default(),
                     pool: pool.clone(),
                     candidates: vec![],

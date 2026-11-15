@@ -22,6 +22,20 @@ use thiserror::Error;
 /// instructions file point to.
 pub(crate) const INSTRUCTION_ASSET: &str = "instructions/AGENTS.md";
 
+/// Shared path components for installed releases and their owned instructions.
+/// `release_root` and name-based instruction recognition use the same shape.
+const RELEASE_LAYOUT: ReleaseLayout = ReleaseLayout {
+    container: "provenant",
+    releases: "releases",
+    instructions: "instructions",
+};
+#[derive(Clone, Copy)]
+struct ReleaseLayout {
+    container: &'static str,
+    releases: &'static str,
+    instructions: &'static str,
+}
+
 #[derive(Debug, Error)]
 pub enum InstallError {
     #[error(transparent)]
@@ -362,11 +376,10 @@ impl Targets {
                 normal_absolute(p)?;
             }
         }
-        for path in file_paths
-            .iter()
-            .chain(skills_paths.iter())
-            .chain([&self.bin_dir.join("provenant"), &self.shared_instruction])
-        {
+        for path in file_paths.iter().chain(skills_paths.iter()).chain([
+            &self.bin_dir.join(crate::STABLE_BINARY_NAME),
+            &self.shared_instruction,
+        ]) {
             if path.starts_with(self.roots.state.as_path())
                 || self
                     .protected_roots
@@ -447,21 +460,6 @@ pub struct ManualInclude {
 
 /// Preview must succeed before any root, lock, staging file or receipt is made.
 pub trait InstallReporter {
-    /// Keep intermediate batch receipts on the unfinished state format until
-    /// the final batch completes its state transition.
-    fn receipt_state_format_version(&self) -> Option<u64> {
-        None
-    }
-    /// Request a receipt publication even when its bytes are unchanged, so an
-    /// external state transition still has a final commit boundary.
-    fn receipt_required(&self) -> bool {
-        false
-    }
-    /// Called under the install lock after every non-receipt write succeeds,
-    /// immediately before publishing the receipt. Never called for dry runs.
-    fn before_receipt(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
     /// Called under the install lock after rechecking an exact match or absence,
     /// before unlinking or forgetting an already missing managed agent.
     fn before_remove(&mut self, _action: &Action) -> std::io::Result<()> {
@@ -656,24 +654,22 @@ fn desired(
         None,
         "release".into(),
     )?;
-    if !release.files.contains_key(Path::new("bin/provenant")) {
+    let binary_asset = Path::new("bin").join(crate::STABLE_BINARY_NAME);
+    if !release.files.contains_key(&binary_asset) {
         return Err(InstallError::Manifest("missing executable"));
     }
     insert(
-        targets.bin_dir.join("provenant"),
-        Value::Link(root.join("bin/provenant")),
+        targets.bin_dir.join(crate::STABLE_BINARY_NAME),
+        Value::Link(root.join(&binary_asset)),
         None,
         "binary".into(),
     )?;
     if let Some(bytes) = &targets.peer_agent {
-        let path = peer_agent_plist(targets.roots.state.as_path()).ok_or(
-            InstallError::InvalidConfig("peer agent requires the default state root"),
-        )?;
         let home =
             provenant_os::fs::canonicalize(&targets.home).unwrap_or_else(|_| targets.home.clone());
-        if path != home.join("Library/LaunchAgents/dev.provenant.peer.plist") {
-            return Err(InstallError::Conflict(path));
-        }
+        let path = crate::legacy_launch_agent_path(&home, "peer-agent").ok_or(
+            InstallError::InvalidConfig("peer agent name is not declared"),
+        )?;
         insert(
             path,
             Value::File {
@@ -687,24 +683,29 @@ fn desired(
     if let Some(bytes) = &targets.tick_agent {
         let home =
             provenant_os::fs::canonicalize(&targets.home).unwrap_or_else(|_| targets.home.clone());
-        let state = targets.roots.state.as_path();
-        let mut units = vec![("tick-agent", bytes, tick_agent_plist(state))];
+        let mut units = vec![(
+            "tick-agent",
+            bytes,
+            crate::legacy_launch_agent_path(&home, "tick-agent"),
+        )];
         if let Some(service) = &targets.tick_service {
             units = vec![
-                ("tick-agent", bytes, tick_timer_path(state)),
-                ("tick-service", service, tick_service_path(state)),
+                (
+                    "tick-agent",
+                    bytes,
+                    Some(systemd_user_dir(&home).join(LINUX_TIMER)),
+                ),
+                (
+                    "tick-service",
+                    service,
+                    Some(systemd_user_dir(&home).join(LINUX_SERVICE)),
+                ),
             ];
         }
         for (selector, bytes, path) in units {
             let path = path.ok_or(InstallError::InvalidConfig(
-                "tick agent requires the default state root",
+                "tick agent artifact name is not declared",
             ))?;
-            if selector == "tick-agent"
-                && targets.tick_service.is_none()
-                && path != home.join(MACOS_TICK)
-            {
-                return Err(InstallError::Conflict(path));
-            }
             insert(
                 path,
                 Value::File {
@@ -778,15 +779,124 @@ fn desired(
 }
 /// Where state keeps the immutable files of the release with `digest`.
 pub fn release_root(state: &Path, digest: provenant_records::SourceDigest) -> PathBuf {
-    state.join("releases").join(digest.to_string())
+    state.join(RELEASE_LAYOUT.releases).join(digest.to_string())
+}
+
+fn release_asset_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    for releases in path.ancestors().skip(1) {
+        if !releases
+            .file_name()
+            .is_some_and(|name| name == RELEASE_LAYOUT.releases)
+        {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(releases) else {
+            continue;
+        };
+        let mut components = relative.components();
+        let Some(Component::Normal(digest)) = components.next() else {
+            continue;
+        };
+        if digest
+            .to_str()
+            .is_none_or(|text| provenant_records::SourceDigest::parse(text).is_err())
+        {
+            continue;
+        }
+        let mut asset = PathBuf::new();
+        for component in components {
+            if !matches!(component, Component::Normal(_)) {
+                asset.clear();
+                break;
+            }
+            asset.push(component.as_os_str());
+        }
+        if asset.as_os_str().is_empty() {
+            continue;
+        }
+        let Some(root) = releases.parent() else {
+            continue;
+        };
+        let Some(container) = root.parent() else {
+            continue;
+        };
+        if !container
+            .file_name()
+            .is_some_and(|name| name == RELEASE_LAYOUT.container)
+        {
+            continue;
+        }
+        let Some(data) = container.parent() else {
+            continue;
+        };
+        if !data.is_absolute()
+            || !data
+                .components()
+                .any(|component| matches!(component, Component::Normal(_)))
+        {
+            continue;
+        }
+        return Some(asset);
+    }
+    None
+}
+
+fn release_link_matches(current: &Value, desired: &Value) -> bool {
+    let (Value::Link(current), Value::Link(desired)) = (current, desired) else {
+        return false;
+    };
+    release_asset_path(current)
+        .zip(release_asset_path(desired))
+        .is_some_and(|(current, desired)| current == desired)
+}
+
+fn declared_agent_path(path: &Path, selector: &str, home: &Path) -> bool {
+    crate::LEGACY_1X_ARTIFACTS.iter().any(|artifact| {
+        let crate::LegacyArtifact::LaunchAgent {
+            selector: name,
+            plist,
+            disposition: crate::ArtifactDisposition::Replace,
+            ..
+        } = artifact
+        else {
+            return false;
+        };
+        *name == selector && home.join(plist) == path
+    })
+}
+
+fn declared_binary_name(path: &Path) -> bool {
+    crate::LEGACY_1X_ARTIFACTS.iter().any(|artifact| {
+        matches!(
+            artifact,
+            crate::LegacyArtifact::StableLink {
+                name,
+                disposition: crate::ArtifactDisposition::Replace,
+            } if path.file_name().is_some_and(|actual| actual == *name)
+        )
+    })
+}
+
+/// Return an asset path inside any declared Provenant release tree, regardless
+/// of its data root name. This recognizes binary, skill and instruction links
+/// across the one-way 1.x cut-over without decoding an old receipt.
+pub fn release_instruction_asset(path: &Path) -> Option<PathBuf> {
+    let asset = release_asset_path(path)?;
+    asset
+        .strip_prefix(RELEASE_LAYOUT.instructions)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())?;
+    Some(asset)
 }
 
 /// The single per-user agent belongs only to an account's default state root.
 pub fn peer_agent_plist(state: &Path) -> Option<PathBuf> {
-    default_state_home(state).map(|home| home.join("Library/LaunchAgents/dev.provenant.peer.plist"))
+    default_state_home(state).and_then(|home| crate::legacy_launch_agent_path(home, "peer-agent"))
 }
 
-const MACOS_TICK: &str = "Library/LaunchAgents/dev.provenant.tick.plist";
 const LINUX_TIMER: &str = "provenant-tick.timer";
 const LINUX_SERVICE: &str = "provenant-tick.service";
 
@@ -806,7 +916,7 @@ pub fn user_dir_in(home: &Path, config_home: Option<std::ffi::OsString>) -> Path
 
 /// The host tick shares the per-user default-state ownership scope.
 pub fn tick_agent_plist(state: &Path) -> Option<PathBuf> {
-    default_state_home(state).map(|home| home.join(MACOS_TICK))
+    default_state_home(state).and_then(|home| crate::legacy_launch_agent_path(home, "tick-agent"))
 }
 
 /// The Linux systemd user timer, in the same ownership scope.
@@ -913,8 +1023,17 @@ pub fn plan_install(
                             && matches_owned(&current.value, &entry.expected)
                     })
                 });
-                let adopt_binary = targets.adopt_existing
-                    && want.selector == "binary"
+                let home = provenant_os::fs::canonicalize(&targets.home)
+                    .unwrap_or_else(|_| targets.home.clone());
+                let adopt_binary = want.selector == "binary"
+                    && declared_binary_name(path)
+                    && (release_link_matches(&current.value, &want.value)
+                        || (targets.adopt_existing && matches!(current.value, Value::File { .. })));
+                let adopt_release_link = matches!(
+                    want.selector.as_str(),
+                    "skill" | "instruction" | "shared-instruction"
+                ) && release_link_matches(&current.value, &want.value);
+                let adopt_agent = declared_agent_path(path, &want.selector, &home)
                     && matches!(current.value, Value::File { .. });
                 // The shared instructions file belongs to the release like the
                 // harness ones. Adopt anything provenant already pointed here
@@ -970,6 +1089,8 @@ pub fn plan_install(
                 if !immutable
                     && !was_owned
                     && !adopt_binary
+                    && !adopt_release_link
+                    && !adopt_agent
                     && !adopt_shared
                     && want.selector != "config"
                 {
@@ -1141,7 +1262,7 @@ pub fn plan_install(
         .collect();
     let receipt = InstallReceipt {
         extra: Default::default(),
-        schema_version: 1,
+        schema_version: provenant_records::INSTALL_RECEIPT_SCHEMA_VERSION,
         state_format_version: provenant_records::STATE_FORMAT_VERSION,
         source_digest: release.manifest.source_digest,
         manifest_digest: CanonicalV1::file_digest(&release.manifest_bytes),
@@ -1239,42 +1360,12 @@ pub fn install(
     smoke: &dyn ReleaseSmoke,
     dry_run: bool,
 ) -> Result<InstallOutcome, InstallError> {
-    let mut receipt = plan.receipt.clone();
-    if let Some(version) = reporter.receipt_state_format_version() {
-        receipt.state_format_version = version;
-    }
+    let receipt = plan.receipt.clone();
     let receipt_bytes = provenant_records::encode(&receipt)?;
     if receipt_bytes.len() as u64 > Limits::CONFIG.max_bytes {
         return Err(InstallError::Manifest("receipt byte bound"));
     }
     let mut actions = plan.actions.clone();
-    if reporter.receipt_required()
-        || receipt.state_format_version != plan.receipt.state_format_version
-    {
-        let path = plan
-            .targets
-            .roots
-            .state
-            .as_path()
-            .join("install/receipt.json");
-        let current = plan
-            .before
-            .entries
-            .get(&path)
-            .ok_or_else(|| InstallError::Drift(path.clone()))?;
-        actions.retain(|action| action.selector != "receipt");
-        if reporter.receipt_required()
-            || current.as_ref().is_none_or(|snapshot| {
-                snapshot.value
-                    != (Value::File {
-                        bytes: receipt_bytes.clone(),
-                        mode: 0o600,
-                    })
-            })
-        {
-            actions.push(receipt_action(&path, current, &receipt_bytes)?);
-        }
-    }
     reporter.preview(&actions).map_err(InstallError::Preview)?;
     reporter
         .manual_includes(&plan.manual_includes)
@@ -1356,10 +1447,6 @@ pub fn install(
                         .value
                         .clone()
                 };
-                if action.selector == "receipt" {
-                    reporter.before_receipt().map_err(InstallError::Preview)?;
-                    recheck(&path, before, state_root)?;
-                }
                 publish(&path, &value, before.is_some(), state_root)
             }
         })();
@@ -1792,7 +1879,13 @@ pub(crate) fn read_receipt(targets: &Targets) -> Result<Option<InstallReceipt>, 
 pub fn installed_binary(targets: &Targets) -> Result<Option<PathBuf>, InstallError> {
     read_receipt_inspected(targets, None)?
         .filter(|decoded| !decoded.stale.iter().any(|entry| entry.selector == "binary"))
-        .map(|decoded| Ok(decoded.receipt.bin_dir.to_path_buf()?.join("provenant")))
+        .map(|decoded| {
+            Ok(decoded
+                .receipt
+                .bin_dir
+                .to_path_buf()?
+                .join(crate::STABLE_BINARY_NAME))
+        })
         .transpose()
 }
 /// The recorded targets uninstall of `targets` selects, and every recorded
@@ -1833,15 +1926,13 @@ fn read_receipt_inspected(
 struct Decoded {
     receipt: InstallReceipt,
     moved: Option<PathBuf>,
-    /// The move is the 1.x hand-off, which install reports on its own.
-    handed_off: bool,
     stale: Vec<OwnedEntry>,
     stale_targets: BTreeSet<TargetId>,
 }
 impl Decoded {
     fn findings(&self) -> Result<Vec<InstallFinding>, InstallError> {
         let mut findings = Vec::new();
-        if let Some(old_state) = self.moved.as_ref().filter(|_| !self.handed_off) {
+        if let Some(old_state) = &self.moved {
             findings.push(InstallFinding {
                 rule: "state_root_moved".into(),
                 detail: None,
@@ -1858,10 +1949,10 @@ impl Decoded {
 }
 fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallError> {
     let mut receipt: InstallReceipt =
-        provenant_records::decode_v1(bytes, Limits::CONFIG).map_err(InstallError::ReceiptDecode)?;
-    receipt
-        .entries
-        .retain(|entry| entry.selector != "disk-guard-agent");
+        provenant_records::decode(bytes, Limits::CONFIG).map_err(InstallError::ReceiptDecode)?;
+    if receipt.schema_version != provenant_records::INSTALL_RECEIPT_SCHEMA_VERSION {
+        return Err(InstallError::Manifest("unsupported receipt schema version"));
+    }
     let state_root = targets.roots.state.as_path();
     normal_absolute(&receipt.bin_dir.to_path_buf()?)?;
     let mut harnesses = BTreeSet::new();
@@ -1908,7 +1999,10 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
                 .ancestors()
                 .nth(4)
                 .filter(|root| {
-                    target == release_root(root, receipt.source_digest).join("bin/provenant")
+                    target
+                        == release_root(root, receipt.source_digest)
+                            .join("bin")
+                            .join(crate::STABLE_BINARY_NAME)
                 })
                 .ok_or(InstallError::Manifest(
                     "receipt entry outside resolved targets",
@@ -1923,13 +2017,6 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
         }
     };
     let moved = (old_state != state_root).then_some(old_state);
-    // The first 2.0 install copies the 1.x receipt into the fresh default root
-    // of the same home on purpose, so the links that receipt owns are replaced.
-    // Any other moved root keeps its old links for manual cleanup.
-    let handed_off = moved
-        .as_deref()
-        .and_then(provenant_core::legacy_state_home)
-        .is_some_and(|old_home| default_state_home(state_root) == Some(old_home));
     let home =
         provenant_os::fs::canonicalize(&targets.home).unwrap_or_else(|_| targets.home.clone());
     let bin_dir = receipt.bin_dir.to_path_buf()?;
@@ -2012,8 +2099,7 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
             ));
         }
         // A shared path under a former home is stale, never a schema error.
-        // An entry the hand-off moved from the 1.x root stays owned.
-        if !(permitted || handed_off && permitted_moved)
+        if !(permitted || permitted_moved)
             || old_home.is_some_and(|old| path.starts_with(old) && !path.starts_with(&home))
         {
             stale.push(entry.clone());
@@ -2025,7 +2111,6 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
     Ok(Decoded {
         receipt,
         moved,
-        handed_off,
         stale,
         stale_targets,
     })
@@ -2119,8 +2204,13 @@ fn permitted_entry(
                     }
                 ));
         }
-        let binary = receipt.bin_dir.to_path_buf()?.join("provenant");
-        let expected_target = release_root(state_root, receipt.source_digest).join("bin/provenant");
+        let binary = receipt
+            .bin_dir
+            .to_path_buf()?
+            .join(crate::STABLE_BINARY_NAME);
+        let expected_target = release_root(state_root, receipt.source_digest)
+            .join("bin")
+            .join(crate::STABLE_BINARY_NAME);
         return Ok(entry.selector == "binary"
             && path == binary
             && matches!(
@@ -2284,7 +2374,9 @@ fn check_install_inspected(
                 {
                     let expected = OwnedValue::Link {
                         extra: Default::default(),
-                        target: AbsolutePath::new(&release_path.join("bin/provenant"))?,
+                        target: AbsolutePath::new(
+                            &release_path.join("bin").join(crate::STABLE_BINARY_NAME),
+                        )?,
                     };
                     if !stale_binary
                         && !receipt.entries.iter().any(|entry| {
@@ -2587,7 +2679,6 @@ pub fn uninstall(
     let Decoded {
         mut receipt,
         moved,
-        handed_off: _,
         stale,
         stale_targets: _,
     } = decoded;

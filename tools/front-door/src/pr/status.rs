@@ -1,5 +1,5 @@
 //! `pr status`: one compact line per pull request.
-use super::{Result, execute, successful};
+use super::{Result, successful};
 use crate::{emit_summarised, fail, roots};
 use provenant_cli::Globals;
 use provenant_records::{CommandResult, Outcome};
@@ -189,9 +189,17 @@ fn observe_ci_with(
 
 // Both classic protection and rulesets may apply. Only trust the resolved
 // policy when both sources are readable.
-pub(super) fn required_checks(project: &Path, target: &str) -> Option<Vec<String>> {
+pub(super) fn required_checks(state: &Path, project: &Path, target: &str) -> Option<Vec<String>> {
     required_policy(target, &|argv| {
-        super::execute_for(project, argv, std::time::Duration::from_secs(60), false).ok()
+        super::forge_execute(
+            state,
+            project,
+            argv,
+            &provenant_config::ports::Request::within(std::time::Duration::from_secs(60)),
+            false,
+            None,
+        )
+        .ok()
     })
     .map(|policy| policy.checks.into_iter().map(|check| check.name).collect())
     .filter(|names: &Vec<String>| !names.is_empty())
@@ -507,48 +515,55 @@ fn summarise_ci(
         truncated: false,
     }
 }
-fn open_numbers(project: &Path) -> Result<Vec<u64>> {
+fn open_numbers(state: &Path, project: &Path) -> Result<Vec<u64>> {
     #[derive(Deserialize)]
     struct Listed {
         number: u64,
     }
-    let bytes = successful(execute(
+    let bytes = successful(super::forge_execute(
+        state,
         project,
         &[
             "gh", "pr", "list", "--author", "@me", "--state", "open", "--limit", "50", "--json",
             "number",
         ],
+        &provenant_config::ports::Request::within(std::time::Duration::from_secs(60)),
+        false,
+        None,
     )?)?;
     let mut listed: Vec<Listed> = serde_json::from_slice(&bytes)?;
     listed.sort_by_key(|entry| entry.number);
     Ok(listed.into_iter().map(|entry| entry.number).collect())
 }
-/// Resolve the selected repository once before a `wait --pr` observation loop.
+/// Resolve the selected repository once before a `wait --pr` observation
+/// loop, within the waiter's request context.
 pub(crate) fn wait_repository(
     state: &Path,
     project: &Path,
-    budget: std::time::Duration,
+    request: &provenant_config::ports::Request,
 ) -> Result<String> {
     Ok(super::observer::repository_for_project(
-        state, project, budget,
+        state, project, request,
     )?)
 }
 
-/// Revalidate PR metadata and its CI through the shared observer during a wait loop.
+/// Revalidate PR metadata and its CI through the shared observer during a wait
+/// loop. The metadata read, every check page and the checks read share
+/// `request`'s one deadline and cancellation.
 pub(crate) fn wait_line_observed(
     project: &Path,
     state: &Path,
     repository: &str,
     number: u64,
-    timeout: std::time::Duration,
+    request: &provenant_config::ports::Request,
     max_age: std::time::Duration,
 ) -> Result<Line> {
     use super::observer::{ObserveError, Observer};
-    let mut observer = Observer::open(state, project, repository, timeout)?;
+    let mut observer = Observer::open(state, project, repository, request)?;
     let value = observer.resource(
         &format!("pulls/{number}"),
         std::time::Duration::ZERO,
-        timeout,
+        request,
     )?;
     let pull: RestWaitPull = serde_json::from_value(value)?;
     let state = if pull.merged_at.is_some() {
@@ -566,7 +581,7 @@ pub(crate) fn wait_line_observed(
         draft: pull.draft,
         url: pull.html_url,
     };
-    let checks = match observer.checks(&view.head, max_age, timeout) {
+    let checks = match observer.checks(&view.head, max_age, request) {
         Ok(checks) => Some(checks),
         Err(ObserveError::Unavailable(_)) => None,
         Err(error) => return Err(error.to_string().into()),
@@ -580,13 +595,13 @@ pub(crate) fn wait_line(
     project: &Path,
     state: &Path,
     number: u64,
-    timeout: std::time::Duration,
+    request: &provenant_config::ports::Request,
     max_age: std::time::Duration,
-    cancel: Option<&provenant_core::CancelToken>,
 ) -> Result<Line> {
     use super::observer::{ObserveError, Observer};
     let text = number.to_string();
-    let bytes = successful(super::execute_cancellable(
+    let bytes = successful(super::forge_execute(
+        state,
         project,
         &[
             "gh",
@@ -596,10 +611,9 @@ pub(crate) fn wait_line(
             "--json",
             "state,headRefOid,mergeStateStatus,reviewDecision,isDraft,url",
         ],
-        timeout,
+        request,
         false,
         None,
-        cancel,
     )?)?;
     let view: View = serde_json::from_slice(&bytes)?;
     let segments: Vec<&str> = view.url.trim_end_matches('/').split('/').collect();
@@ -609,8 +623,8 @@ pub(crate) fn wait_line(
     };
     // Unreadable or incomplete checks leave the row readable, as before; a
     // rate limit or an expired read is a failed row naming why.
-    let checks = match Observer::open(state, project, &repository, timeout)
-        .and_then(|mut observer| observer.checks(&view.head, max_age, timeout))
+    let checks = match Observer::open(state, project, &repository, request)
+        .and_then(|mut observer| observer.checks(&view.head, max_age, request))
     {
         Ok(checks) => Some(checks),
         Err(ObserveError::Unavailable(_)) => None,
@@ -676,9 +690,8 @@ fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
                 project,
                 state,
                 number,
-                std::time::Duration::from_secs(60),
+                &provenant_config::ports::Request::within(std::time::Duration::from_secs(60)),
                 std::time::Duration::ZERO,
-                None,
             )
             .unwrap_or_else(|error| Line {
                 number,
@@ -705,7 +718,7 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
             .roots
             .state;
         let numbers = if numbers.is_empty() {
-            open_numbers(&project)?
+            open_numbers(state.as_path(), &project)?
         } else {
             numbers
         };

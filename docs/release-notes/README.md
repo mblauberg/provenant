@@ -4,7 +4,7 @@ Published versions are on [GitHub Releases](https://github.com/mblauberg/provena
 
 ## Stability
 
-Provenant makes no stability promise. Commands, configuration, state and output may change without a deprecation period or compatibility shims. Upgrade every host together; mixed peer versions are unsupported. Each release lists breaking changes first.
+The [consumer contract](../specs/consumer-contract.md) marks each command, output, variable and repository file stable, provisional or internal. Stable items change only in a major release; provisional ones may change in a minor release and are named here when they do; internal ones may change in any release. There is no deprecation period and there are no compatibility shims. Upgrade every host together; mixed peer versions are unsupported. Each release lists breaking changes first.
 
 ## Writing a fragment
 

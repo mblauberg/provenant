@@ -75,36 +75,38 @@ pub fn decide_candidate(
     }
     decide(forge, target, requested, method)
 }
-/// Publication engine is selected once, from the shared strategy declaration.
+/// Backend authority comes only from the effective landing port. Strategy remains
+/// the candidate/ordering plan and cannot enable a disabled publication backend.
 pub fn decide_strategy(
     forge: &mut dyn Forge,
     target: &str,
     settings: &provenant_cli::domains::LandSettings,
     candidate: &Candidate,
+    port: &provenant_config::LandPort,
 ) -> Result<PublishDecision, LandingError> {
-    match settings.strategy.declaration().execution {
-        provenant_records::landing::Execution::Command => {
-            if !settings
-                .command
-                .as_ref()
-                .is_some_and(|command| command.valid())
-            {
-                return Err(LandingError::Failed(
-                    "command strategy requires a valid land.command declaration".into(),
-                ));
+    let (backend, _) = provenant_config::land_backend(port);
+    provenant_config::dispatch_port_backend(
+        &backend.backend,
+        || match settings.strategy.declaration().execution {
+            provenant_records::landing::Execution::Builtin => {
+                decide_candidate(forge, target, settings.publish, settings.method, candidate)
             }
+            provenant_records::landing::Execution::Unavailable => Err(LandingError::Unimplemented(
+                "strategy execution follows in 2.1",
+            )),
+        },
+        |_| {
             Ok(PublishDecision {
                 mode: PublishMode::Command,
-                reason: "land.strategy selects the repository command".into(),
+                reason: format!("land command port (source: {:?})", port.source),
             })
-        }
-        provenant_records::landing::Execution::Builtin => {
-            decide_candidate(forge, target, settings.publish, settings.method, candidate)
-        }
-        provenant_records::landing::Execution::Unavailable => Err(LandingError::Unimplemented(
-            "strategy execution follows in 2.1",
-        )),
-    }
+        },
+        || {
+            Err(LandingError::PortUnavailable {
+                port_source: port.source,
+            })
+        },
+    )
 }
 
 /// Return PRs whose pinned head or approval changed immediately before publication.

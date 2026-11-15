@@ -472,8 +472,7 @@ impl PrepareInput<'_> {
     }
 
     pub(crate) fn sandboxed(&self) -> bool {
-        (self.host_var)(provenant_confinement::run_config::SANDBOX_ENV)
-            .is_none_or(|value| value != "off")
+        (self.host_var)(provenant_core::consumer_env::SANDBOX).is_none_or(|value| value != "off")
     }
 
     pub fn user_skills(&self) -> bool {
@@ -639,23 +638,15 @@ pub(crate) fn base_env(
 ) -> Vec<(OsString, OsString)> {
     if !input.sandboxed() {
         let mut env: Vec<_> = std::env::vars_os()
-            .filter(|(name, _)| {
-                name != provenant_confinement::run_config::SANDBOX_ENV && name != "HOME"
-            })
+            .filter(|(name, _)| name != provenant_core::consumer_env::SANDBOX && name != "HOME")
             .collect();
         // Establish the host's selected home before an adapter may isolate it.
         env.push(("HOME".into(), input.home.into()));
-        env.push((
-            provenant_confinement::run_config::SANDBOX_ENV.into(),
-            "off".into(),
-        ));
+        env.push((provenant_core::consumer_env::SANDBOX.into(), "off".into()));
         return env;
     }
     let mut env = vec![
-        (
-            provenant_confinement::run_config::SANDBOX_ENV.into(),
-            "on".into(),
-        ),
+        (provenant_core::consumer_env::SANDBOX.into(), "on".into()),
         ("HOME".into(), input.home.into()),
         ("USER".into(), input.user.into()),
         ("PATH".into(), path.as_ref().to_owned()),
@@ -693,9 +684,12 @@ pub(crate) fn private_git_objects(
             path: bin.join("git"),
             bytes: crate::lane::git_wrapper(git, &Default::default())?,
         });
-        spec.env.retain(|(key, _)| key != "PROVENANT_GIT");
         spec.env
-            .push(("PROVENANT_GIT".into(), bin.join("git").into()));
+            .retain(|(key, _)| key != provenant_core::consumer_env::GIT);
+        spec.env.push((
+            provenant_core::consumer_env::GIT.into(),
+            bin.join("git").into(),
+        ));
         grant_exec_path(git, spec);
         spec.profile.spec.tool_exec_roots.push(subtree(&bin));
         spec.profile
@@ -861,9 +855,12 @@ pub(crate) fn private_git_objects(
     spec.git_wrapper.scrub = true;
     spec.write_git_wrapper(&scratch.join("bin"), input.provenant.git)?;
     // The generated wrapper embeds the real executable, so this cannot recurse.
-    spec.env.retain(|(key, _)| key != "PROVENANT_GIT");
     spec.env
-        .push(("PROVENANT_GIT".into(), scratch.join("bin/git").into()));
+        .retain(|(key, _)| key != provenant_core::consumer_env::GIT);
+    spec.env.push((
+        provenant_core::consumer_env::GIT.into(),
+        scratch.join("bin/git").into(),
+    ));
     grant_exec_path(input.provenant.git, spec);
     spec.profile
         .spec
@@ -1006,9 +1003,9 @@ pub(crate) fn finalise_provider_env(
 
 impl LaunchSpec {
     pub(crate) fn native_environment(&self) -> bool {
-        self.env.iter().any(|(name, value)| {
-            name == provenant_confinement::run_config::SANDBOX_ENV && value == "off"
-        })
+        self.env
+            .iter()
+            .any(|(name, value)| name == provenant_core::consumer_env::SANDBOX && value == "off")
     }
 
     /// The host Cargo binding, present once the host has finalised Cargo.
@@ -1501,7 +1498,7 @@ fn cargo_environment(
     native: bool,
     env: &mut Vec<(OsString, OsString)>,
 ) {
-    env.retain(|(key, _)| key != "PROVENANT_LANE_CARGO_LINT_TARGET");
+    env.retain(|(key, _)| key != provenant_core::consumer_env::LANE_CARGO_LINT_TARGET);
     if native {
         for (name, value) in [
             (
@@ -1524,7 +1521,7 @@ fn cargo_environment(
         // this sibling. Cargo locks the build directory, so they then do not
         // queue behind test and build runs in the lane's own target/.
         env.push((
-            "PROVENANT_LANE_CARGO_LINT_TARGET".into(),
+            provenant_core::consumer_env::LANE_CARGO_LINT_TARGET.into(),
             cache.join("target-lint").into_os_string(),
         ));
     }

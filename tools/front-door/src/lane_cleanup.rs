@@ -102,6 +102,30 @@ fn retirement_for_ref(
     let subject = ownership
         .custody_subject()
         .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
+    // A worktree retirement and its reference step share one immutable record.
+    // When the reference sweep resumes that record, carry its linked identity
+    // forward after the durable worktree prerequisite has completed.
+    let related_subjects = if related_subjects.is_empty() {
+        match port.retirement_for_subject(project, &subject)? {
+            Some(existing) if !existing.related_subjects.is_empty() => {
+                let reference_step = existing
+                    .outcomes
+                    .iter()
+                    .find(|outcome| outcome.step == RetirementStep::Reference)
+                    .ok_or(worktrees::WorktreeError::RegistrationUnconfirmed)?;
+                if !reference_step
+                    .step
+                    .prerequisites_complete(&existing.outcomes)
+                {
+                    return Err(worktrees::WorktreeError::RegistrationUnconfirmed);
+                }
+                existing.related_subjects
+            }
+            Some(_) | None => related_subjects,
+        }
+    } else {
+        related_subjects
+    };
     let Some(record) = port.begin_retirement(RetirementIntent {
         project,
         related_subjects: related_subjects.clone(),
@@ -1760,6 +1784,9 @@ mod tests {
         }
         fn forge(&self, _: &GitRefName) -> worktrees::ForgeObservation {
             worktrees::ForgeObservation::Absent
+        }
+        fn fresh_forge(&self, branch: &GitRefName) -> worktrees::ForgeObservation {
+            self.forge(branch)
         }
         fn integration_bases(&self) -> Vec<(String, GitOid)> {
             Vec::new()

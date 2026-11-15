@@ -547,8 +547,8 @@ pub(crate) mod peer_tests {
         ];
         let removed = [
             provenant_core::RUN_STATE_DIRECTORY_ENV,
-            provenant_run::LANE_DEPTH_ENV,
-            provenant_run::PARENT_ATTEMPT_ENV,
+            provenant_core::consumer_env::LANE_DEPTH,
+            provenant_core::consumer_env::PARENT_ATTEMPT_ID,
         ];
         let fixture_home = tempfile::tempdir()?;
         let isolate_home = name.ends_with("settlement_defers_adopted_writer_cleanup");
@@ -1485,6 +1485,7 @@ fn fallback_cause_uses_only_unanimous_typed_facts() {
         run::{SkipKind, SkippedRoute},
     };
     let route = |cause| SkippedRoute {
+        skipped_accounts: Vec::new(),
         extra: Default::default(),
         route: "/private/token".into(),
         kind: SkipKind::Unavailable,

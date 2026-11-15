@@ -2,8 +2,8 @@
 use crate::{emit, fail, roots};
 use provenant_cli::Globals;
 use provenant_config::{
-    CommandExitCodes, ExitDisposition, PortBackend, PortCommand, PortCommandDisposition,
-    PortCommandExecution, PortSource, PortTable,
+    CommandExitCodes, ExitDisposition, PortCommand, PortCommandDisposition, PortCommandExecution,
+    PortSource, PortTable,
 };
 use provenant_core::CancelToken;
 use provenant_os::exec::{SystemExecutor, Termination};
@@ -12,9 +12,9 @@ use serde::Serialize;
 use std::{ffi::OsString, io::Write, path::Path, time::Duration};
 
 const COMMAND: &str = "verify";
-const CONFIG_JSON_ENV: &str = "PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON";
-const PROJECT_ENV: &str = "PROVENANT_VERIFY_PROJECT_ROOT";
-const TIER_ENV: &str = "PROVENANT_VERIFY_TIER";
+use provenant_core::consumer_env::{
+    VERIFY_EFFECTIVE_CONFIG_JSON, VERIFY_PROJECT_ROOT, VERIFY_TIER,
+};
 
 #[derive(Serialize)]
 struct Report {
@@ -80,28 +80,37 @@ pub fn run(tier: Option<&str>, globals: &Globals) -> u8 {
             );
         }
     };
-    let stored_command_digest = match &declaration.backend {
-        PortBackend::Command { command } => Some(command.digest()),
-        PortBackend::Builtin | PortBackend::None => None,
-    };
+    let stored_command_digest = provenant_config::dispatch_port_backend(
+        &declaration.backend,
+        || None,
+        |command| Some(command.digest()),
+        || None,
+    );
     let environment = [
-        (OsString::from(CONFIG_JSON_ENV), effective_config),
-        (OsString::from(PROJECT_ENV), project.as_os_str().to_owned()),
-        (OsString::from(TIER_ENV), OsString::from(&tier)),
+        (
+            OsString::from(VERIFY_EFFECTIVE_CONFIG_JSON),
+            effective_config,
+        ),
+        (
+            OsString::from(VERIFY_PROJECT_ROOT),
+            project.as_os_str().to_owned(),
+        ),
+        (OsString::from(VERIFY_TIER), OsString::from(&tier)),
     ];
     let timeout = Duration::from_secs(provenant_core::MAX_LANE_RUNTIME_SECONDS);
     let cancel = CancelToken::new();
-    let (backend, source, mut execution, should_record) = match declaration.backend {
-        PortBackend::Builtin => {
+    let selected = provenant_config::dispatch_port_backend(
+        &declaration.backend,
+        || {
             let script = resolved.assets.join("scripts/verify-tier");
             if !script.is_file() {
-                return fail(
+                return Err(fail(
                     COMMAND,
                     Outcome::Unavailable,
                     "VERIFY_ENGINE_UNAVAILABLE",
                     "the builtin verify tier engine is not present in the selected product assets",
                     globals,
-                );
+                ));
             }
             let arguments = [
                 script.as_os_str().to_owned(),
@@ -130,21 +139,19 @@ pub fn run(tier: Option<&str>, globals: &Globals) -> u8 {
                     if execution.disposition == PortCommandDisposition::Refused {
                         execution.disposition = PortCommandDisposition::Failed;
                     }
-                    ("builtin", declaration.source, execution, false)
+                    Ok(("builtin", declaration.source, execution, false))
                 }
-                Err(error) => {
-                    return fail(
-                        COMMAND,
-                        Outcome::Unavailable,
-                        "VERIFY_ENGINE_UNAVAILABLE",
-                        &format!("cannot start the builtin verify tier engine: {error}"),
-                        globals,
-                    );
-                }
+                Err(error) => Err(fail(
+                    COMMAND,
+                    Outcome::Unavailable,
+                    "VERIFY_ENGINE_UNAVAILABLE",
+                    &format!("cannot start the builtin verify tier engine: {error}"),
+                    globals,
+                )),
             }
-        }
-        PortBackend::Command { command } => {
-            let command = substitute_tier(&command, &tier);
+        },
+        |command| {
+            let command = substitute_tier(command, &tier);
             match execute(&command, &project, &[], &environment, timeout, &cancel) {
                 Ok(mut execution) => {
                     // The request key carries the selected tier; the digest binds
@@ -152,21 +159,21 @@ pub fn run(tier: Option<&str>, globals: &Globals) -> u8 {
                     if let Some(digest) = stored_command_digest {
                         execution.command_digest = digest;
                     }
-                    ("command", declaration.source, execution, true)
+                    Ok(("command", declaration.source, execution, true))
                 }
                 Err(_error) => {
                     let mut execution = PortCommandExecution::failed(&command);
                     if let Some(digest) = stored_command_digest {
                         execution.command_digest = digest;
                     }
-                    ("command", declaration.source, execution, true)
+                    Ok(("command", declaration.source, execution, true))
                 }
             }
-        }
-        PortBackend::None => {
-            return render(
+        },
+        || {
+            Err(render(
                 Report {
-                    tier,
+                    tier: tier.clone(),
                     backend: "none",
                     source: declaration.source,
                     disposition: None,
@@ -181,8 +188,12 @@ pub fn run(tier: Option<&str>, globals: &Globals) -> u8 {
                 )),
                 None,
                 globals,
-            );
-        }
+            ))
+        },
+    );
+    let (backend, source, mut execution, should_record) = match selected {
+        Ok(selected) => selected,
+        Err(code) => return code,
     };
     if execution.disposition == PortCommandDisposition::Succeeded && !execution.capture_complete() {
         execution.disposition = PortCommandDisposition::Unknown;
@@ -192,20 +203,40 @@ pub fn run(tier: Option<&str>, globals: &Globals) -> u8 {
             "{}:{tier}",
             CanonicalV1::file_digest(project.as_os_str().as_encoded_bytes())
         );
-        if let Err(error) = provenant_config::record_port_command(
+        let publication = match provenant_config::record_port_command(
             resolved.roots.state.as_path(),
             "verify",
             source,
             "tier",
             &key,
             &execution,
+            provenant_config::PortReceiptLifetime::AgeDays {
+                days: provenant_config::DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS,
+            },
         ) {
+            Ok(publication) => publication,
+            Err(error) => {
+                return render(
+                    report(&tier, backend, source, &execution),
+                    Outcome::Error,
+                    Some((
+                        "VERIFY_EVIDENCE",
+                        format!("cannot record verify command evidence: {error}"),
+                    )),
+                    Some(&execution),
+                    globals,
+                );
+            }
+        };
+        if let provenant_config::PortCommandPublication::VisibleDurabilityUnconfirmed { cause } =
+            publication
+        {
             return render(
                 report(&tier, backend, source, &execution),
                 Outcome::Error,
                 Some((
-                    "VERIFY_EVIDENCE",
-                    format!("cannot record verify command evidence: {error}"),
+                    "VERIFY_EVIDENCE_VISIBLE",
+                    format!("verify receipt is visible but durability is unconfirmed: {cause}"),
                 )),
                 Some(&execution),
                 globals,

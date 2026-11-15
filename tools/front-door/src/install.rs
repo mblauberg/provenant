@@ -27,20 +27,30 @@ enum EdgeError {
     Peer(provenant_fabric_runtime::peer_agent::AgentError),
 }
 fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
-    let state = targets.roots.state.as_path();
+    let roots = targets.roots.clone();
+    prepare_agents_at(targets, &roots)
+}
+
+/// Read staged owner configuration, but render agents for the published root.
+fn prepare_agents_at(
+    targets: &mut Targets,
+    destination: &provenant_core::Roots,
+) -> Result<(), EdgeError> {
+    let state = destination.state.as_path();
     if provenant_fabric_runtime::peer_agent::eligible(state, &targets.home) {
-        let program = targets.bin_dir.join("provenant");
+        let program = targets.bin_dir.join(provenant_config::STABLE_BINARY_NAME);
         targets.peer_agent = Some(
             provenant_fabric_runtime::peer_agent::install_plist(
                 &program,
                 &targets.roots,
+                state,
                 peer_agent_registry_name,
             )
             .map_err(EdgeError::Peer)?,
         );
     }
     if super::tick_agent::eligible(state, &targets.home) {
-        let program = targets.bin_dir.join("provenant");
+        let program = targets.bin_dir.join(provenant_config::STABLE_BINARY_NAME);
         let search = provenant_fabric_runtime::peer_agent::scheduler_path(
             &program,
             &targets.roots,
@@ -77,6 +87,14 @@ fn selected_targets(
     harnesses: &[Harness],
 ) -> Result<(Resolved, Targets), EdgeError> {
     let environment = environment(globals)?;
+    let targets = selected_targets_in(&environment, harnesses)?;
+    Ok((environment, targets))
+}
+
+fn selected_targets_in(
+    environment: &Resolved,
+    harnesses: &[Harness],
+) -> Result<Targets, EdgeError> {
     let mut targets = cli::install::configured_targets(
         environment.roots.clone(),
         &environment.home,
@@ -95,7 +113,7 @@ fn selected_targets(
         account_config(&targets.roots, &environment.home).map_err(EdgeError::Install)?;
     targets.accounts = accounts;
     targets.shared_settings = shared;
-    Ok((environment, targets))
+    Ok(targets)
 }
 
 /// Largest shared settings source read.
@@ -319,9 +337,16 @@ impl PreviewReporter {
     /// tick agent is restarted from the new root once the install is done.
     fn stop_legacy_agents(&mut self, state: &Path, home: &Path) -> io::Result<()> {
         if provenant_fabric_runtime::peer_agent::eligible(state, home) {
-            crate::state_reset::quiesce_launch_agents(
+            let labels: Vec<_> = provenant_config::LEGACY_1X_ARTIFACTS
+                .iter()
+                .filter_map(|artifact| match artifact {
+                    provenant_config::LegacyArtifact::LaunchAgent { label, .. } => Some(*label),
+                    _ => None,
+                })
+                .collect();
+            crate::state_handoff::quiesce_launch_agents(
                 home,
-                crate::state_handoff::LEGACY_AGENT_LABELS,
+                &labels,
                 launchctl,
                 |label, result| {
                     // Retired labels must stay absent. Only current agents
@@ -329,7 +354,13 @@ impl PreviewReporter {
                     self.record_stop(
                         label,
                         result.map(|stopped| {
-                            stopped && matches!(label, "dev.provenant.peer" | "dev.provenant.tick")
+                            stopped && provenant_config::LEGACY_1X_ARTIFACTS.iter().any(|artifact| {
+                                matches!(artifact, provenant_config::LegacyArtifact::LaunchAgent {
+                                    label: known,
+                                    disposition: provenant_config::ArtifactDisposition::Replace,
+                                    ..
+                                } if *known == label)
+                            })
                         }),
                     )
                 },
@@ -337,7 +368,7 @@ impl PreviewReporter {
         } else if super::tick_agent::eligible(state, home) {
             self.record_stop(
                 "dev.provenant.tick",
-                super::tick_agent::stop_for_reset(home).map_err(io::Error::other),
+                super::tick_agent::quiesce(home).map_err(io::Error::other),
             )?;
         }
         Ok(())
@@ -822,14 +853,14 @@ struct Batches {
 /// The selected, recorded or detected targets plus one batch for every
 /// registered account directory of a selected harness, so a new or upgraded
 /// install leaves every account with the same managed content.
-fn install_batches(globals: &cli::Globals, args: &cli::Install) -> Result<Batches, EdgeError> {
-    let mut targets = detected_batches(globals, args)?;
-    let (environment, base) = selected_targets(globals, &[])?;
+fn install_batches(environment: &Resolved, args: &cli::Install) -> Result<Batches, EdgeError> {
+    let mut targets = detected_batches(environment, args)?;
+    let base = selected_targets_in(environment, &[])?;
     let mut findings = Vec::new();
     if args.harness.is_empty()
         && let Some(receipt) = read_install_receipt(&base).map_err(EdgeError::Install)?
     {
-        for record in orphaned_targets(&environment, &base, &receipt) {
+        for record in orphaned_targets(environment, &base, &receipt) {
             findings.push(InstallFinding {
                 rule: "orphaned_account".into(),
                 detail: None,
@@ -870,21 +901,21 @@ fn install_batches(globals: &cli::Globals, args: &cli::Install) -> Result<Batche
 }
 
 fn detected_batches(
-    globals: &cli::Globals,
+    environment: &Resolved,
     args: &cli::Install,
 ) -> Result<Vec<Targets>, EdgeError> {
     if !args.harness.is_empty() {
-        return selected_targets(globals, &args.harness).map(|(_, targets)| vec![targets]);
+        return selected_targets_in(environment, &args.harness).map(|targets| vec![targets]);
     }
     // Resolve config and roots without validating an empty selection.
-    let (environment, base) = selected_targets(globals, &[])?;
+    let base = selected_targets_in(environment, &[])?;
     if let Some(receipt) = read_install_receipt(&base).map_err(EdgeError::Install)? {
         let bin = receipt
             .bin_dir
             .to_path_buf()
             .map_err(InstallError::from)
             .map_err(EdgeError::Install)?;
-        let orphans = orphaned_targets(&environment, &base, &receipt);
+        let orphans = orphaned_targets(environment, &base, &receipt);
         return receipt
             .harness_targets
             .into_iter()
@@ -921,7 +952,7 @@ fn detected_batches(
         if std::env::split_paths(&path)
             .any(|dir| provenant_os::sys::is_executable(&dir.join(spec.binary)))
         {
-            batches.push(selected_targets(globals, &[spec.id])?.1);
+            batches.push(selected_targets_in(environment, &[spec.id])?);
         }
     }
     let mut directories = Vec::new();
@@ -1025,83 +1056,47 @@ pub(super) fn run_install(args: cli::Install, globals: &cli::Globals) -> u8 {
     }
 }
 
-/// Installs every batch. `agents` also settles the per-user LaunchAgents,
-/// which only a new release needs; a sync leaves them running as they are.
-fn apply_install(
-    mut args: cli::Install,
-    globals: &cli::Globals,
-    agents: bool,
+struct PreparedInstall {
+    batches: Vec<Targets>,
+    summaries: Vec<HarnessTarget>,
+    preview: InstallOutcome,
+}
+
+fn supports_hooks(batch: &Targets) -> bool {
+    batch.harnesses.iter().any(|target| {
+        cli::hooks::HOOK_SPECS
+            .iter()
+            .any(|spec| spec.registration.harness == Some(target.harness))
+    })
+}
+
+fn batch_args(args: &cli::Install, batch: &Targets, dry_run: bool) -> cli::Install {
+    cli::Install {
+        bin_dir: Some(batch.bin_dir.clone()),
+        hooks: if matches!(args.hooks, Some(cli::Switch::On)) && !supports_hooks(batch) {
+            None
+        } else {
+            args.hooks
+        },
+        dry_run,
+        ..args.clone()
+    }
+}
+
+/// All work that can fail against staged owner configuration runs here, before
+/// any service is stopped or the candidate root is published.
+fn preflight_install(
+    environment: &Resolved,
+    destination: &provenant_core::Roots,
+    args: &cli::Install,
     options: SyncOptions,
-) -> Result<Applied, Refused> {
-    // Receipt errors and downgrade attempts are refusals, never guessed formats.
-    refuse_newer_state(globals)?;
-    args.source = provenant_core::PathResolver::resolve_existing_ancestor(
-        &provenant_os::fs::SystemPathResolver,
-        &args.source,
-    )
-    .map_err(|source| {
-        InstallError::Fs(provenant_os::fs::FsError::Io {
-            operation: "resolve install source",
-            path: args.source.clone(),
-            source,
-        })
-    })?;
-    let mut reporter = PreviewReporter::default();
-    // The first install at a fresh default root copies the 1.x owner
-    // configuration before anything reads it: targets, accounts and previews
-    // all come from the copied files.
-    let environment = environment(globals)?;
-    let state_copy =
-        crate::state_handoff::plan(environment.roots.state.as_path(), &environment.home)
-            .map_err(|error| Refused::Fail(Outcome::Error, "STATE_COPY", error.to_string()))?;
-    let state_copy = match state_copy {
-        Some(plan) if args.dry_run => {
-            // Until the copy exists every 1.x link reads as foreign, so a
-            // preview would only report conflicts. Check the release alone.
-            let cancel = CancelToken::new();
-            let smoke = SystemSmoke::new(None).map_err(|error| {
-                Refused::Fail(Outcome::Error, "SMOKE_EXECUTOR", error.to_string())
-            })?;
-            verify_release(&args.source, &smoke, &cancel)?;
-            return Ok(Applied {
-                result: Ok(InstallOutcome {
-                    actions: Vec::new(),
-                    findings: Vec::new(),
-                    manual_includes: Vec::new(),
-                    dry_run: true,
-                }),
-                summaries: Vec::new(),
-                peer_agent: None,
-                tick_agent: None,
-                state_copy: Some(plan),
-            });
-        }
-        Some(plan) => {
-            // Preflight and stage all handoff inputs before stopping 1.x.
-            // A failed preflight stops nothing; a failed stop publishes nothing.
-            let home = environment.home.clone();
-            match crate::state_handoff::run(&plan, &environment.roots, || {
-                reporter.stop_legacy_agents(&plan.to, &home)
-            }) {
-                Ok(copied) => Some(copied),
-                Err(error) => {
-                    if let Some(message) = reporter.stopped_report(&plan.to) {
-                        let _ = writeln!(io::stderr().lock(), "{message}");
-                    }
-                    return Err(Refused::Fail(
-                        Outcome::Error,
-                        "STATE_COPY",
-                        error.to_string(),
-                    ));
-                }
-            }
-        }
-        None => None,
-    };
+    context: &InstallContext<'_>,
+    smoke: &SystemSmoke,
+) -> Result<PreparedInstall, Refused> {
     let Batches {
         targets: mut batches,
         findings: skipped,
-    } = install_batches(globals, &args)?;
+    } = install_batches(environment, args)?;
     for targets in &mut batches {
         targets.bin_dir = args
             .bin_dir
@@ -1124,81 +1119,183 @@ fn apply_install(
         .iter()
         .flat_map(|batch| batch.harnesses.clone())
         .collect();
-    let Some(mut targets) = batches.last().cloned() else {
+    if batches.is_empty() {
         return Err(Refused::Fail(
             Outcome::Invalid,
             "NO_HARNESSES",
             "No harness CLIs, Claude config directories or registered accounts found; select --harness".into(),
         ));
     };
+    for batch in &mut batches {
+        prepare_agents_at(batch, destination)?;
+    }
+    if matches!(args.hooks, Some(cli::Switch::On)) && !batches.iter().any(supports_hooks) {
+        return Err(InstallError::HooksUnavailable.into());
+    }
+    let mut preview = InstallOutcome {
+        actions: Vec::new(),
+        findings: skipped,
+        manual_includes: Vec::new(),
+        dry_run: true,
+    };
+    let mut reporter = PreviewReporter::default();
+    for batch in &batches {
+        let outcome = cli::install::execute_install(
+            &batch_args(args, batch, true),
+            batch.clone(),
+            context,
+            &mut reporter,
+            smoke,
+            env!("PROVENANT_TARGET_TRIPLE"),
+        )?;
+        preview.actions.extend(outcome.actions);
+        preview.findings.extend(outcome.findings);
+        preview.manual_includes.extend(outcome.manual_includes);
+    }
+    // Smoke the source before the handoff may stop 1.x or publish the new root.
+    verify_release(&args.source, smoke, context.cancel)?;
+    Ok(PreparedInstall {
+        batches,
+        summaries,
+        preview,
+    })
+}
+
+/// Installs every batch. `agents` also settles the per-user LaunchAgents,
+/// which only a new release needs; a sync leaves them running as they are.
+fn apply_install(
+    mut args: cli::Install,
+    globals: &cli::Globals,
+    agents: bool,
+    options: SyncOptions,
+) -> Result<Applied, Refused> {
+    args.source = provenant_core::PathResolver::resolve_existing_ancestor(
+        &provenant_os::fs::SystemPathResolver,
+        &args.source,
+    )
+    .map_err(|source| {
+        InstallError::Fs(provenant_os::fs::FsError::Io {
+            operation: "resolve install source",
+            path: args.source.clone(),
+            source,
+        })
+    })?;
+    let environment = environment(globals)?;
+    // Identify an explicit 1.x root before any current receipt reader sees it.
+    let plan = crate::state_handoff::plan(environment.roots.state.as_path(), &environment.home)
+        .map_err(|error| {
+            let (outcome, code) = match &error {
+                crate::state_handoff::PlanError::StateFormatBreak { .. } => {
+                    (Outcome::Refused, "STATE_FORMAT_BREAK")
+                }
+                _ => (Outcome::Error, "STATE_COPY"),
+            };
+            Refused::Fail(outcome, code, error.to_string())
+        })?;
+    refuse_newer_state(globals)?;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let context = context(&clock, &cancel)
         .map_err(|error| Refused::Fail(Outcome::Error, "WAIT_BUDGET", error))?;
     let smoke = SystemSmoke::new(None)
         .map_err(|error| Refused::Fail(Outcome::Error, "SMOKE_EXECUTOR", error.to_string()))?;
+    let mut reporter = PreviewReporter::default();
+    let mut prepared = None;
+    let state_copy = if let Some(plan) = plan {
+        let preflight = |candidate: &provenant_core::Roots| {
+            let staged = Resolved {
+                roots: candidate.clone(),
+                ..environment.clone()
+            };
+            prepared = Some(
+                preflight_install(
+                    &staged,
+                    &environment.roots,
+                    &args,
+                    options,
+                    &context,
+                    &smoke,
+                )
+                .map_err(|error| io::Error::other(error.message()))?,
+            );
+            Ok(())
+        };
+        if args.dry_run {
+            crate::state_handoff::preview(&plan, &environment.roots, preflight)
+                .map_err(|error| Refused::Fail(Outcome::Error, "STATE_COPY", error.to_string()))?;
+            Some(plan)
+        } else {
+            match crate::state_handoff::run(&plan, &environment.roots, preflight, || {
+                reporter.stop_legacy_agents(&plan.to, &environment.home)
+            }) {
+                Ok(copied) => Some(copied),
+                Err(error) => {
+                    if let Some(message) = reporter.stopped_report(&plan.to) {
+                        let _ = writeln!(io::stderr().lock(), "{message}");
+                    }
+                    return Err(Refused::Fail(
+                        Outcome::Error,
+                        "STATE_COPY",
+                        error.to_string(),
+                    ));
+                }
+            }
+        }
+    } else {
+        None
+    };
+    let PreparedInstall {
+        mut batches,
+        summaries,
+        preview,
+    } = match prepared {
+        Some(prepared) => prepared,
+        None => preflight_install(
+            &environment,
+            &environment.roots,
+            &args,
+            options,
+            &context,
+            &smoke,
+        )?,
+    };
+    if args.dry_run {
+        return Ok(Applied {
+            result: Ok(preview),
+            summaries,
+            peer_agent: None,
+            tick_agent: None,
+            state_copy,
+        });
+    }
+    // Configuration has been validated at the staged root; every actual write
+    // now targets its published name. Agent bytes already name that destination.
+    for batch in &mut batches {
+        batch.roots = environment.roots.clone();
+    }
+    let targets = batches
+        .last()
+        .cloned()
+        .ok_or(InstallError::InvalidConfig("no prepared install batches"))?;
     let state = targets.roots.state.as_path().to_path_buf();
     let home = targets.home.clone();
-    prepare_agents(&mut targets)?;
     let tick_enabled = targets.tick_agent.is_some();
     reporter.home = Some(home.clone());
     let result: Result<_, Refused> = (|| {
         let mut combined = InstallOutcome {
             actions: Vec::new(),
-            findings: skipped,
+            findings: preview.findings,
             manual_includes: Vec::new(),
             dry_run: args.dry_run,
         };
-        // Refuse predictable conflicts before publishing the first target's receipt.
-        for batch in &mut batches {
-            prepare_agents(batch).map_err(|error| match error {
-                EdgeError::Install(error) => error,
-                _ => InstallError::InvalidConfig("cannot prepare install agents"),
-            })?;
-        }
-        let supports_hooks = |batch: &Targets| {
-            batch.harnesses.iter().any(|target| {
-                cli::hooks::HOOK_SPECS
-                    .iter()
-                    .any(|spec| spec.registration.harness == Some(target.harness))
-            })
-        };
-        if matches!(args.hooks, Some(cli::Switch::On)) && !batches.iter().any(supports_hooks) {
-            return Err(InstallError::HooksUnavailable.into());
-        }
-        let batch_args = |batch: &Targets, dry_run| cli::Install {
-            bin_dir: Some(batch.bin_dir.clone()),
-            hooks: if matches!(args.hooks, Some(cli::Switch::On)) && !supports_hooks(batch) {
-                None
-            } else {
-                args.hooks
-            },
-            dry_run,
-            ..args.clone()
-        };
-        for batch in &batches {
-            cli::install::execute_install(
-                &batch_args(batch, true),
-                batch.clone(),
-                &context,
-                &mut reporter,
-                &smoke,
-                env!("PROVENANT_TARGET_TRIPLE"),
-            )?;
-        }
-        // A dry-run install does not execute smoke checks. Complete the real
-        // release checks after every target preview and before destructive work.
-        verify_release(&args.source, &smoke, &cancel)?;
         if agents && !args.dry_run && provenant_fabric_runtime::peer_agent::eligible(&state, &home)
         {
-            retire_disk_guard(&home)
-                .map_err(|error| InstallError::AgentRetirement(error.to_string()))?;
-            super::tick_agent::retire_gc(&home)
+            retire_legacy_agents(&home)
                 .map_err(|error| InstallError::AgentRetirement(error.to_string()))?;
         }
         for batch in batches {
             // Publish one receipt target at a time, using config's existing lock and ownership rules.
-            let settings = batch_args(&batch, args.dry_run);
+            let settings = batch_args(&args, &batch, args.dry_run);
             let outcome = cli::install::execute_install(
                 &settings,
                 batch,
@@ -2068,7 +2165,7 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
         ..Default::default()
     };
     if provenant_fabric_runtime::peer_agent::eligible(targets.roots.state.as_path(), &targets.home)
-        && let Err(error) = retire_disk_guard(&targets.home)
+        && let Err(error) = retire_legacy_agents(&targets.home)
     {
         return edge_error("uninstall", EdgeError::Peer(error), globals);
     }
@@ -2142,7 +2239,7 @@ mod tests {
             };
         let receipt = InstallReceipt {
             extra: Default::default(),
-            schema_version: 1,
+            schema_version: provenant_records::INSTALL_RECEIPT_SCHEMA_VERSION,
             state_format_version: provenant_records::STATE_FORMAT_VERSION,
             source_digest: SourceDigest::from_bytes([1; 32]),
             manifest_digest: FileDigest::from_bytes([2; 32]),
@@ -2263,71 +2360,136 @@ mod tests {
     }
 }
 
-fn retire_disk_guard(home: &Path) -> Result<(), AgentError> {
-    retire_disk_guard_with(home, launchctl)
+/// Retire every declared 1.x-only service by name, including a loaded service
+/// whose plist is already absent. A failed unload preserves its plist for retry.
+fn retire_legacy_agents(home: &Path) -> Result<(), AgentError> {
+    retire_legacy_agents_with(home, launchctl)
 }
 
-fn retire_disk_guard_with(
+fn retire_legacy_agents_with(
     home: &Path,
     mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
 ) -> Result<(), AgentError> {
-    let plist = home.join("Library/LaunchAgents/dev.provenant.disk-guard.plist");
-    match std::fs::symlink_metadata(&plist) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    }
-    let service = format!(
-        "gui/{}/dev.provenant.disk-guard",
-        provenant_os::fs::effective_uid()
-    );
-    if run(&["print".as_ref(), service.as_ref()], home)?.0 {
-        let (ok, error) = run(&["bootout".as_ref(), service.as_ref()], home)?;
-        if !ok {
-            return Err(AgentError::Launchctl("bootout", error));
+    for artifact in provenant_config::LEGACY_1X_ARTIFACTS {
+        let provenant_config::LegacyArtifact::LaunchAgent {
+            label,
+            plist,
+            disposition: provenant_config::ArtifactDisposition::Remove,
+            ..
+        } = artifact
+        else {
+            continue;
+        };
+        provenant_fabric_runtime::peer_agent::stop_service_with(home, label, &mut run)?;
+        let plist = home.join(plist);
+        match std::fs::remove_file(&plist) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
     }
-    std::fs::remove_file(plist)?;
     Ok(())
 }
 
 #[cfg(test)]
-mod retired_disk_guard_tests {
+mod retired_agent_tests {
     #[allow(unused_imports)] // The worktree driver includes this module without libtest.
     use super::*;
 
-    #[test]
-    fn retirement_stops_and_deletes_the_old_agent_once() {
-        let home = tempfile::tempdir().unwrap();
-        let plist = home
-            .path()
-            .join("Library/LaunchAgents/dev.provenant.disk-guard.plist");
-        std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
-        std::fs::write(&plist, b"old plist").unwrap();
-        let mut calls = Vec::new();
-        for _ in 0..2 {
-            retire_disk_guard_with(home.path(), |args, _| {
-                calls.push(args[0].to_owned());
-                Ok((true, String::new()))
-            })
-            .unwrap();
+    fn service_output(loaded: bool, label: &str) -> (bool, String) {
+        if loaded {
+            (true, "state = running\n".into())
+        } else {
+            (
+                false,
+                format!("exit 113: Could not find service \"{label}\" in domain gui"),
+            )
         }
-        assert_eq!(calls, [OsStr::new("print"), OsStr::new("bootout")]);
-        assert!(!plist.exists());
     }
 
     #[test]
-    fn failed_bootout_preserves_the_plist_for_retry() {
-        let home = tempfile::tempdir().unwrap();
-        let plist = home
-            .path()
-            .join("Library/LaunchAgents/dev.provenant.disk-guard.plist");
-        std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
-        std::fs::write(&plist, b"old plist").unwrap();
-        let result = retire_disk_guard_with(home.path(), |args, _| {
-            Ok((args[0] == "print", "busy".into()))
-        });
-        assert!(matches!(result, Err(AgentError::Launchctl("bootout", _))));
-        assert!(plist.exists());
+    fn declared_legacy_agents_are_unloaded_before_plists_are_removed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_config::{ArtifactDisposition, LEGACY_1X_ARTIFACTS, LegacyArtifact};
+        let home = tempfile::tempdir()?;
+        let mut loaded = std::collections::BTreeSet::new();
+        for artifact in LEGACY_1X_ARTIFACTS {
+            if let LegacyArtifact::LaunchAgent { label, plist, .. } = artifact {
+                let path = home.path().join(plist);
+                std::fs::create_dir_all(path.parent().ok_or("plist parent")?)?;
+                std::fs::write(path, label)?;
+                loaded.insert(*label);
+            }
+        }
+        for _ in 0..2 {
+            retire_legacy_agents_with(home.path(), |args, _| {
+                let service = args[1].to_string_lossy();
+                let label = service.rsplit('/').next().unwrap_or_default();
+                if args[0] == "bootout" {
+                    let plist = LEGACY_1X_ARTIFACTS
+                        .iter()
+                        .find_map(|artifact| match artifact {
+                            LegacyArtifact::LaunchAgent {
+                                label: known,
+                                plist,
+                                ..
+                            } if *known == label => Some(plist),
+                            _ => None,
+                        })
+                        .expect("declared service");
+                    assert!(home.path().join(plist).exists(), "unload precedes removal");
+                    loaded.remove(label);
+                    Ok((true, String::new()))
+                } else {
+                    Ok(service_output(loaded.contains(label), label))
+                }
+            })?;
+        }
+        for artifact in LEGACY_1X_ARTIFACTS {
+            if let LegacyArtifact::LaunchAgent {
+                label,
+                plist,
+                disposition,
+                ..
+            } = artifact
+            {
+                let retained = *disposition == ArtifactDisposition::Replace;
+                assert_eq!(home.path().join(plist).exists(), retained);
+                assert_eq!(loaded.contains(label), retained);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn failed_unload_preserves_declared_plist_for_retry() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for artifact in provenant_config::LEGACY_1X_ARTIFACTS {
+            let provenant_config::LegacyArtifact::LaunchAgent {
+                label,
+                plist,
+                disposition: provenant_config::ArtifactDisposition::Remove,
+                ..
+            } = artifact
+            else {
+                continue;
+            };
+            let home = tempfile::tempdir()?;
+            let path = home.path().join(plist);
+            std::fs::create_dir_all(path.parent().ok_or("plist parent")?)?;
+            std::fs::write(&path, b"old plist")?;
+            let result = retire_legacy_agents_with(home.path(), |args, _| {
+                let service = args[1].to_string_lossy();
+                if args[0] == "print" {
+                    let queried = service.rsplit('/').next().unwrap_or_default();
+                    Ok(service_output(queried == *label, queried))
+                } else {
+                    Ok((false, "busy".into()))
+                }
+            });
+            assert!(matches!(result, Err(AgentError::Quiescence { .. })));
+            assert!(path.exists());
+        }
+        Ok(())
     }
 }

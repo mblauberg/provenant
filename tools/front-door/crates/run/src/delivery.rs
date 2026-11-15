@@ -234,6 +234,116 @@ impl HostDeliveryContext {
                 captured("HOME").map(|home| home.join(provenant_core::DEFAULT_STATE_SUFFIX))
             })
     }
+    fn forge_command_with_input(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        stage: Stage,
+        input: &[u8],
+    ) -> Result<String> {
+        use provenant_config::{ForgeOperation, ForgePort, PortTable};
+        let state = self
+            .host_state()
+            .ok_or_else(|| prepare_error("forge port", "host state root unknown"))?;
+        let project = self
+            .bound
+            .as_ref()
+            .map_or(cwd, |bound| bound.host_cwd.as_path());
+        let table = PortTable::read_for(Some(project), &state)
+            .map_err(|error| prepare_error("forge port", error.to_string()))?;
+        let mut forge = ForgePort::new(table.forge, "forge", project, &state)
+            .map_err(|error| prepare_error("forge port", error.to_string()))?;
+        if let Some(cancel) = &self.cancellation {
+            forge.set_cancel(cancel.clone());
+        }
+        let arguments: Vec<OsString> = args.iter().map(OsString::from).collect();
+        let operation = ForgeOperation::Cli {
+            arguments,
+            input: Some(input.to_vec()),
+        };
+        let timeout = Duration::from_secs(30);
+        let response = forge
+            .request_with(
+                operation,
+                timeout,
+                |forge_args, forge_input, forge_environment, budget| {
+                    let tools = self
+                        .tools
+                        .as_ref()
+                        .ok_or_else(|| std::io::Error::other("host tools unavailable"))?;
+                    let executable = tools.gh.as_deref().ok_or_else(|| {
+                        std::io::Error::other("the builtin forge executable was not sealed during delivery preparation")
+                    })?;
+                    let argv: Vec<OsString> = std::iter::once(executable.as_os_str().to_owned())
+                        .chain(forge_args.iter().skip(1).cloned())
+                        .collect();
+                    let mut env: Vec<_> = self
+                        .environment
+                        .iter()
+                        .map(|(key, value)| {
+                            (
+                                OsString::from_vec(key.clone()),
+                                OsString::from_vec(value.clone()),
+                            )
+                        })
+                        .collect();
+                    env.extend(forge_environment.iter().cloned());
+                    if let Some(bound) = &self.bound {
+                        env.push(("GIT_DIR".into(), bound.git_dir.as_os_str().to_owned()));
+                        env.push((
+                            "GIT_WORK_TREE".into(),
+                            bound.host_cwd.as_os_str().to_owned(),
+                        ));
+                    }
+                    let mut options = ExecOptions::new(&argv, project, budget);
+                    options.cancel = self.cancellation.as_ref();
+                    options.process_group = true;
+                    options.env = Some(&env);
+                    options.stdin = Some(forge_input.unwrap_or(&[]));
+                    options.stdout = StreamPolicy::Capture {
+                        limit: stdout_limit(false, args),
+                    };
+                    options.stderr = if stage == Stage::Prepare {
+                        StreamPolicy::Capture { limit: 4096 }
+                    } else {
+                        StreamPolicy::Discard
+                    };
+                    let executor = SystemExecutor::new(1).map_err(std::io::Error::other)?;
+                    let fallback = provenant_core::CancelToken::new();
+                    self.facts
+                        .with_executor(
+                            &executor,
+                            self.cancellation.as_ref().unwrap_or(&fallback),
+                            |executor| executor.execute(options).map_err(std::io::Error::other),
+                        )
+                        .map_err(std::io::Error::other)
+                },
+            )
+            .map_err(|error| {
+                if stage == Stage::Prepare {
+                    prepare_error("forge port", error.to_string())
+                } else {
+                    RunError::Delivery(stage)
+                }
+            })?;
+        if response.execution.disposition != provenant_config::PortCommandDisposition::Succeeded {
+            return Err(if stage == Stage::Prepare {
+                prepare_error(
+                    "forge port",
+                    format!(
+                        "forge command returned {:?}",
+                        response.execution.disposition
+                    ),
+                )
+            } else {
+                RunError::Delivery(stage)
+            });
+        }
+        String::from_utf8(response.body)
+            .map(|value| value.trim().to_owned())
+            .map_err(|_| RunError::Delivery(stage))
+    }
+
     /// Share the command-scoped repository fact limits with host delivery.
     pub fn with_repo_facts(mut self, facts: &provenant_confinement::worktrees::RepoFacts) -> Self {
         self.facts = facts.clone();
@@ -592,8 +702,8 @@ impl HostDeliveryContext {
             "GIT_SSH_COMMAND",
             "GIT_SSH_VARIANT",
             "GIT_TERMINAL_PROMPT",
-            "PROVENANT_GIT",
-            "PROVENANT_STATE_DIR",
+            provenant_core::consumer_env::GIT,
+            provenant_core::STATE_DIRECTORY_ENV,
             "GIT_CONFIG_GLOBAL",
             "GIT_CONFIG_SYSTEM",
             "GIT_CONFIG_NOSYSTEM",
@@ -641,7 +751,17 @@ impl HostDeliveryContext {
         let stage = Stage::Prepare;
         let git = self.executable("git", writer)?;
         let gh = if request.open_pr {
-            Some(self.executable("gh", writer)?)
+            let state = self
+                .host_state()
+                .ok_or_else(|| prepare_error("forge port", "host state root unknown"))?;
+            let ports = provenant_config::PortTable::read_for(Some(&writer.project), &state)
+                .map_err(|error| prepare_error("forge port", error))?;
+            provenant_config::dispatch_port_backend(
+                &ports.forge.backend,
+                || self.executable("gh", writer).map(Some),
+                |_| Ok(None),
+                || Ok(None),
+            )?
         } else {
             None
         };
@@ -1155,7 +1275,7 @@ impl HostDeliveryContext {
             let override_path = self
                 .environment
                 .iter()
-                .find(|(key, _)| key == b"PROVENANT_GIT")
+                .find(|(key, _)| key == provenant_core::consumer_env::GIT.as_bytes())
                 .map(|(_, value)| OsString::from_vec(value.clone()));
             let path =
                 provenant_os::git::resolve_git_executable(override_path.as_deref().map(Path::new))
@@ -1221,6 +1341,9 @@ impl HostDeliveryContext {
         stage: Stage,
         input: &[u8],
     ) -> Result<String> {
+        if tool == "gh" {
+            return self.forge_command_with_input(cwd, args, stage, input);
+        }
         let failure = |reason: String| {
             if stage == Stage::Prepare {
                 let step = match args.first().copied() {
@@ -1259,10 +1382,6 @@ impl HostDeliveryContext {
             .ok_or_else(|| failure("host tools are unavailable".into()))?;
         let executable = match tool {
             "git" => &tools.git,
-            "gh" => tools
-                .gh
-                .as_ref()
-                .ok_or_else(|| failure("gh is unavailable".into()))?,
             _ => return Err(failure(format!("{tool} is unavailable"))),
         };
         let git_options: &[&str] = if tool == "git" {

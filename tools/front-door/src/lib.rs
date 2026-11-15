@@ -21,6 +21,7 @@ mod tick_agent;
 mod tracker;
 
 mod chair_log_retention;
+mod checkpoint_retention;
 mod gc_support;
 mod handoff;
 mod hook_state;
@@ -31,6 +32,7 @@ mod install;
 mod lane_cleanup;
 pub mod local_answers;
 mod overflow;
+mod port_receipt_retention;
 mod pr;
 #[cfg(test)]
 mod pr_land_tests;
@@ -42,11 +44,6 @@ mod roots;
 mod settlement;
 mod staging_gc;
 mod state_handoff;
-#[allow(
-    dead_code,
-    reason = "2.0.0 install runs from a fresh root and never resets; a later release gates removing the 1.x root on the owner"
-)]
-mod state_reset;
 mod status_wait;
 mod target_seed_build;
 mod usage;
@@ -945,7 +942,8 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
     };
     // Inside a lane, account state is out of reach whatever root was selected.
     if matches!(command, Command::Quota { .. })
-        && std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some_and(|depth| depth != "0")
+        && std::env::var_os(provenant_core::consumer_env::LANE_DEPTH)
+            .is_some_and(|depth| depth != "0")
     {
         return fail(
             &inv.leaf,
@@ -961,6 +959,28 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             provenant_cli::workflow::Session::Save { .. }
         ))
     );
+    if matches!(&command, Command::Install(_)) {
+        let selected_state = globals
+            .state_dir
+            .as_deref()
+            .map(std::path::Path::to_path_buf)
+            .or_else(|| {
+                std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(std::path::PathBuf::from)
+            });
+        if let Some(state) = selected_state
+            && state.is_absolute()
+            && let Ok(home) = roots::home()
+            && let Err(error) = state_handoff::validate_selected_root(&state, &home)
+        {
+            let (status, code) = match &error {
+                state_handoff::PlanError::StateFormatBreak { .. } => {
+                    (Outcome::Refused, "STATE_FORMAT_BREAK")
+                }
+                state_handoff::PlanError::Io(_) => (Outcome::Error, "STATE_COPY"),
+            };
+            return fail(&inv.leaf, status, code, &error.to_string(), globals);
+        }
+    }
     if let Err(error) = roots::validate_globals(globals, session_save) {
         // A bad selected root is a usage fault; the environment is not.
         let status = match error {
@@ -1794,7 +1814,7 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             usage_project,
             provenant_cli::fabric::current_session().as_deref(),
-            std::env::var(provenant_run::PARENT_ATTEMPT_ENV)
+            std::env::var(provenant_core::consumer_env::PARENT_ATTEMPT_ID)
                 .ok()
                 .and_then(|id| id.parse().ok()),
             status_wait,

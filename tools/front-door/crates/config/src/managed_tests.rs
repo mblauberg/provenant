@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
+use crate::{ArtifactDisposition, LEGACY_1X_ARTIFACTS, LegacyArtifact, STABLE_BINARY_NAME};
 use provenant_core::{PathResolver, RootInputs};
 use provenant_os::clock::SystemClock;
 use provenant_records::{SourceInput, source_digest};
@@ -149,6 +150,250 @@ struct Smoke;
 
 #[path = "account_sync_tests.rs"]
 mod account_sync;
+
+#[test]
+fn first_install_cleans_declared_legacy_names_and_foreign_release_links() {
+    let mut f = Fixture::new();
+    fs::create_dir_all(f.source.join("instructions")).unwrap();
+    fs::write(
+        f.source.join("instructions/AGENTS.md"),
+        b"current instructions\n",
+    )
+    .unwrap();
+    let mut inputs = RootInputs::new(f.home.clone(), f.base.join("checkout"));
+    inputs.state_dir = Some(f.home.join(".local/share/provenant/v2"));
+    f.targets = Targets::new(
+        inputs.resolve(&Resolver).unwrap(),
+        &f.home,
+        &[
+            Harness::Codex,
+            Harness::Claude,
+            Harness::Cursor,
+            Harness::Agy,
+            Harness::Opencode,
+        ],
+    );
+    let release = f.release();
+    let old_root = f
+        .home
+        .join(".local/share/provenant/v1/releases")
+        .join(release.manifest.source_digest.to_string());
+    let legacy = f
+        .home
+        .join(".local/share/provenant/foreign-root/releases")
+        .join(release.manifest.source_digest.to_string());
+    let selectors: Vec<_> = LEGACY_1X_ARTIFACTS
+        .iter()
+        .filter_map(|artifact| match artifact {
+            LegacyArtifact::HarnessSelector {
+                selector,
+                disposition: ArtifactDisposition::Remove,
+            } => Some(*selector),
+            _ => None,
+        })
+        .collect();
+    assert!(!selectors.is_empty());
+    for target in &f.targets.harnesses {
+        if target.harness == Harness::Codex {
+            let mut text = String::from("user_setting = 'preserved'\n");
+            for selector in selectors
+                .iter()
+                .filter(|selector| selector.starts_with("toml:"))
+            {
+                let path = selector.strip_prefix("toml:").unwrap();
+                text.push_str(&format!("{path} = {{ command = 'legacy' }}\n"));
+            }
+            fs::create_dir_all(target.config_file.parent().unwrap()).unwrap();
+            fs::write(&target.config_file, text).unwrap();
+        } else {
+            let mut bytes = b"{\"user\":{\"preserved\":true}}".to_vec();
+            for selector in selectors
+                .iter()
+                .filter(|selector| selector.starts_with("json:/"))
+            {
+                let path: Vec<_> = selector
+                    .strip_prefix("json:/")
+                    .unwrap()
+                    .split('/')
+                    .collect();
+                bytes = crate::splice::set(
+                    &bytes,
+                    &path,
+                    Some(&serde_json::json!({"command":"legacy"})),
+                )
+                .unwrap();
+            }
+            if target.harness == Harness::Opencode {
+                let old_one = old_root.join("instructions/AGENTS.md");
+                let old_two = legacy.join("instructions/AGENTS.md");
+                bytes = crate::splice::set(
+                    &bytes,
+                    &["instructions"],
+                    Some(&serde_json::json!([
+                        old_one.to_string_lossy(),
+                        old_two.to_string_lossy()
+                    ])),
+                )
+                .unwrap();
+            }
+            fs::create_dir_all(target.config_file.parent().unwrap()).unwrap();
+            fs::write(&target.config_file, bytes).unwrap();
+        }
+    }
+    let binary = f.targets.bin_dir.join(STABLE_BINARY_NAME);
+    fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    symlink(old_root.join("bin").join(STABLE_BINARY_NAME), &binary).unwrap();
+    let codex = f
+        .targets
+        .harnesses
+        .iter()
+        .find(|target| target.harness == Harness::Codex)
+        .unwrap();
+    let skill = codex.skills_dir.join("example");
+    fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    symlink(old_root.join("skills/example"), &skill).unwrap();
+    let instruction = codex.instruction.as_ref().unwrap();
+    fs::create_dir_all(instruction.parent().unwrap()).unwrap();
+    symlink(old_root.join("instructions/AGENTS.md"), instruction).unwrap();
+    fs::create_dir_all(f.targets.shared_instruction.parent().unwrap()).unwrap();
+    symlink(
+        old_root.join("instructions/AGENTS.md"),
+        &f.targets.shared_instruction,
+    )
+    .unwrap();
+    assert!(!f.receipt().exists());
+
+    let current_agent = b"current agent\n";
+    f.targets.peer_agent = Some(current_agent.to_vec());
+    f.targets.tick_agent = Some(current_agent.to_vec());
+    for artifact in LEGACY_1X_ARTIFACTS {
+        if let LegacyArtifact::LaunchAgent {
+            plist,
+            disposition: ArtifactDisposition::Replace,
+            ..
+        } = artifact
+        {
+            let path = f.home.join(plist);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"legacy agent\n").unwrap();
+        }
+    }
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan_for(release.clone()),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+
+    let current_root = release_root(
+        f.targets.roots.state.as_path(),
+        release.manifest.source_digest,
+    );
+    for link in [&binary, &skill, instruction, &f.targets.shared_instruction] {
+        assert!(fs::read_link(link).unwrap().starts_with(&current_root));
+    }
+    let receipt = read_receipt(&f.targets).unwrap().unwrap();
+    for artifact in LEGACY_1X_ARTIFACTS {
+        if let LegacyArtifact::LaunchAgent {
+            plist,
+            selector,
+            disposition: ArtifactDisposition::Replace,
+            ..
+        } = artifact
+        {
+            let path = f.home.join(plist);
+            assert_eq!(fs::read(&path).unwrap(), current_agent);
+            assert_eq!(
+                receipt
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.selector == *selector)
+                    .count(),
+                1
+            );
+        }
+    }
+    for link in [&binary, &skill, instruction, &f.targets.shared_instruction] {
+        let count = receipt
+            .entries
+            .iter()
+            .filter(|entry| entry.path.to_path_buf().ok().as_deref() == Some(link.as_path()))
+            .count();
+        assert_eq!(count, 1, "{link:?}");
+    }
+    let opencode_config = f
+        .targets
+        .harnesses
+        .iter()
+        .find(|target| target.harness == Harness::Opencode)
+        .unwrap()
+        .config_file
+        .clone();
+    assert_eq!(
+        receipt
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.path.to_path_buf().ok().as_deref() == Some(opencode_config.as_path())
+                    && entry.selector.starts_with("array:")
+            })
+            .count(),
+        1
+    );
+    for target in &f.targets.harnesses {
+        if target.harness == Harness::Codex {
+            let text = fs::read_to_string(&target.config_file).unwrap();
+            let document = text.parse::<toml_edit::DocumentMut>().unwrap();
+            assert_eq!(document["user_setting"].as_str(), Some("preserved"));
+            for selector in selectors
+                .iter()
+                .filter(|selector| selector.starts_with("toml:"))
+            {
+                let path = selector.strip_prefix("toml:").unwrap();
+                let (_, key) = path.split_once('.').unwrap();
+                assert!(
+                    document
+                        .get("mcp_servers")
+                        .and_then(toml_edit::Item::as_table_like)
+                        .is_none_or(|table| !table.contains_key(key))
+                );
+            }
+        } else {
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&target.config_file).unwrap()).unwrap();
+            assert!(value["user"]["preserved"].as_bool().unwrap());
+            for selector in selectors
+                .iter()
+                .filter(|selector| selector.starts_with("json:/"))
+            {
+                let mut current = &value;
+                let mut present = true;
+                for component in selector.strip_prefix("json:/").unwrap().split('/') {
+                    let Some(next) = current.get(component) else {
+                        present = false;
+                        break;
+                    };
+                    current = next;
+                }
+                assert!(!present);
+            }
+            if target.harness == Harness::Opencode {
+                assert_eq!(value["instructions"].as_array().unwrap().len(), 1);
+                assert_eq!(
+                    value["instructions"][0].as_str().unwrap(),
+                    current_root
+                        .join("instructions/AGENTS.md")
+                        .to_str()
+                        .unwrap()
+                );
+            }
+        }
+    }
+}
 
 #[test]
 fn peer_agent_accepts_a_symlinked_home() {
@@ -862,19 +1107,6 @@ fn peer_and_tick_agents_are_removed_only_on_an_exact_match() {
             );
             if modified {
                 fs::write(&plist, b"user edited plist\n").unwrap();
-                let release = f.release();
-                let error = Snapshots::capture(&release, &f.targets)
-                    .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots))
-                    .unwrap_err()
-                    .to_string();
-                assert!(error.contains(plist.to_str().unwrap()), "{error}");
-                if matches!(agent, AgentFixture::Peer) {
-                    assert!(error.contains("move it aside"), "{error}");
-                    assert!(
-                        error.contains("launchctl bootout gui/$UID/dev.provenant.peer"),
-                        "{error}"
-                    );
-                }
             }
             if state == "missing" {
                 fs::remove_file(&plist).unwrap();
@@ -1069,38 +1301,6 @@ fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
 }
 
 #[test]
-fn unrecognised_peer_agent_is_refused_without_touching_bytes() {
-    let mut f = Fixture::new();
-    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
-        .unwrap();
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let context = InstallContext {
-        clock: &clock,
-        cancel: &cancel,
-        budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
-    };
-    install(&f.plan(), &context, &mut Reporter::default(), &Smoke, false).unwrap();
-    let plist = peer_agent_plist(f.targets.roots.state.as_path()).unwrap();
-    fs::create_dir_all(plist.parent().unwrap()).unwrap();
-    fs::write(&plist, b"unrecognised plist\n").unwrap();
-    fs::set_permissions(&plist, fs::Permissions::from_mode(0o644)).unwrap();
-    f.targets.peer_agent = Some(b"new plist\n".to_vec());
-
-    let release = f.release();
-    let plan = Snapshots::capture(&release, &f.targets)
-        .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots));
-    let error = plan.unwrap_err().to_string();
-    assert!(error.contains("move it aside"), "{error}");
-    assert!(
-        error.contains("launchctl bootout gui/$UID/dev.provenant.peer"),
-        "{error}"
-    );
-    assert_eq!(fs::read(&plist).unwrap(), b"unrecognised plist\n");
-}
-
-#[test]
 fn failed_peer_stop_keeps_the_plist_and_receipt_for_retry() {
     for missing in [false, true] {
         let mut f = Fixture::new();
@@ -1236,189 +1436,6 @@ fn context<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> InstallContex
         cancel,
     }
 }
-#[test]
-fn intermediate_receipt_does_not_complete_reset_when_a_later_batch_fails() {
-    struct ResetBatch {
-        marker: PathBuf,
-        pending: bool,
-        refuse: bool,
-    }
-    impl InstallReporter for ResetBatch {
-        fn preview(&mut self, _: &[Action]) -> io::Result<()> {
-            Ok(())
-        }
-        fn receipt_state_format_version(&self) -> Option<u64> {
-            self.pending.then_some(1)
-        }
-        fn before_receipt(&mut self) -> io::Result<()> {
-            if self.pending {
-                return Ok(());
-            }
-            if self.refuse {
-                return Err(io::Error::other("reset refused"));
-            }
-            fs::remove_file(&self.marker)
-        }
-    }
-    let f = Fixture::new();
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let marker = f.base.join("old-artifacts-without-store-header");
-    fs::write(&marker, "old state").unwrap();
-    let mut batch = ResetBatch {
-        marker: marker.clone(),
-        pending: true,
-        refuse: false,
-    };
-    install(
-        &f.plan(),
-        &context(&clock, &cancel),
-        &mut batch,
-        &Smoke,
-        false,
-    )
-    .unwrap();
-    assert!(marker.exists());
-    assert_eq!(
-        read_receipt(&f.targets)
-            .unwrap()
-            .unwrap()
-            .state_format_version,
-        1
-    );
-    batch.pending = false;
-    batch.refuse = true;
-    assert!(
-        install(
-            &f.plan(),
-            &context(&clock, &cancel),
-            &mut batch,
-            &Smoke,
-            false
-        )
-        .is_err()
-    );
-    assert!(marker.exists());
-    assert_eq!(
-        read_receipt(&f.targets)
-            .unwrap()
-            .unwrap()
-            .state_format_version,
-        1
-    );
-    batch.refuse = false;
-    install(
-        &f.plan(),
-        &context(&clock, &cancel),
-        &mut batch,
-        &Smoke,
-        false,
-    )
-    .unwrap();
-    assert!(!marker.exists());
-    assert_eq!(
-        read_receipt(&f.targets)
-            .unwrap()
-            .unwrap()
-            .state_format_version,
-        provenant_records::STATE_FORMAT_VERSION
-    );
-}
-
-#[test]
-fn receipt_callback_runs_only_after_writes_and_can_require_an_unchanged_receipt() {
-    struct Boundary<'a> {
-        fixture: &'a Fixture,
-        previous: Option<Vec<u8>>,
-        marker: PathBuf,
-        refuse: bool,
-        called: bool,
-    }
-    impl InstallReporter for Boundary<'_> {
-        fn preview(&mut self, _: &[Action]) -> io::Result<()> {
-            Ok(())
-        }
-        fn receipt_required(&self) -> bool {
-            true
-        }
-        fn before_receipt(&mut self) -> io::Result<()> {
-            assert!(self.fixture.targets.bin_dir.join("provenant").exists());
-            assert!(self.fixture.link().exists());
-            assert_eq!(fs::read(self.fixture.receipt()).ok(), self.previous);
-            self.called = true;
-            if self.refuse {
-                return Err(io::Error::other("reset refused"));
-            }
-            fs::remove_file(&self.marker)
-        }
-    }
-    let f = Fixture::new();
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let marker = f.base.join("dropped-store");
-    fs::write(&marker, "old state").unwrap();
-    let mut reporter = Boundary {
-        fixture: &f,
-        previous: None,
-        marker: marker.clone(),
-        refuse: true,
-        called: false,
-    };
-    let plan = f.plan();
-    install(
-        &plan,
-        &context(&clock, &cancel),
-        &mut reporter,
-        &Smoke,
-        true,
-    )
-    .unwrap();
-    assert!(!reporter.called);
-    assert!(marker.exists());
-    let error = install(
-        &plan,
-        &context(&clock, &cancel),
-        &mut reporter,
-        &Smoke,
-        false,
-    )
-    .unwrap_err();
-    assert!(reporter.called);
-    assert!(
-        matches!(error, InstallError::Partial { remaining, .. } if remaining.iter().all(|a| a.selector == "receipt"))
-    );
-    assert!(!f.receipt().exists());
-    assert!(marker.exists());
-    reporter.refuse = false;
-    reporter.called = false;
-    install(
-        &f.plan(),
-        &context(&clock, &cancel),
-        &mut reporter,
-        &Smoke,
-        false,
-    )
-    .unwrap();
-    assert!(reporter.called);
-    assert!(!marker.exists());
-    let previous = fs::read(f.receipt()).unwrap();
-    assert!(f.plan().actions().is_empty());
-    fs::write(&marker, "recreated old state").unwrap();
-    reporter.previous = Some(previous.clone());
-    reporter.called = false;
-    install(
-        &f.plan(),
-        &context(&clock, &cancel),
-        &mut reporter,
-        &Smoke,
-        false,
-    )
-    .unwrap();
-    assert!(reporter.called);
-    assert!(!marker.exists());
-    assert_eq!(fs::read(f.receipt()).unwrap(), previous);
-}
-
 #[test]
 fn dry_run_and_broken_preview_create_nothing() {
     let f = Fixture::new();
@@ -4184,57 +4201,6 @@ fn disabling_tick_agent_reinstall_stops_exact_or_missing_owned_plists() {
                 .any(|entry| entry.selector == "tick-agent")
         );
     }
-}
-
-#[test]
-fn retired_disk_guard_is_not_managed_by_install_or_uninstall() {
-    let f = Fixture::new();
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let ctx = context(&clock, &cancel);
-    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    let mut receipt: InstallReceipt = read_receipt(&f.targets).unwrap().unwrap();
-    let plist = f
-        .home
-        .join("Library/LaunchAgents/dev.provenant.disk-guard.plist");
-    fs::create_dir_all(plist.parent().unwrap()).unwrap();
-    fs::write(&plist, b"old plist").unwrap();
-    receipt.entries.push(OwnedEntry {
-        extra: Default::default(),
-        path: AbsolutePath::new(&plist).unwrap(),
-        harness: None,
-        selector: "disk-guard-agent".into(),
-        expected: owned(&Value::File {
-            bytes: b"old plist".to_vec(),
-            mode: 0o600,
-        })
-        .unwrap(),
-    });
-    fs::write(f.receipt(), serde_json::to_vec(&receipt).unwrap()).unwrap();
-    let plan = f.plan();
-    assert!(
-        !plan
-            .actions()
-            .iter()
-            .any(|action| action.selector == "disk-guard-agent")
-    );
-    install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    assert!(
-        !read_receipt(&f.targets)
-            .unwrap()
-            .unwrap()
-            .entries
-            .iter()
-            .any(|entry| entry.selector == "disk-guard-agent")
-    );
-    let outcome = uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
-    assert!(
-        !outcome
-            .actions
-            .iter()
-            .any(|action| action.selector == "disk-guard-agent")
-    );
-    assert!(plist.exists(), "retirement belongs to the process edge");
 }
 
 #[test]

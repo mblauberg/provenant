@@ -624,6 +624,9 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
         InventoryContext::Sandboxed,
     )?)?;
     let route = provenant_records::ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
         extra: Default::default(),
         adapter: "codex".into(),
         model: "fixture".into(),
@@ -635,6 +638,7 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
         exclusions: Vec::new(),
         eligibility: provenant_records::RouteEligibility::Eligible,
         readiness: provenant_records::RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 100,
@@ -1121,6 +1125,8 @@ fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
         serde_json::from_value(serde_json::json!({"adapter": "codex", "label": label, "key": label, "directory": format!("/fixture/{label}")}))
     }).collect::<Result<_, _>>()?;
     let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
+            "selection_context":{"workload":"general","writes":false},
+            "diagnostics":serde_json::to_value(provenant_records::route_selection::RouteDiagnostics::default()).unwrap(),
         "adapter": "codex", "model": "example", "catalogue_revision": "fixture",
         "host": "fixture", "alternatives": [], "exclusions": [],
         "confidentiality": {"evidence_ref": "fixture"}, "eligibility": "eligible",

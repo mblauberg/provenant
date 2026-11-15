@@ -71,6 +71,8 @@ pub struct Sourced<T> {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LandPolicy {
+    /// Publication declaration sealed in the plan and pending intent.
+    pub publication_port: provenant_config::LandPort,
     /// Frozen contract carried by candidate markers and receipts before dispatch.
     pub landing: Option<provenant_records::landing::LandingContext>,
     pub fields: BTreeMap<String, Sourced<Value>>,
@@ -373,6 +375,7 @@ impl LandPolicy {
             }
         }
         Ok(Self {
+            publication_port: provenant_config::PortTable::builtin().land,
             landing: None,
             fields,
             budget_rate_micros_per_minute,

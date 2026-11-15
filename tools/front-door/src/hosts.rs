@@ -280,6 +280,44 @@ fn agy_accounts(
         })
         .collect()
 }
+
+/// Warn while the untouched 1.x root remains. The doctor checks only the
+/// root entry itself; it never opens the old receipt or any stored state.
+fn legacy_state_warning(home: &Path) -> Option<&'static str> {
+    let root = home.join(provenant_core::LEGACY_V1_STATE_SUFFIX);
+    match fs::symlink_metadata(root) {
+        Ok(_) => Some(
+            "1.x state remains on this host. The 2.0 install copied owner configuration only; after all lanes are wound down, manually archive or remove remaining run state and other unowned data. Preserve it if rollback is required.",
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some("could not inspect whether 1.x state remains on this host"),
+    }
+}
+
+/// Report obsolete Provenant LaunchAgent plists from the shared artifact
+/// declaration. Current peer and tick agents are deliberately excluded.
+fn legacy_agent_warning(home: &Path) -> Option<&'static str> {
+    use provenant_config::{ArtifactDisposition, LegacyArtifact};
+
+    provenant_config::LEGACY_1X_ARTIFACTS
+        .iter()
+        .any(|artifact| match artifact {
+            LegacyArtifact::LaunchAgent {
+                plist,
+                disposition: ArtifactDisposition::Remove,
+                ..
+            } => match fs::symlink_metadata(home.join(plist)) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(_) => true,
+            },
+            _ => false,
+        })
+        .then_some(
+            "obsolete Provenant launch-agent files remain on this host; run the 2.0 install after lanes are wound down to remove them by name",
+        )
+}
+
 pub(crate) fn local(
     home: &Path,
     roots: &provenant_core::Roots,
@@ -340,11 +378,31 @@ pub(crate) fn local(
         claude.push(Identity { label, signin });
     }
     let (managed, managed_error) = managed(roots, home);
-    let agy_accounts = provenant_cli::config_reads::read_for(roots, "accounts")
-        .ok()
+    let account_config = provenant_cli::config_reads::read_for(roots, "accounts").ok();
+    let registered_accounts = account_config
+        .as_ref()
+        .map(|config| provenant_cli::accounts::homes(&config.domains.accounts))
+        .unwrap_or_default();
+    let agy_accounts = account_config
+        .as_ref()
         .map(|config| agy_accounts(&config.domains.accounts, home))
         .unwrap_or_default();
     let mut warnings = crate::pool_effort_warnings(roots);
+    if let Some(warning) = legacy_state_warning(home) {
+        warnings.push(warning.into());
+    }
+    if let Some(warning) = legacy_agent_warning(home) {
+        warnings.push(warning.into());
+    }
+    match provenant_config::legacy_harness_selectors(roots, home, &registered_accounts) {
+        Ok(leftovers) if !leftovers.is_empty() => warnings.push(
+            "obsolete Provenant Fabric entries remain in harness configuration; run the 2.0 install to remove them by name".into(),
+        ),
+        Ok(_) => {}
+        Err(_) => warnings.push(
+            "could not inspect known 1.x Provenant harness entries".into(),
+        ),
+    }
     let login_accounts = match provenant_cli::quota::recorded_login_rows(roots) {
         Ok(rows) => rows.into_iter().map(login_account).collect(),
         Err(_) => {
@@ -714,6 +772,51 @@ pub(crate) fn keychain_suffix(config_dir: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn doctor_warns_for_a_remaining_legacy_root() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(super::legacy_state_warning(home.path()).is_none());
+        let legacy = home.path().join(provenant_core::LEGACY_V1_STATE_SUFFIX);
+        std::fs::create_dir_all(&legacy).unwrap();
+        assert!(super::legacy_state_warning(home.path()).is_some());
+        std::fs::remove_dir(&legacy).unwrap();
+        assert!(super::legacy_state_warning(home.path()).is_none());
+    }
+
+    #[test]
+    fn doctor_warns_only_for_declared_removed_launch_agents() {
+        use provenant_config::{ArtifactDisposition, LegacyArtifact};
+
+        let home = tempfile::tempdir().unwrap();
+        assert!(super::legacy_agent_warning(home.path()).is_none());
+        for artifact in provenant_config::LEGACY_1X_ARTIFACTS {
+            if let LegacyArtifact::LaunchAgent {
+                plist, disposition, ..
+            } = artifact
+            {
+                if matches!(disposition, ArtifactDisposition::Replace) {
+                    let path = home.path().join(plist);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, b"current agent").unwrap();
+                }
+            }
+        }
+        assert!(super::legacy_agent_warning(home.path()).is_none());
+        for artifact in provenant_config::LEGACY_1X_ARTIFACTS {
+            if let LegacyArtifact::LaunchAgent {
+                plist,
+                disposition: ArtifactDisposition::Remove,
+                ..
+            } = artifact
+            {
+                let path = home.path().join(plist);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"leftover").unwrap();
+            }
+        }
+        assert!(super::legacy_agent_warning(home.path()).is_some());
+    }
+
     #[test]
     fn doctor_flags_an_agy_registration_without_its_isolated_keychain() {
         let home = tempfile::tempdir().unwrap();

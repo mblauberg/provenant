@@ -12,8 +12,19 @@ use std::{
     path::Path,
 };
 
-pub const ENV: &str = "PROVENANT_PROCESS_TREE";
 pub const SAMPLE_SCHEMA_VERSION: u32 = 2;
+/// The `Sample` fields `provenant process-tree --json` returns as `data`, and
+/// the fields of each entry in `processes`. The outward contract renders these
+/// lists; a test keeps them equal to the serialised shape.
+pub const SAMPLE_FIELDS: &[&str] = &[
+    "schema_version",
+    "root_pid",
+    "sampled_at",
+    "swap_used_bytes",
+    "swap_total_bytes",
+    "processes",
+];
+pub const PROCESS_FIELDS: &[&str] = &["pid", "ppid", "pgid", "rss_bytes"];
 pub const FILE: &str = "process-tree.json";
 pub const MAX_PROCESSES: usize = 4096;
 const MAX_BYTES: u64 = 1024 * 1024;
@@ -450,6 +461,31 @@ fn select(
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn declared_sample_fields_are_the_serialised_sample() {
+        let sample = Sample {
+            schema_version: SAMPLE_SCHEMA_VERSION,
+            root_pid: 1,
+            sampled_at: WallTime::from_micros(0).unwrap(),
+            swap_used_bytes: None,
+            swap_total_bytes: None,
+            processes: vec![ProcessMemory {
+                pid: 1,
+                ppid: 0,
+                pgid: 1,
+                rss_bytes: 0,
+            }],
+        };
+        let value = serde_json::to_value(&sample).unwrap();
+        let keys = |value: &serde_json::Value| -> BTreeSet<String> {
+            value.as_object().unwrap().keys().cloned().collect()
+        };
+        let declared =
+            |fields: &[&str]| -> BTreeSet<String> { fields.iter().map(|f| (*f).into()).collect() };
+        assert_eq!(keys(&value), declared(SAMPLE_FIELDS));
+        assert_eq!(keys(&value["processes"][0]), declared(PROCESS_FIELDS));
+    }
 
     struct FixtureSource {
         swap: Option<(u64, u64)>,

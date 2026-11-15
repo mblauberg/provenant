@@ -11,18 +11,21 @@ mod edit;
 mod gc;
 mod github_policy;
 mod history;
+mod install_artifacts;
 mod schema;
 pub use gc::{
-    ByteObservation, DiskLevel, DiskLimits, ForeignWorktrees, GcSettings, LaneBuildSettings,
-    MemoryPressureThreshold, PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, RETENTION_CLASSES,
-    RemoteBranches, RetentionBytes, RetentionClass, RetentionEligibility, RetentionIssue,
-    RetentionKind, RetentionMeasurement, RetentionTrigger, STORE_BUSY_TIMEOUT_CEILING_MS,
-    StoreSettings, WRITER_LANES_CEILING, deserialize_auto, parse_cache_size, retention_schedule,
+    ByteObservation, DISK_FLOOR, DiskGate, DiskLevel, DiskLimits, ForeignWorktrees, GcSettings,
+    LaneBuildSettings, MemoryPressureThreshold, PROJECT_WRITER_LANES_CEILING, ProjectGcSettings,
+    RETENTION_CLASSES, RemoteBranches, RetentionAdapter, RetentionBytes, RetentionClass,
+    RetentionCollector, RetentionEligibility, RetentionIssue, RetentionKind, RetentionMeasurements,
+    RetentionOwner, RetentionTrigger, STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings,
+    WRITER_LANES_CEILING, deserialize_auto, parse_cache_size, retention_schedule,
 };
 pub use github_policy::{
     DEFAULT_GH_BUDGET, GH_INVOCATIONS_FILE, GithubPolicy, label_events_trigger_ci,
 };
 mod harness;
+pub use harness::legacy_harness_selectors;
 mod hooks;
 pub use hooks::{CLAUDE_HOOKS, claude_lane_settings};
 mod inspection;
@@ -34,16 +37,23 @@ pub mod policy;
 mod presets;
 mod providers;
 pub use providers::{ProviderSettings, ProviderUpdate};
-mod ports;
+pub mod ports;
 mod project_binding;
 pub use ports::{
-    CommandExitCodes, ExitDisposition, Integration, LandBackend, LandPort, PORTS_CONFIG,
-    PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend, PortBackendKind, PortCommand,
-    PortCommandDisposition, PortCommandExecution, PortCommandReceiptProof, PortEvidenceError,
-    PortSource, PortTable, VerifyPort, VerifySelection, VerifyTier, WorktreeLayoutPort,
-    execute_port_command, port_command_receipt_proof, record_port_command,
+    Adapter, CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition, Forge,
+    ForgeOperation, ForgePort, ForgeResponse, HeadersObservation, Integration, LandBackend,
+    LandPort, PORTS_CONFIG, PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend, PortBackendKind,
+    PortCommand, PortCommandBackend, PortCommandDisposition, PortCommandExecution,
+    PortCommandPublication, PortCommandReceipt, PortCommandReceiptCollectionLock,
+    PortCommandReceiptEntry, PortCommandReceiptInventory, PortCommandReceiptProof, PortError,
+    PortEvidenceError, PortExecution, PortReceiptIssue, PortReceiptLifetime, PortSource, PortTable,
+    VerifyPort, VerifySelection, VerifyTier, WorktreeLayoutPort, dispatch_port_backend,
+    execute_port_command, execute_port_command_with_input, land_backend, port_command_environment,
+    port_command_receipt_proof, port_command_receipts, record_port_command,
+    remove_port_command_receipt, try_lock_port_command_receipts,
 };
 mod release;
+pub mod repository_files;
 mod repository_policy;
 pub use repository_policy::{REPOSITORY_CONFIG, RepositoryPolicy, read_land};
 pub mod removed;
@@ -69,7 +79,11 @@ pub use domains::{
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
-pub use knobs::{KNOB_SOURCES, KnobEdit, KnobSource, KnobValue};
+pub use install_artifacts::{
+    ArtifactDisposition, LEGACY_1X_ARTIFACTS, LegacyArtifact, STABLE_BINARY_NAME,
+    legacy_launch_agent_label, legacy_launch_agent_path,
+};
+pub use knobs::{KNOB_SOURCES, KnobEdit, KnobSource, KnobValue, knob_source};
 pub use loader::{
     config_show, inspect_config, load, load_with_domains, read, read_knobs, read_with_domains,
 };
@@ -80,7 +94,9 @@ pub use project_binding::{
     registered_gc_projects, registered_projects, transient_location,
 };
 pub use provenant_records::Finding;
-pub use schema::{Layer, Schema, SchemaField, apply_patch, schema};
+pub use schema::{
+    DeclaredEnum, Layer, Schema, SchemaField, apply_patch, declared_enums, probe_field, schema,
+};
 
 use serde::{Deserialize, Serialize, Serializer};
 use std::{collections::BTreeMap, fmt, path::PathBuf};
@@ -289,8 +305,8 @@ pub use managed::{
     InstallContext, InstallError, InstallFinding, InstallInspection, InstallOutcome, InstallPlan,
     InstallReporter, ManualInclude, ReleaseSmoke, SelectorChange, Snapshots, Targets,
     inspect_accounts, inspect_install, install, installed_binary, peer_agent_plist,
-    plan_and_install, plan_install, private_directory, release_root, systemd_user_dir,
-    tick_agent_plist, tick_service_path, tick_timer_path, uninstall, user_dir_in,
+    plan_and_install, plan_install, private_directory, release_instruction_asset, release_root,
+    systemd_user_dir, tick_agent_plist, tick_service_path, tick_timer_path, uninstall, user_dir_in,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};

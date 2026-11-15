@@ -209,22 +209,51 @@ fn writer_gc_settings_use_defaults_when_configuration_is_unreadable()
     Ok(())
 }
 
+/// The resolved policy with `DISK_FLOOR` set as a host knob would set it.
+fn disk_policy(strength: provenant_records::policy::Strength) -> provenant_records::policy::Policy {
+    let mut policy = provenant_records::policy::Policy::default();
+    policy.overlay(
+        &std::collections::BTreeMap::from([(provenant_config::DISK_FLOOR.to_owned(), strength)]),
+        provenant_records::policy::Source::Host,
+    );
+    policy
+}
+
 #[test]
-fn writer_warns_below_advisory_floor_and_proceeds() -> Result<(), String> {
+fn writer_disk_check_follows_the_declared_disk_floor_policy() -> Result<(), String> {
+    use provenant_records::policy::Strength;
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
         critical_free: Some("50B".into()),
         schedule: false,
         ..Default::default()
     };
-    for free in [50, 99, 100] {
-        check_writer_disk_with(
-            &settings,
-            Path::new("/state"),
-            Path::new("/tree"),
-            Path::new("/home"),
-            |_| Ok(free),
-        )?;
+    // The shipped rule warns; only an explicit refuse holds a writer.
+    assert_eq!(
+        provenant_records::policy::Policy::default()
+            .rule(provenant_config::DISK_FLOOR)
+            .rule
+            .strength,
+        Strength::Warn
+    );
+    for strength in Strength::ALL {
+        let policy = disk_policy(strength);
+        let refuses = policy.rule(provenant_config::DISK_FLOOR).rule.strength == Strength::Refuse;
+        for free in [0, 49, 50, 99, 100] {
+            let result = check_writer_disk_with(
+                &settings,
+                &policy,
+                Path::new("/state"),
+                Path::new("/tree"),
+                Path::new("/home"),
+                |_| Ok(free),
+            );
+            assert_eq!(
+                result.is_err(),
+                refuses && free < 50,
+                "{strength:?} at {free}"
+            );
+        }
     }
     Ok(())
 }
@@ -242,10 +271,17 @@ fn writer_requires_critical_space_on_every_output_volume() -> Result<(), String>
     let cache = home.join("Library/Caches/provenant-lane-cargo");
     for low in [worktree, state, cache.as_path()] {
         let mut observed = Vec::new();
-        let result = check_writer_disk_with(&settings, state, worktree, home, |path| {
-            observed.push(path.to_path_buf());
-            Ok(if path == low { 99 } else { 1000 })
-        });
+        let result = check_writer_disk_with(
+            &settings,
+            &disk_policy(provenant_records::policy::Strength::Refuse),
+            state,
+            worktree,
+            home,
+            |path| {
+                observed.push(path.to_path_buf());
+                Ok(if path == low { 99 } else { 1000 })
+            },
+        );
         let error = result
             .err()
             .ok_or_else(|| format!("writer accepted low volume {}", low.display()))?;
@@ -254,7 +290,14 @@ fn writer_requires_critical_space_on_every_output_volume() -> Result<(), String>
         );
         assert!(observed.contains(&low.to_path_buf()));
     }
-    check_writer_disk_with(&settings, state, worktree, home, |_| Ok(100))?;
+    check_writer_disk_with(
+        &settings,
+        &disk_policy(provenant_records::policy::Strength::Refuse),
+        state,
+        worktree,
+        home,
+        |_| Ok(100),
+    )?;
     Ok(())
 }
 
@@ -264,6 +307,7 @@ fn writer_disk_default_floor_names_its_source() -> Result<(), String> {
     let settings = provenant_config::GcSettings::default();
     let error = check_writer_disk_with(
         &settings,
+        &disk_policy(provenant_records::policy::Strength::Refuse),
         directory.path(),
         directory.path(),
         directory.path(),
@@ -290,6 +334,7 @@ fn writer_disk_observation_failure_warns_and_continues() -> Result<(), String> {
     };
     let result = check_writer_disk_with(
         &settings,
+        &disk_policy(provenant_records::policy::Strength::Refuse),
         Path::new("/state"),
         Path::new("/worktree"),
         Path::new("/home"),
@@ -311,6 +356,7 @@ fn writer_rechecks_once_after_collection_and_reports_reclaimed_bytes() -> Result
         let samples = Cell::new(0);
         let result = check_writer_disk_with_collection(
             &settings,
+            &disk_policy(provenant_records::policy::Strength::Refuse),
             Path::new("/state"),
             Path::new("/tree"),
             Path::new("/home"),
@@ -342,6 +388,7 @@ fn writer_rechecks_once_after_collection_and_reports_reclaimed_bytes() -> Result
     let calls = Cell::new(0);
     check_writer_disk_with_collection(
         &settings,
+        &disk_policy(provenant_records::policy::Strength::Refuse),
         Path::new("/state"),
         Path::new("/tree"),
         Path::new("/home"),
@@ -359,6 +406,7 @@ fn writer_rechecks_once_after_collection_and_reports_reclaimed_bytes() -> Result
     assert!(
         check_writer_disk_with_collection(
             &disabled,
+            &disk_policy(provenant_records::policy::Strength::Refuse),
             Path::new("/state"),
             Path::new("/tree"),
             Path::new("/home"),
@@ -386,7 +434,15 @@ fn writer_samples_missing_roots_without_creating_them() -> Result<(), Box<dyn st
     };
     let state = base.join("missing/state");
     let home = base.join("missing/home");
-    check_writer_disk(&settings, &state, &base, &base, &home).map_err(String::from)?;
+    check_writer_disk(
+        &settings,
+        &provenant_records::policy::Policy::default(),
+        &state,
+        &base,
+        &base,
+        &home,
+    )
+    .map_err(String::from)?;
     assert!(!base.join("missing").exists());
     Ok(())
 }
@@ -401,6 +457,7 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     };
     let check = check_writer_disk_with(
         &settings,
+        &disk_policy(provenant_records::policy::Strength::Refuse),
         Path::new("/state"),
         Path::new("/worktree"),
         Path::new("/home"),

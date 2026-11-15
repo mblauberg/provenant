@@ -713,6 +713,7 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
             _: Option<&provenant_run::AttemptRecord>,
         ) -> Result<provenant_run::PreparedLaunch, Box<provenant_run::PrepareRefusal>> {
             let mut route = provenant_records::run::SkippedRoute {
+                skipped_accounts: Vec::new(),
                 extra: Default::default(),
                 route: "fixture/model".into(),
                 kind: provenant_records::run::SkipKind::Unavailable,
@@ -853,6 +854,7 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
             refusal
                 .skipped_routes
                 .push(provenant_records::run::SkippedRoute {
+                    skipped_accounts: Vec::new(),
                     extra: Default::default(),
                     route: "codex/gpt".into(),
                     kind: provenant_records::run::SkipKind::Unavailable,
@@ -912,6 +914,7 @@ fn retry_output_names_the_recorded_refusal_route_and_reason() -> TestResult {
         .as_str()
         .ok_or("advance_error")?;
     let route = provenant_records::run::SkippedRoute {
+        skipped_accounts: Vec::new(),
         extra: Default::default(),
         route: "codex/gpt".into(),
         kind: provenant_records::run::SkipKind::Unavailable,

@@ -5,8 +5,8 @@ Anchor: `tests/parser.rs`, `crates/cli/src/render.rs`, `tests/catalogue_read_onl
 
 Use `provenant help --all` for commands and `provenant config schema` for configuration.
 The outward contract is declared in `crates/cli/src/external_contract.rs`, covering commands, lane environment and JSON schemas.
-`scripts/generate-reference` renders `external-contract.md` from that declaration through `provenant-cli print-reference-data`; the same data derives threshold behaviour from the policy table.
-No command currently promises cross-version stability, and direct internal-state readers are unsupported.
+`scripts/generate-reference` renders `external-contract.md` from that declaration through `provenant-cli print-reference-data`; the same data derives threshold behaviour from the policy table. Every enumeration an owner declares for the editor, such as `gc.projects.{project}.foreign_worktrees`, publishes its values and runtime default through the same data; the configuration reference fills them in and refuses an entry that restates them (`every_declared_enum_value_is_one_the_runtime_accepts`).
+The [consumer contract](consumer-contract.md) states which commands, outputs and variables are stable across 2.x; direct internal-state readers are unsupported.
 Conditional PR wait observations report `review=unknown` because the REST response has no GraphQL review decision; CI settlement still determines the wait verdict. One-shot `pr status` keeps its detailed review observation.
 Repository CI reads its tier declaration from `config/ports.json`; the optional `.provenant/ports.json` entry links that same table, so running repository checks requires neither an installed Provenant nor a `.provenant` directory.
 
@@ -85,6 +85,20 @@ and rereads at `domains.wait.local_interval_ms`. Peer or relayed rows also use
 paced rereads at that setting because the relay socket has no remote event
 subscription; the result identifies that source. Pull requests use forge
 observation. Settlement events are emitted as they are observed. Expiry ends blocking observation. Local stores take one final snapshot; remote reads use only the original wait budget. Results identify unsatisfied waits as timed out.
+Every blocking forge operation inside a wait (repository discovery, pull
+request metadata, each check page and the checks read) shares one request
+context: the wait's absolute deadline, capped per read by
+`domains.wait.pr_read_timeout_seconds`, and the waiter's cancellation. Each
+operation derives its bound from the time that context has left, and a wait
+that settles cancels the forge transport of its other targets.
+Wait settings resolve in one place for every waiter (`wait`, owner-side run
+waits, relay child waits and CI cadence). A configuration file that cannot be
+read leaves the compiled defaults in force with a warning, and every reported
+source names the reason; a file that is present but malformed is a typed
+error. Reports name each setting with its source.
+- Why: a wait must not outlive its budget in a transport it can no longer
+  interrupt, and one setting must not fail three different ways.
+- Test: `src/status_wait.rs::a_target_settling_after_the_last_sample_is_reported_settled_at_expiry`; `crates/cli/src/wait.rs::wait_settings_resolve_through_one_failure_policy`; `crates/config/src/ports/request.rs::a_capped_request_shares_cancellation_and_never_extends_the_deadline`
 Wait budgets clamp to `domains.wait.max_timeout_seconds` (shipped default four
 hours), warning once with the effective limit and source when exceeded. A larger
 request remains a blocking wait. Parsing retains the request so configured
@@ -171,8 +185,11 @@ at any supported configuration layer or using `land --poll` selects that fixed i
 all three waits. Source provenance decides this, so an explicit value is fixed even when it
 matches the bundled default.
 
-The `command` strategy invokes `land.command.argv` in the repository checkout,
-with the full pending intent as JSON on stdin. Its required declaration includes
+The effective `PortTable.land` declaration alone selects the publication backend.
+`none` returns typed unavailability before publication effects; `command` invokes
+its declared argv in the repository checkout. Candidate and ordering strategies
+remain independent of that backend. The command receives
+the full pending intent as JSON on stdin. Its required declaration includes
 `unknown_exit_code` (1..255) and `timeout_seconds` (>0). Exit 0 attests that the
 supplied candidate landed; other exits refuse, except the declared unknown code.
 Timeouts and signals are also unknown. The same pending markers, gate, approvals,

@@ -167,6 +167,9 @@ pub(super) fn prepare_command(
         .name;
     let runtime = canonical(&std::env::current_exe().map_err(|error| error.to_string())?)?;
     let route = ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
         extra: [("name".into(), serde_json::Value::String(name.into()))]
             .into_iter()
             .collect(),
@@ -180,6 +183,7 @@ pub(super) fn prepare_command(
         exclusions: Vec::new(),
         eligibility: provenant_records::RouteEligibility::Eligible,
         readiness: provenant_records::RouteReadiness::Ready {
+            availability_warning: None,
             extra: Default::default(),
             availability_ref: format!("domains.fabric.commands.{name}"),
             expires_unix_seconds: i64::MAX,
@@ -216,7 +220,7 @@ pub(super) fn prepare_command(
             home: &home,
             user: &user,
             host_var: &|key| {
-                if key == provenant_confinement::run_config::SANDBOX_ENV {
+                if key == provenant_core::consumer_env::SANDBOX {
                     Some(sandbox.env_value().into())
                 } else {
                     host_provider_var(registry, key)
@@ -278,11 +282,13 @@ pub(super) fn prepare_command(
     let coordination_reads = configure_build_slots(
         &mut spec,
         &settings,
+        &source,
         &home,
         &scratch,
         &runtime,
         roots.state.as_path(),
         &task.profile.knobs,
+        &launch_policy,
     )?;
     if let Some(policy) = plan.policy_mut() {
         for root in std::iter::once(process_tree_read).chain(coordination_reads) {
@@ -428,87 +434,146 @@ pub(super) fn local_cargo(
     }
 }
 
-#[allow(clippy::print_stderr)]
+#[allow(
+    clippy::print_stderr,
+    clippy::too_many_arguments,
+    reason = "provider setup carries the resolved host and project execution context"
+)]
 pub(super) fn configure_build_slots(
     spec: &mut provenant_providers::LaunchSpec,
     settings: &provenant_config::LaneBuildSettings,
+    project: &Path,
     home: &Path,
     scratch: &Path,
     runtime: &Path,
     state: &Path,
     knobs: &std::collections::BTreeMap<String, serde_json::Value>,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<Vec<PathGrant>, String> {
-    if spec.env.iter().any(|(name, value)| {
-        name == provenant_confinement::run_config::SANDBOX_ENV && value == "off"
-    }) {
-        check_sandbox_off_build_disk(&spec.env, state)?;
+    let table = provenant_config::PortTable::read_for(Some(project), state)
+        .map_err(|error| format!("cannot resolve build admission port: {error}"))?;
+    let port = table.build_admission;
+    let builtin = matches!(&port.backend, provenant_config::PortBackend::Builtin);
+    if builtin
+        && spec
+            .env
+            .iter()
+            .any(|(name, value)| name == provenant_core::consumer_env::SANDBOX && value == "off")
+    {
+        check_sandbox_off_build_disk(&spec.env, state, policy)?;
         return Ok(Vec::new());
     }
-    // Builds, not lanes, share the host's build slots: a `cargo` shim takes
-    // one around each compiling command. The host (this process, outside
-    // the sandbox) creates the slot files; the lane may only read and lock
-    // them. Memory is unreadable only on a host that cannot run lanes.
     let cargo = home.join(".cargo/bin/cargo");
-    if spec.env.iter().any(|(name, _)| name == "CARGO_TARGET_DIR") && cargo.is_file() {
-        let total = provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
-        let slots = settings.build_limit(total);
-        match provenant_os::build_slots::BuildSlots::provision(state, slots) {
-            Ok(()) => {
-                let disk_limits = provenant_config::GcSettings::read(state)
-                    .and_then(|gc| gc.disk_limits(state))
-                    .map(Some)
-                    .unwrap_or_else(|error| {
-                        let _ = writeln!(
-                std::io::stderr().lock(),
-                            "provenant: build disk limits unavailable; critical limit could not be resolved, so the build may proceed without the disk gate: {error}"
-                        );
-                        None
-                    });
-                match spec.configure_build_slots(
-                    scratch,
-                    &provenant_providers::BuildSlotGate {
-                        provenant: runtime,
-                        state,
-                        slots,
-                        disk_limits,
-                        cargo: &cargo,
-                        local_cargo: local_cargo(knobs),
-                    },
-                ) {
-                    Ok(provenant_providers::BuildSlotSetupOutcome::Configured) => {
-                        let directory = state.join(provenant_os::build_slots::DIRECTORY.join("/"));
-                        // BuildSlots opens the directory and each existing slot
-                        // read-only, then takes an advisory lock. The lane cannot
-                        // create, replace or unlink these host coordination files.
-                        return Ok(std::iter::once(PathGrant {
-                            path: directory.clone(),
-                            scope: PathScope::Exact,
-                        })
-                        .chain((0..slots).map(|index| PathGrant {
-                            path: directory.join(format!("slot-{index}.lock")),
-                            scope: PathScope::Exact,
-                        }))
-                        .collect());
-                    }
-                    Ok(provenant_providers::BuildSlotSetupOutcome::Skipped) => {}
-                    Err(error) => eprintln!(
+    if !spec.env.iter().any(|(name, _)| name == "CARGO_TARGET_DIR") || !cargo.is_file() {
+        return Ok(Vec::new());
+    }
+    let spec = std::cell::RefCell::new(spec);
+    provenant_config::dispatch_port_backend(
+        &port.backend,
+        || {
+            let total =
+                provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
+            let slots = settings.build_limit(total);
+            if let Err(error) = provenant_os::build_slots::BuildSlots::provision(state, slots) {
+                eprintln!(
+                    "provenant: build slots unavailable for this lane, building without them: {error}"
+                );
+                return Ok(Vec::new());
+            }
+            let disk_gate = provenant_config::GcSettings::read(state)
+                .and_then(|gc| gc.disk_limits(state))
+                .map(|limits| Some(provenant_config::DiskGate::new(limits, policy)))
+                .unwrap_or_else(|error| {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "provenant: build disk limits unavailable; critical limit could not be resolved, so the build may proceed without the disk gate: {error}"
+                    );
+                    None
+                });
+            let gate = provenant_providers::BuildSlotGate {
+                project,
+                backend: port.backend.clone(),
+                source: port.source,
+                provenant: runtime,
+                state,
+                slots,
+                disk_gate,
+                cargo: &cargo,
+                local_cargo: local_cargo(knobs),
+            };
+            match spec.borrow_mut().configure_build_slots(scratch, &gate) {
+                Ok(provenant_providers::BuildSlotSetupOutcome::Configured) => {
+                    let directory = state.join(provenant_os::build_slots::DIRECTORY.join("/"));
+                    Ok(std::iter::once(PathGrant {
+                        path: directory.clone(),
+                        scope: PathScope::Exact,
+                    })
+                    .chain((0..slots).map(|index| PathGrant {
+                        path: directory.join(format!("slot-{index}.lock")),
+                        scope: PathScope::Exact,
+                    }))
+                    .collect())
+                }
+                Ok(provenant_providers::BuildSlotSetupOutcome::Skipped) => Ok(Vec::new()),
+                Err(error) => {
+                    eprintln!(
                         "provenant: build slot shim unavailable for this lane, building without it: {error}"
-                    ),
+                    );
+                    Ok(Vec::new())
                 }
             }
-            // Build slots are fair sharing, not a boundary: without them
-            // the lane still runs, ungated.
-            Err(error) => eprintln!(
-                "provenant: build slots unavailable for this lane, building without them: {error}"
-            ),
-        }
-    }
-    Ok(Vec::new())
+        },
+        |_| {
+            let gate = provenant_providers::BuildSlotGate {
+                project,
+                backend: port.backend.clone(),
+                source: port.source,
+                provenant: runtime,
+                state,
+                slots: 1,
+                disk_gate: None,
+                cargo: &cargo,
+                local_cargo: local_cargo(knobs),
+            };
+            match spec.borrow_mut().configure_build_slots(scratch, &gate) {
+                Ok(_) => Ok(Vec::new()),
+                Err(error) => {
+                    eprintln!(
+                        "provenant: repository build wrapper unavailable for this lane: {error}"
+                    );
+                    Ok(Vec::new())
+                }
+            }
+        },
+        || {
+            if local_cargo(knobs) == "all" {
+                return Ok(Vec::new());
+            }
+            // Disabling admission does not widen the separate configured
+            // permission to compile locally.
+            let gate = provenant_providers::BuildSlotGate {
+                project,
+                backend: port.backend.clone(),
+                source: port.source,
+                provenant: runtime,
+                state,
+                slots: 1,
+                disk_gate: None,
+                cargo: &cargo,
+                local_cargo: local_cargo(knobs),
+            };
+            spec.borrow_mut()
+                .configure_build_slots(scratch, &gate)
+                .map_err(|error| format!("cannot configure local cargo policy: {error}"))?;
+            Ok(Vec::new())
+        },
+    )
 }
 
 fn check_sandbox_off_build_disk(
     env: &[(std::ffi::OsString, std::ffi::OsString)],
     state: &Path,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<(), String> {
     let target = env
         .iter()
@@ -549,20 +614,20 @@ fn check_sandbox_off_build_disk(
             return Ok(());
         }
     };
-    match limits.level(free) {
-        provenant_config::DiskLevel::Critical => Err(format!(
-            "{}; refusing to start a sandbox-off lane that can build",
-            limits.detail(free)
-        )),
-        provenant_config::DiskLevel::Warning => {
+    // The same declared decision as submission, admission and new builds.
+    match provenant_config::DiskGate::new(limits, policy).decide(free) {
+        provenant_records::policy::Effect::Proceed => Ok(()),
+        provenant_records::policy::Effect::Warn(message) => {
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "provenant: warning: {}; sandbox-off lane may build",
-                limits.detail(free)
+                "provenant: warning: {message}; sandbox-off lane may build"
             );
             Ok(())
         }
-        provenant_config::DiskLevel::Ready => Ok(()),
+        provenant_records::policy::Effect::Refuse(diagnostic) => Err(format!(
+            "{}; refusing to start a sandbox-off lane that can build",
+            diagnostic.detail.unwrap_or_default()
+        )),
     }
 }
 
@@ -636,6 +701,7 @@ pub(super) fn skip(route: &str, kind: SkipKind, _detail: impl Into<String>) -> S
         diagnostic.next.unwrap_or_default()
     );
     SkippedRoute {
+        skipped_accounts: Vec::new(),
         extra: Default::default(),
         route: route.to_owned(),
         kind,
@@ -669,26 +735,32 @@ mod refusal_tests {
     }
 
     #[test]
-    fn sandbox_off_build_checks_the_critical_disk_limit_before_lane_start() {
+    fn sandbox_off_build_follows_the_declared_disk_floor_policy() {
+        use provenant_records::policy::{Policy, Source, Strength};
         let state = tempfile::tempdir().unwrap();
         let target = state.path().join("target");
-        for (critical_free, refuses) in [("18446744073709551615B", true), ("0B", false)] {
-            std::fs::write(
-                state.path().join("config.toml"),
-                format!("schema_version = 1\n[gc]\nfree_floor = '18446744073709551615B'\ncritical_free = '{critical_free}'\n"),
-            )
-            .unwrap();
-            let env = vec![
-                ("CARGO_TARGET_DIR".into(), target.as_os_str().to_owned()),
-                (
-                    provenant_confinement::run_config::SANDBOX_ENV.into(),
-                    "off".into(),
-                ),
-            ];
-            let result = check_sandbox_off_build_disk(&env, state.path());
-            assert_eq!(result.is_err(), refuses);
-            if let Err(message) = result {
-                assert!(message.contains("gc.critical_free"));
+        for strength in Strength::ALL {
+            let mut policy = Policy::default();
+            policy.overlay(
+                &std::collections::BTreeMap::from([(
+                    provenant_config::DISK_FLOOR.to_owned(),
+                    strength,
+                )]),
+                Source::Host,
+            );
+            for (critical_free, below) in [("18446744073709551615B", true), ("0B", false)] {
+                std::fs::write(
+                    state.path().join("config.toml"),
+                    format!("schema_version = 1\n[gc]\nfree_floor = '18446744073709551615B'\ncritical_free = '{critical_free}'\n"),
+                )
+                .unwrap();
+                let env = vec![
+                    ("CARGO_TARGET_DIR".into(), target.as_os_str().to_owned()),
+                    (provenant_core::consumer_env::SANDBOX.into(), "off".into()),
+                ];
+                let result = check_sandbox_off_build_disk(&env, state.path(), &policy);
+                let effective = policy.rule(provenant_config::DISK_FLOOR).rule.strength;
+                assert_eq!(result.is_err(), below && effective == Strength::Refuse);
             }
         }
     }

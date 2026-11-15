@@ -9,9 +9,9 @@ mod lane_read_tests;
 mod refusal_detail;
 mod unified;
 pub(crate) use unified::{
-    GraphCommand, check_targets, command_fail, graph_listing, read_lane_graph, read_status_rows,
-    status_line, unified_graph_command, unified_graph_output, unified_graph_steer,
-    unified_graph_trace, unsettled_graphs,
+    GraphCommand, check_targets, command_fail, final_status_rows, graph_listing, read_lane_graph,
+    read_status_rows, status_line, unified_graph_command, unified_graph_output,
+    unified_graph_steer, unified_graph_trace, unsettled_graphs,
 };
 pub(crate) mod gc_cleanup;
 pub(crate) mod git_facts;

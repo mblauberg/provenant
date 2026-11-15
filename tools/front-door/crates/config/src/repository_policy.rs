@@ -21,6 +21,7 @@ pub struct RepositoryPolicy {
     pub protected_paths: Vec<PathBuf>,
 }
 
+/// The `[launch_policy]` section (`repository_files::LAUNCH_POLICY_SECTION`).
 #[derive(Deserialize)]
 struct ProjectConfig {
     #[serde(default)]
@@ -38,7 +39,9 @@ pub fn read_land<T: serde::de::DeserializeOwned>(
     let config: serde_json::Value =
         toml_edit::de::from_str(&text).map_err(|_| ConfigError::InvalidRepositoryPolicy)?;
     config
-        .pointer("/domains/pr/land")
+        .pointer(&crate::repository_files::section_pointer(
+            crate::repository_files::LAND_SECTION,
+        ))
         .cloned()
         .map(|value| {
             serde_json::from_value(value).map_err(|_| ConfigError::InvalidRepositoryPolicy)
@@ -48,11 +51,12 @@ pub fn read_land<T: serde::de::DeserializeOwned>(
 
 fn read_declaration(checkout: &Path) -> Result<Option<String>, ConfigError> {
     let root = Directory::open_anchor(checkout)?;
-    let directory = match root.open_verified_directory(OsStr::new(".provenant")) {
-        Ok(directory) => directory,
-        Err(error) if error.is_not_found() => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
+    let directory =
+        match root.open_verified_directory(OsStr::new(crate::repository_files::DIRECTORY)) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
     let file = match directory.open_read(OsStr::new("config.toml")) {
         Ok(file) => file,
         Err(error) if error.is_not_found() => return Ok(None),
@@ -322,6 +326,24 @@ mod tests {
             "[domains.pr.land]\nintegration='single'\n",
         )?;
         assert!(read_land::<Declaration>(root.path()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn every_declared_launch_policy_key_is_accepted_and_others_are_refused()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::repository_files::{LAUNCH_POLICY_KEYS, LAUNCH_POLICY_SECTION};
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir(root.path().join(".provenant"))?;
+        let value = |key: &str| if key == "confidential" { "true" } else { "[]" };
+        for key in LAUNCH_POLICY_KEYS.iter().copied().chain(["undeclared"]) {
+            std::fs::write(
+                root.path().join(REPOSITORY_CONFIG),
+                format!("[{LAUNCH_POLICY_SECTION}]\n{key}={}\n", value(key)),
+            )?;
+            let read = RepositoryPolicy::read(root.path());
+            assert_eq!(read.is_ok(), LAUNCH_POLICY_KEYS.contains(&key), "{key}");
+        }
         Ok(())
     }
 

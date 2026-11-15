@@ -118,15 +118,16 @@ pub(crate) fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeErr
 /// Whether the host launched this process inside a lane. Every Fabric entry
 /// point that can act as an agent checks it before opening the store.
 pub fn in_lane() -> bool {
-    std::env::var_os(provenant_run::PARENT_ATTEMPT_ENV).is_some()
+    std::env::var_os(provenant_core::consumer_env::PARENT_ATTEMPT_ID).is_some()
         || std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some()
-        || std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some_and(|depth| depth != "0")
+        || std::env::var_os(provenant_core::consumer_env::LANE_DEPTH)
+            .is_some_and(|depth| depth != "0")
 }
 
 /// An explicit, harness-neutral chair session for the chair log. Without it,
 /// settlement finds the session the chair saved (`chair_session_for`).
 pub fn current_session() -> Option<String> {
-    std::env::var("PROVENANT_SESSION_ID")
+    std::env::var(provenant_core::consumer_env::SESSION_ID)
         .ok()
         .filter(|value| !value.is_empty())
 }
@@ -193,6 +194,32 @@ pub fn acquire_custody(
         )),
     }
 }
+/// Observe a checkout identity without creating state during previews.
+pub fn inspect_checkout_subject(roots: &Roots, path: &Path) -> Result<Option<provenant_records::custody::Subject>, EdgeError> {
+    let repo = custody_checkout(roots, path)?;
+    match provenant_confinement::worktrees::worktree_subject(&repo) {
+        Ok(subject) => Ok(Some(subject)),
+        Err(provenant_confinement::worktrees::WorktreeError::Filesystem(error)) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Acquire through the verified Git boundary shared by creation and launch.
+pub fn checkout_subject(roots: &Roots, path: &Path) -> Result<provenant_records::custody::Subject, EdgeError> {
+    let repo = custody_checkout(roots, path)?;
+    Ok(provenant_confinement::worktrees::acquire_worktree_subject(&repo)?)
+}
+
+fn custody_checkout(roots: &Roots, path: &Path) -> Result<provenant_confinement::repo::VerifiedRepo, EdgeError> {
+    use provenant_confinement::{UtilityBudget, UtilityRuntime};
+    let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
+    let runtime = UtilityRuntime::read_only(git, roots.state.as_path())?;
+    let executor = SystemExecutor::new(1)?;
+    let cancel = CancelToken::new();
+    let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
+    Ok(runtime.open_read_repo(&executor, path, budget, &cancel)?)
+}
+
 pub fn checkout_branch(roots: &Roots, path: &Path) -> Result<Option<String>, EdgeError> {
     use provenant_confinement::repo::GitRevision;
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime};
@@ -304,7 +331,7 @@ impl Context {
             host,
             cwd,
             &config,
-            std::env::var_os("PROVENANT_AGENT_LABEL").as_deref(),
+            std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
             None,
             key,
         )?;
@@ -358,7 +385,7 @@ impl Context {
             host,
             cwd,
             &config,
-            std::env::var_os("PROVENANT_AGENT_LABEL").as_deref(),
+            std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
             None,
             key,
         )?;
@@ -423,7 +450,7 @@ impl Context {
             inbox: provenant_fabric_runtime::identity::inbox_address(
                 host,
                 &config,
-                std::env::var_os("PROVENANT_AGENT_LABEL").as_deref(),
+                std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
                 None,
             )?,
             client: config.client_label.clone(),
@@ -472,7 +499,7 @@ impl Context {
             host,
             cwd,
             &config,
-            std::env::var_os("PROVENANT_AGENT_LABEL").as_deref(),
+            std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
             None,
             key,
         )?;
@@ -502,7 +529,7 @@ impl Context {
     }
     /// This selects a socket, never sender authority; the host binds the actor.
     pub fn lane_relay_socket(&self) -> Result<PathBuf, EdgeError> {
-        let attempt = std::env::var("PROVENANT_PARENT_ATTEMPT_ID")
+        let attempt = std::env::var(provenant_core::consumer_env::PARENT_ATTEMPT_ID)
             .ok()
             .and_then(|id| provenant_core::AttemptId::parse(&id).ok())
             .ok_or(EdgeError::Invalid)?;
@@ -516,7 +543,7 @@ impl Context {
         provenant_fabric_runtime::identity::inbox_address(
             self.identity.host,
             &self.config,
-            std::env::var_os("PROVENANT_AGENT_LABEL").as_deref(),
+            std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
             harness_client(client).map(|harness| harness.spec().name),
         )
     }

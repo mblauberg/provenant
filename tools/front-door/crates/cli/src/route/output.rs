@@ -88,6 +88,7 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
                     let mut probe = route.clone();
                     probe.account_key = Some(record.account.account_key.clone());
                     probe.readiness = RouteReadiness::Ready {
+                        availability_warning: None,
                         extra: Default::default(),
                         availability_ref: "preview".into(),
                         expires_unix_seconds: now + 60,
@@ -204,37 +205,16 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
                     .candidates
                     .iter()
                     .map(|candidate| {
-                        let prior = candidate.extra.get("outcome_prior");
-                        let evidence = prior.and_then(|prior| prior.get("evidence"));
-                        let evidence_count = prior
-                            .and_then(|prior| prior.get("evidence_count"))
-                            .and_then(|count| count.as_u64())
-                            .unwrap_or_default();
-                        let factor = prior
-                            .and_then(|prior| prior.get("factor_basis_points"))
-                            .and_then(|factor| factor.as_u64())
-                            .unwrap_or(10_000);
-                        let successes = evidence
-                            .and_then(|evidence| evidence.get("successes"))
-                            .and_then(|count| count.as_u64())
-                            .unwrap_or_default();
-                        let failures = evidence
-                            .and_then(|evidence| evidence.get("failures"))
-                            .and_then(|count| count.as_u64())
-                            .unwrap_or_default();
-                        let source = prior
-                            .and_then(|prior| prior.get("source"))
-                            .and_then(|source| source.as_str())
-                            .unwrap_or("unavailable");
-                        let capability = candidate.extra.get("capability_preference");
-                        let capability_weight = capability
-                            .and_then(|preference| preference.get("weight"))
-                            .and_then(|weight| weight.as_u64())
-                            .unwrap_or(1);
-                        let capability_source = capability
-                            .and_then(|preference| preference.get("source"))
-                            .and_then(|source| source.as_str())
-                            .unwrap_or("unavailable");
+                        let prior = candidate.ranking.outcome_prior.as_ref();
+                        let evidence = prior.and_then(|prior| prior.evidence.as_ref());
+                        let evidence_count = prior.map_or(0, |prior| prior.evidence_count);
+                        let factor = prior.map_or(10_000, |prior| prior.factor_basis_points);
+                        let successes = evidence.map_or(0, |evidence| evidence.successes);
+                        let failures = evidence.map_or(0, |evidence| evidence.failures);
+                        let source = prior.map_or("unavailable", |prior| prior.source.as_str());
+                        let capability = candidate.ranking.capability_preference.as_ref();
+                        let capability_weight = capability.map_or(1, |preference| preference.weight);
+                        let capability_source = capability.map_or("unavailable", |preference| preference.source.as_str());
                         let ranking = format!(
                             "\n  {}: prior={factor}/10000 successes={successes} failures={failures} evidence_count={evidence_count} source={source} capability_weight={capability_weight} capability_source={capability_source}",
                             candidate.model
@@ -255,10 +235,10 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             }),
         diagnostics
     );
-    if let Some(warning) = route.extra.get("effort_warning") {
+    if let Some(warning) = route.diagnostics.effort_warning.as_ref() {
         text.push_str(&format!(
             "warning: effort {} for {} dropped; source={}\n",
-            warning["requested"], warning["model"], warning["source"]
+            warning.requested, warning.model, warning.source
         ));
     }
     for record in &preview.recorded_readiness {

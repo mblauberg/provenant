@@ -402,7 +402,7 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
 }
 
 #[test]
-fn settlement_intent_replays_a_prune_after_a_crash() -> Result<(), Box<dyn std::error::Error>> {
+fn settlement_intent_keeps_prune_pending_until_custody_replay() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let worktree = temp.path().join("lane");
     std::fs::create_dir(&worktree)?;
@@ -413,8 +413,9 @@ fn settlement_intent_replays_a_prune_after_a_crash() -> Result<(), Box<dyn std::
     std::fs::remove_dir(&worktree)?;
     let receipt = super::replay_worktree_settlement(Some(&intent), &worktree)?
         .ok_or("missing recovered prune receipt")?;
-    assert_eq!(receipt["state"], "pruned");
+    assert_eq!(receipt["state"], "pruning");
     assert_eq!(receipt["recovered_from_intent"], true);
+    assert_ne!(receipt["state"], "pruned");
     assert_eq!(
         super::replay_worktree_settlement(Some(&receipt), &worktree)?,
         Some(receipt)

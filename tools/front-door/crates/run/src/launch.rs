@@ -110,7 +110,8 @@ impl PreparedLaunch {
         cancel: &provenant_core::CancelToken,
         policy: &provenant_records::policy::Policy,
     ) -> Result<()> {
-        use provenant_confinement::run_config::{SANDBOX_ENV, SandboxRestriction};
+        use provenant_confinement::run_config::SandboxRestriction;
+        use provenant_core::consumer_env::SANDBOX;
         use std::io::Write as _;
         let Some(confinement) = self.confinement.as_mut().filter(|c| c.sandbox.effective) else {
             return Ok(());
@@ -133,9 +134,9 @@ impl PreparedLaunch {
         if let Some(warning) = &mode.warning {
             let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
         }
-        self.environment.retain(|(name, _)| name != SANDBOX_ENV);
+        self.environment.retain(|(name, _)| name != SANDBOX);
         self.environment
-            .push((SANDBOX_ENV.into(), mode.env_value().into()));
+            .push((SANDBOX.into(), mode.env_value().into()));
         self.route.extra.insert(
             provenant_records::run::SANDBOX_ROUTE_FIELD.into(),
             serde_json::to_value(mode)
@@ -328,6 +329,7 @@ fn pacing_refusal_retains_the_selected_reserve_fact() {
         origin: PacingSettingSource::ShippedDefault,
     };
     let mut skipped = SkippedRoute {
+        skipped_accounts: Vec::new(),
         extra: Default::default(),
         route: "fixture/model".into(),
         kind: SkipKind::Unavailable,
@@ -1179,12 +1181,16 @@ impl RunStore {
         let ports =
             provenant_config::PortTable::read_for(Some(&writer.project), &self.writer_registry)
                 .map_err(|_| "repository admission declaration is unavailable")?;
-        let (source, command) = match &ports.admission.backend {
-            provenant_config::PortBackend::Builtin | provenant_config::PortBackend::None => {
-                return Ok((record.clone(), None));
-            }
-            provenant_config::PortBackend::Command { command } => (ports.admission.source, command),
+        let command = provenant_config::dispatch_port_backend(
+            &ports.admission.backend,
+            || None,
+            Some,
+            || None,
+        );
+        let Some(command) = command else {
+            return Ok((record.clone(), None));
         };
+        let source = ports.admission.source;
         let binding = AdmissionPortBinding::new(source, command);
         let encoded = serde_json::to_value(&binding)
             .map_err(|_| "repository admission binding could not be encoded")?;
@@ -1234,38 +1240,54 @@ impl RunStore {
         };
         let execution = if binding.valid() {
             let environment = [
-                ("PROVENANT_PORT_PHASE".into(), command_phase.into()),
                 (
-                    "PROVENANT_ADMISSION_ATTEMPT".into(),
+                    provenant_core::consumer_env::PORT_PHASE.into(),
+                    command_phase.into(),
+                ),
+                (
+                    provenant_core::consumer_env::ADMISSION_ATTEMPT.into(),
                     attempt.to_string().into(),
                 ),
                 (
-                    "PROVENANT_ADMISSION_WORKTREE".into(),
+                    provenant_core::consumer_env::ADMISSION_WORKTREE.into(),
                     writer.worktree.as_os_str().to_owned(),
                 ),
                 (
-                    "PROVENANT_ADMISSION_PROJECT".into(),
+                    provenant_core::consumer_env::ADMISSION_PROJECT.into(),
                     writer.project.as_os_str().to_owned(),
                 ),
                 (
-                    "PROVENANT_ADMISSION_OWNER_PID".into(),
+                    provenant_core::consumer_env::ADMISSION_OWNER_PID.into(),
                     std::process::id().to_string().into(),
                 ),
                 (
-                    "PROVENANT_ADMISSION_EPOCH".into(),
+                    provenant_core::consumer_env::ADMISSION_EPOCH.into(),
                     binding.lease_epoch.to_string().into(),
                 ),
             ];
             let timeout =
                 std::time::Duration::from_secs(request.task.provider_timeout_seconds.max(1));
-            provenant_config::execute_port_command(
-                executor,
-                &binding.command,
-                &writer.project,
-                &[],
-                &environment,
-                timeout,
-                cancel,
+            let port = provenant_config::Port {
+                source: binding.source,
+                backend: provenant_config::PortBackend::Command {
+                    command: binding.command.clone(),
+                },
+            };
+            provenant_config::dispatch_port_backend(
+                &port.backend,
+                || provenant_config::PortCommandExecution::failed(&binding.command),
+                |command| {
+                    provenant_config::execute_port_command(
+                        executor,
+                        command,
+                        &writer.project,
+                        &[],
+                        &environment,
+                        timeout,
+                        cancel,
+                    )
+                },
+                || provenant_config::PortCommandExecution::failed(&binding.command),
             )
         } else {
             provenant_config::PortCommandExecution::failed(&binding.command)
@@ -1278,9 +1300,28 @@ impl RunStore {
             command_phase,
             &request_key,
             &execution,
+            provenant_config::PortReceiptLifetime::AttemptTerminalAndRelease {
+                attempt_id: attempt,
+                project_id: self.context.project_id,
+                actor_id: self.context.actor_id,
+                lease_epoch: binding.lease_epoch,
+            },
         );
+        let evidence_visible = match evidence {
+            Ok(provenant_config::PortCommandPublication::Durable) => true,
+            Ok(provenant_config::PortCommandPublication::VisibleDurabilityUnconfirmed {
+                cause,
+            }) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: admission receipt is visible but durability is unconfirmed: {cause}"
+                );
+                true
+            }
+            Err(_) => false,
+        };
         execution.disposition == provenant_config::PortCommandDisposition::Succeeded
-            && evidence.is_ok()
+            && evidence_visible
     }
 
     #[cfg(test)]
@@ -2470,8 +2511,16 @@ fn set_lane_environment(
     depth: u64,
     parent: AttemptId,
 ) {
-    set_environment_value(environment, LANE_DEPTH_ENV, depth.to_string());
-    set_environment_value(environment, PARENT_ATTEMPT_ENV, parent.to_string());
+    set_environment_value(
+        environment,
+        provenant_core::consumer_env::LANE_DEPTH,
+        depth.to_string(),
+    );
+    set_environment_value(
+        environment,
+        provenant_core::consumer_env::PARENT_ATTEMPT_ID,
+        parent.to_string(),
+    );
 }
 
 fn set_environment_value(environment: &mut Vec<(OsString, OsString)>, name: &str, value: String) {
@@ -2584,7 +2633,10 @@ mod lane_environment_tests {
     fn lane_environment_overrides_adapter_values() {
         let parent = AttemptId::from_bytes([6; 16]);
         let mut environment = vec![
-            (OsString::from(LANE_DEPTH_ENV), OsString::from("99")),
+            (
+                OsString::from(provenant_core::consumer_env::LANE_DEPTH),
+                OsString::from("99"),
+            ),
             (OsString::from("OTHER"), OsString::from("kept")),
         ];
         set_lane_environment(&mut environment, 2, parent);
@@ -2592,9 +2644,12 @@ mod lane_environment_tests {
             environment,
             vec![
                 (OsString::from("OTHER"), OsString::from("kept")),
-                (OsString::from(LANE_DEPTH_ENV), OsString::from("2")),
                 (
-                    OsString::from(PARENT_ATTEMPT_ENV),
+                    OsString::from(provenant_core::consumer_env::LANE_DEPTH),
+                    OsString::from("2")
+                ),
+                (
+                    OsString::from(provenant_core::consumer_env::PARENT_ATTEMPT_ID),
                     OsString::from(parent.to_string())
                 ),
             ]
@@ -3048,8 +3103,12 @@ mod admission_port_lifecycle_tests {
                     .map(|(_, value)| value.to_string_lossy().into_owned())
                     .unwrap_or_default()
             };
-            let phase = value(std::ffi::OsStr::new("PROVENANT_PORT_PHASE"));
-            let epoch = value(std::ffi::OsStr::new("PROVENANT_ADMISSION_EPOCH"));
+            let phase = value(std::ffi::OsStr::new(
+                provenant_core::consumer_env::PORT_PHASE,
+            ));
+            let epoch = value(std::ffi::OsStr::new(
+                provenant_core::consumer_env::ADMISSION_EPOCH,
+            ));
             self.calls
                 .lock()
                 .expect("gate calls mutex")
@@ -3499,6 +3558,12 @@ mod admission_port_lifecycle_tests {
             "release",
             &key,
             &execution,
+            provenant_config::PortReceiptLifetime::AttemptTerminalAndRelease {
+                attempt_id: attempt,
+                project_id: context.project_id,
+                actor_id: context.actor_id,
+                lease_epoch: terminal_binding.lease_epoch,
+            },
         )?;
         assert!(store.admission_release_receipt_confirmed(attempt, &terminal_binding));
         assert!(

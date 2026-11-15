@@ -161,6 +161,20 @@ pub fn main() -> std::process::ExitCode {
         Some("--writer-provider") => exit("writer provider", provider(&args)),
         // Bind a Unix-domain socket at the given path and connect to it.
         Some("--bind-socket") => exit("bind socket", bind_socket(&args)),
+        // The fake forge command port re-enters this harness and its existing fake `gh`.
+        Some("--forge-port") => {
+            let text = args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            match support::fake_forge_port(&text) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    let _ = writeln!(std::io::stderr().lock(), "fake forge port: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         // The fake `gh` of the `land` fixtures.
         Some("pr" | "repo" | "api") => {
             let args: Vec<String> = std::env::args().skip(1).collect();
@@ -280,7 +294,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_reports_transient_and_preserves_unobserved_project_array",
             "gc_pressure_collects_only_the_selected_primary_project",
             "gc_refuses_bare_projects_and_their_linked_checkout_fallback",
-            "provider_state_gc_sweeps_host_and_refuses_replaced_roots",
+            "provider_retention_classes_sweep_host_and_refuse_replaced_roots",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "merged_pruning_deletes_a_merged_branch_without_a_worktree",
             "remove_by_name_follows_the_branch_merge_state",
@@ -396,8 +410,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache" => {
                     gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache()
                 }
-                "provider_state_gc_sweeps_host_and_refuses_replaced_roots" => {
-                    crate::provider_retention::provider_state_gc_sweeps_host_and_refuses_replaced_roots()
+                "provider_retention_classes_sweep_host_and_refuse_replaced_roots" => {
+                    crate::provider_retention::provider_retention_classes_sweep_host_and_refuse_replaced_roots()
                 }
                 "gc_pressure_collects_only_the_selected_primary_project" => gc_pressure_collects_only_the_selected_primary_project(),
                 "gc_refuses_bare_projects_and_their_linked_checkout_fallback" => gc_refuses_bare_projects_and_their_linked_checkout_fallback(),
@@ -518,6 +532,7 @@ pub(super) fn git(rig: &TestRig, args: &[&str]) -> Result<String> {
 
 pub(super) fn repository() -> Result<TestRig> {
     let rig = TestRig::new()?;
+    support::configure_fake_forge_ports(&rig.state, &rig.project, &std::env::current_exe()?)?;
     git(&rig, &["config", "user.name", "Fixture"])?;
     git(&rig, &["config", "user.email", "fixture@example.invalid"])?;
     // Detached auto-maintenance would write locks while tests snapshot the tree.

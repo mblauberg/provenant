@@ -1262,7 +1262,7 @@ pub fn from_lane(
     cancel: &CancelToken,
     within: std::time::Duration,
 ) -> Result<Value, ServiceError> {
-    let attempt = std::env::var("PROVENANT_PARENT_ATTEMPT_ID")
+    let attempt = std::env::var(provenant_core::consumer_env::PARENT_ATTEMPT_ID)
         .ok()
         .and_then(|id| provenant_core::AttemptId::parse(&id).ok())
         .ok_or_else(|| refused("graph_relay_unavailable", "not running inside a lane"))?;
@@ -1291,10 +1291,10 @@ pub fn wait_for_children(
     })
 }
 
-pub fn child_wait_observation(interval: std::time::Duration) -> String {
+pub fn child_wait_observation(cadence: &crate::wait::LocalCadence) -> String {
     format!(
-        "paced reread every {} ms (domains.wait.local_interval_ms); relay socket has no remote event subscription",
-        interval.as_millis()
+        "paced reread {}; relay socket has no remote event subscription",
+        cadence.every()
     )
 }
 
@@ -1367,7 +1367,7 @@ fn template_library(
     }
     layered_templates(
         &config.join("provenant/templates"),
-        &repository.join(".provenant/templates"),
+        &repository.join(provenant_config::repository_files::TEMPLATES),
     )
 }
 

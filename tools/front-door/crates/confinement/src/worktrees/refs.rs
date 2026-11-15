@@ -383,6 +383,34 @@ impl RefLedger {
     }
 }
 
+/// Keep a worktree tip reachable across checkout retirement and durably record
+/// the ref before the caller writes its retirement intent. The ref name is
+/// stable per object, so an interrupted retry repairs the ledger record rather
+/// than creating another preservation ref.
+pub(super) fn preserve_tip(
+    context: &WorktreeContext<'_>,
+    tip: GitOid,
+    cancel: &CancelToken,
+) -> Result<RefRecord, WorktreeError> {
+    let reference =
+        GitRefName::preserved_tip(tip.to_string()).map_err(|_| WorktreeError::InvalidRequest)?;
+    match super::ref_tip(context, &reference, cancel)? {
+        Some(actual) if actual == tip => {}
+        Some(_) => return Err(WorktreeError::IdentityChanged),
+        None => {
+            super::lifecycle::execute_mutation(
+                context,
+                GitMutation::CreatePreservationRef {
+                    reference: reference.clone(),
+                    tip,
+                },
+                cancel,
+            )?;
+        }
+    }
+    RefLedger::for_context(context)?.observe_local_branch(&reference, tip, context.clock, cancel)
+}
+
 impl RefLedger {
     fn lock(&self, clock: &dyn Clock, cancel: &CancelToken) -> Result<LockGuard, WorktreeError> {
         let budget = WaitBudget::cli(clock.mono_now(), LEDGER_LOCK_SECONDS)
@@ -531,7 +559,13 @@ fn validate_reference(endpoint: &RefEndpoint, reference: &str) -> Result<(), Wor
     match endpoint {
         RefEndpoint::Worktree { .. } if reference == PRIVATE_HEAD => Ok(()),
         RefEndpoint::Worktree { .. } => Err(WorktreeError::InvalidRequest),
-        RefEndpoint::Local | RefEndpoint::Remote { .. }
+        RefEndpoint::Local
+            if reference.starts_with("refs/") && GitRefName::new(reference).is_ok() =>
+        {
+            Ok(())
+        }
+        RefEndpoint::Local if GitRefName::parse_preserved_tip(reference).is_ok() => Ok(()),
+        RefEndpoint::Remote { .. }
             if reference.starts_with("refs/") && GitRefName::new(reference).is_ok() =>
         {
             Ok(())
