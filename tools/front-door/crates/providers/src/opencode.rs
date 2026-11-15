@@ -1949,7 +1949,7 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
 
     #[cfg(unix)]
     #[test]
-    fn read_only_search_path_skips_unencodable_git_shim_directory() {
+    fn search_path_is_independent_of_unencodable_git_shim_directory() {
         use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
         let base = crate::tests::read_only_plan("/fixture", Some("login"));
         let scratch = tempfile::tempdir().unwrap();
@@ -1984,15 +1984,18 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
         let path = &spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
         let defaults = crate::launch::tool_search_path(input.home, true, input.policy).unwrap();
         assert_eq!(path, &defaults);
-        assert!(matches!(
-            prepare(
-                &input,
-                Access::WorktreeWrite,
-                Session::Fresh,
-                OpenCode.stream(None).unwrap()
-            ),
-            Err(ProviderError::InvalidPath)
-        ));
+        let writer = prepare(
+            &input,
+            Access::WorktreeWrite,
+            Session::Fresh,
+            OpenCode.stream(None).unwrap(),
+        )
+        .expect("OpenCode's provider builder leaves Git wrapper setup to shared finalisation");
+        assert_eq!(
+            writer.env.iter().find(|(key, _)| key == "PATH").unwrap().1,
+            defaults,
+            "provider preparation must not add a private Git prefix"
+        );
     }
 
     #[test]
@@ -2171,12 +2174,12 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
                     _ => panic!("unexpected setup step: {step:?}"),
                 }
             }
+            // OpenCode's provider builder leaves Git wrapper setup to the
+            // shared finaliser; it does not create the removed private prefix.
+            assert!(!project_parent.join("scratch/bin/git").exists());
             assert_eq!(
-                project_parent
-                    .join("scratch/bin/git")
-                    .canonicalize()
-                    .unwrap(),
-                git
+                spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1,
+                crate::launch::tool_search_path(&home, true, input.policy).unwrap()
             );
             assert!(spec.profile.spec.runtime_reads.contains(&subtree(&package)));
             let directories = required_anchors(plan.permissions(), &spec.profile, None)
