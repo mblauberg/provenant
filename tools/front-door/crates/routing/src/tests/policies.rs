@@ -364,16 +364,16 @@ fn opus_advisory_uses_the_applied_pool_tier() -> Result<(), Box<dyn std::error::
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
     for warn_model in &catalogue.writer_advisory.warn_models {
-        if let Ok(route) = resolve(&request(warn_model.as_str())?, &context)
-            && let Some(advisory) = config.opus_writer_advisory(&catalogue, &route)
-        {
-            assert!(advisory.contains(warn_model.as_str()), "{advisory}");
-            let quiet = RoutingConfig {
-                suppress_opus_writer_warning: true,
-                ..RoutingConfig::default()
-            };
-            assert!(quiet.opus_writer_advisory(&catalogue, &route).is_none());
-        }
+        let route = resolve(&request(warn_model.as_str())?, &context)?;
+        let advisory = config
+            .opus_writer_advisory(&catalogue, &route)
+            .ok_or_else(|| format!("missing writer advisory for {warn_model}"))?;
+        assert!(advisory.contains(warn_model.as_str()), "{advisory}");
+        let quiet = RoutingConfig {
+            suppress_opus_writer_warning: true,
+            ..RoutingConfig::default()
+        };
+        assert!(quiet.opus_writer_advisory(&catalogue, &route).is_none());
     }
     Ok(())
 }
@@ -386,25 +386,42 @@ fn opus_only_pool_still_advises_a_cheaper_tier_member() -> Result<(), Box<dyn st
         .warn_models
         .first()
         .ok_or("warn model")?;
+    let cheaper = catalogue
+        .writer_advisory
+        .cheaper_models
+        .first()
+        .ok_or("no cheaper advisory models")?
+        .clone();
     let mut config = RoutingConfig::default();
-    for pool in ["principal", "custom"] {
-        config.pools.insert(
-            pool.into(),
-            vec![RoutePoolMember {
+    config.pools.insert(
+        "principal".into(),
+        vec![
+            RoutePoolMember {
                 model: warn_model.clone(),
                 weight: 1,
                 effort: None,
                 efforts: vec![],
                 free: false,
-            }],
-        );
-        let mut query = request(warn_model.as_str())?;
-        query.choice = RouteChoice::NamedRoute(RouteName::parse(pool)?);
-        let route = resolve(&query, &context(&catalogue, &config, now()?))?;
-        if let Some(advisory) = config.opus_writer_advisory(&catalogue, &route) {
-            assert!(advisory.contains(warn_model.as_str()), "{advisory}");
-        }
-    }
+            },
+            RoutePoolMember {
+                model: cheaper.clone(),
+                weight: 1,
+                effort: None,
+                efforts: vec![],
+                free: false,
+            },
+        ],
+    );
+    let route = resolve(
+        &request(warn_model.as_str())?,
+        &context(&catalogue, &config, now()?),
+    )?;
+    assert_eq!(route.model, warn_model.model());
+    let advisory = config
+        .opus_writer_advisory(&catalogue, &route)
+        .ok_or("missing advisory for a pool with a cheaper member")?;
+    assert!(advisory.contains(warn_model.as_str()), "{advisory}");
+    assert!(advisory.contains(cheaper.as_str()), "{advisory}");
     Ok(())
 }
 

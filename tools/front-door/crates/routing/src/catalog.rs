@@ -1038,8 +1038,8 @@ mod pacing_profile_tests {
             "'thu 00:00'",
             "'day 25'",
             "'2026-11-02T09:00'",
-            "{reset_of='anese'}",
-            "{reset_of='anese',window='monthly'}",
+            "{reset_of='account-a'}",
+            "{reset_of='account-a',window='monthly'}",
         ] {
             let profile: PacingProfile =
                 toml_edit::de::from_str(&format!("deadline={deadline}")).unwrap();
@@ -1055,7 +1055,7 @@ mod pacing_profile_tests {
         for invalid in [
             "deadline='thu 25:00'",
             "deadline='day 32'",
-            "deadline={reset_of='anese',when='weekly'}",
+            "deadline={reset_of='account-a',when='weekly'}",
             "policy='unlimited'",
             "after_deadline='stop'",
             "window=['five_hour']",
@@ -1066,7 +1066,7 @@ mod pacing_profile_tests {
             );
         }
         let error =
-            toml_edit::de::from_str::<PacingProfile>("deadline={reset_of='anese',when='weekly'}")
+            toml_edit::de::from_str::<PacingProfile>("deadline={reset_of='account-a',when='weekly'}")
                 .unwrap_err()
                 .to_string();
         assert!(
@@ -1089,7 +1089,13 @@ mod pacing_profile_tests {
                 ..PacingProfile::default()
             },
         );
-        assert_eq!(config.validate().len(), 2);
+        let errors = config
+            .validate()
+            .into_iter()
+            .map(|error| (error.field, error.code))
+            .collect::<Vec<_>>();
+        assert!(errors.contains(&("pacing.accounts.pro.deadline".into(), "selector")));
+        assert!(errors.contains(&("pacing.accounts.pro.reserve".into(), "range")));
     }
 }
 fn defaults(_: Profile) -> &'static str {
@@ -1730,6 +1736,21 @@ mod tests {
             .first()
             .ok_or("no warn models in catalogue")?
             .clone();
+        let design_cheaper = catalogue
+            .pools
+            .get("design")
+            .and_then(|members| {
+                members.iter().find(|member| {
+                    member.model != warn_model
+                        && catalogue
+                            .writer_advisory
+                            .cheaper_models
+                            .contains(&member.model)
+                })
+            })
+            .ok_or("no bundled cheaper design member")?
+            .model
+            .clone();
         let mut route = resolve(&request(warn_model.as_str())?, &context)?;
         let default = config
             .opus_writer_advisory(&catalogue, &route)
@@ -1739,12 +1760,19 @@ mod tests {
             r#"
             [writer_advisory]
             warn_models = ["{warn_model}", "custom/synth-warn"]
-            cheaper_models = ["custom/synth-cheap", "{warn_model}"]
+            cheaper_models = ["custom/synth-cheap", "{design_cheaper}"]
             pool_priority = ["design", "senior", "principal"]
         "#,
-            warn_model = warn_model.as_str()
+            warn_model = warn_model.as_str(),
+            design_cheaper = design_cheaper.as_str()
         ))?;
         assert!(changed.validate().is_empty());
+        let overridden = changed
+            .opus_writer_advisory(&catalogue, &route)
+            .ok_or("overridden advisory missing")?;
+        for part in [warn_model.as_str(), "design", design_cheaper.as_str()] {
+            assert!(overridden.contains(part), "{overridden}");
+        }
         route.adapter = "custom".into();
         route.model = "synth-warn".into();
         assert!(config.opus_writer_advisory(&catalogue, &route).is_none());
