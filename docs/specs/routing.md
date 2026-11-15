@@ -83,10 +83,12 @@ unreadable-path floors and adds a warning to reviewer guidance.
 When a lane later adds or edits a nested review panel, the relay uses the
 graph's admitted review base and the source declared by that child or patch.
 Explicit commit sources can differ from the calling node's source. Settled
-node outputs can supply their recorded commit; a missing or still-moving head
-is incomplete context and applies the configured unreadable-path floors,
-alongside paths captured from any resolved subjects. The relay does not resolve
-refs again or substitute the current checkout head.
+node outputs can supply their recorded commit. An integration source is known
+only after its immutable integration pin is recorded; its admission-time branch
+base alone may be stale. A missing or still-moving head is incomplete context
+and applies the configured unreadable-path floors, alongside paths captured
+from any resolved subjects. The relay does not resolve refs again or substitute
+the current checkout head.
 
 Use this command for the complete policy-selected panel:
 

@@ -1088,12 +1088,10 @@ fn relay_review_subject_commit(
         // delivered head has been sealed for this new review, retain the
         // configured fallback floors instead of using an earlier source pin.
         SourceBinding::Head { .. } => None,
-        SourceBinding::Integration => checkpoint.integration_pin.clone().or_else(|| {
-            checkpoint
-                .bases
-                .and_then(|bases| bases.integration)
-                .map(|base| base.to_string())
-        }),
+        // The graph's integration base is only the admission-time branch
+        // base. Runtime binds Integration from the branch head and records
+        // that immutable source in integration_pin; without it, stay unknown.
+        SourceBinding::Integration => checkpoint.integration_pin.clone(),
     }
 }
 
@@ -3057,7 +3055,10 @@ mod panel_tests {
                 "attempts": []
             }]
         }))?;
-        checkpoint.bases = GraphBaseBinding::new(Some(provenant_core::GitOid::parse(&base)?), None);
+        checkpoint.bases = GraphBaseBinding::new(
+            Some(provenant_core::GitOid::parse(&base)?),
+            Some(provenant_core::GitOid::parse(&docs_subject)?),
+        );
 
         let missing_add: provenant_fabric_runtime::graph::relay::ChildRequest =
             serde_json::from_value(json!({
@@ -3080,9 +3081,31 @@ mod panel_tests {
                     }
                 }
             }))?;
+        let integration_add: provenant_fabric_runtime::graph::relay::ChildRequest =
+            serde_json::from_value(json!({
+                "id": "integration",
+                "use": "task",
+                "brief": "Review the selected subject",
+                "idempotency_key": "integration-source",
+                "launch": {
+                    "node": {
+                        "id": "integration",
+                        "use": "review-panel",
+                        "source": {"type": "integration"}
+                    }
+                }
+            }))?;
         let missing = relay_child_review_subjects(&missing_add, &library)?;
         let dynamic = relay_child_review_subjects(&dynamic_add, &library)?;
-        for subjects in [&missing, &dynamic] {
+        let integration = relay_child_review_subjects(&integration_add, &library)?;
+        assert!(checkpoint.integration_pin.is_none());
+        assert!(
+            checkpoint
+                .bases
+                .and_then(|bases| bases.integration)
+                .is_some()
+        );
+        for subjects in [&missing, &dynamic, &integration] {
             let resolvers = launch_resolvers_for_relay(
                 &roots,
                 &project,
