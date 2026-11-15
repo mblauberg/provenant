@@ -190,14 +190,16 @@ outcomes. Status exposes `queued`, `resumed` or `not_continued`, the stable
 operation and message IDs, and the successor when known. It never echoes the
 steering text into generic receipts or status. Replaying an operation with the
 same text returns the same intent, while reusing its ID with different text
-conflicts. The host verifies launch
-evidence and ownership before reading steering input. If natural completion
-races with readiness or the interrupt request, settlement adopts the durable
-intent when terminal session evidence is valid. A different typed stop wins
-and leaves the saved input without an automatic continuation. If the live
-session or process identity changes, or the terminal session disagrees with the
-first validated identity, the input remains recorded and the graph reports the
-mismatch instead of starting a fresh session.
+conflicts. The host verifies launch evidence and ownership before reading
+steering input. At local graph admission, the host stamps graph, node and
+attempt identity from the work key; an accepted request replay preserves that
+stored identity, and caller-supplied flags never establish it. If natural
+completion races with readiness or the interrupt request, settlement adopts
+the durable intent when terminal session evidence is valid. A different typed
+stop wins and leaves the saved input without an automatic continuation. If the
+live session or process identity changes, or the terminal session disagrees
+with the first validated identity, the input remains recorded and the graph
+reports the mismatch instead of starting a fresh session.
 
 This is continuation transport for #3318, not live input injection. Adapters
 advertise `continuation_only` only when their run path can retain and resume the
