@@ -102,6 +102,17 @@ fn retained_ref_evidence(
     }
 }
 
+/// The typed name of a proof reference: a local branch or a remote-tracking ref.
+fn proof_ref_name(reference: &str) -> Option<provenant_confinement::repo::GitRefName> {
+    use provenant_confinement::repo::GitRefName;
+    if let Some(branch) = reference.strip_prefix("refs/heads/") {
+        return GitRefName::branch(branch).ok();
+    }
+    reference
+        .strip_prefix("refs/remotes/")
+        .and_then(|tracking| GitRefName::remote_tracking(tracking).ok())
+}
+
 fn is_integration_evidence(evidence: &provenant_records::custody::LandedEvidence) -> bool {
     matches!(
         (&evidence.predicate, &evidence.source),
@@ -850,8 +861,8 @@ fn collect_owned_worktree_with(
                 }
                 let target = worktrees::LandingTarget {
                     reference: Some(
-                        provenant_confinement::repo::GitRefName::new(&proof_reference)
-                            .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                        proof_ref_name(&proof_reference)
+                            .ok_or(worktrees::WorktreeError::InvalidRequest)?,
                     ),
                     tip: pinned,
                 };

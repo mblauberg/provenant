@@ -105,12 +105,16 @@ fn settlement_defers_tracking_ref_refresh() -> Result<(), Box<dyn std::error::Er
     assert_eq!(receipt["state"], "retained", "{receipt}");
     assert_eq!(receipt["cleanup_deferred"], true);
     gc_cleanup::collect_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+    // An unreachable remote proves nothing: the refresh failure is reported
+    // and the worktree stays for a later retry, never removed on it.
     let completed = fixture
         .store
         .worktree_settlement(fixture.settled.attempt_id, &call)?
         .ok_or("completed receipt")?;
-    assert_eq!(completed["state"], "pruned", "{completed}");
+    assert_eq!(completed["state"], "retained", "{completed}");
+    assert_eq!(completed["retryable"], true, "{completed}");
     assert!(completed["tracking_ref_warning"].is_string(), "{completed}");
+    assert!(fixture.worktree.exists());
     Ok(())
 }
 
@@ -234,10 +238,10 @@ fn resumed_lane_settlement_ignores_terminal_graph() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn resumed_lane_settlement_defers_cleanup_and_records_its_receipt()
+fn resumed_lane_settlement_defers_cleanup_and_keeps_work_without_removal_proof()
 -> Result<(), Box<dyn std::error::Error>> {
     if host_test(
-        "fabric::peer_tests::peer_writer_delivery::resumed_lane_settlement_defers_cleanup_and_records_its_receipt",
+        "fabric::peer_tests::peer_writer_delivery::resumed_lane_settlement_defers_cleanup_and_keeps_work_without_removal_proof",
     )? {
         return Ok(());
     }
@@ -284,15 +288,18 @@ fn resumed_lane_settlement_defers_cleanup_and_records_its_receipt()
                 .and_then(|spawned| spawned.last().cloned())
         })
         .ok_or("settlement did not start collection")?;
-    gc_cleanup::run(&request_json, &FreeWorkers)?;
-    assert!(!fixture.worktree.exists());
-    let completed = fixture
-        .store
-        .worktree_settlement(fixture.settled.attempt_id, &call)?
-        .ok_or("completed receipt")?;
-    assert_eq!(completed["state"], "pruned", "{completed}");
-    // A replay still completes after the worktree has gone.
-    gc_cleanup::run(&request_json, &FreeWorkers)?;
+    // With no delivery and no integration target there is no exact ref to prove
+    // removal, so collection keeps the work, stays retryable and replays cleanly.
+    for _ in 0..2 {
+        gc_cleanup::run(&request_json, &FreeWorkers)?;
+        assert!(fixture.worktree.exists());
+        let kept = fixture
+            .store
+            .worktree_settlement(fixture.settled.attempt_id, &call)?
+            .ok_or("kept receipt")?;
+        assert_eq!(kept["state"], "retained", "{kept}");
+        assert_eq!(kept["retryable"], true, "{kept}");
+    }
 
     assert!(
         fixture
@@ -411,7 +418,8 @@ fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
 }
 
 #[test]
-fn settlement_intent_keeps_prune_pending_until_custody_replay() -> Result<(), Box<dyn std::error::Error>> {
+fn settlement_intent_keeps_prune_pending_until_custody_replay()
+-> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let worktree = temp.path().join("lane");
     std::fs::create_dir(&worktree)?;
