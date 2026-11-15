@@ -144,7 +144,7 @@ struct SeedSource {
 }
 
 struct SeedCandidate {
-    target: PathBuf,
+    target: std::path::PathBuf,
     generation_id: Option<String>,
     project_match: bool,
 }
