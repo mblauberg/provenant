@@ -1518,13 +1518,25 @@ pub(super) fn commit(
     revision
 }
 
-/// Whether an admitted patch skipped `id`.
+/// Whether the checkpoint row still carries an admitted patch skip for `id`.
+/// A retry resets the row and clears its patch skip reason.
 pub(super) fn skipped_by_patch(checkpoint: &GraphCheckpoint, id: &str) -> bool {
+    let Some(reason) = checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == id)
+        .and_then(|progress| progress.skip_reason.as_deref())
+    else {
+        return false;
+    };
     checkpoint
         .expansions
         .iter()
         .filter_map(|expansion| expansion.patch.as_ref())
-        .any(|record| record.skipped.iter().any(|skipped| skipped == id))
+        .any(|record| {
+            record.skipped.iter().any(|skipped| skipped == id)
+                && reason == format!("skipped by patch revision {}", record.revision)
+        })
 }
 
 pub(super) fn correct_review_verdict(

@@ -993,9 +993,10 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
     Ok(())
 }
 
-/// Recompute every composite boundary after a patch changes its member set or
-/// settlement. Patch admission saves the expansion and these derived rows as
-/// one checkpoint, so replay never sees a parent paired with obsolete members.
+/// Recompute each active composite boundary after a patch changes its member
+/// set or settlement. An explicit patch skip remains authoritative until a
+/// later replacement supersedes it. Save both in one checkpoint so replay
+/// never sees a parent paired with obsolete members.
 pub(super) fn reconcile_checkpoint(plan: &PlannedGraph, checkpoint: &mut GraphCheckpoint) {
     let positions = plan
         .nodes
@@ -1006,7 +1007,10 @@ pub(super) fn reconcile_checkpoint(plan: &PlannedGraph, checkpoint: &mut GraphCh
     // Expanded plans place members before their boundaries. A parent therefore
     // reads already-recomputed outputs from any nested composite it contains.
     for (index, node) in plan.nodes.iter().enumerate() {
-        if node.composite.is_some() && when::holds(&node.when) {
+        if node.composite.is_some()
+            && when::holds(&node.when)
+            && !patch::skipped_by_patch(checkpoint, &node.id)
+        {
             reconcile_progress(index, plan, &positions, checkpoint);
         }
     }
@@ -1158,6 +1162,10 @@ pub(super) fn validate_progress(
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
 ) -> Result<(), ()> {
+    let patch_skipped = patch::skipped_by_patch(checkpoint, &node.id);
+    if patch_skipped && progress.state != NodeState::Skipped {
+        return Err(());
+    }
     let state = state(node, plan, checkpoint, positions);
     let shortfall = node
         .composite
@@ -1210,8 +1218,9 @@ pub(super) fn validate_progress(
                     })
                 }
             }
-            NodeState::Blocked | NodeState::Skipped => {
-                state == progress.state && progress.outputs.is_none()
+            NodeState::Blocked => state == progress.state && progress.outputs.is_none(),
+            NodeState::Skipped => {
+                (state == progress.state || patch_skipped) && progress.outputs.is_none()
             }
         };
     if valid { Ok(()) } else { Err(()) }

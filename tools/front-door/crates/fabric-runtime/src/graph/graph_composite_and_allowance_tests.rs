@@ -268,6 +268,177 @@ fn public_patch_preserves_inactive_composite_and_replays_derived_state() {
     assert!(replay_owner.calls.is_empty());
 }
 
+// Spec: docs/specs/fabric.md#composite-settlement
+#[test]
+fn public_patch_skip_survives_unrelated_edits_and_retry_supersedes_it() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": "explicit-composite-skip",
+        "nodes": [
+            {"id":"hold","access":"read_only","prompt":"Hold","route":{"alias":"fixture"}},
+            {"id":"skipped","kind":"composite","access":"read_only","depends_on":["hold"],
+             "composite":{"nodes":[
+                 {"id":"member","access":"read_only","prompt":"Skipped group member","route":{"alias":"fixture"}}
+             ],"exports":[{"node":"member","outputs":["result"]}]}},
+            {"id":"active","kind":"composite","access":"read_only","depends_on":["hold"],
+             "composite":{"nodes":[
+                 {"id":"member","access":"read_only","prompt":"Active group member","route":{"alias":"fixture"}}
+             ],"exports":[{"node":"member","outputs":["result"]}]}},
+            {"id":"loose","access":"read_only","prompt":"Original","depends_on":["hold"],"route":{"alias":"fixture"}}
+        ]
+    }))
+    .unwrap();
+    let mut owner = FakeOwner {
+        observations: [AttemptObservation::Pending {
+            attempt_ref: Some("hold-running".into()),
+        }]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let started = advance(&document, &mut owner, &mut journal).unwrap();
+    let mut checkpoint = started.checkpoint;
+    let state = |checkpoint: &GraphCheckpoint, id: &str| {
+        checkpoint
+            .nodes
+            .iter()
+            .find(|progress| progress.id == id)
+            .map(|progress| progress.state)
+    };
+    assert_eq!(state(&checkpoint, "skipped"), Some(NodeState::Pending));
+    assert_eq!(
+        state(&checkpoint, "skipped--member"),
+        Some(NodeState::Pending)
+    );
+
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = patch::PatchContext {
+        library: &library,
+        resolvers: &resolvers,
+        scan: &|_| Ok(()),
+        journal: None,
+        limits: &limits,
+        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+    };
+    let edit: patch::Patch = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "expected_revision": 0,
+        "skip": ["skipped", "active--member"],
+        "replace": [{"id":"loose","access":"read_only","prompt":"Replacement","route":{"alias":"fixture"}}]
+    }))
+    .unwrap();
+    patch::admit_patch(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
+        None,
+        &edit,
+        &context,
+    )
+    .unwrap();
+    assert_eq!(state(&checkpoint, "skipped"), Some(NodeState::Skipped));
+    assert_eq!(
+        state(&checkpoint, "active--member"),
+        Some(NodeState::Skipped)
+    );
+    assert_eq!(state(&checkpoint, "active"), Some(NodeState::Blocked));
+    assert_eq!(state(&checkpoint, "loose"), Some(NodeState::Pending));
+
+    let restored: GraphCheckpoint =
+        serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+    let mut resume_owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, "hold complete"),
+            terminal_with_result(AttemptOutcome::Succeeded, "member complete"),
+            terminal_with_result(AttemptOutcome::Succeeded, "replacement complete"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut resume_journal = MemoryJournal(Some(restored));
+    let resumed = advance(&document, &mut resume_owner, &mut resume_journal).unwrap();
+    assert_eq!(resumed.status, GraphStatus::Complete);
+    assert_eq!(
+        state(&resumed.checkpoint, "skipped"),
+        Some(NodeState::Skipped)
+    );
+    assert_eq!(
+        state(&resumed.checkpoint, "active"),
+        Some(NodeState::Blocked)
+    );
+    assert_eq!(
+        state(&resumed.checkpoint, "skipped--member"),
+        Some(NodeState::Succeeded)
+    );
+    assert_eq!(
+        resume_owner
+            .calls
+            .iter()
+            .filter(|call| call.0.node_id == "loose")
+            .count(),
+        1
+    );
+    assert_eq!(
+        resume_owner
+            .calls
+            .iter()
+            .filter(|call| call.0.node_id == "skipped--member")
+            .count(),
+        1
+    );
+
+    let mut retry_checkpoint = resumed.checkpoint;
+    patch::retry_node(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut retry_checkpoint,
+        },
+        "skipped",
+        None,
+        &context,
+    )
+    .unwrap();
+    assert_eq!(
+        state(&retry_checkpoint, "skipped"),
+        Some(NodeState::Pending)
+    );
+
+    let retry_restored: GraphCheckpoint =
+        serde_json::from_slice(&serde_json::to_vec(&retry_checkpoint).unwrap()).unwrap();
+    let mut retry_owner = FakeOwner {
+        observations: [terminal_with_result(
+            AttemptOutcome::Succeeded,
+            "retried member",
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let mut retry_journal = MemoryJournal(Some(retry_restored));
+    let retried = advance(&document, &mut retry_owner, &mut retry_journal).unwrap();
+    assert_eq!(retried.status, GraphStatus::Complete);
+    assert_eq!(
+        state(&retried.checkpoint, "skipped"),
+        Some(NodeState::Succeeded)
+    );
+    assert_eq!(retry_owner.calls.len(), 1);
+    assert_eq!(retry_owner.calls[0].0.node_id, "skipped--member");
+
+    let replayed_checkpoint: GraphCheckpoint =
+        serde_json::from_slice(&serde_json::to_vec(&retried.checkpoint).unwrap()).unwrap();
+    let mut replay_owner = FakeOwner::default();
+    let replayed = advance(
+        &document,
+        &mut replay_owner,
+        &mut MemoryJournal(Some(replayed_checkpoint)),
+    )
+    .unwrap();
+    assert_eq!(replayed.status, GraphStatus::Complete);
+    assert!(replay_owner.calls.is_empty());
+}
+
 #[test]
 fn advisory_composite_settlement_preserves_cause_and_launches_dependant() {
     for outcome in [AttemptOutcome::ReviewRequired, AttemptOutcome::TaskFailed] {
