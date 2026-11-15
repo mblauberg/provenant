@@ -310,7 +310,7 @@ fn executable_discovery_after_wait_observes_the_completed_update()
         assert!(leases.contains_key("cursor"));
         assert_eq!(
             super::preparation::preparation_executable(&search, "cursor")?,
-            executable
+            executable.as_path()
         );
         assert_eq!(std::fs::read_to_string(executable)?, "new provider");
         update.join().expect("update thread")?;

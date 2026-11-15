@@ -5,6 +5,86 @@ use std::{
 };
 use support::{Result, TestRig, code};
 
+fn set_account_directories(
+    rig: &TestRig,
+    account: &str,
+    directories: &[&std::path::Path],
+) -> Result {
+    let config_path = rig.state.join("config.toml");
+    let mut doc: toml_edit::DocumentMut = fs::read_to_string(&config_path)?.parse()?;
+    let mut paths = toml_edit::Array::new();
+    for directory in directories {
+        paths.push(directory.to_str().ok_or("account directory path")?);
+    }
+    doc["domains"]["accounts"]["entries"][account]["directories"] = toml_edit::value(paths);
+    fs::write(config_path, doc.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn check_config_covers_additional_account_directories() -> Result {
+    // The public check reads only the non-secret configuration; these fixtures
+    // do not invoke provider probes or access account credentials.
+    let rig = TestRig::new()?;
+    support::register_account(
+        &rig,
+        "codex",
+        "home-alias",
+        "key-one",
+        &rig.home.join(".codex-one"),
+    )?;
+    set_account_directories(&rig, "codex-home-alias", &[&rig.home])?;
+    let checked = rig.command(&["check", "config", "--json"])?;
+    assert_eq!(code(&checked), 1);
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
+    assert_eq!(report["data"]["count"], 1);
+    let finding = &report["data"]["findings"][0];
+    assert_eq!(finding["rule"], "config.accounts.directory");
+    assert!(
+        finding["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("HOME or its ancestor")
+    );
+
+    let rig = TestRig::new()?;
+    support::register_account(
+        &rig,
+        "codex",
+        "one",
+        "key-one",
+        &rig.home.join(".codex-one"),
+    )?;
+    support::register_account(
+        &rig,
+        "codex",
+        "two",
+        "key-two",
+        &rig.home.join("shared/child"),
+    )?;
+    set_account_directories(&rig, "codex-one", &[&rig.home.join("shared")])?;
+    let checked = rig.command(&["check", "config", "--json"])?;
+    assert_eq!(code(&checked), 1);
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
+    assert_eq!(report["data"]["count"], 1);
+    assert!(
+        report["data"]["findings"][0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("accounts codex-one and codex-two")
+    );
+
+    let rig = TestRig::new()?;
+    let primary = rig.home.join(".codex-one");
+    support::register_account(&rig, "codex", "one", "key-one", &primary)?;
+    set_account_directories(&rig, "codex-one", &[&primary.join("alias")])?;
+    let checked = rig.command(&["check", "config", "--json"])?;
+    assert_eq!(code(&checked), 0);
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout.bytes)?;
+    assert_eq!(report["data"]["count"], 0);
+    Ok(())
+}
+
 #[test]
 fn register_creates_a_missing_state_root_before_probing() -> Result {
     let mut rig = TestRig::new()?;
