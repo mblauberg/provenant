@@ -985,6 +985,11 @@ mod tests {
         let checkout = base.join("checkout");
         fs::create_dir_all(&common).unwrap();
         fs::create_dir_all(&checkout).unwrap();
+        // Persistent project bindings are reserved for Git-backed locations.
+        // This registry-layer test supplies the minimal common-dir marker;
+        // Git ownership of the checkout hint is proved by confinement callers.
+        fs::write(common.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::create_dir(common.join("objects")).unwrap();
 
         let before = bind_project(&roots, ProjectLocation::new(&common).unwrap()).unwrap();
         assert_eq!(before.primary_checkout_hint(), None);

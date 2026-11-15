@@ -669,6 +669,10 @@ impl RepoFacts {
         context: &WorktreeContext<'_>,
         cancel: &CancelToken,
     ) -> Result<Vec<GitWorktree>, WorktreeError> {
+        // Git can report an external separate-git-dir as the primary
+        // worktree path. Only the already verified layout owner can map that
+        // metadata alias back to a checkout; never infer it from a parent.
+        validate_binding(context)?;
         self.inventories
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -680,7 +684,12 @@ impl RepoFacts {
             context.utility_budget,
             cancel,
         )?;
-        parse_worktree_list(&bytes)
+        let mut entries = parse_worktree_list(&bytes)?;
+        // Revalidate after Git returns so a replaced project path cannot be
+        // used to reinterpret the inventory row.
+        validate_binding(context)?;
+        Self::restore_verified_primary_path(context, &mut entries)?;
+        Ok(entries)
     }
 
     pub(super) fn capture_inventory(
@@ -694,6 +703,56 @@ impl RepoFacts {
         let entries = self.read_inventory(context, cancel)?;
         self.remember_inventory(context, &entries, budget);
         Ok(entries)
+    }
+
+    /// Replace Git's external metadata-directory pseudo-primary with the
+    /// checkout that the context's verified layout proves owns this common dir.
+    /// The mapping applies only when Git supplied exactly one non-bare common-dir
+    /// row and did not also supply the verified checkout path.
+    fn restore_verified_primary_path(
+        context: &WorktreeContext<'_>,
+        entries: &mut [GitWorktree],
+    ) -> Result<(), WorktreeError> {
+        let Some(project) = context.layout.project() else {
+            return Ok(());
+        };
+        let common = canonicalize(context.repo.common_git_dir())?;
+        let project = canonicalize(project)?;
+        if project == common {
+            return Err(WorktreeError::InvalidOutput);
+        }
+
+        let mut metadata_primary = None;
+        let mut checkout_primary_present = false;
+        for (index, entry) in entries.iter().enumerate() {
+            if entry.bare {
+                continue;
+            }
+            let path = match canonicalize(&entry.path) {
+                Ok(path) => path,
+                Err(error) if error.is_not_found() => {
+                    // A stale registration remains visible to the normal
+                    // inventory path; it is not evidence for a primary alias.
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if path == project {
+                checkout_primary_present = true;
+            } else if path == common {
+                if metadata_primary.replace(index).is_some() {
+                    return Err(WorktreeError::InvalidOutput);
+                }
+            }
+        }
+
+        if let Some(index) = metadata_primary {
+            if checkout_primary_present {
+                return Err(WorktreeError::InvalidOutput);
+            }
+            entries[index].path = project;
+        }
+        Ok(())
     }
 
     fn remember_inventory(
