@@ -197,12 +197,12 @@ impl GhForge {
         if let Some(repository) = &self.repository {
             return Ok(repository.clone());
         }
-        let budget = self
-            .reader()
-            .deadline
-            .saturating_duration_since(std::time::Instant::now());
+        let request = crate::pr::request::Request::new(
+            self.reader().deadline,
+            provenant_core::CancelToken::new(),
+        );
         let repository =
-            crate::pr::observer::repository_for_project(&self.state, &self.project, budget)
+            crate::pr::observer::repository_for_project(&self.state, &self.project, &request)
                 .map_err(|error| match error {
                     ObserveError::RateLimited { .. } => {
                         LandingError::RateLimited(error.to_string())
@@ -218,20 +218,18 @@ impl GhForge {
         budget: Duration,
     ) -> Result<serde_json::Value, LandingError> {
         let repository = self.repository_name()?;
-        let mut observer = Observer::open(&self.state, &self.project, &repository, budget)
+        let request = crate::pr::request::Request::within(budget);
+        let mut observer = Observer::open(&self.state, &self.project, &repository, &request)
             .map_err(|error| match error {
                 ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
                 _ => LandingError::Failed(error.to_string()),
             })?;
-        let resource =
-            observer
-                .resource(path, Duration::ZERO, budget)
-                .map_err(|error| match error {
-                    ObserveError::RateLimited { .. } => {
-                        LandingError::RateLimited(error.to_string())
-                    }
-                    _ => LandingError::Failed(error.to_string()),
-                })?;
+        let resource = observer
+            .resource(path, Duration::ZERO, &request)
+            .map_err(|error| match error {
+                ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
+                _ => LandingError::Failed(error.to_string()),
+            })?;
         self.observation_interval = Some(observer.fast_interval());
         Ok(resource)
     }
@@ -681,28 +679,29 @@ impl Forge for GhForge {
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
         let commit = object_id(commit)?;
         let repository = self.repository_name()?;
-        let deadline = self.reader().deadline;
-        #[allow(clippy::disallowed_methods, reason = "one forge observation deadline")]
-        let remaining = || deadline.saturating_duration_since(std::time::Instant::now());
-        let mut observer = Observer::open(&self.state, &self.project, &repository, remaining())
+        // The checks, every page and the commit read share one deadline.
+        let request = crate::pr::request::Request::new(
+            self.reader().deadline,
+            provenant_core::CancelToken::new(),
+        );
+        let mut observer = Observer::open(&self.state, &self.project, &repository, &request)
             .map_err(|error| match error {
                 ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
                 _ => LandingError::CiUnavailable(error.to_string()),
             })?;
         self.observation_interval = Some(observer.fast_interval());
-        let runs = observer
-            .checks(commit, Duration::ZERO, remaining())
-            .map_err(|error| match error {
-                ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
-                _ => LandingError::CiUnavailable(error.to_string()),
-            })?;
+        let runs =
+            observer
+                .checks(commit, Duration::ZERO, &request)
+                .map_err(|error| match error {
+                    ObserveError::RateLimited { .. } => {
+                        LandingError::RateLimited(error.to_string())
+                    }
+                    _ => LandingError::CiUnavailable(error.to_string()),
+                })?;
         self.observation_interval = Some(observer.next_poll_interval());
         let commit_resource = observer
-            .resource(
-                &format!("git/commits/{commit}"),
-                Duration::ZERO,
-                remaining(),
-            )
+            .resource(&format!("git/commits/{commit}"), Duration::ZERO, &request)
             .map_err(|error| match error {
                 ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
                 _ => LandingError::CiUnavailable(error.to_string()),

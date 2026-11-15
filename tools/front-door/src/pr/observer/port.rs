@@ -1,6 +1,7 @@
 //! Repository-declared CI observation transport implementing the common Forge port.
 use super::super::gh::{Forge, Response};
-use super::{GhTransport, ObserveError};
+use super::super::request::Request;
+use super::{GhTransport, ObserveError, expired_request};
 use provenant_config::{PortCommand, PortCommandDisposition, PortSource};
 use provenant_os::exec::SystemExecutor;
 use serde::Deserialize;
@@ -9,7 +10,6 @@ use std::{
     ffi::OsString,
     io,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 #[derive(Deserialize)]
@@ -22,11 +22,12 @@ struct PortResponse {
     body: String,
 }
 
-/// Select the one effective CI observation adapter for this project and request budget.
+/// Select the one effective CI observation adapter for this project, bound to
+/// the caller's request context until an operation binds its own.
 pub(crate) fn select_transport(
     state: &Path,
     project: &Path,
-    budget: Duration,
+    request: &Request,
 ) -> Result<SelectedTransport, ObserveError> {
     let ports = provenant_config::PortTable::read_for(Some(project), state).map_err(|error| {
         ObserveError::Unavailable(format!("CI port configuration is unavailable: {error}"))
@@ -35,7 +36,7 @@ pub(crate) fn select_transport(
     match ports.ci_observation.backend {
         provenant_config::PortBackend::Builtin => Ok(SelectedTransport::Builtin(GhTransport {
             project: project.to_owned(),
-            left: budget,
+            request: request.clone(),
         })),
         provenant_config::PortBackend::Command { command } => {
             let executor = SystemExecutor::new(1).map_err(|error| {
@@ -47,8 +48,7 @@ pub(crate) fn select_transport(
                 project.to_owned(),
                 state.to_owned(),
                 executor,
-                budget,
-                provenant_core::CancelToken::new(),
+                request.clone(),
             )))
         }
         provenant_config::PortBackend::None => Err(ObserveError::Unavailable(
@@ -69,10 +69,10 @@ impl Forge for SelectedTransport {
         }
     }
 
-    fn bound(&mut self, left: Duration) {
+    fn bind(&mut self, request: &Request) {
         match self {
-            Self::Builtin(transport) => transport.bound(left),
-            Self::Command(transport) => transport.bound(left),
+            Self::Builtin(transport) => transport.bind(request),
+            Self::Command(transport) => transport.bind(request),
         }
     }
 }
@@ -83,8 +83,8 @@ pub(crate) struct CommandTransport {
     project: PathBuf,
     state: PathBuf,
     executor: SystemExecutor,
-    budget: Duration,
-    cancel: provenant_core::CancelToken,
+    /// The deadline and cancellation every command request derives from.
+    request: Request,
 }
 impl CommandTransport {
     pub(super) fn new(
@@ -93,8 +93,7 @@ impl CommandTransport {
         project: PathBuf,
         state: PathBuf,
         executor: SystemExecutor,
-        budget: Duration,
-        cancel: provenant_core::CancelToken,
+        request: Request,
     ) -> Self {
         Self {
             command,
@@ -102,8 +101,7 @@ impl CommandTransport {
             project,
             state,
             executor,
-            budget,
-            cancel,
+            request,
         }
     }
 
@@ -125,6 +123,7 @@ impl CommandTransport {
 }
 impl Forge for CommandTransport {
     fn get(&mut self, path: &str, etag: Option<&str>) -> io::Result<Response> {
+        let budget = expired_request(&self.request)?;
         let environment = [
             (
                 OsString::from("PROVENANT_PORT_REQUEST_PATH"),
@@ -141,8 +140,8 @@ impl Forge for CommandTransport {
             &self.project,
             &[],
             &environment,
-            self.budget,
-            &self.cancel,
+            budget,
+            self.request.cancel(),
         );
         let response = parse_response(&execution);
         if response.is_err() && execution.disposition == PortCommandDisposition::Succeeded {
@@ -152,8 +151,8 @@ impl Forge for CommandTransport {
         response
     }
 
-    fn bound(&mut self, left: Duration) {
-        self.budget = left;
+    fn bind(&mut self, request: &Request) {
+        self.request = request.clone();
     }
 }
 

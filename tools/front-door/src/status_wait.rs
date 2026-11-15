@@ -150,7 +150,7 @@ fn read(
                 edge.roots.state.as_path(),
                 repository,
                 *number,
-                left.min(pr_read_timeout),
+                &forge_request(deadline, cancel, pr_read_timeout),
                 crate::pr::observer::POLL,
             ) {
                 Ok(line) => Reading {
@@ -667,6 +667,17 @@ fn outcome(latest: &[Option<Reading>], settled: &[usize], done: bool, any: bool)
     }
 }
 
+/// One forge request for a pull request read: the wait's absolute deadline,
+/// capped by `domains.wait.pr_read_timeout_seconds`, and the waiter's
+/// cancellation, so a target that settles elsewhere interrupts the transport.
+fn forge_request(
+    deadline: Instant,
+    cancel: &CancelToken,
+    pr_read_timeout: Duration,
+) -> crate::pr::request::Request {
+    crate::pr::request::Request::new(deadline, cancel.clone()).capped(pr_read_timeout)
+}
+
 fn preflight_error(
     error: &(dyn std::error::Error + 'static),
     deadline: Instant,
@@ -890,7 +901,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         let repository = crate::pr::status::wait_repository(
             edge.roots.state.as_path(),
             edge.cwd,
-            pr_read_timeout,
+            &forge_request(deadline, &stop.cancel, pr_read_timeout),
         )
         .map_err(|error| error.to_string());
         sources.extend(prs.into_iter().map(|number| Source::Pr {
