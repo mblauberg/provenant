@@ -411,15 +411,18 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         scope: PathScope::Exact,
     }));
     // A path-shaped provider directory is protected only when declared.
-    assert!(!mandatory
-        .credentials()
-        .iter()
-        .any(|entry| entry.path == home.join(".agy-unselected")));
+    assert!(
+        !mandatory
+            .credentials()
+            .iter()
+            .any(|entry| entry.path == home.join(".agy-unselected"))
+    );
 
     Ok(())
 }
 
 // Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+// Spec: docs/specs/run-git.md#project-layout-ownership
 #[test]
 fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -430,11 +433,19 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     let source = root.join("source");
     let state = root.join("state");
     let foreign_project = root.join("other-project");
+    let wrong_project = root.join("wrong-project");
     let metadata = root.join("metadata");
     let foreign_common = metadata.join("external.git");
     let foreign = root.join("external-owned-checkout");
     let unowned = root.join("unowned");
-    for path in [&home, &source, &state, &foreign_project, &metadata] {
+    for path in [
+        &home,
+        &source,
+        &state,
+        &foreign_project,
+        &wrong_project,
+        &metadata,
+    ] {
         std::fs::create_dir_all(path)?;
     }
     std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
@@ -448,6 +459,7 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
         "separate Git directory init failed: {}",
         String::from_utf8_lossy(&init.stderr)
     );
+    provenant_os::fixture::run_git(&wrong_project, &["init", "-q"])?;
     provenant_os::fixture::run_git(
         &foreign_project,
         &["commit", "--allow-empty", "-qm", "fixture"],
@@ -495,10 +507,71 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     let mut inputs = provenant_core::RootInputs::new(home.clone(), source.clone());
     inputs.state_dir = Some(state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    provenant_config::bind_project(
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let utility = provenant_confinement::UtilityRuntime::read_only(&git, &state)?;
+    let location = utility
+        .project_location(
+            &executor,
+            &foreign_project,
+            provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
+            &provenant_core::CancelToken::new(),
+        )?
+        .location;
+    assert_eq!(location.common_dir(), foreign_common);
+    let binding = provenant_config::bind_project(&roots, location.clone())?;
+    let stale = provenant_config::bind_project(
         &roots,
-        provenant_config::ProjectLocation::new(&foreign_common)?,
+        provenant_config::ProjectLocation::from_verified_primary_checkout(
+            &foreign_common,
+            &wrong_project,
+        )?,
     )?;
+    assert_eq!(stale.project_id(), binding.project_id());
+    let layout_environment = [
+        ("HOME", "/nonexistent"),
+        ("XDG_CONFIG_HOME", "/nonexistent"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_SYSTEM", "/dev/null"),
+        ("GIT_NO_REPLACE_OBJECTS", "1"),
+        ("GIT_NO_LAZY_FETCH", "1"),
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("LC_ALL", "C"),
+    ]
+    .map(|(key, value)| (key.into(), value.into()));
+    let stale_layout = provenant_confinement::worktrees::project_layout_for_binding(
+        &executor,
+        &stale,
+        &git,
+        &layout_environment,
+        std::time::Duration::from_secs(5),
+        &provenant_core::CancelToken::new(),
+    );
+    assert!(matches!(
+        stale_layout,
+        Err(provenant_confinement::worktrees::WorktreeError::ProjectLayoutUnresolved)
+    ));
+    let linked_hint = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::from_verified_primary_checkout(
+            &foreign_common,
+            &foreign,
+        )?,
+    )?;
+    let linked_layout = provenant_confinement::worktrees::project_layout_for_binding(
+        &executor,
+        &linked_hint,
+        &git,
+        &layout_environment,
+        std::time::Duration::from_secs(5),
+        &provenant_core::CancelToken::new(),
+    );
+    assert!(matches!(
+        linked_layout,
+        Err(provenant_confinement::worktrees::WorktreeError::ProjectLayoutUnresolved)
+    ));
+    provenant_config::bind_project(&roots, location)?;
     let private = String::from_utf8(provenant_os::fixture::run_git(
         &foreign,
         &["rev-parse", "--absolute-git-dir"],
@@ -524,7 +597,6 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
         roots: Some(&roots),
         ..Default::default()
     };
-    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let selected = protected_worktrees(&registry, &source, &git)?;
     let inventory_for = |source: &Path| {
         provenant_confinement::permissions::MandatoryRoots::for_host(
@@ -1591,7 +1663,8 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     task.base = Some(head.clone());
     task.access.source_root = Some(source.clone());
     task.access.source_identity = Some(source_identity(&source)?);
-    task.route = run::RequestedRoute::Adapter { required_family: None,
+    task.route = run::RequestedRoute::Adapter {
+        required_family: None,
         extra: Default::default(),
         provider: "command".into(),
         name: "fake".into(),

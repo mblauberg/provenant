@@ -43,7 +43,7 @@ fn native_host_inventory_protects_aliases_and_later_worktrees()
     std::os::unix::fs::symlink(&github, home.join(".config/gh/hosts.yml"))?;
     std::os::unix::fs::symlink(&login, home.join(".config/cursor/state.vscdb"))?;
     let own = primary.join(".worktrees/own");
-    let later = other.join(".worktrees/later");
+    let later = other.join(".git/.worktrees/later");
     let inventory = MandatoryRoots::for_host(&roots, &home, &own, &[], &[], &[])?;
     let (mut plan, mut profile) = write_grants_fixture();
     plan.policy =
@@ -94,7 +94,7 @@ fn native_host_inventory_protects_aliases_and_later_worktrees()
         }
         assert!(source.contains(&format!(
             "(deny file-write* (subpath \"{}\"))",
-            other.join(".worktrees").display()
+            other.join(".git/.worktrees").display()
         )));
         assert!(source.contains(&format!(
             "(deny file-read* (literal \"{}\"))",

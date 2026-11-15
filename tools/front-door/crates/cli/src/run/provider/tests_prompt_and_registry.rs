@@ -768,6 +768,120 @@ fn requester_path_excludes_primary_and_linked_checkout_binaries()
         &git,
         &executor,
         &CancelToken::new(),
+        None,
+    )?;
+    assert!(filtered.resolve("primary-provider").is_err());
+    assert!(filtered.resolve("linked-provider").is_err());
+    assert_eq!(filtered.resolve("safe-provider")?, safe_executable);
+    Ok(())
+}
+
+// Spec: docs/specs/run-git.md#project-layout-ownership
+#[test]
+fn requester_path_uses_registered_primary_with_external_git_dir()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::CancelToken;
+    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+    use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let project = root.join("repo/project");
+    let common = root.join("metadata/external.git");
+    let linked = root.join("repo/linked");
+    let home = root.join("git-home");
+    let state = root.join("state");
+    let primary_bin = project.join("bin");
+    let linked_bin = linked.join("bin");
+    let external_bin = root.join("external/bin");
+    for path in [
+        &project,
+        common.parent().ok_or("Git metadata parent")?,
+        &home,
+        &external_bin,
+    ] {
+        std::fs::create_dir_all(path)?;
+    }
+    provenant_os::fixture::private_state_dir(&state)?;
+    let git = provenant_os::git::git_executable()
+        .ok_or("git unavailable")?
+        .canonicalize()?;
+    let executor = SystemExecutor::new(2)?;
+    let init_argv = [
+        git.as_os_str().to_owned(),
+        "init".into(),
+        "-q".into(),
+        "-b".into(),
+        "main".into(),
+        "--separate-git-dir".into(),
+        common.as_os_str().to_owned(),
+        project.as_os_str().to_owned(),
+    ];
+    let mut environment = vec![
+        ("HOME".into(), home.as_os_str().to_owned()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+    ];
+    environment.extend(provenant_os::fixture::fixture_git_settings());
+    let mut options = ExecOptions::new(&init_argv, &root, Duration::from_secs(5));
+    options.env = Some(&environment);
+    assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
+    let commit_argv = [
+        git.as_os_str().to_owned(),
+        "-C".into(),
+        project.as_os_str().to_owned(),
+        "commit".into(),
+        "-q".into(),
+        "--allow-empty".into(),
+        "-m".into(),
+        "Initial".into(),
+    ];
+    let mut options = ExecOptions::new(&commit_argv, &root, Duration::from_secs(5));
+    options.env = Some(&environment);
+    assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
+    let linked_text = linked.to_str().ok_or("linked worktree path")?;
+    provenant_os::fixture::run_git(
+        &project,
+        &["worktree", "add", "-q", "-b", "linked", linked_text],
+    )?;
+    let nested = linked.join("src/nested");
+    std::fs::create_dir_all(&primary_bin)?;
+    std::fs::create_dir_all(&nested)?;
+    std::fs::create_dir_all(&linked_bin)?;
+    let primary_executable = primary_bin.join("primary-provider");
+    let linked_executable = linked_bin.join("linked-provider");
+    let safe_executable = external_bin.join("safe-provider");
+    for executable in [&primary_executable, &linked_executable, &safe_executable] {
+        std::fs::write(executable, "#!/bin/sh\nexit 0\n")?;
+        std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    let mut roots = provenant_core::RootInputs::new(home.clone(), project.clone());
+    roots.state_dir = Some(state.clone());
+    let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let utility = provenant_confinement::UtilityRuntime::read_only(&git, &state)?;
+    let discovered = utility.project_location(
+        &executor,
+        &project,
+        provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
+        &CancelToken::new(),
+    )?;
+    let binding = provenant_config::bind_project(&roots, discovered.location)?;
+    let path = std::env::join_paths([
+        primary_bin.as_os_str(),
+        linked_bin.as_os_str(),
+        external_bin.as_os_str(),
+    ])?;
+    let mut host = run::HostLaunchContext::from_environment(&home, &nested, git.clone());
+    host.lane_path = Some(path.as_os_str().as_bytes().to_vec());
+    let filtered = crate::run::filtered_requester_lane_path(
+        Some(&host),
+        &nested,
+        &nested,
+        &git,
+        &executor,
+        &CancelToken::new(),
+        Some(&binding),
     )?;
     assert!(filtered.resolve("primary-provider").is_err());
     assert!(filtered.resolve("linked-provider").is_err());

@@ -549,8 +549,15 @@ impl UtilityRuntime {
             match directory.metadata_at(OsStr::new(".git"), false) {
                 Ok(_) => {
                     let repo = self.open_repo(executor, ancestor, budget, cancel)?;
-                    let location = provenant_config::ProjectLocation::new(repo.common_git_dir())
-                        .map_err(|_| UtilityError::InvalidOperationValue)?;
+                    let location = if repo.private_git_dir() == repo.common_git_dir() {
+                        provenant_config::ProjectLocation::from_verified_primary_checkout(
+                            repo.common_git_dir(),
+                            repo.root_path(),
+                        )
+                    } else {
+                        provenant_config::ProjectLocation::new(repo.common_git_dir())
+                    }
+                    .map_err(|_| UtilityError::InvalidOperationValue)?;
                     return Ok(DiscoveredProject {
                         location,
                         repository: Some(repo),

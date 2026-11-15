@@ -39,7 +39,10 @@ pub use landed::{
     CommitGraph, IntegrationEdge, LandedBy, Landing, LandingTarget, RepoGraph, Unproven,
     commit_parents, landed,
 };
-pub use layout::{ProjectLayout, project_layout_for_common};
+pub use layout::{
+    ProjectLayout, project_layout_for_binding, project_layout_for_checkout,
+    project_layout_for_common, project_layout_git_environment,
+};
 pub use lifecycle::*;
 pub use owner::{
     WorktreeOrigin, WorktreeOwner, branch_ownership, load_owner, owned_worktree_paths, prune_owned,
@@ -200,6 +203,10 @@ pub enum WorktreeError {
     PortConfiguration(#[source] io::Error),
     #[error("worktree request is invalid")]
     InvalidRequest,
+    #[error(
+        "registered Git project has no verified primary checkout; run `provenant worktree list` from its primary checkout to refresh the layout, then retry"
+    )]
+    ProjectLayoutUnresolved,
     #[error("worktree name {name} matches more than one checkout")]
     AmbiguousName { name: String },
     #[error("primary checkout has a detached HEAD; an integration branch is required")]

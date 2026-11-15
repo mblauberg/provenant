@@ -44,6 +44,31 @@ pub struct Context {
 pub(super) fn canonical(path: &Path) -> Result<PathBuf, EdgeError> {
     Ok(provenant_os::fs::canonicalize(path)?)
 }
+
+fn has_git_common_layout(path: &Path) -> bool {
+    path.file_name() == Some(OsStr::new(".git"))
+        || (path.join("HEAD").is_file() && path.join("objects").is_dir())
+}
+
+fn registered_project_owner(
+    binding: &provenant_config::ProjectBinding,
+    executor: &dyn Executor,
+    git: &Path,
+    cancel: &CancelToken,
+) -> Result<Option<PathBuf>, EdgeError> {
+    if !has_git_common_layout(binding.common_dir()) {
+        return Ok(Some(binding.common_dir().to_path_buf()));
+    }
+    let layout = provenant_confinement::worktrees::project_layout_for_binding(
+        executor,
+        binding,
+        git,
+        &provenant_confinement::worktrees::project_layout_git_environment(),
+        Duration::from_secs(5),
+        cancel,
+    )?;
+    Ok(layout.project().map(Path::to_path_buf))
+}
 /// The provider launch binds TMPDIR to this attempt's private scratch. Require
 /// it explicitly: a lane must never fall back to the host's shared temp area.
 fn lane_temporary() -> Result<PathBuf, EdgeError> {
@@ -318,18 +343,26 @@ impl Context {
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
-        let project_root = discovered
-            .repository
-            .as_ref()
-            .map_or(discovered.location.common_dir(), |repo| repo.root_path());
-        let port_table =
-            provenant_config::PortTable::read_for(Some(project_root), roots.state.as_path())?;
+        let is_git = discovered.repository.is_some();
+        let common_dir = discovered.location.common_dir().to_path_buf();
         let binding = if lane {
             provenant_config::lookup_project(&roots, &discovered.location)?
                 .ok_or(EdgeError::Invalid)?
         } else {
-            provenant_config::bind_project(&roots, discovered.location)?
+            provenant_config::bind_project(&roots, discovered.location.clone())?
         };
+        let project_root = if is_git {
+            registered_project_owner(
+                &binding,
+                &executor,
+                runtime.git_program_path(),
+                &CancelToken::new(),
+            )?
+        } else {
+            Some(common_dir.clone())
+        };
+        let port_table =
+            provenant_config::PortTable::read_for(project_root.as_deref(), roots.state.as_path())?;
         let key = if discovered.repository.is_some() {
             match CrossHostProjectKey::from_home(home, binding.common_dir()) {
                 Ok(key) => Some(key),
@@ -377,14 +410,22 @@ impl Context {
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
-        let project_root = discovered
-            .repository
-            .as_ref()
-            .map_or(discovered.location.common_dir(), |repo| repo.root_path());
-        let port_table =
-            provenant_config::PortTable::read_for(Some(project_root), roots.state.as_path())?;
+        let is_git = discovered.repository.is_some();
+        let common_dir = discovered.location.common_dir().to_path_buf();
         let binding = provenant_config::lookup_project(&roots, &discovered.location)?
             .ok_or(EdgeError::Invalid)?;
+        let project_root = if is_git {
+            registered_project_owner(
+                &binding,
+                &executor,
+                runtime.git_program_path(),
+                &CancelToken::new(),
+            )?
+        } else {
+            Some(common_dir.clone())
+        };
+        let port_table =
+            provenant_config::PortTable::read_for(project_root.as_deref(), roots.state.as_path())?;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
         let key = if discovered.repository.is_some() {
             match CrossHostProjectKey::from_home(home, binding.common_dir()) {
@@ -432,18 +473,40 @@ impl Context {
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
-        let project_root = discovered
-            .repository
-            .as_ref()
-            .map_or(discovered.location.common_dir(), |repo| repo.root_path());
-        let port_table =
-            provenant_config::PortTable::read_for(Some(project_root), roots.state.as_path())?;
         let state_present = roots.state.as_path().try_exists()?;
         let binding = if state_present {
             provenant_config::lookup_project(&roots, &discovered.location)?
         } else {
             None
         };
+        let project_root = match (&binding, &discovered.repository) {
+            (Some(binding), Some(_)) => registered_project_owner(
+                binding,
+                &executor,
+                runtime.git_program_path(),
+                &CancelToken::new(),
+            )?,
+            (None, Some(repo)) => {
+                let read_repo = runtime.open_read_repo(
+                    &executor,
+                    repo.root_path(),
+                    budget,
+                    &CancelToken::new(),
+                )?;
+                let layout = provenant_confinement::worktrees::project_layout_for_checkout(
+                    &executor,
+                    &read_repo,
+                    &runtime,
+                    budget,
+                    &CancelToken::new(),
+                )?;
+                layout.project().map(Path::to_path_buf)
+            }
+            (Some(binding), None) => Some(binding.common_dir().to_path_buf()),
+            (None, None) => Some(discovered.location.common_dir().to_path_buf()),
+        };
+        let port_table =
+            provenant_config::PortTable::read_for(project_root.as_deref(), roots.state.as_path())?;
         let host = if state_present {
             provenant_config::lookup_host(&roots)?
         } else {
@@ -495,9 +558,14 @@ impl Context {
         home: &Path,
         binding: &provenant_config::ProjectBinding,
     ) -> Result<Self, EdgeError> {
-        // Its working directory is the project's, as if started there.
-        let cwd = binding.common_dir().parent().ok_or(EdgeError::Invalid)?;
-        let port_table = provenant_config::PortTable::read_for(Some(cwd), roots.state.as_path())?;
+        let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
+        let executor = SystemExecutor::new(1)?;
+        let project_root = registered_project_owner(binding, &executor, &git, &CancelToken::new())?;
+        // Git metadata has no checkout when inventory proves a bare repository.
+        // Keep its context host-only instead of inventing one from the path.
+        let cwd = project_root.as_deref().unwrap_or(binding.common_dir());
+        let port_table =
+            provenant_config::PortTable::read_for(project_root.as_deref(), roots.state.as_path())?;
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
@@ -528,7 +596,7 @@ impl Context {
             graph_prompt_limit_source,
             graph_decide_timeout_source,
             in_lane: in_lane(),
-            executor: SystemExecutor::new(1)?,
+            executor,
             home: home.to_path_buf(),
             cwd: cwd.to_path_buf(),
         })

@@ -8,6 +8,20 @@ contract owns private Git and publication.
 
 ## Worktrees and refs
 
+### Project layout ownership
+
+Project identity remains keyed by the canonical Git common directory. A
+project-scoped path is owned by the primary checkout proved by Git's worktree
+inventory or by a selected checkout whose private and common Git directories
+match. When an external Git directory prevents inventory from naming that
+checkout, a saved path may fill the gap only if it was captured from a verified
+primary and Git re-proves that it is still the primary for the same common
+directory. Linked-worktree membership alone does not prove primary ownership.
+A bare repository has no project checkout and keeps host/common-only layout.
+The common-directory parent is never a checkout claim.
+- Why: external metadata directories and linked checkouts do not encode a
+  primary path by parent relationship.
+
 A writer needs an explicit verified worktree. Git inventory establishes
 membership; a registry reservation alone does not. Only proven-owned work is
 eligible for cleanup.

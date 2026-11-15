@@ -2514,18 +2514,15 @@ pub(super) fn prepare_candidates(
     let fallback_cancel = provenant_core::CancelToken::new();
     let cancel = registry.cancel.unwrap_or(&fallback_cancel);
     let git_executor = provenant_os::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
+    let project_binding = super::confinement::registered_project_binding(roots, project_id)?;
     let requester_cwd = registry.cwd.unwrap_or(&source);
     let lane_path = match writer.as_ref() {
-        Some(writer) => {
-            let project = verified_project_root(
-                writer.worktree.repo().common_git_dir(),
-                &git,
-                &git_executor,
-                cancel,
-            )?;
-            run::FilteredLanePath::for_requester(registry.host, &project, writer.worktree.path())
-                .map_err(|error| error.to_string())?
-        }
+        Some(writer) => run::FilteredLanePath::for_requester(
+            registry.host,
+            writer.project_root(),
+            writer.worktree.path(),
+        )
+        .map_err(|error| error.to_string())?,
         None => crate::run::filtered_requester_lane_path(
             registry.host,
             requester_cwd,
@@ -2533,6 +2530,7 @@ pub(super) fn prepare_candidates(
             &git,
             &git_executor,
             cancel,
+            project_binding.as_ref(),
         )?,
     };
     let locate = |name: &str| match locate_override {
