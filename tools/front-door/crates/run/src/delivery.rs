@@ -153,6 +153,20 @@ fn publish_pickup(
         .require_durable()
         .map_err(RunError::from)
 }
+/// Filter a requester search path before passing it to a lane or host delivery.
+pub fn filtered_lane_path(
+    path: &OsStr,
+    project: &Path,
+    worktree: &Path,
+) -> std::result::Result<OsString, std::env::JoinPathsError> {
+    std::env::join_paths(
+        std::env::split_paths(path)
+            .filter(|p| p.is_absolute())
+            .filter_map(|p| std::fs::canonicalize(p).ok())
+            .filter(|p| !p.starts_with(worktree) && !p.starts_with(project)),
+    )
+}
+
 // Runtime cancellation is host-local, absent from handoffs and equality.
 impl Clone for HostDeliveryContext {
     fn clone(&self) -> Self {
@@ -1311,12 +1325,7 @@ impl HostDeliveryContext {
             }
             let path = OsString::from_vec(value.clone());
             if name == "PATH" {
-                let paths: Vec<_> = std::env::split_paths(&path)
-                    .filter(|p| p.is_absolute())
-                    .filter_map(|p| std::fs::canonicalize(p).ok())
-                    .filter(|p| !p.starts_with(&writer.worktree) && !p.starts_with(&writer.project))
-                    .collect();
-                *value = std::env::join_paths(paths)
+                *value = filtered_lane_path(&path, &writer.project, &writer.worktree)
                     .map_err(|_| {
                         prepare_error(DeliveryPrepareStep::Environment, "PATH is invalid")
                     })?

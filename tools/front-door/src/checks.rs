@@ -10,6 +10,7 @@ use provenant_os::exec::SystemExecutor;
 use provenant_os::fs;
 use provenant_records::{CanonicalV1, CommandResult, Finding, Outcome, PathWire};
 use std::{
+    ffi::OsString,
     io::{self, Write},
     path::{Path, PathBuf},
     time::Duration,
@@ -100,6 +101,149 @@ enum Inspectable {
         head: Option<String>,
         page: provenant_cli::Page,
     },
+}
+
+#[derive(serde::Serialize)]
+struct AgentToolchainCheck {
+    source: &'static str,
+    digest: provenant_records::FileDigest,
+    warning: Option<&'static str>,
+}
+
+fn installed_agent_bytes(path: &Path) -> Result<Option<Vec<u8>>, Error> {
+    let Some(parent) = path.parent() else {
+        return Ok(None);
+    };
+    let Some(name) = path.file_name() else {
+        return Ok(None);
+    };
+    let directory = match fs::Directory::open_anchor(parent) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    match directory.read_stable(name, 1024 * 1024) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn plist_path(bytes: &[u8]) -> Option<OsString> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let value = text
+        .split_once("<key>PATH</key>")?
+        .1
+        .trim_start()
+        .strip_prefix("<string>")?
+        .split_once("</string>")?
+        .0;
+    let mut decoded = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some((before, escaped)) = rest.split_once('&') {
+        decoded.push_str(before);
+        let (entity, tail) = escaped.split_once(';')?;
+        decoded.push(match entity {
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            _ => return None,
+        });
+        rest = tail;
+    }
+    decoded.push_str(rest);
+    Some(decoded.into())
+}
+
+fn systemd_path(bytes: &[u8]) -> Option<OsString> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let value = text
+        .lines()
+        .find_map(|line| line.strip_prefix("Environment=\"PATH=")?.strip_suffix('"'))?;
+    let mut decoded = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        match character {
+            '\\' => decoded.push(chars.next()?),
+            '%' if chars.clone().next() == Some('%') => {
+                chars.next();
+                decoded.push('%');
+            }
+            _ => decoded.push(character),
+        }
+    }
+    Some(decoded.into())
+}
+
+fn check_installed_agent_path(
+    source: &'static str,
+    path: &Path,
+    home: &Path,
+    worktree: &Path,
+    format: fn(&[u8]) -> Option<OsString>,
+) -> Result<Option<AgentToolchainCheck>, Error> {
+    let Some(bytes) = installed_agent_bytes(path)? else {
+        return Ok(None);
+    };
+    let Some(path) = format(&bytes) else {
+        return Ok(None);
+    };
+    let environment = [(OsString::from("PATH"), path)];
+    let warning =
+        match provenant_run::trusted_lane_toolchain_diagnostic(home, worktree, &environment, &[]) {
+            Ok(()) => None,
+            Err(
+                warning @ ("path_missing"
+                | "path_duplicated"
+                | "path_entry_relative"
+                | "path_entry_writable"
+                | "rustc_not_rustup_shim"
+                | "rustc_path_unresolvable"
+                | "rustc_not_on_path"),
+            ) => Some(warning),
+            Err(_) => None,
+        };
+    Ok(Some(AgentToolchainCheck {
+        source,
+        digest: CanonicalV1::file_digest(&bytes),
+        warning,
+    }))
+}
+
+fn installed_agent_toolchain_checks(
+    home: &Path,
+    worktree: &Path,
+    state: &Path,
+) -> Result<Vec<AgentToolchainCheck>, Error> {
+    let mut checks = Vec::new();
+    if cfg!(target_os = "macos") {
+        if let Some(path) = provenant_config::peer_agent_plist(state)
+            && let Some(check) =
+                check_installed_agent_path("peer-agent", &path, home, worktree, plist_path)?
+        {
+            checks.push(check);
+        }
+        if let Some(path) = provenant_config::tick_agent_plist(state)
+            && let Some(check) =
+                check_installed_agent_path("tick-agent", &path, home, worktree, plist_path)?
+        {
+            checks.push(check);
+        }
+    } else if cfg!(target_os = "linux") {
+        let configured = provenant_config::tick_service_path(state);
+        let default = home.join(".config/systemd/user/provenant-tick.service");
+        for path in [configured, Some(default)].into_iter().flatten() {
+            if checks.iter().any(|check| check.source == "tick-service") {
+                break;
+            }
+            if let Some(check) =
+                check_installed_agent_path("tick-service", &path, home, worktree, systemd_path)?
+            {
+                checks.push(check);
+            }
+        }
+    }
+    Ok(checks)
 }
 pub fn run(
     check: Check,
@@ -313,7 +457,9 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 &smoke,
                 &cancel,
             )?;
-            Ok(provenant_cli::check::install_page(
+            let agent_checks =
+                installed_agent_toolchain_checks(&home, &project, roots.state.as_path())?;
+            let mut result = provenant_cli::check::install_page(
                 inspection,
                 &home,
                 roots.state.as_path(),
@@ -322,9 +468,19 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     "install",
                     &source.as_ref().map(|p| p.as_os_str().as_encoded_bytes()),
                     selector,
+                    &agent_checks,
                 ),
                 &page,
-            )?)
+            )?;
+            result.warnings.extend(agent_checks.iter().filter_map(|check| {
+                check.warning.map(|reason| {
+                    format!(
+                        "{} PATH would make trusted_lane_toolchain fall back ({reason}); ensure the trusted rustup shim is on PATH when reinstalling the agent",
+                        check.source
+                    )
+                })
+            }));
+            Ok(result)
         }),
         Inspectable::Release { base, head, page } => {
             git_page(&project, roots.state.as_path(), |git| {

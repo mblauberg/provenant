@@ -10,8 +10,11 @@ recovers any partial or crashed install.
 
 `./install.sh` installs the release for the checkout's exact tag, else the latest.
 `--tag vX.Y.Z` selects one; `--source [DIR]` builds a checkout with its pinned
-toolchain (`--yes` accepts a missing-toolchain install). Releases are
-`aarch64-apple-darwin` only; other hosts must use `--source`. The script
+toolchain (`--yes` accepts a missing-toolchain install). Agent installation
+discovers `rustc` on the installing shell PATH.
+`provenant check install` warns if an installed agent PATH would prevent a
+trusted rustup toolchain from being selected; reinstall from a shell whose PATH
+finds the rustup shim to refresh it. Releases are `aarch64-apple-darwin` only; other hosts must use `--source`. The script
 verifies the package SHA-256 before running anything from it. State defaults to
 `~/.local/share/provenant/v2` and the binary to `~/.local/bin`; override with
 `--state-dir`, `PROVENANT_STATE_DIR` and `--bin-dir` (absolute paths).

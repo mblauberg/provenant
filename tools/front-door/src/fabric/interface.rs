@@ -2332,6 +2332,26 @@ impl Factory {
             journal.save(&checkpoint).map_err(graph_journal_error)?;
             target.node = Some(node);
         }
+        // Retry is a new request: retain its PATH for this and later advances.
+        {
+            let mut journal = FileJournal::open(
+                &self.context.roots.state,
+                self.context.identity.project,
+                &id,
+                budget,
+                cancel,
+                &self.clock,
+            )
+            .map_err(graph_journal_error)?;
+            let checkpoint = journal
+                .load(&id)
+                .map_err(graph_journal_error)?
+                .ok_or(FacadeError::NotFound)?;
+            journal
+                .set_requester_path(self.requester_lane_path())
+                .map_err(graph_journal_error)?;
+            journal.save(&checkpoint).map_err(graph_journal_error)?;
+        }
         let run = self.graph(
             GraphInput::Resume {
                 extra: Default::default(),

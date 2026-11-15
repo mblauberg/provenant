@@ -547,6 +547,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 cwd: launch.cwd.clone(),
                 executables: [("codex".into(), executable.clone())].into(),
                 executable_search_path: Vec::new(),
+                lane_path: None,
                 git: selected_git.clone(),
                 default_account_directories: Default::default(),
                 credential_roots: Default::default(),

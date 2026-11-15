@@ -114,6 +114,7 @@ fn failed_settlement_does_not_advance_unrelated_graphs() -> Result<(), Box<dyn s
         cwd: fixture.rig.project.clone(),
         executables: Default::default(),
         executable_search_path: Vec::new(),
+                lane_path: None,
         git: provenant_os::git::git_executable().ok_or("git")?,
         default_account_directories: Default::default(),
         credential_roots: Default::default(),
