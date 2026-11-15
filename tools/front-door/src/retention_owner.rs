@@ -223,7 +223,7 @@ impl worktrees::RetirementFeeds for Owner<'_> {
     fn custody(&self, lane: &WorktreeInfo) -> Result<(), String> {
         let context = self.context()?;
         let chair = provenant_cli::fabric::current_chair(&context)
-            .map_err(|error| WorktreeError::Retirement(Box::new(error)))?;
+            .map_err(|error| error.to_string())?;
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         let call = Request {
