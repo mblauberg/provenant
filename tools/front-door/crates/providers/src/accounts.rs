@@ -729,7 +729,12 @@ mod config_tests {
         for (field, invalid, account_id) in cases {
             let entry_path = format!("entries.{account_id}");
             let mut text = ENTRY.replace("entries.work", &entry_path);
-            text.push_str("priority=2\nhidden=true\n");
+            // The invalid line may itself be the priority key; TOML forbids
+            // duplicate keys, so the valid priority is only set otherwise.
+            if field != "priority" {
+                text.push_str("priority=2\n");
+            }
+            text.push_str("hidden=true\n");
             text.push_str(invalid);
             text.push('\n');
             if account_id == "'work.alias'" {
@@ -743,7 +748,8 @@ mod config_tests {
             let account_key = account_id.trim_matches('\'');
             let entry = &config.domains.accounts.entries[account_key];
             assert_eq!(entry.key, "work-key", "{field}");
-            assert_eq!(entry.priority, Some(2), "{field}");
+            let expected_priority = (field != "priority").then_some(2);
+            assert_eq!(entry.priority, expected_priority, "{field}");
             assert!(entry.hidden, "{field}");
             assert!(
                 config.warnings.iter().any(|warning| warning.line > 0),
@@ -764,11 +770,13 @@ mod config_tests {
             if account_id == "'work.alias'" {
                 assert_eq!(config.domains.accounts.entries["home"].key, "home-key");
             }
-            let priority_origin = format!("domains.accounts.entries.{account_key}.priority");
-            assert!(matches!(
-                config.origins.get(&priority_origin),
-                Some(Origin::User { .. })
-            ));
+            if field != "priority" {
+                let priority_origin = format!("domains.accounts.entries.{account_key}.priority");
+                assert!(matches!(
+                    config.origins.get(&priority_origin),
+                    Some(Origin::User { .. })
+                ));
+            }
         }
     }
 

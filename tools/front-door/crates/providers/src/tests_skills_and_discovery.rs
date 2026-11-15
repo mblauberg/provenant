@@ -261,14 +261,15 @@ fn optional_unrepresentable_write_is_omitted_from_applied_access()
 #[test]
 fn unrepresentable_library_target_reports_incomplete_closure()
 -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::unix::ffi::OsStringExt;
     let temp = tempfile::tempdir()?;
     let root = temp.path().canonicalize()?;
     let home = root.join("home");
     let executable = root.join("package/bin/provider");
     std::fs::create_dir_all(&home)?;
     std::fs::create_dir_all(executable.parent().ok_or("package")?)?;
-    let library = root.join(std::ffi::OsString::from_vec(b"library-\xff.dylib".to_vec()));
+    // A control character cannot be written into a Seatbelt profile. Unlike
+    // non-UTF-8 bytes, filesystems such as APFS accept it as a file name.
+    let library = root.join("library-\u{1}.dylib");
     std::fs::write(&library, test_macho(&[]))?;
     let alias = root.join("library-link");
     std::os::unix::fs::symlink(&library, &alias)?;

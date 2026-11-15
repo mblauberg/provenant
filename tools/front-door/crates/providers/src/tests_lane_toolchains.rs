@@ -388,6 +388,7 @@ fn writer_lint_target_is_a_lane_cache_sibling_of_the_build_target() -> Result<()
 #[test]
 fn node_tool_stores_are_read_only() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
+    let token = fixture_token();
     let shared = [
         "Library/pnpm",
         "Library/pnpm/pnpm",
@@ -412,7 +413,7 @@ fn node_tool_stores_are_read_only() -> Result<(), ProviderError> {
                 &plan,
                 &prompt,
                 std::path::Path::new("/fixture/repo"),
-                None,
+                (id == "claude").then_some(&token),
             ))?;
             let spec = &launch.profile.spec;
             let writable: Vec<_> = spec

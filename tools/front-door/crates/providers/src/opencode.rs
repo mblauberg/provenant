@@ -2234,15 +2234,22 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
                 git.display()
             )));
             assert!(profile.contains(&format!("(literal \"{}\")", cwd.join(".claude").display())));
+            let grants_subpath = |path: &std::path::Path| {
+                let needle = format!("(subpath \"{}\")", path.display());
+                profile
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("(allow") && line.contains(&needle))
+            };
             for name in [".agents", ".claude", ".codex"] {
                 for parent in [&project_parent, &cwd] {
                     let directory = parent.join(name);
                     assert!(profile.contains(&format!("(literal \"{}\")", directory.display())));
-                    assert!(!profile.contains(&format!("(subpath \"{}\")", directory.display())));
+                    // Credential-root denials may name the subtree; no grant may.
+                    assert!(!grants_subpath(&directory));
                     assert!(!profile.contains(directory.join("config.json").to_str().unwrap()));
                 }
                 // Ancestor configuration has no enclosing data-read grant.
-                assert!(!profile.contains(&format!("(subpath \"{}\")", project_parent.display())));
+                assert!(!grants_subpath(&project_parent));
             }
         }
     }
