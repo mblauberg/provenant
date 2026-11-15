@@ -167,12 +167,18 @@ stays queued while the provider continues. After settlement, the graph resumes
 the same provider, model, account and session with the saved instructions as
 the next user turn. It must preserve writer custody and must not fall back to a
 fresh session when retained provider state is missing or expired.
-For native Codex launches, the host selector records the chosen HOME.
-Continuation binds it through the sealed parent route, the current registered
-account's exact HOME path, and the validated session and model in that HOME.
-It invokes `resume` under the same account without copying credentials or
-unrelated native sessions into the successor. Sandboxed Codex continues from
-its existing attempt-private session state.
+For native provider launches, the host records the adapter-selected session
+root and compares it with the new prepared launch before invoking the provider.
+The sealed applied route binds provider, model and account to that selection.
+Codex keeps its published v1 HOME selector and validates the exact saved
+session and model there, including a locally discovered account whose selection
+is not persisted in the accounts registry. Other native providers use the
+route-bound selector. The provider receives the exact saved session ID and its
+existing stream decoder must confirm that identity and route; missing, expired,
+unreadable or contradictory state stays not-continued. Native account state is
+not scanned or copied into the successor. Sandboxed state continues from
+attempt-private storage; providers that explicitly retain state there, such as
+OpenCode, continue through that same private-state owner.
 The guardian preserves the typed `steered` stop through exit publication, and
 Run admits that continuation only when the intentional interrupt was delivered
 before exit. A stream identity error also leaves a route- and process-bound

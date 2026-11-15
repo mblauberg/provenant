@@ -778,29 +778,6 @@ fn strip_final_eof_fragment(stdout: &[u8]) -> &[u8] {
         .map_or(&[], |newline| &stdout[..=newline])
 }
 
-fn registered_codex_home(roots: Option<&Roots>, route: &run::RouteRecord) -> Option<PathBuf> {
-    if route.provider.as_deref() != Some("codex") {
-        return None;
-    }
-    let roots = roots?;
-    let key = route.account_key.as_deref()?;
-    let config = crate::config_reads::read_for(roots, "accounts").ok()?;
-    let mut matches = config
-        .domains
-        .accounts
-        .entries
-        .values()
-        .filter(|entry| entry.adapter == "codex" && entry.key == key);
-    let entry = matches.next()?;
-    if matches.next().is_some() {
-        return None;
-    }
-    entry
-        .registered()
-        .ok()
-        .map(|account| account.directory().to_owned())
-}
-
 #[derive(Clone, Copy)]
 struct DecodeOptions<'a> {
     host_settlement: bool,
@@ -1023,7 +1000,6 @@ impl Registry<'_> {
         {
             events.push(event);
         }
-        let codex_home = registered_codex_home(self.roots, route);
         let native_codex_home_required = route
             .sandbox
             .as_ref()
@@ -1038,7 +1014,6 @@ impl Registry<'_> {
                             provider_state,
                             thread,
                             route,
-                            codex_home.as_deref(),
                             native_codex_home_required,
                         )
                     })

@@ -2428,6 +2428,7 @@ mod tests {
             git_wrapper: Default::default(),
             policy: Policy::default(),
             credential_roots: provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
+            session_state: crate::SessionStateLocation::AttemptPrivate,
             profile: provenant_confinement::permissions::ProviderProfile {
                 spec: ProviderProfileSpec::default(),
                 observations: Default::default(),

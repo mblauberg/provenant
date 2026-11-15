@@ -214,6 +214,14 @@ pub(crate) fn filter_optional_grants(
 /// A provider launch ready for confinement. The launcher performs `setup`,
 /// anchors `required_anchors(plan, &profile, worktree)`, compiles the plan with
 /// `profile`, and runs `ConfinedLaunch::command(&argv)` with exactly `env`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionStateLocation {
+    /// Session state is retained inside the attempt's private provider state.
+    AttemptPrivate,
+    /// The provider writes session state below this adapter-selected native root.
+    Native { root: PathBuf },
+}
+
 pub struct LaunchSpec {
     /// `argv[0]` is the canonical executable path.
     pub argv: Vec<OsString>,
@@ -235,6 +243,8 @@ pub struct LaunchSpec {
     /// Declared host credential roots used to validate grants after preparation.
     pub(crate) credential_roots: provenant_core::CredentialRoots,
     pub profile: ProviderProfile,
+    /// Adapter-selected location where this launch retains its session state.
+    pub session_state: SessionStateLocation,
     /// Decoder state bound to any continuation identity.
     pub stream: StreamState,
 }
