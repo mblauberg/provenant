@@ -753,23 +753,75 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
         "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\njunior=[{model='codex/gpt-6-luna',effort='low'}]\n",
     )?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let branch_mode = matches!(location, "branch" | "branch-worktree");
+    let branch_mode = matches!(
+        location,
+        "branch" | "branch-worktree" | "branch-separate-git-dir" | "branch-bare-linked"
+    );
     let primary_branch_mode = location == "branch";
     for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
         fs::write(rig.project.join(name), "original instructions\n")?;
     }
-    let mut git_commands = vec![vec!["add", "."], vec!["commit", "-qm", "instructions"]];
-    if !primary_branch_mode {
-        git_commands.push(vec![
-            "worktree",
-            "add",
-            "-qb",
-            "writer-cwd",
-            ".worktrees/writer-cwd",
-        ]);
-    }
+    let git_commands = vec![vec!["add", "."], vec!["commit", "-qm", "instructions"]];
     for args in git_commands {
         let output = rig.execute(&git, &args, None)?;
+        assert_eq!(code(&output), 0, "{output:?}");
+    }
+    if location == "branch-separate-git-dir" {
+        let metadata = rig.root.join("external-git-metadata");
+        let output = rig.execute(
+            &git,
+            &[
+                "init",
+                "--separate-git-dir",
+                metadata.to_str().ok_or("metadata")?,
+            ],
+            None,
+        )?;
+        assert_eq!(code(&output), 0, "{output:?}");
+    }
+    if location == "branch-bare-linked" {
+        let bare = rig.root.join("bare.git");
+        let selected = rig.root.join("selected");
+        let output = rig.execute(
+            &git,
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                rig.project.to_str().ok_or("project")?,
+                bare.to_str().ok_or("bare")?,
+            ],
+            None,
+        )?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        let output = rig.execute(
+            &git,
+            &[
+                "--git-dir",
+                bare.to_str().ok_or("bare")?,
+                "worktree",
+                "add",
+                "-b",
+                "writer-cwd",
+                selected.to_str().ok_or("selected")?,
+                "HEAD",
+            ],
+            None,
+        )?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        rig.project = selected;
+    } else if !primary_branch_mode {
+        let output = rig.execute(
+            &git,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "writer-cwd",
+                ".worktrees/writer-cwd",
+            ],
+            None,
+        )?;
         assert_eq!(code(&output), 0, "{output:?}");
     }
     if location == "branch-worktree" {
@@ -793,14 +845,23 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
         } else {
             ".worktrees"
         };
-        rig.project.join(root).join("writer-branch")
+        let allocation_root = if location == "branch-bare-linked" {
+            rig.root.join("bare.git")
+        } else {
+            rig.project.clone()
+        };
+        allocation_root.join(root).join("writer-branch")
     } else {
         rig.project.join(".worktrees/writer-cwd")
     };
     if !branch_mode {
         fs::create_dir_all(tree.join("nested/directory"))?;
     }
-    let linked_invocation = rig.project.join(".worktrees/writer-cwd");
+    let linked_invocation = if location == "branch-bare-linked" {
+        rig.project.clone()
+    } else {
+        rig.project.join(".worktrees/writer-cwd")
+    };
     if location == "branch-worktree" {
         assert!(
             !linked_invocation
@@ -817,7 +878,9 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
             fs::create_dir_all(&directory)?;
             directory
         }
-        "branch-worktree" => linked_invocation.clone(),
+        "branch-worktree" | "branch-separate-git-dir" | "branch-bare-linked" => {
+            linked_invocation.clone()
+        }
         "worktree" => tree.clone(),
         "subdirectory" => tree.join("nested/directory"),
         _ => rig.project.clone(),
@@ -864,7 +927,10 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
             assert_eq!(node["worktree"], ".worktrees/writer-branch");
         }
         assert_eq!(node["writer_binding"]["worktree"].as_str(), tree.to_str());
-        if location == "branch-worktree" {
+        if matches!(
+            location,
+            "branch-worktree" | "branch-separate-git-dir" | "branch-bare-linked"
+        ) {
             assert!(
                 !linked_invocation.join(".worktrees/writer-branch").exists(),
                 "branch path was nested under the invoking linked checkout: {response}"
@@ -913,6 +979,14 @@ fn writer_cli_branch_binds_the_new_worktree() -> Result {
 // Spec: docs/specs/supervisor.md#managed-writer-path-owner
 fn writer_cli_branch_from_linked_checkout_uses_primary_layout() -> Result {
     writer_cli_launches_from_cwd("branch-worktree")
+}
+
+fn writer_cli_branch_from_separate_git_directory_uses_inventory() -> Result {
+    writer_cli_launches_from_cwd("branch-separate-git-dir")
+}
+
+fn writer_cli_branch_from_bare_linked_checkout_uses_common_layout() -> Result {
+    writer_cli_launches_from_cwd("branch-bare-linked")
 }
 
 fn writer_cli_launches_from_worktree_subdirectory() -> Result {
@@ -5028,6 +5102,14 @@ fn main() -> ExitCode {
             (
                 "writer_cli_branch_from_linked_checkout_uses_primary_layout",
                 writer_cli_branch_from_linked_checkout_uses_primary_layout,
+            ),
+            (
+                "writer_cli_branch_from_separate_git_directory_uses_inventory",
+                writer_cli_branch_from_separate_git_directory_uses_inventory,
+            ),
+            (
+                "writer_cli_branch_from_bare_linked_checkout_uses_common_layout",
+                writer_cli_branch_from_bare_linked_checkout_uses_common_layout,
             ),
             (
                 "writer_cli_launches_from_worktree_subdirectory",

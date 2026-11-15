@@ -465,14 +465,41 @@ impl UtilityRuntime {
 
     /// Everything a lane can write that matters to `repo`: its own linked
     /// worktree, the project's worktree and scratch areas, and any extra roots.
-    pub(crate) fn lane_roots(&self, repo: &VerifiedRepo) -> Result<LaneRoots, UtilityError> {
-        Ok(LaneRoots::for_repository(
-            repo.root_path(),
-            repo.private_git_dir(),
-            repo.common_git_dir(),
-            &self.lane_roots,
-            &self.host_state,
-        )?)
+    pub(crate) fn lane_roots(
+        &self,
+        repo: &VerifiedRepo,
+        executor: &dyn Executor,
+        cancel: &CancelToken,
+    ) -> Result<LaneRoots, UtilityError> {
+        let common = repo.common_git_dir();
+        let environment = [
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+            ("GIT_DIR".into(), common.as_os_str().to_owned()),
+        ];
+        let layout = if repo.private_git_dir() == common {
+            crate::worktrees::ProjectLayout::for_verified_repo(repo)
+                .map_err(|_| UtilityError::UnreadableGitConfiguration)?
+        } else {
+            crate::worktrees::project_layout_for_common(
+                executor,
+                common,
+                self.git_program_path(),
+                &environment,
+                Duration::from_secs(5),
+                cancel,
+            )
+            .map_err(|_| UtilityError::UnreadableGitConfiguration)?
+        };
+        let mut roots = self.lane_roots.clone().into_paths();
+        if repo.private_git_dir() != common {
+            roots.push(repo.root_path().to_path_buf());
+        }
+        roots.extend(
+            LaneRoots::for_layout(layout.root(), layout.project(), &self.host_state)?.into_paths(),
+        );
+        Ok(LaneRoots::new(roots))
     }
 
     pub fn open_repo(
@@ -818,7 +845,7 @@ impl<'a> HostGit<'a> {
             budget,
             cancel,
         };
-        let roots = runtime.lane_roots(repo)?;
+        let roots = runtime.lane_roots(repo, executor, cancel)?;
         transport::check_environment(&host.env, repo.root_path(), &roots)?;
         let listing = host.run(
             &transport::LISTING_ARGS
@@ -1906,7 +1933,7 @@ fn scan_configuration(
         .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
     let base = repo.root_path();
     let home = runtime.home.path.as_path();
-    let roots = runtime.lane_roots(repo)?;
+    let roots = runtime.lane_roots(repo, executor, cancel)?;
     let own: Vec<PathBuf> = [repo.private_git_dir(), repo.common_git_dir()]
         .iter()
         .flat_map(|dir| ["config", "config.worktree"].map(|name| dir.join(name)))
@@ -2072,7 +2099,7 @@ pub(crate) fn lane_configuration_files(
 ) -> Result<BTreeSet<PathBuf>, UtilityError> {
     let scan = scan_configuration(executor, repo, runtime, budget, cancel)?;
     let mut files = scan.lane_files;
-    let roots = runtime.lane_roots(repo)?;
+    let roots = runtime.lane_roots(repo, executor, cancel)?;
     // An include may be named inside a lane even when Git reports the
     // resolved target as its origin. Seed the graph with the declared path.
     for entry in &scan.entries {

@@ -493,6 +493,13 @@ impl VerifiedRepo {
         Ok(Self::open_structure(path, false)?.common)
     }
 
+    /// Open only the checkout markers and directory identities. This handle
+    /// grants no Git operation until a UtilityRuntime has probed it; layout
+    /// discovery uses it only to verify an inventory path and common identity.
+    pub(crate) fn open_structure_only(path: impl AsRef<Path>) -> Result<Self, RepoError> {
+        Self::open_structure(path, false)
+    }
+
     /// Open and structurally verify the repository, then perform the supplied
     /// fixed Git safety probes before exposing it to callers.
     pub(crate) fn open<E>(
@@ -747,6 +754,7 @@ impl ReadOnlyRepo {
 /// proves registration in the same common repository as `repo`.
 pub struct VerifiedWorktree {
     repo: VerifiedRepo,
+    project_root: Option<PathBuf>,
 }
 
 impl VerifiedWorktree {
@@ -760,6 +768,13 @@ impl VerifiedWorktree {
 
     pub fn path(&self) -> &Path {
         self.repo.root_path()
+    }
+
+    /// Verified primary checkout associated with this worktree, when the
+    /// selected repository handle was the primary. Bare/common-only callers
+    /// have no project config owner.
+    pub fn project_root(&self) -> Option<&Path> {
+        self.project_root.as_deref()
     }
 
     pub fn identity(&self) -> Metadata {
@@ -785,15 +800,19 @@ fn verify_worktree_inner(repo: &VerifiedRepo, path: &Path) -> Result<VerifiedWor
         .common_identity
         .same_identity(&repo.common_identity)
     {
-        // Only the common Git directory names the other project. Its parent
-        // is the checkout for a `.git` directory; a separate Git directory is
-        // named as it is.
+        // A conventional `.git` parent is useful in this diagnostic only
+        // after the parent checkout verifies back to this exact common dir.
         let common = worktree.common_git_dir();
         let project = common
             .parent()
             .filter(|_| common.file_name() == Some(std::ffi::OsStr::new(".git")))
-            .unwrap_or(common)
-            .to_path_buf();
+            .filter(|primary| {
+                VerifiedRepo::open_structure_only(primary).is_ok_and(|repo| {
+                    repo.private_git_dir() == common && repo.common_git_dir() == common
+                })
+            })
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| common.to_path_buf());
         return Err(RepoError::ForeignProject {
             worktree: worktree.root_path().to_path_buf(),
             project,
@@ -809,7 +828,12 @@ fn verify_worktree_inner(repo: &VerifiedRepo, path: &Path) -> Result<VerifiedWor
     worktree.probe_data = repo.probe_data.clone();
     worktree.config_digest = Some(worktree.configuration_digest(None)?);
     worktree.revalidate()?;
-    Ok(VerifiedWorktree { repo: worktree })
+    let project_root =
+        (repo.private_git_dir() == repo.common_git_dir()).then(|| repo.root_path().to_path_buf());
+    Ok(VerifiedWorktree {
+        repo: worktree,
+        project_root,
+    })
 }
 
 /// Hash each file with the path it resolves to, so retargeting a symlink or

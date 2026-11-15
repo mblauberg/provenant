@@ -649,6 +649,8 @@ struct Projects {
     /// Canonical Git common directories, empty when the bindings cannot be
     /// read.
     common_dirs: Vec<PathBuf>,
+    /// Verified primary checkout paths for registered repositories.
+    project_roots: Vec<PathBuf>,
     /// The `<state>/worktrees/<project>` registry directories.
     registries: Vec<PathBuf>,
     /// Worktree layout roots read from registered project declarations.
@@ -665,20 +667,56 @@ impl Projects {
     #[allow(clippy::print_stderr)]
     fn registered(roots: &Roots, registry_name: RegistryName) -> Result<Self, AgentError> {
         let mut common_dirs = Vec::new();
+        let mut project_roots = Vec::new();
         let mut worktree_roots = Vec::new();
         match provenant_config::registered_projects(roots) {
             Ok(bindings) => {
+                let git = provenant_os::git::git_executable();
+                let executor = SystemExecutor::new(1)?;
+                let cancel = provenant_core::CancelToken::new();
                 for binding in bindings {
                     let common = binding.common_dir();
                     common_dirs.push(common.to_path_buf());
-                    if common.file_name() == Some(OsStr::new(".git"))
-                        && let Some(project) = common.parent()
-                    {
-                        let ports = provenant_config::PortTable::read_for(
-                            Some(project),
-                            roots.state.as_path(),
-                        )?;
-                        worktree_roots.extend(ports.worktree_roots_under(project));
+                    let is_git_dir = common.file_name() == Some(OsStr::new(".git"))
+                        || (common.join("HEAD").is_file() && common.join("objects").is_dir());
+                    if !is_git_dir {
+                        continue;
+                    }
+                    let Some(git) = git.as_deref() else {
+                        eprintln!(
+                            "note: peer agent PATH skips only Provenant worktrees: Git is unavailable for registered project layout {}",
+                            common.display()
+                        );
+                        continue;
+                    };
+                    let environment = [
+                        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+                        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+                        ("GIT_DIR".into(), common.as_os_str().to_owned()),
+                    ];
+                    match provenant_confinement::worktrees::project_layout_for_common(
+                        &executor,
+                        common,
+                        git,
+                        &environment,
+                        Duration::from_secs(5),
+                        &cancel,
+                    ) {
+                        Ok(layout) => {
+                            if let Some(project) = layout.project() {
+                                project_roots.push(project.to_path_buf());
+                            }
+                            let ports = provenant_config::PortTable::read_for(
+                                layout.project(),
+                                roots.state.as_path(),
+                            )?;
+                            worktree_roots.extend(ports.worktree_roots_under(layout.root()));
+                        }
+                        Err(error) => eprintln!(
+                            "note: peer agent PATH skips only Provenant worktrees: could not resolve registered project layout for {}: {error}",
+                            common.display()
+                        ),
                     }
                 }
             }
@@ -696,6 +734,7 @@ impl Projects {
             .collect();
         Ok(Self {
             common_dirs,
+            project_roots,
             registries,
             worktree_roots,
             registry_name,
@@ -706,15 +745,13 @@ impl Projects {
     /// it resolves, is a registered project or a Provenant worktree of one.
     fn own(&self, top: &Path, common: Option<&Path>) -> bool {
         let name = (self.registry_name)(top);
-        self.common_dirs.iter().any(|dir| {
-            common == Some(dir.as_path())
-                || *dir == top.join(".git")
-                || (dir.file_name() == Some(OsStr::new(".git"))
-                    && self.worktree_roots.iter().any(|root| top.starts_with(root)))
-        }) || self
-            .registries
-            .iter()
-            .any(|registry| fs::symlink_metadata(registry.join(&name)).is_ok())
+        common.is_some_and(|common| self.common_dirs.iter().any(|dir| dir == common))
+            || self.project_roots.iter().any(|root| root == top)
+            || self.worktree_roots.iter().any(|root| top.starts_with(root))
+            || self
+                .registries
+                .iter()
+                .any(|registry| fs::symlink_metadata(registry.join(&name)).is_ok())
     }
 }
 
@@ -1209,6 +1246,7 @@ mod tests {
         ));
         let projects = Projects {
             common_dirs: Vec::new(),
+            project_roots: Vec::new(),
             registries: Vec::new(),
             worktree_roots: Vec::new(),
             registry_name: name,
@@ -1241,8 +1279,41 @@ mod tests {
 
     fn bind(roots: &provenant_core::Roots, root: &std::path::Path) {
         use super::*;
-        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root).unwrap();
+        let git = provenant_os::git::git_executable().expect("Git unavailable");
+        let output = std::process::Command::new(git)
+            .args(["init", "--quiet"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let location = provenant_config::ProjectLocation::new(root.join(".git")).unwrap();
+        provenant_config::bind_project(roots, location).unwrap();
+    }
+
+    fn bind_separate_git_dir(roots: &provenant_core::Roots, root: &Path, common: &Path) {
+        use super::*;
+        fs::create_dir_all(root).unwrap();
+        fs::create_dir_all(common.parent().unwrap()).unwrap();
+        let git = provenant_os::git::git_executable().expect("Git unavailable");
+        let output = std::process::Command::new(git)
+            .arg("init")
+            .arg("--quiet")
+            .arg("--separate-git-dir")
+            .arg(common)
+            .arg(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let location = provenant_config::ProjectLocation::new(common).unwrap();
         provenant_config::bind_project(roots, location).unwrap();
     }
 
@@ -1329,6 +1400,33 @@ mod tests {
     }
 
     #[test]
+    fn provider_path_resolves_external_git_directory_to_project_layout() {
+        use super::*;
+        let (_temp, base, roots) = project_roots();
+        let project = base.join("project");
+        let common = base.join("metadata/repository");
+        bind_separate_git_dir(&roots, &project, &common);
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![PathBuf::from("trees")];
+        ports.worktree_layout.default = PathBuf::from("trees/<branch>");
+        fs::create_dir_all(project.join(".provenant")).unwrap();
+        fs::write(
+            project.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports).unwrap(),
+        )
+        .unwrap();
+        provider(&project.join("bin/codex"));
+
+        let projects = Projects::registered(&roots, name).unwrap();
+        assert!(projects.own(&project, None));
+        assert!(projects.own(&project.join("trees/feature"), None));
+        assert_eq!(
+            project_worktree(&project.join("bin"), &projects),
+            Some(project)
+        );
+    }
+
+    #[test]
     fn provider_path_keeps_a_clone_that_is_not_a_registered_project() {
         use super::*;
         let (_temp, base, roots) = project_roots();
@@ -1348,6 +1446,7 @@ mod tests {
         );
         let unreadable = Projects {
             common_dirs: Vec::new(),
+            project_roots: Vec::new(),
             registries: Vec::new(),
             worktree_roots: Vec::new(),
             registry_name: name,

@@ -356,7 +356,7 @@ pub(super) fn confinement_request(
                 .chain(writer.is_none().then(|| grant(roots.cwd)))
                 .chain(
                     writer
-                        .and_then(|writer| writer.worktree.repo().common_git_dir().parent())
+                        .and_then(|writer| writer.worktree.project_root())
                         .into_iter()
                         .flat_map(project_scratch_reads),
                 )
@@ -646,6 +646,49 @@ pub(super) fn protected_worktrees(
                 .read_only_worktree_paths(&repo, &executor, &utility, budget, &cancel)
                 .map_err(|error| error.to_string())?,
         );
+    }
+    // Protect every registered repository's effective writer roots. The
+    // binding stores only the common Git directory, so ask Git's inventory to
+    // identify a real primary checkout instead of treating common.parent as
+    // the project when metadata is stored elsewhere.
+    let inventory_environment = [
+        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+    ];
+    for binding in provenant_config::registered_projects(roots)
+        .map_err(|error| format!("project binding inventory is unavailable: {error}"))?
+    {
+        let common = binding.common_dir();
+        if common.file_name() != Some(std::ffi::OsStr::new(".git"))
+            && !(common.join("HEAD").is_file() && common.join("objects").is_dir())
+        {
+            continue;
+        }
+        let mut environment = inventory_environment.to_vec();
+        environment.push(("GIT_DIR".into(), common.as_os_str().to_owned()));
+        let layout = provenant_confinement::worktrees::project_layout_for_common(
+            &executor,
+            common,
+            git,
+            &environment,
+            std::time::Duration::from_secs(5),
+            &cancel,
+        )
+        .map_err(|error| {
+            format!(
+                "could not resolve registered project layout for {}: {error}",
+                common.display()
+            )
+        })?;
+        let ports = provenant_config::PortTable::read_for(layout.project(), roots.state.as_path())
+            .map_err(|error| {
+                format!(
+                    "could not resolve worktree layout for {}: {error}",
+                    common.display()
+                )
+            })?;
+        paths.extend(ports.worktree_roots_under(layout.root()));
     }
     let mut protected = Vec::new();
     for path in paths {

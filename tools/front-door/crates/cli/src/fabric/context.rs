@@ -30,9 +30,10 @@ pub struct Context {
     pub identity: Identity,
     pub config: FabricConfig,
     pub local_observation: provenant_fabric_runtime::coordination::ObservationSettings,
-    /// Canonical project root that owns project configuration and managed paths.
+    /// Stable path owner for project configuration and managed paths. Bare
+    /// common repositories use their Git directory with host-only config.
     pub project_root: PathBuf,
-    /// Project ports resolved once from the primary checkout.
+    /// Effective ports resolved once from the layout owner.
     pub port_table: provenant_config::PortTable,
     /// Origin captured with the effective graph configuration.
     pub graph_prompt_limit_source: provenant_fabric_runtime::graph::InputCapSource,
@@ -324,16 +325,27 @@ impl Context {
         let cancel = CancelToken::new();
         let discovered = runtime.project_location(&executor, cwd, budget, &cancel)?;
         let has_repository = discovered.repository.is_some();
-        let project_root = match discovered.repository {
-            Some(repo) => provenant_confinement::worktrees::open_primary_repo(
-                &runtime, &executor, repo, budget, &cancel,
-            )?
-            .root_path()
-            .to_path_buf(),
-            None => discovered.location.common_dir().to_path_buf(),
+        let (project_root, port_table) = match discovered.repository {
+            Some(repo) => {
+                let opened = provenant_confinement::worktrees::open_project_repo(
+                    &runtime, &executor, repo, budget, &cancel,
+                )?;
+                let project_root = opened.layout.root().to_path_buf();
+                let port_table = provenant_config::PortTable::read_for(
+                    opened.layout.project(),
+                    roots.state.as_path(),
+                )?;
+                (project_root, port_table)
+            }
+            None => {
+                let project_root = discovered.location.common_dir().to_path_buf();
+                let port_table = provenant_config::PortTable::read_for(
+                    Some(&project_root),
+                    roots.state.as_path(),
+                )?;
+                (project_root, port_table)
+            }
         };
-        let port_table =
-            provenant_config::PortTable::read_for(Some(&project_root), roots.state.as_path())?;
         let binding = if lane {
             provenant_config::lookup_project(&roots, &discovered.location)?
                 .ok_or(EdgeError::Invalid)?
@@ -390,16 +402,27 @@ impl Context {
         let cancel = CancelToken::new();
         let discovered = runtime.project_location(&executor, cwd, budget, &cancel)?;
         let has_repository = discovered.repository.is_some();
-        let project_root = match discovered.repository {
-            Some(repo) => provenant_confinement::worktrees::open_primary_repo(
-                &runtime, &executor, repo, budget, &cancel,
-            )?
-            .root_path()
-            .to_path_buf(),
-            None => discovered.location.common_dir().to_path_buf(),
+        let (project_root, port_table) = match discovered.repository {
+            Some(repo) => {
+                let opened = provenant_confinement::worktrees::open_project_repo(
+                    &runtime, &executor, repo, budget, &cancel,
+                )?;
+                let project_root = opened.layout.root().to_path_buf();
+                let port_table = provenant_config::PortTable::read_for(
+                    opened.layout.project(),
+                    roots.state.as_path(),
+                )?;
+                (project_root, port_table)
+            }
+            None => {
+                let project_root = discovered.location.common_dir().to_path_buf();
+                let port_table = provenant_config::PortTable::read_for(
+                    Some(&project_root),
+                    roots.state.as_path(),
+                )?;
+                (project_root, port_table)
+            }
         };
-        let port_table =
-            provenant_config::PortTable::read_for(Some(&project_root), roots.state.as_path())?;
         let binding = provenant_config::lookup_project(&roots, &discovered.location)?
             .ok_or(EdgeError::Invalid)?;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
@@ -451,16 +474,27 @@ impl Context {
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let cancel = CancelToken::new();
         let discovered = runtime.project_location(&executor, cwd, budget, &cancel)?;
-        let project_root = match discovered.repository {
-            Some(repo) => provenant_confinement::worktrees::open_primary_repo(
-                &runtime, &executor, repo, budget, &cancel,
-            )?
-            .root_path()
-            .to_path_buf(),
-            None => discovered.location.common_dir().to_path_buf(),
+        let (project_root, port_table) = match discovered.repository {
+            Some(repo) => {
+                let opened = provenant_confinement::worktrees::open_project_repo(
+                    &runtime, &executor, repo, budget, &cancel,
+                )?;
+                let project_root = opened.layout.root().to_path_buf();
+                let port_table = provenant_config::PortTable::read_for(
+                    opened.layout.project(),
+                    roots.state.as_path(),
+                )?;
+                (project_root, port_table)
+            }
+            None => {
+                let project_root = discovered.location.common_dir().to_path_buf();
+                let port_table = provenant_config::PortTable::read_for(
+                    Some(&project_root),
+                    roots.state.as_path(),
+                )?;
+                (project_root, port_table)
+            }
         };
-        let port_table =
-            provenant_config::PortTable::read_for(Some(&project_root), roots.state.as_path())?;
         let state_present = roots.state.as_path().try_exists()?;
         let binding = if state_present {
             provenant_config::lookup_project(&roots, &discovered.location)?
@@ -519,15 +553,41 @@ impl Context {
         home: &Path,
         binding: &provenant_config::ProjectBinding,
     ) -> Result<Self, EdgeError> {
-        // Its working directory is the project's, as if started there.
-        let project_root = binding
-            .common_dir()
-            .parent()
-            .ok_or(EdgeError::Invalid)?
-            .to_path_buf();
+        // A conventional `.git` directory identifies its checkout by parent.
+        // Other Git common directories need Git's inventory to identify their
+        // checkout; a bare common directory has no project config owner.
+        let common = binding.common_dir();
+        let is_git_dir = common.file_name() == Some(OsStr::new(".git"))
+            || (common.join("HEAD").is_file() && common.join("objects").is_dir());
+        let (project_root, port_table) = if is_git_dir {
+            let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
+            let executor = SystemExecutor::new(1)?;
+            let cancel = CancelToken::new();
+            let environment = [
+                ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+                ("GIT_DIR".into(), common.as_os_str().to_owned()),
+            ];
+            let layout = provenant_confinement::worktrees::project_layout_for_common(
+                &executor,
+                common,
+                &git,
+                &environment,
+                Duration::from_secs(5),
+                &cancel,
+            )?;
+            let project_root = layout.root().to_path_buf();
+            let port_table =
+                provenant_config::PortTable::read_for(layout.project(), roots.state.as_path())?;
+            (project_root, port_table)
+        } else {
+            let project_root = common.to_path_buf();
+            let port_table =
+                provenant_config::PortTable::read_for(Some(&project_root), roots.state.as_path())?;
+            (project_root, port_table)
+        };
         let cwd = project_root.clone();
-        let port_table =
-            provenant_config::PortTable::read_for(Some(&project_root), roots.state.as_path())?;
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);

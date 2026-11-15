@@ -16,6 +16,7 @@ pub use evidence::{
 };
 mod inventory;
 mod landed;
+mod layout;
 mod lifecycle;
 mod owner;
 mod refs;
@@ -23,8 +24,8 @@ mod removal;
 mod setup;
 pub use census::*;
 pub use context::{
-    open_primary_repo, with_context, with_context_using_facts, with_context_using_workers,
-    with_context_using_workers_and_facts,
+    OpenProjectRepo, open_primary_repo, open_project_repo, with_context, with_context_using_facts,
+    with_context_using_workers, with_context_using_workers_and_facts,
 };
 pub use custody::*;
 pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, WorktreeRepairKind, doctor};
@@ -38,6 +39,7 @@ pub use landed::{
     CommitGraph, IntegrationEdge, LandedBy, Landing, LandingTarget, RepoGraph, Unproven,
     commit_parents, landed,
 };
+pub use layout::{ProjectLayout, project_layout_for_common};
 pub use lifecycle::*;
 pub use owner::{
     WorktreeOrigin, WorktreeOwner, branch_ownership, load_owner, owned_worktree_paths, prune_owned,
@@ -140,43 +142,17 @@ pub fn managed_writer_branch(
     Ok(ports.managed_writer_branch(relative).map(str::to_owned))
 }
 
-/// Configured allocation roots for a host-registered Git common directory.
-/// Project roots use their sourced layout; bare/common-only repositories still
-/// receive host overrides while retaining the same common-dir anchoring.
+/// Context-free allocation roots for a registered Git common directory.
+/// Without a verified layout owner, only host declarations may be applied and
+/// they remain anchored at the common directory. Permission callers with Git
+/// inventory add project-owned roots after resolving their actual owner.
 pub(crate) fn allocation_directories(
     common: &Path,
     host_state: &Path,
 ) -> Result<Vec<PathBuf>, WorktreeError> {
-    let parent = common.parent().ok_or(WorktreeError::InvalidRequest)?;
-    let (base, project) = if common.file_name() == Some(OsStr::new(".git")) {
-        (parent, Some(parent))
-    } else {
-        // A primary may have a gitfile that names a separate common directory
-        // inside the checkout. Keep its allocation base and project source.
-        let directory = Directory::open_anchor(parent)?;
-        match directory.metadata_at(OsStr::new(".git"), false) {
-            Ok(metadata) if metadata.kind == provenant_os::fs::FileKind::Regular => {
-                let bytes = inventory::read_bounded(&directory, OsStr::new(".git"), 4096)?;
-                let target = crate::repo::parse_git_path(&bytes, b"gitdir: ")
-                    .ok_or(WorktreeError::InvalidRequest)?;
-                let target = crate::repo::resolve_git_path(parent, &target)?;
-                if crate::permissions::resolve_boundary_path(&target)
-                    .map_err(|_| WorktreeError::InvalidRequest)?
-                    == common
-                {
-                    (parent, Some(parent))
-                } else {
-                    (common, None)
-                }
-            }
-            Ok(_) => (common, None),
-            Err(error) if error.is_not_found() => (common, None),
-            Err(error) => return Err(error.into()),
-        }
-    };
-    let ports = provenant_config::PortTable::read_for(project, host_state)
+    let ports = provenant_config::PortTable::read_for(None, host_state)
         .map_err(WorktreeError::PortConfiguration)?;
-    Ok(ports.worktree_roots_under(base))
+    Ok(ports.worktree_roots_under(common))
 }
 
 impl From<provenant_config::ConfigError> for WorktreeError {
@@ -637,6 +613,14 @@ pub trait RetirementPort {
 }
 
 impl WorktreeContext<'_> {
+    /// Resolve the stable source for project ports and managed paths from the
+    /// selected verified Git handle. `with_context` has already replaced an
+    /// ordinary linked checkout with its primary; a linked handle therefore
+    /// means the registered common repository has no primary checkout.
+    pub fn project_layout(&self) -> Result<ProjectLayout, WorktreeError> {
+        ProjectLayout::for_verified_repo(self.repo)
+    }
+
     /// Host config root shared by project and host port declarations.
     pub fn host_state(&self) -> Result<PathBuf, WorktreeError> {
         self.project_state
@@ -1122,24 +1106,27 @@ mod worktree_layout_tests {
     }
 
     #[test]
-    fn allocation_roots_use_every_project_layout_root() {
+    fn context_free_allocation_roots_do_not_guess_project_owner() {
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir(project.path().join(".git")).unwrap();
         std::fs::create_dir(project.path().join(".provenant")).unwrap();
-        let ports = provenant_config::PortTable::builtin();
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.default = PathBuf::from("custom-worktrees");
         std::fs::write(
             project.path().join(provenant_config::PORTS_CONFIG),
             serde_json::to_vec(&ports).unwrap(),
         )
         .unwrap();
 
+        let common = project.path().join(".git");
+        let host_ports = provenant_config::PortTable::read_for(None, project.path()).unwrap();
         assert_eq!(
-            allocation_directories(&project.path().join(".git"), project.path()).unwrap(),
-            ports
+            allocation_directories(&common, project.path()).unwrap(),
+            host_ports
                 .worktree_layout
                 .roots
                 .iter()
-                .map(|root| project.path().join(root))
+                .map(|root| common.join(root))
                 .collect::<Vec<_>>(),
         );
     }

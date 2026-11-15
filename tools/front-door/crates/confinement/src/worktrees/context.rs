@@ -1,8 +1,21 @@
 //! Shared local lifecycle context for dispatch and operator commands.
+use super::layout::{ProjectLayout, canonical_inventory_path, verified_primary_from_inventory};
 use super::*;
-use provenant_core::Roots;
+use provenant_core::{CancelToken, Roots};
 use provenant_os::exec::SystemExecutor;
+use provenant_os::fs::Directory;
+use std::ffi::OsStr;
+use std::path::PathBuf;
 use std::time::Duration;
+
+/// A verified Git command anchor paired with the stable layout owner.
+pub struct OpenProjectRepo {
+    /// Verified checkout used for Git reads and mutations. A bare-backed
+    /// repository uses the caller's registered linked checkout here.
+    pub repo: VerifiedRepo,
+    /// Stable owner for managed paths; its project config source may be absent.
+    pub layout: ProjectLayout,
+}
 
 pub fn with_context<T>(
     roots: &Roots,
@@ -84,7 +97,8 @@ pub fn with_context_using_workers_and_facts<T>(
         .project_location(&executor, project, budget, cancel)?
         .repository
         .ok_or(WorktreeError::InvalidRequest)?;
-    let repo = open_primary_repo(&runtime, &executor, selected, budget, cancel)?;
+    let opened = open_project_repo(&runtime, &executor, selected, budget, cancel)?;
+    let repo = opened.repo;
     let binding = provenant_config::bind_project(
         roots,
         provenant_config::ProjectLocation::new(repo.common_git_dir())
@@ -112,8 +126,8 @@ pub fn with_context_using_workers_and_facts<T>(
 }
 
 /// Resolve the verified primary checkout shared by a selected checkout and
-/// every linked worktree. Project-owned paths must be anchored here, not at
-/// the caller's current worktree.
+/// linked worktrees. Repositories with a bare common directory have no primary
+/// and should use `open_project_repo` to retain their explicit host-only layout.
 pub fn open_primary_repo(
     runtime: &UtilityRuntime,
     executor: &dyn Executor,
@@ -121,17 +135,50 @@ pub fn open_primary_repo(
     budget: UtilityBudget,
     cancel: &CancelToken,
 ) -> Result<VerifiedRepo, WorktreeError> {
-    let primary = selected
-        .common_git_dir()
-        .parent()
-        .ok_or(WorktreeError::InvalidRequest)?;
-    // The selected checkout is commonly the primary itself. Its verified
-    // handle already contains the Git probes needed by this context.
-    if selected.root_path() == primary {
-        Ok(selected)
+    let opened = open_project_repo(runtime, executor, selected, budget, cancel)?;
+    if opened.layout.project().is_some() {
+        Ok(opened.repo)
     } else {
-        runtime
-            .open_repo(executor, primary, budget, cancel)
-            .map_err(WorktreeError::from)
+        Err(WorktreeError::InvalidRequest)
+    }
+}
+
+/// Resolve the project-layout owner from Git's worktree inventory. The common
+/// directory's parent is not necessarily a checkout: separate Git directories
+/// can live elsewhere, and bare repositories intentionally have no primary
+/// checkout.
+pub fn open_project_repo(
+    runtime: &UtilityRuntime,
+    executor: &dyn Executor,
+    selected: VerifiedRepo,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<OpenProjectRepo, WorktreeError> {
+    let selected_root = selected.root_path().to_path_buf();
+    let common = selected.common_git_dir().to_path_buf();
+    let common_identity = selected.common_identity();
+    let read_only = runtime.open_read_repo(executor, &selected_root, budget, cancel)?;
+    let facts = RepoFacts::default();
+    let inventory = facts.read_only_inventory(&read_only, executor, runtime, budget, cancel)?;
+    let entries = parse_worktree_list(&inventory)?;
+    let selected_registered = entries.iter().any(|entry| {
+        !entry.bare && canonical_inventory_path(&entry.path) == Some(selected_root.clone())
+    });
+    if !selected_registered {
+        return Err(WorktreeError::InvalidOutput);
+    }
+    if let Some(primary) = verified_primary_from_inventory(&common, common_identity, &entries)? {
+        let repo = runtime.open_repo(executor, primary.root_path(), budget, cancel)?;
+        let layout = ProjectLayout::from_repo(&repo, true)?;
+        Ok(OpenProjectRepo { repo, layout })
+    } else {
+        // This repository has no conventional checkout to own project files.
+        // Use the registered common directory as its stable allocation root,
+        // and source only host/built-in ports.
+        let layout = ProjectLayout::from_common_identity(&common, common_identity)?;
+        Ok(OpenProjectRepo {
+            repo: selected,
+            layout,
+        })
     }
 }

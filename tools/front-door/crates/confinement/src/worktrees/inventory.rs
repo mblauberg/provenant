@@ -432,7 +432,7 @@ impl RepoFacts {
         )?;
         match exit_code(&bare)? {
             0 => {
-                let roots = utility.lane_roots(repo)?;
+                let roots = utility.lane_roots(repo, executor, cancel)?;
                 let lane_files = crate::utility::lane_configuration_files(
                     executor, repo, utility, budget, cancel,
                 )?;
@@ -525,6 +525,23 @@ impl RepoFacts {
         timeout: std::time::Duration,
         cancel: &CancelToken,
     ) -> Result<Vec<PathBuf>, WorktreeError> {
+        let inventory =
+            self.discover_worktree_inventory(cwd, git, environment, executor, timeout, cancel)?;
+        inventory_paths(&inventory)
+    }
+
+    /// Read raw Git worktree registrations from a directory selected by the
+    /// caller's sanitised environment. This lets owners resolve repositories
+    /// from a registered common directory without guessing its checkout path.
+    pub fn discover_worktree_inventory(
+        &self,
+        cwd: &Path,
+        git: &Path,
+        environment: &[(OsString, OsString)],
+        executor: &dyn Executor,
+        timeout: std::time::Duration,
+        cancel: &CancelToken,
+    ) -> Result<Vec<u8>, WorktreeError> {
         use provenant_os::exec::{ExecOptions, StreamPolicy};
         let argv = [
             git.as_os_str().to_owned(),
@@ -560,7 +577,10 @@ impl RepoFacts {
         if output.termination != Termination::Exit(0) {
             return Err(WorktreeError::InvalidOutput);
         }
-        inventory_paths(&output.stdout.bytes)
+        // Parse once here so malformed or incomplete registrations never
+        // reach an owner that might turn them into path grants.
+        parse_worktree_list(&output.stdout.bytes)?;
+        Ok(output.stdout.bytes)
     }
 
     /// Read registered checkout paths without interpreting Git's quoted text
