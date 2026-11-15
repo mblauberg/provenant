@@ -434,7 +434,7 @@ jobs:
           QUARANTINE_FILTER: ${{ needs.rust-macos-archive.outputs.quarantine_filter }}
         run: |
           if [ -n "$QUARANTINE_FILTER" ]; then
-            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level flaky --final-status-level pass -E "$QUARANTINE_FILTER"
+            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/linux-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level pass --final-status-level pass -E "$QUARANTINE_FILTER"
           else
             echo 'No quarantined tests to run.'
           fi
@@ -678,7 +678,7 @@ jobs:
         working-directory: tools/front-door
         run: |
           if [ -n "$QUARANTINE_FILTER" ]; then
-            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level flaky --final-status-level pass -E "$QUARANTINE_FILTER"
+            cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --status-level pass --final-status-level pass -E "$QUARANTINE_FILTER"
           else
             echo 'No quarantined tests to run.'
           fi
