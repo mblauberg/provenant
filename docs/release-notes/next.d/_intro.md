@@ -1,1 +1,1 @@
-Provenant 2.0 brings graph-based execution and a fresh state root. Read the breaking changes before upgrading and drain active work first.
+Provenant 2.0 moves execution to graphs and introduces a new state root. Before upgrading, drain 1.x work and update integrations for the changed command surface.

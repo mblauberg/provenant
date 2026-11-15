@@ -1,0 +1,4 @@
+## Breaking changes
+### Pipelines and graphs
+
+- **`run` takes a template first.** Use `provenant run task "brief"` for a plain lane; see `provenant help run` for graph and route options. Named launches with the same inputs return the existing graph; changed inputs get a new name. (#3178, #3179, #3180)
