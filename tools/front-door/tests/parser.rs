@@ -5,9 +5,9 @@ use support::{Result, TestRig, code};
 fn terminal_status_sees_graphs_submitted_under_harness_markers() -> Result {
     let mut rig = TestRig::new()?;
     rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
-    for (marker, value, graph) in [
-        ("CLAUDECODE", "1", "claude-marker"),
-        ("CODEX_THREAD_ID", "chair-fixture", "codex-marker"),
+    for (marker, value, graph, client) in [
+        ("CLAUDECODE", "1", "claude-marker", "claude"),
+        ("CODEX_THREAD_ID", "chair-fixture", "codex-marker", "codex"),
     ] {
         rig.env.push((marker.into(), value.into()));
         let document = rig.root.join("graph.json");
@@ -45,8 +45,8 @@ fn terminal_status_sees_graphs_submitted_under_harness_markers() -> Result {
         let out = rig.command(&["fabric", "identity", "--json"])?;
         assert_eq!(code(&out), 0);
         let identity: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
-        assert_eq!(identity["data"]["client"], "agent");
-        assert_eq!(identity["data"]["inbox"]["agent"], "agent");
+        assert_eq!(identity["data"]["client"], client);
+        assert_eq!(identity["data"]["inbox"]["agent"], client);
         rig.env.retain(|(key, _)| key != marker);
     }
     Ok(())
