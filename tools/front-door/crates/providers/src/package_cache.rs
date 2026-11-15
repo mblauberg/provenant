@@ -638,11 +638,12 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let root = tempfile::tempdir().expect("fixture root");
-        let home = root.path().join("host-home");
-        let account = root.path().join("account-home");
-        let project = root.path().join("repo");
-        let selected = root.path().join("nvm/versions/node/v24.0.1");
-        let later = root.path().join("homebrew");
+        let base = root.path().canonicalize().expect("canonical fixture root");
+        let home = base.join("host-home");
+        let account = base.join("account-home");
+        let project = base.join("repo");
+        let selected = base.join("nvm/versions/node/v24.0.1");
+        let later = base.join("homebrew");
         let selected_bin = selected.join("bin");
         let later_cellar = later.join("Cellar/node@22/22.18.0");
         let later_cellar_bin = later_cellar.join("bin");
