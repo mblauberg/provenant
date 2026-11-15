@@ -2488,7 +2488,7 @@ pub(super) fn prepare_candidates(
     };
     let requester_cwd = registry.cwd.unwrap_or(&source);
     let same_source = writer.is_none() && canonical(requester_cwd)? == source;
-    let path_project = match writer.as_ref() {
+    let path_project = match task.writer.as_ref() {
         Some(writer) => writer.project.clone(),
         None => requester_path_project_root(requester_cwd)?,
     };
