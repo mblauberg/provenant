@@ -317,11 +317,12 @@ fn cursor_status_observes_the_signed_in_account() {
     assert_eq!(
         crate::host::local_signin(
             provenant_records::LoginReprobe::Cursor,
-            &CursorDesktopToken(std::str::from_utf8(output).unwrap(), 0),
+        &CursorDesktopToken(std::str::from_utf8(output).unwrap(), 0, "/requester/bin"),
             Path::new("/bin/cursor-agent"),
             Path::new("/home/test"),
             Path::new("/home/test"),
             Path::new("/"),
+            Some(OsStr::new("/requester/bin")),
         ),
         Some(crate::host::LocalSignin::SignedIn)
     );
@@ -387,12 +388,16 @@ fn cursor_cli_only_account_matches_desktop_identity() {
 }
 
 /// Desktop token output at the sqlite executor boundary.
-struct CursorDesktopToken<'a>(&'a str, i64);
+struct CursorDesktopToken<'a>(&'a str, i64, &'a str);
 impl provenant_os::exec::Executor for CursorDesktopToken<'_> {
     fn execute(
         &self,
-        _: provenant_os::exec::ExecOptions<'_>,
+        options: provenant_os::exec::ExecOptions<'_>,
     ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
+        assert!(options.env.is_some_and(|env| {
+            env.iter()
+                .any(|(key, value)| key == "PATH" && value == self.2)
+        }));
         Ok(provenant_os::exec::ExecOutcome {
             termination: provenant_os::exec::Termination::Exit(self.1),
             stdout: provenant_os::exec::CapturedStream {

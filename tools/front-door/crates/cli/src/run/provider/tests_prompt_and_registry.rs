@@ -719,6 +719,30 @@ fn registry_provider_resolves_prepares_and_reports_quota(
 }
 
 #[test]
+fn requester_path_excludes_checkout_binaries_when_called_from_a_subdirectory()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    let nested = project.join("src/nested");
+    let bin = project.join("bin");
+    std::fs::create_dir_all(&nested)?;
+    std::fs::create_dir_all(&bin)?;
+    provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+    let executable = bin.join("provider");
+    std::fs::write(&executable, "#!/bin/sh\nexit 0\n")?;
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+
+    let path = std::env::join_paths([bin.as_path()])?;
+    let project_root = requester_path_project_root(&nested)?;
+    assert_eq!(project_root, std::fs::canonicalize(&project)?);
+    let filtered = run::FilteredLanePath::from_path(&path, &project_root, &nested)?;
+    assert!(filtered.resolve("provider").is_err());
+    Ok(())
+}
+
+#[test]
 fn opencode_stale_auth_prepares_with_an_unverified_warning()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId};

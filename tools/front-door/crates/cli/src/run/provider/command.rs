@@ -30,7 +30,7 @@ fn command_executable(
     program: &str,
     cwd: &Path,
     lane_path: &run::FilteredLanePath,
-    locate_override: Option<&dyn Fn(&str) -> Result<PathBuf, String>>,
+    locate_override: Option<&ExecutableLocator<'_>>,
 ) -> Result<PathBuf, PrepareError> {
     if program.contains('/') {
         Ok(cwd.join(program))
@@ -50,7 +50,7 @@ pub(super) fn prepare_command(
     task: &run::TaskRequest,
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
-    locate_override: Option<&dyn Fn(&str) -> Result<PathBuf, String>>,
+    locate_override: Option<&ExecutableLocator<'_>>,
     provider: &str,
     name: &str,
 ) -> Result<run::PreparedLaunch, PrepareError> {
@@ -102,12 +102,22 @@ pub(super) fn prepare_command(
     } else {
         source.clone()
     };
-    let path_project = task
-        .writer
-        .as_ref()
-        .map_or(source.as_path(), |writer| writer.project.as_path());
-    let lane_path = run::FilteredLanePath::for_requester(registry.host, path_project, &cwd)
-        .map_err(|error| error.to_string())?;
+    let requester_cwd = registry.cwd.unwrap_or(&source);
+    let same_source = task.writer.is_none() && canonical(requester_cwd)? == source;
+    let path_project = match task.writer.as_ref() {
+        Some(writer) => writer.project.clone(),
+        None => requester_path_project_root(requester_cwd)?,
+    };
+    let path_worktree = if task.writer.is_some() {
+        cwd.clone()
+    } else if same_source || source == path_project {
+        path_project.clone()
+    } else {
+        requester_path_project_root(&source)?
+    };
+    let lane_path =
+        run::FilteredLanePath::for_requester(registry.host, &path_project, &path_worktree)
+            .map_err(|error| error.to_string())?;
     let invocation = command_executable(program, &cwd, &lane_path, locate_override)?;
     let executable = canonical(&invocation).map_err(|_| executable_unavailable(program))?;
     let runtimes = command

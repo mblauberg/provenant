@@ -2,9 +2,12 @@
 impl super::Factory {
     pub(crate) fn requester_lane_path(&self) -> Vec<u8> {
         use std::os::unix::ffi::OsStringExt;
+        let Ok(project) = self.graph_checkout() else {
+            return Vec::new();
+        };
         provenant_run::FilteredLanePath::for_requester(
             self.host_launch.as_ref(),
-            &self.cwd,
+            &project,
             &self.cwd,
         )
         .map(|path| path.path().to_os_string().into_vec())
