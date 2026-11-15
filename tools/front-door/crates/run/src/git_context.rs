@@ -253,7 +253,7 @@ fn lane_roots(
         (Some(private), Some(common)) => {
             let project = if private == common {
                 // The selected repository environment was just derived from
-                // this checkout with sanitized Git. It proves the primary
+                // this checkout with sanitised Git. It proves the primary
                 // directly and avoids requiring a saved binding at bootstrap.
                 if let Some(host_state) = host_state {
                     let location = provenant_config::ProjectLocation::new(common.clone())
