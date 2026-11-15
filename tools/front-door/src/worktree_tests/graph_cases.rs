@@ -78,7 +78,8 @@ pub(super) fn graph_run_refuses_low_disk_writers() -> Result {
     assert_eq!(settings.gc.free_floor_bytes(rig.state.as_path())?, 1);
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version=1\n[gc]\ncritical_free='18446744073709551615B'\n",
+        // Low space warns by default; this host declares the floor refusing.
+        "schema_version=1\n[knobs]\n'policy.DISK_FLOOR'='refuse'\n[gc]\ncritical_free='18446744073709551615B'\n",
     )?;
     let document = rig.root.join("low-disk.json");
     fs::write(

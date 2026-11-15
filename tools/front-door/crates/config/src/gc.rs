@@ -649,6 +649,58 @@ impl DiskLimits {
     }
 }
 
+/// Policy rule that decides measured free space below `gc.critical_free`.
+pub const DISK_FLOOR: &str = "DISK_FLOOR";
+
+/// The disk thresholds plus the effective [`DISK_FLOOR`] strength and the
+/// layer that set it: everything a dispatch, admission or new-build decision
+/// needs. Built by the host and serialised unchanged into the build shim, so
+/// every consumer takes the same decision.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct DiskGate {
+    pub limits: DiskLimits,
+    pub strength: provenant_records::policy::Strength,
+    pub source: provenant_records::policy::Source,
+}
+impl DiskGate {
+    pub fn new(limits: DiskLimits, policy: &provenant_records::policy::Policy) -> Self {
+        let rule = policy.rule(DISK_FLOOR);
+        Self {
+            limits,
+            strength: rule.rule.strength,
+            source: rule.source,
+        }
+    }
+
+    /// The one deciding point for measured low space. Below `gc.free_floor`
+    /// it warns and proceeds; below `gc.critical_free` the declared
+    /// `DISK_FLOOR` rule decides (warn by default; `refuse` or `off` when
+    /// configured). Every message names the figures, their sources and the
+    /// remedy. A failure to write a record is an integrity error elsewhere,
+    /// never this decision.
+    pub fn decide(&self, free: u64) -> provenant_records::policy::Effect {
+        use provenant_records::policy::{Effect, Facts, Policy};
+        let level = self.limits.level(free);
+        let detail = format!(
+            "{}; next: run `provenant gc --free-floor {}B`",
+            self.limits.detail(free),
+            self.limits.free_floor
+        );
+        match level {
+            DiskLevel::Ready => Effect::Proceed,
+            DiskLevel::Warning => Effect::Warn(detail),
+            DiskLevel::Critical => {
+                let mut policy = Policy::default();
+                policy.overlay(
+                    &BTreeMap::from([(DISK_FLOOR.to_owned(), self.strength)]),
+                    self.source,
+                );
+                policy.check(DISK_FLOOR, Facts::violation(detail))
+            }
+        }
+    }
+}
+
 impl GcSettings {
     pub fn disk_limits(&self, state: &Path) -> std::io::Result<DiskLimits> {
         use provenant_records::diagnostic::SettingSource::{Configuration, ShippedDefault};
@@ -1342,6 +1394,69 @@ mod disk_limit_tests {
             defaults.critical_free_source,
             provenant_records::diagnostic::SettingSource::ShippedDefault
         );
+        Ok(())
+    }
+
+    /// Low space warns by default; the declared rule alone can make it
+    /// refuse or silence it, and every report carries figures, sources and remedy.
+    #[test]
+    fn disk_gate_effect_follows_the_declared_disk_floor_rule()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_records::policy::{Effect, Policy, Source, Strength};
+        let temp = tempfile::tempdir()?;
+        let limits = GcSettings {
+            free_floor: Some("100B".into()),
+            critical_free: Some("50B".into()),
+            ..Default::default()
+        }
+        .disk_limits(temp.path())?;
+        let shipped = DiskGate::new(limits, &Policy::default());
+        assert_eq!(shipped.strength, Strength::Warn);
+        assert_eq!(shipped.source, Source::CompiledDefault);
+        for strength in provenant_records::policy::table()
+            .iter()
+            .find(|rule| rule.code == DISK_FLOOR)
+            .ok_or("DISK_FLOOR is declared")?
+            .strengths()
+        {
+            let mut policy = Policy::default();
+            policy.overlay(
+                &BTreeMap::from([(DISK_FLOOR.to_owned(), strength)]),
+                Source::Host,
+            );
+            let gate = DiskGate::new(limits, &policy);
+            assert_eq!((gate.strength, gate.source), (strength, Source::Host));
+            let decoded: DiskGate = serde_json::from_slice(&serde_json::to_vec(&gate)?)?;
+            for free in [0, 49, 50, 99, 100] {
+                let effect = decoded.decide(free);
+                let expected_kind = match limits.level(free) {
+                    DiskLevel::Ready => "proceed",
+                    DiskLevel::Warning => "warn",
+                    DiskLevel::Critical => match strength {
+                        Strength::Refuse => "refuse",
+                        Strength::Warn => "warn",
+                        Strength::Off => "proceed",
+                    },
+                };
+                let kind = match &effect {
+                    Effect::Proceed => "proceed",
+                    Effect::Warn(_) => "warn",
+                    Effect::Refuse(_) => "refuse",
+                };
+                assert_eq!(kind, expected_kind, "{strength:?} at {free}");
+                if let Some(message) = effect.message() {
+                    for fact in [
+                        &format!("{free} bytes"),
+                        "gc.free_floor",
+                        "gc.critical_free",
+                        limits.critical_free_source.description(),
+                        "provenant gc",
+                    ] {
+                        assert!(message.contains(fact), "{fact}: {message}");
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

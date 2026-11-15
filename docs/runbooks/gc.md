@@ -28,9 +28,10 @@ before worktrees. Preview and apply use allocated tree bytes without following
 links; APFS clones may share physical blocks, so the change in volume free space
 can differ. Partial observations and failed paths remain visible in JSON and text.
 
-`gc.free_floor` is an advisory collection target. New builds warn below it and
-stop only below `gc.critical_free` (2 GiB by default); diagnostics show the effective
-threshold and source. Settlement releases private Cargo output and attempt scratch
+`gc.free_floor` is an advisory collection target. Below it, and below
+`gc.critical_free` (2 GiB by default), dispatch, admission and new builds warn
+and continue; diagnostics show the effective thresholds and sources. A host that
+wants a hard floor sets the `policy.DISK_FLOOR` knob to `refuse`. Settlement releases private Cargo output and attempt scratch
 without waiting for worktree removal. Registry and Git downloads live in the host CARGO_HOME and are owned by Cargo,
 not lane retention. Lanes fetch into those stores by default; with
 `domains.fabric.lanes.cargo_source_writes = false` they are read-only and a missing

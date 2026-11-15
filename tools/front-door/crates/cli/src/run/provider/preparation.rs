@@ -3798,6 +3798,7 @@ pub(super) fn prepare_candidates(
             &provenant_executable,
             roots.state.as_path(),
             &task.profile.knobs,
+            &launch_policy,
         )?;
         if let Some(policy) = plan.policy_mut() {
             for root in std::iter::once(process_tree_read).chain(coordination_reads) {

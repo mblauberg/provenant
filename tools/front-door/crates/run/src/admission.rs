@@ -814,19 +814,18 @@ impl RunStore {
         )
         .filter(|left| *left > 0);
         if let Some((free, limits)) = disk.zip(limits) {
-            match limits.level(free) {
-                provenant_config::DiskLevel::Critical => {
-                    eprintln!("admission: {}", limits.detail(free));
+            use provenant_records::policy::Effect;
+            // Submission and new builds take this same declared decision.
+            match provenant_config::DiskGate::new(limits, &policy).decide(free) {
+                Effect::Proceed => {}
+                Effect::Warn(message) => eprintln!("admission warning: {message}"),
+                Effect::Refuse(_) => {
                     return Err(RunError::Admission(AdmissionError::Disk {
                         free,
                         floor: limits.critical_free,
                         origin: limits.critical_free_source,
                     }));
                 }
-                provenant_config::DiskLevel::Warning => {
-                    eprintln!("admission warning: {}; proceeding", limits.detail(free))
-                }
-                provenant_config::DiskLevel::Ready => {}
             }
         }
         let observed = |error: RunError| (error.to_string(), error);

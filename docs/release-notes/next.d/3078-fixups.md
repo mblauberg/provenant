@@ -2,13 +2,13 @@
 
 ### Lanes and settlement
 
-- Replace `policy.LAUNCH_DISK`, `policy.ADMISSION_DISK` and `policy.BUILD_DISK` overrides with `gc.free_floor` and `gc.critical_free`; set `gc.critical_free='0B'` to disable the critical stop. (#3078)
+- Replace `policy.LAUNCH_DISK`, `policy.ADMISSION_DISK` and `policy.BUILD_DISK` with one `policy.DISK_FLOOR` rule over `gc.free_floor` and `gc.critical_free`. Low space warns by default for every lane class; set `policy.DISK_FLOOR='refuse'` for a hard floor. (#3078)
 
 ## Fixes
 
 ### Lanes and settlement
 
-- Complete handoffs survive host token-budget stops as successful settlements, retaining the host cause. Dispatch and new builds warn below `gc.free_floor` and stop only below `gc.critical_free`, which defaults to 2 GiB. (#3078)
+- Complete handoffs survive host token-budget stops as successful settlements, retaining the host cause. Submission, admission and new builds share one low-space decision: they warn below `gc.free_floor` and `gc.critical_free` (2 GiB by default) and refuse only when `policy.DISK_FLOOR` is set to `refuse`. (#3078)
 
 ### CLI and install
 
