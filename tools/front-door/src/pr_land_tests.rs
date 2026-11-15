@@ -857,7 +857,7 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
             let head: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("head.json"))?)?;
             io::stdout().write_all(&serde_json::to_vec(&serde_json::json!([[{"id": 1, "user": {"login": "reviewer"}, "state": "APPROVED", "commit_id": head["headRefOid"]}]]))?)?;
         }
-        value if value.starts_with("api repos/{owner}/{repo}/git/commits/") => {
+        value if value.starts_with("api repos/{owner}/{repo}/git/commits/") || value.starts_with("api repos/owner/repo/git/commits/") => {
             let commit = value.rsplit('/').next().ok_or("commit")?;
             let output = provenant_os::fixture::git_command().current_dir(&dir).args(["rev-parse", &format!("{commit}^{{tree}}")]).output()?;
             if !output.status.success() { return Err("cannot resolve fixture tree".into()); }
