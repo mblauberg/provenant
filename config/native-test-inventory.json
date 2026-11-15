@@ -77,13 +77,6 @@
     "binary": "provenant-os"
   },
   {
-    "test": "sys::pid::tests::native_offsealed_platform_process_is_refused_when_present",
-    "platform": "macOS",
-    "invocation": "census",
-    "environment": "PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED",
-    "binary": "provenant-os"
-  },
-  {
     "test": "command_custom_shebang_runtime_keeps_credentials_and_writes_denied",
     "platform": "macOS",
     "invocation": "provider-dispatch",
