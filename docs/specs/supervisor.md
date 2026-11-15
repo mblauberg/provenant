@@ -158,6 +158,11 @@ report its refusal code and reason or sourced warnings.
 Unsupported confinement fails `ConfinementUnavailable` and never widens
 access. An optional root that resolves into a declared credential root is
 omitted with a warning.
+
+Registered Git projects' declared worktree allocation roots remain protected
+from extra host write grants, including before those roots exist. Resolve the
+project port table from the verified primary checkout in Git's worktree
+inventory; the common Git directory's parent does not establish that owner.
 - Why: one broad grant silently voids the boundary.
 - Owner: `crates/core/src/roots.rs`, `crates/confinement/src/permissions.rs`,
   `crates/cli/src/run/provider/confinement.rs`
