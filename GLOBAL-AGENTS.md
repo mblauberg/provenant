@@ -30,7 +30,7 @@ SKILL.md.
   same-account work, and Provenant lanes for writers, other providers or
   accounts, durable work, and landing or review that must count; a same-family
   writer the user can watch is also valid. Juniors take bounded
-  work (`run --route junior`), seniors plan (`run plan`) and review,
+  work (`run implement --route junior`), seniors plan (`run plan`) and review,
   principals rarely. `provenant help --all` lists commands.
 - **Continuity.** Use `session` at session start, before compaction and at
   handoff, and `tracker` for work tracked in GitHub issues.
