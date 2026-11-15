@@ -4,8 +4,8 @@
 //! only: pool names, basis points, reset times and the plan label. It never
 //! copies provider payloads, credentials or prompt text.
 use crate::{AccountScope, QuotaSnapshot, QuotaStatus, QuotaWindow};
-use serde::{Deserialize, Serialize};
 use provenant_records::ExtraFields;
+use serde::{Deserialize, Serialize};
 
 pub const HISTORY_SCHEMA_VERSION: u64 = 1;
 pub const DEFAULT_HISTORY_MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -150,11 +150,8 @@ pub fn decode_lines(bytes: &[u8]) -> Vec<HistoryRecord> {
         .split(|b| *b == b'\n')
         .filter(|line| !line.is_empty())
         .filter_map(|line| {
-            provenant_records::decode::<HistoryRecord, _>(
-                line,
-                provenant_records::Limits::CONFIG,
-            )
-            .ok()
+            provenant_records::decode::<HistoryRecord, _>(line, provenant_records::Limits::CONFIG)
+                .ok()
         })
         .filter(|r| r.schema_version == HISTORY_SCHEMA_VERSION)
         .collect()
@@ -266,11 +263,9 @@ mod tests {
             let decoded = decode_lines(&serde_json::to_vec(&value).unwrap());
             assert_eq!(decoded.len(), 1);
             let encoded = encode_line(&decoded[0]).unwrap();
-            let round_trip: HistoryRecord = provenant_records::decode(
-                encoded.as_slice(),
-                provenant_records::Limits::CONFIG,
-            )
-            .unwrap();
+            let round_trip: HistoryRecord =
+                provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG)
+                    .unwrap();
             assert_eq!(serde_json::to_value(round_trip).unwrap(), value);
         }
         let mut future_version = base;

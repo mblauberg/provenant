@@ -1,7 +1,7 @@
 use crate::{AccountScope, QuotaError, QuotaSnapshot, QuotaStatus};
+use provenant_records::ExtraFields;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use provenant_records::ExtraFields;
 
 pub const MAX_ACCOUNTS: usize = 128;
 pub const MAX_WINDOWS: usize = 64;
@@ -600,8 +600,7 @@ mod tests {
         value["record"] = serde_json::json!({"value": [1, 2]});
         value["account"]["account"] = serde_json::json!({"value": [1, 2]});
         value["snapshot"]["snapshot"] = serde_json::json!({"value": [1, 2]});
-        value["snapshot"]["account"]["snapshot_account"] =
-            serde_json::json!({"value": [1, 2]});
+        value["snapshot"]["account"]["snapshot_account"] = serde_json::json!({"value": [1, 2]});
         value["snapshot"]["windows"][0]["window"] = serde_json::json!({"value": [1, 2]});
         value["snapshot"]["details"]["details"] = serde_json::json!({"value": [1, 2]});
         value["claim"]["claim"] = serde_json::json!({"value": [1, 2]});
@@ -611,8 +610,7 @@ mod tests {
         value["credential_metadata"][0]["stat"]["credential_stat"] =
             serde_json::json!({"value": [1, 2]});
         value["refusals"][0]["refusal"] = serde_json::json!({"value": [1, 2]});
-        value["refusals"][0]["account"]["refusal_account"] =
-            serde_json::json!({"value": [1, 2]});
+        value["refusals"][0]["account"]["refusal_account"] = serde_json::json!({"value": [1, 2]});
         value["capacity_cooldowns"][0]["cooldown"] = serde_json::json!({"value": [1, 2]});
         value["capacity_cooldowns"][0]["account"]["cooldown_account"] =
             serde_json::json!({"value": [1, 2]});
@@ -625,7 +623,9 @@ mod tests {
         round_trip.validate()?;
         let observed = &round_trip.credential_metadata[0];
         let mut refreshed = observed.clone();
-        refreshed.extra.insert("new_metadata".into(), serde_json::json!(true));
+        refreshed
+            .extra
+            .insert("new_metadata".into(), serde_json::json!(true));
         refreshed.stat.as_mut().unwrap().size += 1;
         refreshed
             .stat

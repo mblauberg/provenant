@@ -291,8 +291,14 @@ mod tests {
         let configured = parse(&format!("{BASE}[polling_intervals.claude]\ntimer_seconds = 17\npanel_seconds = 11\n[polling_intervals.agy]\ntimer_seconds = 2000\n")).unwrap();
         assert!(configured.validate().is_empty());
         configured.apply_polling_intervals(&mut policies);
-        let claude = policies.iter().find(|policy| policy.adapter == "claude").unwrap();
-        let agy = policies.iter().find(|policy| policy.adapter == "agy").unwrap();
+        let claude = policies
+            .iter()
+            .find(|policy| policy.adapter == "claude")
+            .unwrap();
+        let agy = policies
+            .iter()
+            .find(|policy| policy.adapter == "agy")
+            .unwrap();
         let opencode = policies
             .iter()
             .find(|policy| policy.adapter == "opencode")
@@ -404,10 +410,19 @@ mod tests {
         assert_eq!(raised.wall_budget_seconds, 300);
         assert!(raised.validate().is_empty());
         for (text, field) in [
-            ("max_parallel = 0\nwall_budget_seconds = 55\n".to_owned(), "max_parallel"),
-            ("max_parallel = 3\nwall_budget_seconds = 0\n".to_owned(), "wall_budget_seconds"),
             (
-                format!("max_parallel = {}\nwall_budget_seconds = 55\n", MAX_PARALLEL + 1),
+                "max_parallel = 0\nwall_budget_seconds = 55\n".to_owned(),
+                "max_parallel",
+            ),
+            (
+                "max_parallel = 3\nwall_budget_seconds = 0\n".to_owned(),
+                "wall_budget_seconds",
+            ),
+            (
+                format!(
+                    "max_parallel = {}\nwall_budget_seconds = 55\n",
+                    MAX_PARALLEL + 1
+                ),
                 "max_parallel",
             ),
             (

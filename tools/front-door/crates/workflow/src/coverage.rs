@@ -40,7 +40,7 @@ macro_rules! declare_diagnostic_codes {
 
         impl DiagnosticCode {
             /// Every emitted reason is paired with a coverage test case.
-            pub const ALL: &'static [Self] = &[$(Self::$code),+];
+            pub const ALL: &[Self] = &[$(Self::$code),+];
         }
     };
 }

@@ -43,7 +43,7 @@ macro_rules! declare_readiness_enum {
 
         impl $name {
             /// Every declared variant, for exhaustive stored-format tables.
-            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+            pub const ALL: &[Self] = &[$(Self::$variant),+];
         }
     };
 }

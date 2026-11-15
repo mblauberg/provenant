@@ -1,6 +1,6 @@
 //! Provider-owned wire decoding and supervisor effect contracts.
-use serde::{Deserialize, Serialize};
 use provenant_records::ExtraFields;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug)]
 pub struct QuotaPolicy {

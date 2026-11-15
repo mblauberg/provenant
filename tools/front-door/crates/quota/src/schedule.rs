@@ -130,17 +130,61 @@ struct BackoffRule {
 
 const RETRY_AFTER_CAP_SECONDS: u64 = 3600;
 const BACKOFF_RULES: &[BackoffRule] = &[
-    BackoffRule { failure: ProbeFailure::Network, first_seconds: 15, cap_seconds: 300 },
-    BackoffRule { failure: ProbeFailure::RateLimited, first_seconds: 120, cap_seconds: 3600 },
-    BackoffRule { failure: ProbeFailure::RefreshDeferred, first_seconds: 15, cap_seconds: 15 },
-    BackoffRule { failure: ProbeFailure::Auth, first_seconds: 900, cap_seconds: 900 },
-    BackoffRule { failure: ProbeFailure::LoginExpired, first_seconds: 900, cap_seconds: 900 },
-    BackoffRule { failure: ProbeFailure::AccountMismatch, first_seconds: 900, cap_seconds: 900 },
-    BackoffRule { failure: ProbeFailure::IsolatedKeychainUnavailable, first_seconds: 3600, cap_seconds: 3600 },
-    BackoffRule { failure: ProbeFailure::MissingCli, first_seconds: 86400, cap_seconds: 86400 },
-    BackoffRule { failure: ProbeFailure::ProbeDirectory, first_seconds: 120, cap_seconds: 120 },
-    BackoffRule { failure: ProbeFailure::Disabled, first_seconds: 86400, cap_seconds: 86400 },
-    BackoffRule { failure: ProbeFailure::Malformed, first_seconds: 120, cap_seconds: 120 },
+    BackoffRule {
+        failure: ProbeFailure::Network,
+        first_seconds: 15,
+        cap_seconds: 300,
+    },
+    BackoffRule {
+        failure: ProbeFailure::RateLimited,
+        first_seconds: 120,
+        cap_seconds: 3600,
+    },
+    BackoffRule {
+        failure: ProbeFailure::RefreshDeferred,
+        first_seconds: 15,
+        cap_seconds: 15,
+    },
+    BackoffRule {
+        failure: ProbeFailure::Auth,
+        first_seconds: 900,
+        cap_seconds: 900,
+    },
+    BackoffRule {
+        failure: ProbeFailure::LoginExpired,
+        first_seconds: 900,
+        cap_seconds: 900,
+    },
+    BackoffRule {
+        failure: ProbeFailure::AccountMismatch,
+        first_seconds: 900,
+        cap_seconds: 900,
+    },
+    BackoffRule {
+        failure: ProbeFailure::IsolatedKeychainUnavailable,
+        first_seconds: 3600,
+        cap_seconds: 3600,
+    },
+    BackoffRule {
+        failure: ProbeFailure::MissingCli,
+        first_seconds: 86400,
+        cap_seconds: 86400,
+    },
+    BackoffRule {
+        failure: ProbeFailure::ProbeDirectory,
+        first_seconds: 120,
+        cap_seconds: 120,
+    },
+    BackoffRule {
+        failure: ProbeFailure::Disabled,
+        first_seconds: 86400,
+        cap_seconds: 86400,
+    },
+    BackoffRule {
+        failure: ProbeFailure::Malformed,
+        first_seconds: 120,
+        cap_seconds: 120,
+    },
 ];
 
 pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option<u64>) -> u64 {
@@ -263,7 +307,8 @@ pub fn complete(
                     details.extra.extend(previous_details.extra.clone());
                 }
                 for window in &mut snapshot.windows {
-                    if let Some(previous) = previous.windows.iter().find(|row| row.pool == window.pool)
+                    if let Some(previous) =
+                        previous.windows.iter().find(|row| row.pool == window.pool)
                     {
                         window.extra.extend(previous.extra.clone());
                     }
@@ -1202,17 +1247,9 @@ mod tests {
                     .first_seconds
                     .saturating_mul(2u64.saturating_pow(exponent))
                     .min(rule.cap_seconds);
-                for retry_after in [
-                    None,
-                    Some(0),
-                    Some(RETRY_AFTER_CAP_SECONDS),
-                    Some(u64::MAX),
-                ] {
-                    let expected = expected_base.max(
-                        retry_after
-                            .unwrap_or(0)
-                            .min(RETRY_AFTER_CAP_SECONDS),
-                    );
+                for retry_after in [None, Some(0), Some(RETRY_AFTER_CAP_SECONDS), Some(u64::MAX)] {
+                    let expected =
+                        expected_base.max(retry_after.unwrap_or(0).min(RETRY_AFTER_CAP_SECONDS));
                     assert_eq!(
                         backoff(rule.failure, attempt, retry_after),
                         expected,
@@ -1264,7 +1301,9 @@ mod tests {
             .unwrap();
         let future = serde_json::json!({"value": true});
         r.extra.insert("future_record".into(), future.clone());
-        r.account.extra.insert("future_scope".into(), future.clone());
+        r.account
+            .extra
+            .insert("future_scope".into(), future.clone());
         r.capacity_cooldowns[0]
             .extra
             .insert("future_cooldown".into(), future.clone());
@@ -1284,7 +1323,9 @@ mod tests {
                 resets_unix_seconds: Some(900),
             }],
         );
-        snapshot.extra.insert("future_snapshot".into(), future.clone());
+        snapshot
+            .extra
+            .insert("future_snapshot".into(), future.clone());
         snapshot
             .account
             .extra
@@ -1318,10 +1359,7 @@ mod tests {
         assert_eq!(reserved.account.extra, before_account);
         assert_eq!(reserved.capacity_cooldowns.len(), 1);
         assert_eq!(reserved.capacity_cooldowns[0].account.label, renamed.label);
-        assert_eq!(
-            reserved.capacity_cooldowns[0].extra,
-            before_cooldown.extra
-        );
+        assert_eq!(reserved.capacity_cooldowns[0].extra, before_cooldown.extra);
         assert_eq!(
             reserved.capacity_cooldowns[0].account.extra,
             before_cooldown.account.extra
@@ -1345,7 +1383,10 @@ mod tests {
         assert_eq!(completed.account.extra, before_account);
         let completed_snapshot = completed.snapshot.unwrap();
         assert_eq!(completed_snapshot.extra, before_snapshot.extra);
-        assert_eq!(completed_snapshot.account.extra, before_snapshot.account.extra);
+        assert_eq!(
+            completed_snapshot.account.extra,
+            before_snapshot.account.extra
+        );
         assert_eq!(
             completed_snapshot.windows[0].extra,
             before_snapshot.windows[0].extra
@@ -1764,9 +1805,12 @@ mod transition_tests {
                 && drop.account.account_key == "old"
                 && drop.replacement.is_none()
         }));
-        assert!(!plan.drops.iter().any(|drop| {
-            drop.account.adapter == "agy" && drop.account.account_key == "old"
-        }));
+        assert!(
+            !plan
+                .drops
+                .iter()
+                .any(|drop| { drop.account.adapter == "agy" && drop.account.account_key == "old" })
+        );
         let settings = Settings::default();
         let expected_accounts = detected
             .iter()
@@ -1798,8 +1842,8 @@ mod transition_tests {
             power: Power::Low,
             ..tick
         };
-        let low_plan = plan_tick(crate::source::TEST_POLICIES, &records, &detected, &low, 100)
-            .unwrap();
+        let low_plan =
+            plan_tick(crate::source::TEST_POLICIES, &records, &detected, &low, 100).unwrap();
         assert!(low_plan.batches.iter().flatten().all(|account| {
             crate::source::TEST_POLICIES
                 .iter()
@@ -2045,7 +2089,12 @@ mod transition_tests {
                 .collect::<Vec<_>>();
             let detections = [Detection {
                 adapter: "claude".into(),
-                accounts: Some(records.iter().map(|record| record.account.clone()).collect()),
+                accounts: Some(
+                    records
+                        .iter()
+                        .map(|record| record.account.clone())
+                        .collect(),
+                ),
                 status: QuotaStatus::AuthRequired,
             }];
             let report = report(
@@ -2062,7 +2111,9 @@ mod transition_tests {
                 .iter()
                 .map(|row| (row.account.account_key.as_str(), row.status))
                 .collect::<std::collections::BTreeMap<_, _>>();
-            let expected = expected_rows.into_iter().collect::<std::collections::BTreeMap<_, _>>();
+            let expected = expected_rows
+                .into_iter()
+                .collect::<std::collections::BTreeMap<_, _>>();
             assert_eq!(observed, expected);
             assert_eq!(
                 report.coverage.known,
@@ -2100,7 +2151,9 @@ mod transition_tests {
                 .collect::<std::collections::BTreeSet<_>>();
             assert_eq!(
                 observed_probes,
-                expected_probes.into_iter().collect::<std::collections::BTreeSet<_>>()
+                expected_probes
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>()
             );
         }
     }

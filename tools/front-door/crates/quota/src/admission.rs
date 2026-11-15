@@ -98,9 +98,10 @@ pub fn record_capacity_cooldown(
     }
     record.capacity_cooldowns.push(CapacityCooldown {
         extra,
-        account: existing
-            .as_ref()
-            .map_or_else(|| record.account.clone(), |cooldown| cooldown.account.updated_from(account)),
+        account: existing.as_ref().map_or_else(
+            || record.account.clone(),
+            |cooldown| cooldown.account.updated_from(account),
+        ),
         model: model.into(),
         observed_unix_seconds: now,
         expires_unix_seconds: expires,
@@ -430,9 +431,10 @@ pub fn record_refusal(
     }
     record.refusals.push(Refusal {
         extra,
-        account: existing
-            .as_ref()
-            .map_or_else(|| record.account.clone(), |refusal| refusal.account.updated_from(account)),
+        account: existing.as_ref().map_or_else(
+            || record.account.clone(),
+            |refusal| refusal.account.updated_from(account),
+        ),
         model: model.into(),
         pool: pool.map(Into::into),
         observed_unix_seconds: now_unix_seconds,
@@ -509,16 +511,10 @@ mod tests {
             200,
             Some(600),
         )
-            .unwrap()
-            .replacement
-            .unwrap();
-        let record = record_capacity_cooldown(
-            Some(&record),
-            &incoming,
-            "codex/model",
-            200,
-            600,
-        )
+        .unwrap()
+        .replacement
+        .unwrap();
+        let record = record_capacity_cooldown(Some(&record), &incoming, "codex/model", 200, 600)
             .unwrap()
             .unwrap()
             .replacement
@@ -1095,12 +1091,8 @@ mod admission_tests {
             ),
         ] {
             let mut fresh = refused.clone();
-            let mut snapshot = QuotaSnapshot::test_snapshot(
-                account.clone(),
-                status,
-                1_500,
-                windows,
-            );
+            let mut snapshot =
+                QuotaSnapshot::test_snapshot(account.clone(), status, 1_500, windows);
             snapshot.revision = fresh.revision;
             snapshot.authority_ref = Some("configured-local-quota".into());
             fresh.snapshot = Some(snapshot);
@@ -1110,11 +1102,15 @@ mod admission_tests {
                 records: std::slice::from_ref(&fresh),
                 pools: &[],
             };
-            assert!(!admission
-                .refusal_holds("codex", Some(&fresh), &fresh.refusals[0])
-                .unwrap());
+            assert!(
+                !admission
+                    .refusal_holds("codex", Some(&fresh), &fresh.refusals[0])
+                    .unwrap()
+            );
             assert_eq!(
-                admission.account_block("codex", "opaque", &route.model).unwrap(),
+                admission
+                    .account_block("codex", "opaque", &route.model)
+                    .unwrap(),
                 None
             );
             if readiness_ready {
@@ -1159,11 +1155,15 @@ mod admission_tests {
                 records: std::slice::from_ref(&failed),
                 pools: &[],
             };
-            assert!(admission
-                .refusal_holds("codex", Some(&failed), &failed.refusals[0])
-                .unwrap());
+            assert!(
+                admission
+                    .refusal_holds("codex", Some(&failed), &failed.refusals[0])
+                    .unwrap()
+            );
             assert_eq!(
-                admission.account_block("codex", "opaque", &route.model).unwrap(),
+                admission
+                    .account_block("codex", "opaque", &route.model)
+                    .unwrap(),
                 Some(AccountBlock::ScopedRefusal)
             );
             assert!(admission.check(&route).is_err());
