@@ -665,6 +665,101 @@ pub fn review_merge_base_between(git: &Path, cwd: &Path, head: &str, base: &str)
     Ok(value.to_owned())
 }
 
+/// The changed paths and size inputs for one already-pinned review range.
+/// `numstat` and `tree` are absent when size metadata could not be captured;
+/// path selection remains available independently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewDiffContext {
+    pub paths: Vec<String>,
+    pub numstat: Option<String>,
+    pub tree: Option<String>,
+}
+
+/// Read the review selection inputs from immutable commit IDs. The refs have
+/// already been resolved by the launch owner; this function accepts only full
+/// object IDs and never resolves their former names again.
+pub fn review_diff_context_at(
+    git: &Path,
+    cwd: &Path,
+    base: &str,
+    head: &str,
+) -> Result<ReviewDiffContext> {
+    const PATH_LIMIT: usize = 4 * CONTEXT_LIMIT;
+    let base = provenant_core::GitOid::parse(base)
+        .map_err(|_| RunError::Validation("review base must be a pinned commit"))?
+        .to_string();
+    let head = provenant_core::GitOid::parse(head)
+        .map_err(|_| RunError::Validation("review head must be a pinned commit"))?
+        .to_string();
+    let executor = SystemExecutor::new(1).map_err(execution_error)?;
+    let env = repository_environment(&executor, git, cwd)?;
+    let read_complete = |args: &[&str], limit: usize| -> Result<Vec<u8>> {
+        let (output, timed_out) = read_git_with_env(&executor, git, cwd, args, limit, &env)?;
+        if timed_out || output.truncated {
+            return Err(execution_error("pinned review diff was incomplete"));
+        }
+        Ok(output.bytes)
+    };
+    let merge_base_bytes = read_complete(&["merge-base", &base, &head], 256)?;
+    let merge_base = std::str::from_utf8(&merge_base_bytes)
+        .map_err(execution_error)?
+        .trim()
+        .to_owned();
+    if provenant_core::GitOid::parse(&merge_base).is_err() {
+        return Err(execution_error("pinned review merge base was invalid"));
+    }
+    let path_bytes = read_complete(
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            &merge_base,
+            &head,
+            "--",
+        ],
+        PATH_LIMIT,
+    )?;
+    let paths = path_bytes
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect();
+    let size_data = (|| -> Option<(String, String)> {
+        let numstat = String::from_utf8(read_complete(
+            &[
+                "diff",
+                "--numstat",
+                "--no-renames",
+                "-z",
+                &merge_base,
+                &head,
+                "--",
+            ],
+            CONTEXT_LIMIT,
+        )?)
+        .ok()?;
+        let mut tree = Vec::new();
+        for revision in [&merge_base, &head] {
+            tree.extend(read_complete(
+                &["ls-tree", "-r", "-z", "--name-only", revision],
+                CONTEXT_LIMIT,
+            )?);
+        }
+        Some((numstat, String::from_utf8(tree).ok()?))
+    })();
+    let (numstat, tree) = size_data
+        .map(|(numstat, tree)| (Some(numstat), Some(tree)))
+        .unwrap_or((None, None));
+    Ok(ReviewDiffContext {
+        paths,
+        numstat,
+        tree,
+    })
+}
+
 /// Resolve the merge base against the locally recorded default origin branch.
 pub fn review_merge_base(git: &Path, cwd: &Path, head: &str) -> Result<String> {
     let executor = SystemExecutor::new(1).map_err(execution_error)?;

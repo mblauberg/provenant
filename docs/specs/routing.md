@@ -51,6 +51,19 @@ preference always expires.
 - Why: changing operating policy should not need a Rust change, and a typo must
   not widen access.
 
+## Pinned review selection
+
+When `provenant run review` supplies both `subject` and `review_base`, the host
+resolves them to immutable commits once. Before expanding `@review-panel`, it
+derives changed paths and measured size from the merge-base-to-subject diff and
+passes both to `ReviewConfig::resolve_panel`. Configured path floors can raise
+the selected shape and add their lenses; explicit request fields and layered
+review configuration keep their existing precedence. If size metadata is
+unavailable, selection proceeds with size unknown.
+
+- Why: panel coverage must follow the change that reviewers will actually see,
+  not the submitter's current checkout.
+
 ## Capability and selection preferences
 
 Capability never excludes a listed pool member. Capability preferences rank
