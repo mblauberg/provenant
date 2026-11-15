@@ -465,17 +465,20 @@ mod tests {
                     && warning["reason"] == reason
                     && warning["code"] == "exec_root_ignored"));
             }
+            // Shared paths are write grants; a read-only lane evaluates none.
             let credential_warning = warnings
                 .iter()
-                .find(|warning| warning["key"] == "domains.lanes.projects.example.shared_paths[4]")
-                .ok_or("credential warning")?;
-            let declared_source = credential_roots
-                .entries()
-                .iter()
-                .find(|entry| entry.path == home.join(".ssh"))
-                .map(|entry| entry.source.as_str())
-                .ok_or("SSH credential declaration")?;
-            assert_eq!(credential_warning["credential_source"], declared_source);
+                .find(|warning| warning["key"] == "domains.lanes.projects.example.shared_paths[4]");
+            assert_eq!(credential_warning.is_some(), writer);
+            if let Some(credential_warning) = credential_warning {
+                let declared_source = credential_roots
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.path == home.join(".ssh"))
+                    .map(|entry| entry.source.as_str())
+                    .ok_or("SSH credential declaration")?;
+                assert_eq!(credential_warning["credential_source"], declared_source);
+            }
             assert!(
                 profile
                     .spec
