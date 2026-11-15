@@ -4254,6 +4254,7 @@ pub(super) fn prepare_candidates(
                 run::ResolvedCiScope::resolve(&task.profile).receipt(),
             );
         }
+        gh_selection.finalise_environment(&mut spec.env);
         if adapter_spec.is_some_and(|spec| {
             spec.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)
         }) && (!sandbox.effective || spec.env.iter().any(|(key, _)| key == "GH_TOKEN"))

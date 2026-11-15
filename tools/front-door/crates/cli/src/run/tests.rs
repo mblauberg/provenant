@@ -296,13 +296,13 @@ fn invalid_sealed_root_never_writes_to_registry_root() -> Result<(), Box<dyn std
         roots: Some(&roots),
         ..Default::default()
     };
-    let protected = temp.path().join("protected");
+    let protected = inputs.home.join(".ssh");
     let context = run::HolderContext {
         schema_version: 1,
         roots: run::RootSeed {
             home: temp.path().join("home"),
-            checkout: protected.clone(),
-            state_root: protected,
+            checkout: temp.path().join("checkout"),
+            state_root: protected.clone(),
         },
         project_id: provenant_core::ProjectId::from_bytes([1; 16]),
         actor_id: ActorId::from_bytes([2; 16]),
@@ -330,13 +330,8 @@ fn invalid_sealed_root_never_writes_to_registry_root() -> Result<(), Box<dyn std
         Some(&context),
     )?;
     assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
-    assert!(
-        decoded
-            .reason
-            .unwrap_or_default()
-            .contains("capacity cooldown configuration unavailable")
-    );
     assert!(!roots.state.as_path().join("quota").exists());
+    assert!(!protected.exists());
     Ok(())
 }
 #[test]

@@ -1317,6 +1317,31 @@ mod tests {
         }
     }
     #[test]
+    fn observation_wait_catalogue_reports_the_clamped_effective_range() {
+        let maximum = provenant_core::MAX_LANE_RUNTIME_SECONDS;
+        let catalogue = catalog(&expanded_model());
+        let command = catalogue
+            .commands
+            .iter()
+            .find(|entry| entry.command == "provenant fabric events read")
+            .unwrap();
+        assert_eq!(
+            command
+                .arguments
+                .iter()
+                .find(|arg| arg.name == "wait")
+                .unwrap()
+                .bounds,
+            Some((0, maximum))
+        );
+        assert_eq!(crate::grammar::observation_wait_seconds("0s"), Ok(0));
+        assert_eq!(
+            crate::grammar::observation_wait_seconds(&format!("{}s", maximum + 1)),
+            Ok(maximum)
+        );
+    }
+
+    #[test]
     fn published_non_numeric_bounds_and_weight_are_preserved() {
         let catalogue = catalog(&expanded_model());
         for (path, name, bounds) in [

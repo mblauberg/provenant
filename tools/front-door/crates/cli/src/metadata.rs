@@ -85,7 +85,7 @@ impl CatalogueArg for Arg {
     }
     fn catalog_observation_wait(self) -> Self {
         self.value_parser(crate::grammar::observation_wait_seconds)
-            .add(NumericBounds((0, provenant_core::MAX_LANE_RUNTIME_SECONDS)))
+            .catalog_bounds((0, provenant_core::MAX_LANE_RUNTIME_SECONDS))
     }
     fn catalog_u64_range(self, range: impl RangeBounds<u64>) -> Self {
         let bounds = unsigned_bounds(&range);

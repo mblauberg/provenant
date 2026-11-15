@@ -72,8 +72,12 @@ Writers use private Git state; the host does not execute with lane-mutable Git
 configuration. For sandboxed lanes, confinement protects shared Git state.
 Import uses Git's quarantined receive and verification; publication compares
 against the pinned base. The base remains pinned until publication.
+The GitHub credential receipt governs token delivery even when sandboxing is
+off: `none` withholds host token environment variables, `injected` passes only
+the selected token, and `ambient` preserves the native host environment.
 - Why: untrusted lane state must not alter shared Git or publish over another writer.
 - Test: `crates/confinement/tests/lane_git_conformance.rs::lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only`
+  `crates/cli/src/run/provider/gh_auth.rs::tests::selection_drives_receipt_and_environment_without_disclosing_tokens`
 
 ## PR contributions JSON reference
 

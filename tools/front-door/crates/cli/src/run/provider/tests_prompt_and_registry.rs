@@ -812,7 +812,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     readiness.sync_probe_result(
         &account,
         provenant_quota::LOCAL_HOST,
-        now - 1,
+        now - 301,
         300,
         Some(provenant_quota::ReadinessReason::SignedOut),
     )?;
@@ -897,7 +897,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     )?;
     assert_eq!(prepared.route.provider.as_deref(), Some("opencode"));
     assert_eq!(prepared.route.account_key.as_deref(), Some("go"));
-    // Readiness remains recorded; only the current launch treats it as unknown.
+    // Expired readiness remains recorded as stale evidence and reads as unknown.
     let scope = provenant_quota::ReadinessScope {
         host: provenant_quota::LOCAL_HOST.into(),
         adapter: "opencode".into(),
@@ -906,7 +906,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     };
     assert_eq!(
         crate::quota::read_readiness(&state, &scope, now).reason,
-        Some(provenant_quota::ReadinessReason::SignedOut)
+        Some(provenant_quota::ReadinessReason::Stale)
     );
     Ok(())
 }
@@ -993,6 +993,39 @@ fn prepare_with_partial_account_estimates(
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
     let now = provenant_os::clock::SystemClock::new().unix_seconds();
+    // Keep readiness positive so this invariant isolates advisory local usage
+    // estimates from the independent account-login admission boundary.
+    let readiness_root = state.join("readiness");
+    std::fs::DirBuilder::new().mode(0o700).create(&readiness_root)?;
+    for key in ["ready", "spent-a", "spent-b"] {
+        let directory = readiness_root.join(key);
+        std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        let readiness_path = directory.join("opencode.json");
+        let readiness = provenant_quota::ReadinessFile {
+            schema_version: 1,
+            login: None,
+            records: vec![provenant_quota::RouteReadiness {
+                schema_version: 1,
+                scope: provenant_quota::ReadinessScope {
+                    host: provenant_quota::LOCAL_HOST.into(),
+                    adapter: "opencode".into(),
+                    account_key: key.into(),
+                    route: "opencode/opencode-go/deepseek-v4.1-flash".into(),
+                },
+                state: provenant_quota::ReadinessState::Ready,
+                reason: None,
+                observed_unix_seconds: now,
+                expires_unix_seconds: now + 300,
+                reset_unix_seconds: None,
+                evidence_ref: Some("fixture".into()),
+            }],
+        };
+        std::fs::write(&readiness_path, serde_json::to_vec(&readiness)?)?;
+        std::fs::set_permissions(
+            &readiness_path,
+            std::fs::Permissions::from_mode(0o600),
+        )?;
+    }
     let quota = state.join("quota");
     std::fs::DirBuilder::new().mode(0o700).create(&quota)?;
     for key in spent {

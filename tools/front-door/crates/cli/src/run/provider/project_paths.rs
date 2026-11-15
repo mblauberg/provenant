@@ -416,7 +416,10 @@ mod tests {
             );
             assert_eq!(
                 profile.spec.tool_exec_roots,
-                [grant(primary.join(".local-tools"))]
+                [
+                    grant(primary.join(".local-tools")),
+                    grant(primary.join(".ssh"))
+                ]
             );
             assert_eq!(record["exec_roots"][0]["path"], "./.local-tools");
             assert_eq!(!profile.spec.tool_writes.is_empty(), writer);
@@ -455,7 +458,6 @@ mod tests {
                 (2, "outside_primary_checkout"),
                 (3, "outside_primary_checkout"),
                 (4, "missing_or_unreadable"),
-                (5, "credential_root"),
                 (6, "protected_path"),
             ] {
                 assert!(warnings.iter().any(|warning| warning["key"]
@@ -465,7 +467,7 @@ mod tests {
             }
             let credential_warning = warnings
                 .iter()
-                .find(|warning| warning["key"] == "domains.lanes.projects.example.exec_roots[5]")
+                .find(|warning| warning["key"] == "domains.lanes.projects.example.shared_paths[4]")
                 .ok_or("credential warning")?;
             let declared_source = credential_roots
                 .entries()

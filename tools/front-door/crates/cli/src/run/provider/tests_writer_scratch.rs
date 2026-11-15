@@ -48,6 +48,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
                 .env(CHILD, layout)
                 .env("GH_TOKEN", "fixture-host-token")
                 .env_remove("GIT_CONFIG_GLOBAL")
+                .env_remove("GH_CONFIG_DIR")
                 .env_remove("XDG_CONFIG_HOME")
                 .status()?;
             assert!(status.success(), "GitHub config layout {layout}");

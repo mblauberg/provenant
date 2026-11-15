@@ -406,12 +406,15 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
             scope: PathScope::Exact
         }));
     }
-    assert!(
-        mandatory
-            .credentials()
-            .iter()
-            .any(|entry| entry.path == home.join(".agy-unselected"))
-    );
+    assert!(mandatory.credentials().contains(&PathGrant {
+        path: root.join("agent/socket"),
+        scope: PathScope::Exact,
+    }));
+    // A path-shaped provider directory is protected only when declared.
+    assert!(!mandatory
+        .credentials()
+        .iter()
+        .any(|entry| entry.path == home.join(".agy-unselected")));
 
     Ok(())
 }

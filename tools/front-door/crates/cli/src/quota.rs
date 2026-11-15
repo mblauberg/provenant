@@ -4360,7 +4360,10 @@ mod tests {
                 resets_unix_seconds: None,
                 window_seconds: Some(18_000),
             }],
-            details: None,
+            details: Some(QuotaDetails {
+                plan: Some("go".into()),
+                ..Default::default()
+            }),
         });
         let mut records = vec![record];
         let mut settings = Settings::default();

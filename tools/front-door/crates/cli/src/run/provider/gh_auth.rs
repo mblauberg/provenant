@@ -16,6 +16,15 @@
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
 use std::{ffi::OsString, path::Path, time::Duration};
 
+/// GitHub CLI's token inputs, including enterprise hosts.
+const SELECTED_TOKEN: &str = "GH_TOKEN";
+const TOKEN_ENVIRONMENT: &[&str] = &[
+    SELECTED_TOKEN,
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
 /// Where a lane's GitHub credential comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CredentialSource {
@@ -93,6 +102,21 @@ impl Selection {
         }
     }
 
+    /// Native environments must honour the same credential decision as an
+    /// injected environment. Ambient delivery keeps the host CLI's environment.
+    pub(super) fn finalise_environment(&self, environment: &mut Vec<(OsString, OsString)>) {
+        environment.retain(|(key, _)| {
+            let Some(key) = key.to_str().filter(|key| TOKEN_ENVIRONMENT.contains(key)) else {
+                return true;
+            };
+            match self.delivery {
+                Delivery::Ambient => true,
+                Delivery::Injected(_) => key == SELECTED_TOKEN,
+                Delivery::None(_) => false,
+            }
+        });
+    }
+
     /// The launch receipt's `github_credential` field. Never carries bytes.
     pub(super) fn receipt(&self) -> serde_json::Value {
         let (delivery, detail) = match &self.delivery {
@@ -155,14 +179,14 @@ pub(super) fn inject(
             home,
             &config,
             cancel,
-            std::env::var_os("GH_TOKEN"),
+            std::env::var_os(SELECTED_TOKEN),
         ),
     };
     match resolved {
         Ok((token, origin)) => {
             *cache = Some((token.clone(), origin));
-            environment.retain(|(key, _)| key != "GH_TOKEN");
-            environment.push(("GH_TOKEN".into(), token));
+            environment.retain(|(key, _)| key != SELECTED_TOKEN);
+            environment.push((SELECTED_TOKEN.into(), token));
             Ok(origin)
         }
         Err(cause) => Err(format!(
@@ -497,7 +521,7 @@ mod tests {
     /// The selection and its source reach the receipt for every delivery,
     /// sandboxed or not, and the receipt never holds credential bytes.
     #[test]
-    fn selection_receipt_names_identity_source_delivery_and_mediation() {
+    fn selection_drives_receipt_and_environment_without_disclosing_tokens() {
         let injected = Selection::new(Delivery::Injected(TokenOrigin::StoredLogin), true).receipt();
         assert_eq!(injected["identity"], "user");
         assert_eq!(injected["source"], "default");
@@ -511,5 +535,31 @@ mod tests {
         assert!(none["identity"].is_null());
         assert_eq!(none["delivery"], "none");
         assert_eq!(none["mediation"], "none");
+        for (delivery, retained_tokens) in [
+            (
+                Delivery::Injected(TokenOrigin::StoredLogin),
+                vec![SELECTED_TOKEN],
+            ),
+            (Delivery::Ambient, TOKEN_ENVIRONMENT.to_vec()),
+            (Delivery::None("access policy".into()), vec![]),
+        ] {
+            let selection = Selection::new(delivery, false);
+            let unrelated = (OsString::from("PATH"), OsString::from("/fixture/bin"));
+            let mut environment = vec![unrelated.clone()];
+            environment.extend(
+                TOKEN_ENVIRONMENT
+                    .iter()
+                    .map(|name| (OsString::from(*name), OsString::from("fixture-secret"))),
+            );
+            selection.finalise_environment(&mut environment);
+            let mut expected = vec![unrelated];
+            expected.extend(
+                retained_tokens
+                    .into_iter()
+                    .map(|name| (OsString::from(name), OsString::from("fixture-secret"))),
+            );
+            assert_eq!(environment, expected);
+            assert!(!selection.receipt().to_string().contains("fixture-secret"));
+        }
     }
 }
