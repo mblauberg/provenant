@@ -1008,7 +1008,7 @@ fn codex_native_home_comes_from_the_route_account_registration()
     );
     let other_account = run::RouteRecord {
         account_key: Some("other-key".into()),
-        ..route
+        ..route.clone()
     };
     assert!(registered_codex_home(Some(&roots), &other_account).is_none());
     assert!(registered_codex_home(None, &route).is_none());
