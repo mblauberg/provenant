@@ -661,6 +661,21 @@ impl PortTable {
         Ok(table)
     }
 
+    /// Resolve only the project declaration over compiled defaults when no
+    /// validated host state root is available to supply host-level ports.
+    pub fn read_project_only(project: &Path) -> io::Result<Self> {
+        let table = Self::read_layers(Some(project), None, |_, warning| {
+            let message = format!(
+                "{}: {}: unknown configuration key; ignored",
+                warning.source, warning.key
+            );
+            use std::io::Write;
+            let _ = writeln!(io::stderr().lock(), "warning: {message}");
+        })?;
+        table.validate()?;
+        Ok(table)
+    }
+
     /// Inspect well-typed declarations without hiding semantically invalid ports.
     pub fn read_for_inspection(project: Option<&Path>, host_state: &Path) -> io::Result<Self> {
         Self::read_for_inspection_with(project, host_state, |bytes, warning| {
@@ -673,13 +688,23 @@ impl PortTable {
         host_state: &Path,
         mut on_unknown: impl FnMut(&[u8], &provenant_records::InputWarning),
     ) -> io::Result<Self> {
+        Self::read_layers(project, Some(host_state), &mut on_unknown)
+    }
+
+    fn read_layers(
+        project: Option<&Path>,
+        host_state: Option<&Path>,
+        mut on_unknown: impl FnMut(&[u8], &provenant_records::InputWarning),
+    ) -> io::Result<Self> {
         let mut document = serde_json::to_value(Self::builtin()).map_err(io::Error::other)?;
-        apply_layer(
-            &mut document,
-            &host_state.join("ports.json"),
-            PortSource::Host,
-            &mut on_unknown,
-        )?;
+        if let Some(host_state) = host_state {
+            apply_layer(
+                &mut document,
+                &host_state.join("ports.json"),
+                PortSource::Host,
+                &mut on_unknown,
+            )?;
+        }
         if let Some(project) = project {
             apply_layer(
                 &mut document,

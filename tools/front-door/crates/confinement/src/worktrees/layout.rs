@@ -113,10 +113,11 @@ pub fn project_layout_for_common(
 }
 
 /// Resolve a common Git directory using its registered checkout hint when one
-/// exists, otherwise using the verified Git inventory. Host transport safety
-/// checks use this before reading effective repository configuration, so the
-/// inventory command has its own sanitized environment and does not recurse
-/// through `UtilityRuntime`.
+/// exists, otherwise using the verified Git inventory. Without a validated
+/// host-state root, callers should use `project_layout_for_common` directly.
+/// Host transport safety checks use this before reading effective repository
+/// configuration, so the inventory command has its own sanitized environment
+/// and does not recurse through `UtilityRuntime`.
 pub fn project_layout_for_common_at_state(
     executor: &dyn Executor,
     common: &Path,

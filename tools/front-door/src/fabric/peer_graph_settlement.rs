@@ -476,7 +476,7 @@ fn pinned_review_range_survives_moved_ref_and_another_checkout()
     std::fs::create_dir(&scratch)?;
     let directory = provenant_os::fs::Directory::open_anchor(&scratch)?;
     let git_path = provenant_os::git::git_executable().ok_or("git")?;
-    provenant_run::GitContext::capture_at(&git_path, &other, &base, &head)?
+    provenant_run::GitContext::capture_at(&git_path, &other, &rig.state, &base, &head)?
         .write_to(&directory, &scratch)?;
     let stat = std::fs::read_to_string(scratch.join("git-diff.stat"))?;
     assert!(stat.contains("source-change"), "{stat}");

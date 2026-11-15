@@ -498,7 +498,7 @@ impl UtilityRuntime {
             repo.common_git_dir(),
             project_root.as_deref(),
             &self.lane_roots,
-            &self.host_state,
+            Some(&self.host_state),
         )?)
     }
 
@@ -2516,9 +2516,9 @@ pub(crate) mod tests {
         let included = lane_root.join("linked-config.inc");
         fs::create_dir(&root)?;
         fs::create_dir(&lane_root)?;
-        let mut ports = serde_json::to_value(provenant_config::PortTable::builtin())?;
-        ports["worktree_layout"]["roots"] = serde_json::json!([".agent-worktrees"]);
-        ports["worktree_layout"]["default"] = serde_json::json!(".agent-worktrees/<branch>");
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![PathBuf::from(".agent-worktrees")];
+        ports.worktree_layout.default = PathBuf::from(".agent-worktrees/<branch>");
         fs::create_dir_all(root.join(".provenant"))?;
         fs::write(
             root.join(provenant_config::PORTS_CONFIG),
@@ -2573,6 +2573,13 @@ pub(crate) mod tests {
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         let common = common.canonicalize()?;
         let root = root.canonicalize()?;
+        let configured = provenant_config::PortTable::read_for(Some(&root), &state)?;
+        assert!(
+            configured
+                .worktree_roots_under(&root)
+                .contains(&root.join(".agent-worktrees")),
+            "fixture must configure the primary-owned lane root"
+        );
         let runtime = UtilityRuntime::new(&fixture.git, &fixture.home, &state)?;
         let primary = runtime.open_repo(
             &fixture.executor,
