@@ -979,7 +979,6 @@ fn setup_stays_below_run_owned_roots_without_following_links()
         for step in [
             SetupStep::CreateDir(outside.join("x")),
             SetupStep::CreateDir(scratch.join("../out/x")),
-            SetupStep::CreateDir(scratch.clone()),
             SetupStep::CreateDir(scratch.join("escape/x")),
             SetupStep::Symlink {
                 link: scratch.join("private-config/packages/x"),
@@ -988,6 +987,8 @@ fn setup_stays_below_run_owned_roots_without_following_links()
         ] {
             assert!(apply_setup(&[step], &roots, None).is_err());
         }
+        // A run-owned root exists already, so creating it again is a no-op.
+        apply_setup(&[SetupStep::CreateDir(scratch.clone())], &roots, None)?;
         assert!(!outside.join("x").exists());
         Ok(())
     })();

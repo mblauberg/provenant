@@ -1407,7 +1407,8 @@ pub(super) fn canonical(path: &Path) -> Result<PathBuf, String> {
     provenant_os::fs::canonicalize(path).map_err(|error| error.to_string())
 }
 
-/// Generated files stay in scratch and links in scratch or private state.
+/// Generated files and links stay in scratch or the attempt's private state
+/// (a lane home, such as Codex's, lives there).
 /// Directories may use any run-owned root, including trusted shared state, and
 /// the selected Claude account's `projects/` tree. Traversal never follows links.
 pub(super) fn apply_setup(
@@ -1417,6 +1418,9 @@ pub(super) fn apply_setup(
 ) -> Result<(), String> {
     for step in steps {
         match step {
+            // Setup names a lane home by creating its parent, and that parent
+            // can be a run-owned root, which exists by construction.
+            SetupStep::CreateDir(path) if roots.iter().any(|root| *root == path.as_path()) => {}
             SetupStep::CreateDir(path) => {
                 let transcript_root =
                     claude_account.filter(|directory| path.starts_with(directory.join("projects")));
@@ -1461,7 +1465,7 @@ pub(super) fn write_setup_file(
     bytes: &[u8],
     executable: bool,
 ) -> Result<(), String> {
-    let (parent, name) = setup_parent(&roots[..1], path, false)?;
+    let (parent, name) = setup_parent(&roots[..roots.len().min(2)], path, false)?;
     let matches = match parent.metadata_at(name, false) {
         Ok(metadata) if metadata.kind == FileKind::Regular => {
             let mut file = parent.open_read(name).map_err(|error| error.to_string())?;

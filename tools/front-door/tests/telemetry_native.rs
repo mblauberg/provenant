@@ -254,7 +254,13 @@ fn stats_output_omits_attempt_rows_and_keeps_unlinked_usage() -> Result {
     assert_eq!(code(&output), 0, "{output:?}");
     let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
     let native = &report["data"]["native_subagents"];
-    assert_eq!(native["attempts"], serde_json::json!([]));
+    // Attempt rows are omitted (an absent or empty list), never reported.
+    assert!(
+        native["attempts"]
+            .as_array()
+            .is_none_or(|rows| rows.is_empty()),
+        "{native}"
+    );
     let unlinked = native["unlinked"]
         .as_array()
         .and_then(|rows| rows.iter().find(|row| row["model"] == "claude-opus-5-5"))

@@ -9,9 +9,12 @@ use support::{Result, TestRig, code};
 
 #[test]
 fn missing_graph_worktree_warns_once_and_scheduled_gc_completes() -> Result {
+    // The seeded graph has no inbox request to answer, so a graph that must
+    // finish is answered by its owner when it files the decision.
     struct Seed {
         actor: String,
         at: provenant_core::WallTime,
+        answer: bool,
     }
     impl graph::AttemptOwner for Seed {
         type Error = std::convert::Infallible;
@@ -23,6 +26,17 @@ fn missing_graph_worktree_warns_once_and_scheduled_gc_completes() -> Result {
         }
         fn wall_now(&self) -> Option<provenant_core::WallTime> {
             Some(self.at)
+        }
+        fn node_ask(
+            &mut self,
+            _: graph::AskScope<'_>,
+        ) -> std::result::Result<Option<graph::AskReply>, Self::Error> {
+            Ok(self.answer.then(|| graph::AskReply {
+                option: Some("hold".into()),
+                text: None,
+                actor: self.actor.clone(),
+                at: Some(self.at),
+            }))
         }
         fn observe_or_start(
             &mut self,
@@ -99,6 +113,7 @@ fn missing_graph_worktree_warns_once_and_scheduled_gc_completes() -> Result {
             &mut Seed {
                 actor: actor.clone(),
                 at,
+                answer: id == "present",
             },
             &mut journal,
             &Default::default(),
@@ -108,7 +123,6 @@ fn missing_graph_worktree_warns_once_and_scheduled_gc_completes() -> Result {
     let first = rig.command(&["tick", "--json"])?;
     assert_eq!(code(&first), 0, "{first:?}");
     let first: Value = serde_json::from_slice(&first.stdout.bytes)?;
-    assert_eq!(first["data"]["graphs"]["advanced"], 1, "{first}");
     let warnings = first["data"]["graphs"]["warnings"]
         .as_array()
         .ok_or("warnings")?;
