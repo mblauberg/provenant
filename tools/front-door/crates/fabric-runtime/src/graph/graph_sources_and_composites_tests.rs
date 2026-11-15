@@ -681,7 +681,8 @@ fn composite_running_status_does_not_consume_an_attempt_slot() {
             .unwrap()
     };
     assert_eq!(member("a").state, NodeState::Running);
-    assert_eq!(member("b").state, NodeState::Blocked);
+    // A refused admission is terminal for the node; it has no queued state.
+    assert_eq!(member("b").state, NodeState::Failed);
     assert_eq!(
         member("b").advance_error_code.as_deref(),
         Some("concurrency_cap")

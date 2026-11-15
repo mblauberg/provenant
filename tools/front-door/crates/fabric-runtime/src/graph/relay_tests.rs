@@ -479,7 +479,8 @@ fn a_waiting_parent_yields_its_slot_to_its_child() {
     // Explicit refusal makes the occupied-slot invariant observable without
     // recreating the removed queue state.
     let held = run(&checkpoint, false);
-    assert_eq!(progress(&held, "a--fix").state, NodeState::Blocked);
+    // A refused admission is terminal for the node; it has no queued state.
+    assert_eq!(progress(&held, "a--fix").state, NodeState::Failed);
     assert_eq!(
         progress(&held, "a--fix").advance_error_code.as_deref(),
         Some("concurrency_cap")
@@ -546,11 +547,20 @@ fn relay_frames_are_tagged_and_strict() {
     );
     let wait: relay::RelayOp = serde_json::from_value(json!({"op":"wait","waiting":true})).unwrap();
     assert_eq!(wait, relay::RelayOp::Wait { waiting: true });
+    // Frames are tagged: an unknown op or a mistyped field is refused, while a
+    // field from a newer peer is tolerated.
+    for malformed in [
+        json!({"op":"launch","id":"x"}),
+        json!({"op":"wait","waiting":"yes"}),
+        json!({"id":"x","brief":"b","idempotency_key":"k"}),
+    ] {
+        assert!(serde_json::from_value::<relay::RelayOp>(malformed).is_err());
+    }
     assert!(
         serde_json::from_value::<relay::RelayOp>(
-            json!({"op":"add","id":"x","brief":"b","idempotency_key":"k","host":"elsewhere"})
+            json!({"op":"add","id":"x","brief":"b","idempotency_key":"k","future":1})
         )
-        .is_err()
+        .is_ok()
     );
 }
 

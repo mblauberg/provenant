@@ -1505,8 +1505,8 @@ mod tests {
             .iter()
             .find(|warning| warning.message.contains("writer_launch_seconds"))
             .unwrap();
-        assert!(warning.message.contains("launch_wait_seconds"));
-        assert!(warning.message.contains("writer_provision_seconds"));
+        // The retired key is named and ignored; the replacement keys keep defaults.
+        assert!(warning.message.contains("retired"));
         assert_eq!(
             loaded.domains.fabric.graph.launch_wait_seconds,
             config().graph.launch_wait_seconds

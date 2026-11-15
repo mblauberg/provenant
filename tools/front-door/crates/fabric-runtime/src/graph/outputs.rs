@@ -485,6 +485,20 @@ fn parse_findings(
                 }
             }
         }
+        // Optional review text is dropped, not fatal, when mistyped; the review
+        // contract then reports it missing while the other entries stay usable.
+        for field in ["evidence", "proposed_fix"] {
+            if entry
+                .get(field)
+                .is_some_and(|value| !value.is_null() && !value.is_string())
+            {
+                skipped.push(format!(
+                    "malformed finding: {}",
+                    fail(field, "expected string")
+                ));
+                entry.remove(field);
+            }
+        }
         if entry
             .get("line")
             .is_some_and(|line| !line.is_null() && line.as_u64().is_none())

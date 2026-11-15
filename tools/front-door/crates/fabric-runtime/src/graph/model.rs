@@ -532,14 +532,22 @@ impl AttemptSpec {
     }
 }
 
+/// Node spellings that no longer exist, with their replacement. Extra fields are
+/// kept for newer writers, so a removed key is refused here rather than ignored.
+const REMOVED_NODE_KEYS: &[(&str, &str)] =
+    &[("auto_continue_no_work", "on_stop"), ("brief", "prompt")];
+
 fn graph_node_extra<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<provenant_records::ExtraFields, D::Error> {
     let extra = provenant_records::ExtraFields::deserialize(deserializer)?;
-    if extra.contains_key("auto_continue_no_work") {
-        return Err(serde::de::Error::custom(
-            "auto_continue_no_work was removed; use on_stop",
-        ));
+    if let Some((removed, replacement)) = REMOVED_NODE_KEYS
+        .iter()
+        .find(|(removed, _)| extra.contains_key(*removed))
+    {
+        return Err(serde::de::Error::custom(format!(
+            "{removed} was removed; use {replacement}"
+        )));
     }
     Ok(extra)
 }
