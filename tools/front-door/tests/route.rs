@@ -860,12 +860,19 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
         0,
     )?;
     let utility_model = pool["data"]["model"].as_str().ok_or("utility model")?;
+    let utility_model_id = format!(
+        "{}/{}",
+        pool["data"]["adapter"].as_str().ok_or("utility adapter")?,
+        utility_model
+    );
+    let candidates = pool["data"]["pool_selection"]["candidates"]
+        .as_array()
+        .ok_or("utility candidates")?;
     assert!(
-        pool["data"]["pool_selection"]["candidates"]
-            .as_array()
-            .ok_or("utility candidates")?
+        candidates
             .iter()
-            .any(|candidate| candidate["model"] == utility_model)
+            .any(|candidate| candidate["model"] == utility_model_id),
+        "selected route model {utility_model_id} is absent from its candidate receipt: {candidates:?}"
     );
     let resolved = call(
         &rig,
