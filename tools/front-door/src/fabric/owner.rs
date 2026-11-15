@@ -4709,13 +4709,12 @@ mod peer_capture_tests {
         let chunk = |offset: u64| {
             let end = (offset + provenant_records::run::OUTPUT_LIMIT).min(text.len() as u64);
             OutputResult::Chunk {
-                peer: provenant_records::run::PeerOutputFields {
-                    graph: provenant_records::run::PeerGraphFields {
-                        peer_origin_work_key: Some(origin.clone()),
-                        ..Default::default()
-                    },
+                peer: provenant_records::run::PeerGraphFields {
+                    peer_origin_work_key: Some(origin.clone()),
                     ..Default::default()
                 },
+                length: Some(text.len() as u64),
+                planner_fallback: None,
                 extra: Default::default(),
                 target: target.clone(),
                 part: OutputPart::Result,
@@ -4756,11 +4755,10 @@ mod peer_capture_tests {
                             2 => *next_offset = offset,
                             3 => *digest = provenant_core::Digest::from_bytes([9; 32]),
                             4 => {
-                                peer.graph.peer_origin_work_key =
-                                    Some(origin.next_attempt().unwrap());
+                                peer.peer_origin_work_key = Some(origin.next_attempt().unwrap());
                             }
                             _ => {
-                                peer.graph.peer_origin_work_key = None;
+                                peer.peer_origin_work_key = None;
                             }
                         }
                     }

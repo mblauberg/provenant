@@ -282,7 +282,7 @@ mod tests {
     fn base_commit_uses_bounded_repository_facts() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
-        std::fs::create_dir(&state)?;
+        provenant_os::fixture::private_state_dir(&state)?;
         let git = Git::new(&state)?;
         let project = temp.path().join("project");
         std::fs::create_dir_all(&project)?;
@@ -427,6 +427,19 @@ mod tests {
             listing
                 .windows(b"branch refs/heads/linked\0".len())
                 .any(|field| field == b"branch refs/heads/linked\0")
+        );
+        // A forced `core.bare=true` inventory is not itself evidence that an
+        // unbound common directory has no project owner.
+        provenant_os::fixture::run_git(&bare, &["config", "--local", "--unset", "core.bare"])?;
+        git.invalidate_repositories();
+        assert!(git.worktrees(&linked).is_err());
+        provenant_os::fixture::run_git(&bare, &["config", "--local", "core.bare", "true"])?;
+        git.invalidate_repositories();
+        let listing = git.worktrees(&linked)?;
+        assert!(
+            listing
+                .windows(b"bare\0".len())
+                .any(|field| field == b"bare\0")
         );
         // A linked checkout may write its own config.worktree. It cannot make
         // the common bare repository appear to be a primary checkout.

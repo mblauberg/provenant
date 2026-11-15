@@ -2102,7 +2102,6 @@ mod cargo_setup_tests {
         let state = root.join("state");
         std::fs::create_dir_all(&seed)?;
         std::fs::create_dir_all(common.parent().ok_or("common parent")?)?;
-        std::fs::create_dir_all(writer_path.parent().ok_or("writer parent")?)?;
         std::fs::create_dir(&home)?;
         provenant_os::fixture::private_state_dir(&state)?;
         let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
@@ -2123,7 +2122,15 @@ mod cargo_setup_tests {
                 Err(String::from_utf8_lossy(&output.stderr).into_owned().into())
             }
         };
-        run_git(&root, &["init", "-q", seed.to_str().ok_or("seed path")?])?;
+        run_git(
+            &root,
+            &[
+                "init",
+                "-q",
+                "--initial-branch=main",
+                seed.to_str().ok_or("seed path")?,
+            ],
+        )?;
         run_git(&seed, &["config", "user.name", "Fixture"])?;
         run_git(&seed, &["config", "user.email", "fixture@example.invalid"])?;
         std::fs::write(seed.join("README.md"), "bare layout\n")?;
@@ -2145,10 +2152,11 @@ mod cargo_setup_tests {
                 common.to_str().ok_or("common path")?,
                 "worktree",
                 "add",
-                "main",
                 source.to_str().ok_or("source path")?,
+                "main",
             ],
         )?;
+        std::fs::create_dir_all(writer_path.parent().ok_or("writer parent")?)?;
         run_git(
             &root,
             &[
@@ -2626,6 +2634,9 @@ mod cargo_setup_tests {
             verified_cargo_config(&build, &cache.join(".cargo")),
             Err(codes::CARGO_CONFIG_CHANGES_BUILD_TARGET)
         );
+        // Keep the ancestor-compiler assertion independent of the target flag
+        // already rejected above; the first ineligible config owns the result.
+        std::fs::remove_file(&config).unwrap();
         // An intermediate config belongs to this Cargo invocation's cone too.
         let ancestor_config = nested.parent().unwrap().join(".cargo/config.toml");
         std::fs::create_dir_all(ancestor_config.parent().unwrap()).unwrap();

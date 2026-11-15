@@ -540,7 +540,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
         "api --paginate --slurp repos/{owner}/{repo}/pulls/1668/reviews?per_page=100" => {
             io::stdout().write_all(b"[[]]")?;
         }
-        "api repos/{owner}/{repo}/pulls/1668" => {
+        "api repos/{owner}/{repo}/pulls/1668" | "api repos/owner/repo/pulls/1668" => {
             if Path::new("read-fail-after-merge").exists() && Path::new("merge-args").exists() {
                 writeln!(io::stderr(), "HTTP 502 Bad Gateway")?;
                 return Ok(1);

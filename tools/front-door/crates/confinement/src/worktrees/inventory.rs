@@ -436,50 +436,32 @@ impl RepoFacts {
                 let lane_files = crate::utility::lane_configuration_files(
                     executor, repo, utility, budget, cancel,
                 )?;
-                if !bare.stdout.bytes.ends_with(&[0]) {
-                    return Err(WorktreeError::InvalidOutput);
-                }
-                let mut fields = bare.stdout.bytes.split(|byte| *byte == 0);
-                let mut selected = None;
-                let mut untrusted_bare = false;
-                while let Some(origin) = fields.next() {
-                    if origin.is_empty() && fields.clone().next().is_none() {
-                        break;
-                    }
-                    let path = origin
-                        .strip_prefix(b"file:")
-                        .ok_or(WorktreeError::InvalidOutput)?;
-                    if path.is_empty() {
-                        return Err(WorktreeError::InvalidOutput);
-                    }
-                    let path = PathBuf::from(OsString::from_vec(path.to_vec()));
-                    let path = if path.is_absolute() {
-                        path
-                    } else {
-                        repo.root_path().join(path)
-                    };
-                    let in_lane = roots.contains(&path);
-                    let path = crate::transport::normalise(&path);
-                    let value = fields.next().ok_or(WorktreeError::InvalidOutput)?;
-                    let value = match value {
-                        b"true" => true,
-                        b"false" => false,
-                        _ => return Err(WorktreeError::InvalidOutput),
-                    };
-                    if !in_lane && !lane_files.contains(&path) {
-                        selected = Some(value);
-                    } else {
-                        untrusted_bare |= value;
-                    }
-                }
-                // If a bare setting appears only through lane-controlled
-                // provenance, the primary worktree cannot be classified
-                // safely: an alias may hide a trusted occurrence of that file.
-                if selected != Some(true) && untrusted_bare {
-                    return Err(WorktreeError::InvalidOutput);
-                }
-                Ok(selected)
+                classify_bare_origins(repo, &bare.stdout.bytes, &roots, &lane_files)
             }
+            1 => Ok(None),
+            _ => Err(WorktreeError::InvalidOutput),
+        }
+    }
+
+    /// Resolve local bare origins from roots already known during layout
+    /// bootstrap, without recursively asking `UtilityRuntime` to resolve the
+    /// full owner first.
+    pub(crate) fn bare_setting_with_roots(
+        &self,
+        repo: &VerifiedRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+        roots: &crate::transport::LaneRoots,
+    ) -> Result<Option<bool>, WorktreeError> {
+        let scalar = budget.with_stdout_cap(self.scalar_limit)?;
+        let lane_files = crate::utility::lane_configuration_files_with_roots(
+            executor, repo, utility, budget, cancel, roots,
+        )?;
+        let bare = UtilityRuntime::local_bare_origins(executor, repo, utility, scalar, cancel)?;
+        match exit_code(&bare)? {
+            0 => classify_bare_origins(repo, &bare.stdout.bytes, roots, &lane_files),
             1 => Ok(None),
             _ => Err(WorktreeError::InvalidOutput),
         }
@@ -542,16 +524,66 @@ impl RepoFacts {
         timeout: std::time::Duration,
         cancel: &CancelToken,
     ) -> Result<Vec<u8>, WorktreeError> {
+        self.discover_worktree_inventory_inner(
+            cwd,
+            git,
+            environment,
+            executor,
+            timeout,
+            cancel,
+            None,
+        )
+    }
+
+    /// Read an inventory with an explicit bare setting. Layout bootstrap may
+    /// use this only after classifying the setting's local origin as trusted;
+    /// the override itself never proves a bare common directory.
+    pub(crate) fn discover_worktree_inventory_with_bare_setting(
+        &self,
+        cwd: &Path,
+        git: &Path,
+        environment: &[(OsString, OsString)],
+        executor: &dyn Executor,
+        timeout: std::time::Duration,
+        cancel: &CancelToken,
+        bare: bool,
+    ) -> Result<Vec<u8>, WorktreeError> {
+        self.discover_worktree_inventory_inner(
+            cwd,
+            git,
+            environment,
+            executor,
+            timeout,
+            cancel,
+            Some(bare),
+        )
+    }
+
+    fn discover_worktree_inventory_inner(
+        &self,
+        cwd: &Path,
+        git: &Path,
+        environment: &[(OsString, OsString)],
+        executor: &dyn Executor,
+        timeout: std::time::Duration,
+        cancel: &CancelToken,
+        bare_override: Option<bool>,
+    ) -> Result<Vec<u8>, WorktreeError> {
         use provenant_os::exec::{ExecOptions, StreamPolicy};
-        let argv = [
+        let mut argv = vec![
             git.as_os_str().to_owned(),
             "-c".into(),
             "core.fsmonitor=false".into(),
+        ];
+        if let Some(bare) = bare_override {
+            argv.extend(["-c".into(), format!("core.bare={bare}").into()]);
+        }
+        argv.extend([
             "worktree".into(),
             "list".into(),
             "--porcelain".into(),
             "-z".into(),
-        ];
+        ]);
         let mut options = ExecOptions::new(&argv, cwd, timeout);
         options.env = Some(environment);
         options.stdin = Some(b"");
@@ -669,6 +701,10 @@ impl RepoFacts {
         context: &WorktreeContext<'_>,
         cancel: &CancelToken,
     ) -> Result<Vec<GitWorktree>, WorktreeError> {
+        // Git can report an external separate-git-dir as the primary
+        // worktree path. Only the already verified layout owner can map that
+        // metadata alias back to a checkout; never infer it from a parent.
+        validate_binding(context)?;
         self.inventories
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -680,7 +716,12 @@ impl RepoFacts {
             context.utility_budget,
             cancel,
         )?;
-        parse_worktree_list(&bytes)
+        let mut entries = parse_worktree_list(&bytes)?;
+        // Revalidate after Git returns so a replaced project path cannot be
+        // used to reinterpret the inventory row.
+        validate_binding(context)?;
+        Self::restore_verified_primary_path(context, &mut entries)?;
+        Ok(entries)
     }
 
     pub(super) fn capture_inventory(
@@ -694,6 +735,54 @@ impl RepoFacts {
         let entries = self.read_inventory(context, cancel)?;
         self.remember_inventory(context, &entries, budget);
         Ok(entries)
+    }
+
+    /// Replace Git's external metadata-directory pseudo-primary with the
+    /// checkout that the context's verified layout proves owns this common dir.
+    /// The mapping applies only when Git supplied exactly one non-bare common-dir
+    /// row and did not also supply the verified checkout path.
+    fn restore_verified_primary_path(
+        context: &WorktreeContext<'_>,
+        entries: &mut [GitWorktree],
+    ) -> Result<(), WorktreeError> {
+        let Some(project) = context.layout.project() else {
+            return Ok(());
+        };
+        let common = canonicalize(context.repo.common_git_dir())?;
+        let project = canonicalize(project)?;
+        if project == common {
+            return Err(WorktreeError::InvalidOutput);
+        }
+
+        let mut metadata_primary = None;
+        let mut checkout_primary_present = false;
+        for (index, entry) in entries.iter().enumerate() {
+            if entry.bare {
+                continue;
+            }
+            let path = match canonicalize(&entry.path) {
+                Ok(path) => path,
+                Err(error) if error.is_not_found() => {
+                    // A stale registration remains visible to the normal
+                    // inventory path; it is not evidence for a primary alias.
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if path == project {
+                checkout_primary_present = true;
+            } else if path == common && metadata_primary.replace(index).is_some() {
+                return Err(WorktreeError::InvalidOutput);
+            }
+        }
+
+        if let Some(index) = metadata_primary {
+            if checkout_primary_present {
+                return Err(WorktreeError::InvalidOutput);
+            }
+            entries[index].path = project;
+        }
+        Ok(())
     }
 
     fn remember_inventory(
@@ -843,6 +932,57 @@ pub(crate) struct GitWorktree {
     pub(super) locked: bool,
     pub(super) prunable: bool,
     pub(crate) bare: bool,
+}
+
+fn classify_bare_origins(
+    repo: &VerifiedRepo,
+    bytes: &[u8],
+    roots: &crate::transport::LaneRoots,
+    lane_files: &std::collections::BTreeSet<PathBuf>,
+) -> Result<Option<bool>, WorktreeError> {
+    if !bytes.ends_with(&[0]) {
+        return Err(WorktreeError::InvalidOutput);
+    }
+    let mut fields = bytes.split(|byte| *byte == 0);
+    let mut selected = None;
+    let mut untrusted_bare = false;
+    while let Some(origin) = fields.next() {
+        if origin.is_empty() && fields.clone().next().is_none() {
+            break;
+        }
+        let path = origin
+            .strip_prefix(b"file:")
+            .ok_or(WorktreeError::InvalidOutput)?;
+        if path.is_empty() {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        let path = PathBuf::from(OsString::from_vec(path.to_vec()));
+        let path = if path.is_absolute() {
+            path
+        } else {
+            repo.root_path().join(path)
+        };
+        let in_lane = roots.contains(&path);
+        let path = crate::transport::normalise(&path);
+        let value = fields.next().ok_or(WorktreeError::InvalidOutput)?;
+        let value = match value {
+            b"true" => true,
+            b"false" => false,
+            _ => return Err(WorktreeError::InvalidOutput),
+        };
+        if !in_lane && !lane_files.contains(&path) {
+            selected = Some(value);
+        } else {
+            untrusted_bare |= value;
+        }
+    }
+    // If a bare setting appears only through lane-controlled provenance, the
+    // primary worktree cannot be classified safely: an alias may hide a
+    // trusted occurrence of that file.
+    if selected != Some(true) && untrusted_bare {
+        return Err(WorktreeError::InvalidOutput);
+    }
+    Ok(selected)
 }
 
 fn inventory_paths(bytes: &[u8]) -> Result<Vec<PathBuf>, WorktreeError> {

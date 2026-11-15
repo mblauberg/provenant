@@ -696,6 +696,8 @@ pub(super) enum PrepareError {
     Receipt(#[from] serde_json::Error),
     #[error(transparent)]
     ReadOnly(#[from] ReadOnlyPlanError),
+    #[error(transparent)]
+    SourceView(super::source_tree::SourceViewError),
     #[error("write grants overlap a host index")]
     HostIndexOverlap,
     #[error("write grants overlap the host target seed store")]
@@ -814,6 +816,30 @@ impl PrepareError {
                 )
                 .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable),
             }),
+            Self::SourceView(error) => {
+                let detail = error.to_string();
+                let binding_refusal = matches!(
+                    &error.cause,
+                    super::source_tree::SourceCause::ProjectBindingDirectory(_)
+                );
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::SourceViewRefused,
+                    detail.clone(),
+                );
+                refusal.terminal_note = Some(detail);
+                if binding_refusal {
+                    let mut skipped = skip(
+                        "project binding state",
+                        SkipKind::Refused,
+                        "project binding state directory is unsafe",
+                    );
+                    skipped.confinement_guard = Some(
+                        provenant_records::diagnostic::ConfinementGuard::ProjectBindingDirectoryUnsafe,
+                    );
+                    refusal.skipped_routes.push(skipped);
+                }
+                Box::new(refusal)
+            }
             Self::Candidates {
                 message,
                 skipped_routes,
@@ -1208,12 +1234,7 @@ fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError 
 
 impl From<super::source_tree::SourceViewError> for PrepareError {
     fn from(error: super::source_tree::SourceViewError) -> Self {
-        // The step and cause are fixed-form text, never Git output or contents.
-        Self::Refusal {
-            message: error.to_string(),
-            cause: provenant_records::run::TerminalCause::SourceViewRefused,
-            note: Some(error.to_string()),
-        }
+        Self::SourceView(error)
     }
 }
 impl From<String> for PrepareError {
@@ -1398,6 +1419,12 @@ impl PlanCheckError {
         refusal.terminal_note = Some(skipped.detail.clone());
         refusal.resource = skipped.guard_resource;
         refusal.skipped_routes.push(skipped);
+        if let Self::ReadOnly(ReadOnlyPlanError::ProjectBindingDirectory(diagnostic)) = self {
+            refusal.message = diagnostic
+                .detail
+                .unwrap_or_else(|| "project binding state directory is unsafe".into());
+            refusal.terminal_note = diagnostic.next;
+        }
         refusal
     }
 
@@ -1485,6 +1512,7 @@ impl PlanCheckError {
                 ReadOnlyPlanError::MissingBinding => G::ProjectBindingMissing,
                 ReadOnlyPlanError::PinnedSourceRequiresGit => G::PinnedSourceRequiresGit,
                 ReadOnlyPlanError::Other(_) => G::ReadOnlyPreparationFailed,
+                ReadOnlyPlanError::ProjectBindingDirectory(_) => G::ProjectBindingDirectoryUnsafe,
             },
         }
     }
@@ -2668,10 +2696,18 @@ pub(super) fn prepare_candidates(
         if entries.iter().any(|entry| entry.adapter == spec.name) {
             continue;
         }
-        let directory = registry
+        let host_directory = registry
             .host
-            .and_then(|host| host.default_account_directories.get(spec.name).cloned())
-            .or_else(|| host_provider_var(registry, environment).map(PathBuf::from))
+            .and_then(|host| host.default_account_directories.get(spec.name).cloned());
+        let environment_directory = host_provider_var(registry, environment);
+        let configured_by = match (host_directory.as_ref(), environment_directory.as_ref()) {
+            (Some(directory), Some(value)) if directory.as_os_str() == value => Some(environment),
+            (Some(_), _) => Some("host account-directory configuration"),
+            (None, Some(_)) => Some(environment),
+            (None, None) => None,
+        };
+        let directory = host_directory
+            .or_else(|| environment_directory.map(PathBuf::from))
             .unwrap_or_else(|| home.join(fallback));
         let mut entry = provenant_providers::accounts::Registration {
             adapter: spec.name.into(),
@@ -2694,8 +2730,9 @@ pub(super) fn prepare_candidates(
         let discovered = (|| -> Result<(), AccountObservationError> {
             let executable =
                 locate(spec.name).map_err(AccountObservationError::VersionUnavailable)?;
-            entry.directory = canonical(&directory)
-                .map_err(|detail| default_directory_error(spec, &directory, detail))?;
+            entry.directory = canonical(&directory).map_err(|detail| {
+                default_directory_error(spec, &directory, detail, configured_by)
+            })?;
             entry.key = provenant_providers::accounts::detect(
                 &executor,
                 spec.name,
@@ -2711,8 +2748,12 @@ pub(super) fn prepare_candidates(
         match discovered {
             Ok(()) => entries.push(entry),
             Err(error) => {
-                default_failures
-                    .insert(spec.name.to_owned(), (error.skip_kind(), error.to_string()));
+                let configured_directory =
+                    matches!(&error, AccountObservationError::ConfiguredDirectory(_));
+                default_failures.insert(
+                    spec.name.to_owned(),
+                    (error.skip_kind(), error.to_string(), configured_directory),
+                );
             }
         }
     }
@@ -2821,6 +2862,35 @@ pub(super) fn prepare_candidates(
                     };
                     let recorded =
                         crate::quota::read_readiness(roots.state.as_path(), &scope, timestamp);
+                    // Staleness removes an old auth failure from admission,
+                    // but the executable-only OpenCode probe still cannot
+                    // establish login health. Keep that distinction visible
+                    // as a launch warning instead of silently losing the
+                    // reason when `read_readiness` projects it to `Stale`.
+                    let persisted_auth_failure = crate::quota::recorded_readiness_file(
+                        roots.state.as_path(),
+                        &entry.adapter,
+                        &entry.key,
+                    )
+                    .ok()
+                    .flatten()
+                    .is_some_and(|file| {
+                        file.records.iter().any(|record| {
+                            record.scope.host == provenant_quota::LOCAL_HOST
+                                && record.scope.route == provenant_quota::ACCOUNT_ROUTE
+                                && recorded.reason == Some(provenant_quota::ReadinessReason::Stale)
+                                && recorded.observed_scope.as_ref() == Some(&record.scope)
+                                && recorded.observed_unix_seconds
+                                    == Some(record.observed_unix_seconds)
+                                && matches!(
+                                    record.reason,
+                                    Some(
+                                        provenant_quota::ReadinessReason::SignedOut
+                                            | provenant_quota::ReadinessReason::LoginExpired
+                                    )
+                                )
+                        })
+                    });
                     let mismatch = recorded.reason
                         == Some(provenant_quota::ReadinessReason::AccountMismatch)
                         || diagnostic_records.iter().any(|r| {
@@ -2847,7 +2917,8 @@ pub(super) fn prepare_candidates(
                                 provenant_quota::ReadinessReason::SignedOut
                                     | provenant_quota::ReadinessReason::LoginExpired
                             )
-                        );
+                        )
+                        || persisted_auth_failure;
                     if auth_failure && login_check_can_clear(&entry.adapter, mismatch) {
                         let executable = Path::new(&record.executable);
                         if strategy == provenant_records::LoginReprobe::ExecutableOnly {
@@ -3297,7 +3368,9 @@ pub(super) fn prepare_candidates(
                 reason,
                 provenant_records::RouteExclusionReason::UnknownAvailability
             ) {
-                if let Some((kind, detail)) = default_failures.get(&route.adapter) {
+                if let Some((kind, detail, configured_directory)) =
+                    default_failures.get(&route.adapter)
+                {
                     previous_outcome = if *kind == SkipKind::AuthRequired {
                         provenant_routing::FallbackOutcome::AuthRequired
                     } else {
@@ -3309,7 +3382,7 @@ pub(super) fn prepare_candidates(
                     } else {
                         reason.clone()
                     });
-                    if *kind == SkipKind::AuthRequired {
+                    if *kind == SkipKind::AuthRequired || *configured_directory {
                         skipped.detail = provenant_records::diagnostic::safe_text(detail);
                     }
                     reasons.push(name_skipped_accounts(skipped, &route, &entries));
@@ -5633,4 +5706,42 @@ mod route_launch_boundary_regressions {
         assert_eq!(filtered.resolve("fixture-command")?, executable);
         Ok(())
     }
+}
+
+#[test]
+// Spec: docs/specs/state.md#roots-and-identities
+fn binding_refusal_preserves_local_repair_and_closed_route_guard() {
+    let error = ReadOnlyPlanError::from(
+        provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
+            path: std::path::PathBuf::from("/private/test-binding-state"),
+            mode: 0o755,
+            owner_matches: true,
+        },
+    );
+    let refusal = PlanCheckError::ReadOnly(error).into_refusal();
+    assert!(refusal.message.contains("/private/test-binding-state"));
+    assert!(
+        refusal
+            .terminal_note
+            .as_deref()
+            .is_some_and(|note| note.contains("chmod 700"))
+    );
+    assert_eq!(
+        refusal.boundary_class,
+        provenant_records::diagnostic::BoundaryClass::Authority
+    );
+    assert_eq!(
+        refusal.policy_code.as_deref(),
+        Some("CONFINEMENT_READ_ONLY_PLAN_AUTHORITY")
+    );
+    assert_eq!(refusal.skipped_routes.len(), 1);
+    assert!(
+        !refusal.skipped_routes[0]
+            .detail
+            .contains("/private/test-binding-state")
+    );
+    assert_eq!(
+        refusal.skipped_routes[0].confinement_guard,
+        Some(provenant_records::diagnostic::ConfinementGuard::ProjectBindingDirectoryUnsafe)
+    );
 }

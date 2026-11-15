@@ -2602,13 +2602,12 @@ mod result_tests {
             result: PeerResult::Output {
                 extra: Default::default(),
                 data: Box::new(OutputResult::Chunk {
-                    peer: provenant_records::run::PeerOutputFields {
-                        graph: provenant_records::run::PeerGraphFields {
-                            peer_origin_work_key: Some(origin.clone()),
-                            ..Default::default()
-                        },
+                    peer: provenant_records::run::PeerGraphFields {
+                        peer_origin_work_key: Some(origin.clone()),
                         ..Default::default()
                     },
+                    length: Some(text.len() as u64),
+                    planner_fallback: None,
                     extra: Default::default(),
                     target,
                     part: OutputPart::Result,
@@ -2778,7 +2777,7 @@ mod result_tests {
             if let PeerResult::Output { data, .. } = &mut reply.result
                 && let OutputResult::Chunk { peer, .. } = data.as_mut()
             {
-                peer.graph.peer_origin_work_key = Some(provenant_records::WorkKey::new(
+                peer.peer_origin_work_key = Some(provenant_records::WorkKey::new(
                     factory.context.identity.project,
                     document.graph_id.clone(),
                     "producer",
@@ -2806,14 +2805,15 @@ mod result_tests {
         if let PeerResult::Output { data, .. } = &mut reply.result
             && let OutputResult::Chunk {
                 peer,
+                length,
                 next_offset,
                 eof,
                 bytes,
                 ..
             } = data.as_mut()
         {
-            peer.length = Some(text.len() as u64);
-            peer.graph.peer_origin_work_key = Some(origin.clone());
+            *length = Some(text.len() as u64);
+            peer.peer_origin_work_key = Some(origin.clone());
             *next_offset = 5;
             *eof = false;
             *bytes = OutputBytes::Utf8(text[..5].into());
@@ -2888,7 +2888,7 @@ mod result_tests {
         if let PeerResult::Output { data, .. } = &mut second.result
             && let OutputResult::Chunk { peer, .. } = data.as_mut()
         {
-            peer.graph.peer_origin_work_key = Some(origin.next_attempt().unwrap());
+            peer.peer_origin_work_key = Some(origin.next_attempt().unwrap());
         }
         std::fs::write(&second_response, serde_json::to_vec(&second)?)?;
         let refused = graph_inputs::materialise(

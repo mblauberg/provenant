@@ -279,7 +279,9 @@ fn malformed_operations_and_waits_fail_before_state_creation() -> Result {
             "--operation-id",
             "bad/id",
         ],
-        vec!["fabric", "events", "read", "--wait", "14401"],
+        // Oversized observation waits clamp to the supported maximum; use
+        // malformed syntax to verify this path refuses before state creation.
+        vec!["fabric", "events", "read", "--wait", "not-a-number"],
     ] {
         assert_eq!(call(&rig, &args, 2)?["status"], "invalid");
         assert!(!rig.state.exists());

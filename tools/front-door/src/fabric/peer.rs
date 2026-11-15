@@ -586,12 +586,20 @@ pub fn peer(
                         extra: Default::default(),
                     }
                 } else {
-                    peer_result(owner.snapshots_local(targets, &cancel), |data| {
-                        PeerResult::RunStatuses {
+                    peer_result(
+                        owner.snapshots_local(targets, &cancel).map(|mut data| {
+                            for attempt in &mut data {
+                                provenant_fabric_runtime::runs::project_peer_attempt_diagnostics(
+                                    attempt,
+                                );
+                            }
+                            data
+                        }),
+                        |data| PeerResult::RunStatuses {
                             data,
                             extra: Default::default(),
-                        }
-                    })
+                        },
+                    )
                 }
             }
             PeerAction::CancelSubmission { .. } => peer_result(
@@ -642,6 +650,7 @@ pub fn peer(
                                 after,
                             )?);
                         }
+                        value.project_peer_diagnostics();
                         Ok(value)
                     });
                 peer_result(observed, |value| PeerResult::Run {
@@ -744,7 +753,7 @@ pub fn peer(
                         | OutputResult::Artifact { peer, target, .. }) = &mut data;
                         let mut fields = peer_graph_fields(&peer_factory, target.attempt)?;
                         fields.peer_subtree = None;
-                        peer.merge_graph(fields);
+                        peer.merge(fields);
                         Ok(data)
                     }),
                 |data| PeerResult::Output {
@@ -760,14 +769,18 @@ pub fn peer(
                     }
                 })
             }
-            PeerAction::Lanes { all, limit, .. } => {
-                peer_result(owner.lanes_local(*all, *limit, &cancel), |data| {
-                    PeerResult::RunStatuses {
-                        data,
-                        extra: Default::default(),
+            PeerAction::Lanes { all, limit, .. } => peer_result(
+                owner.lanes_local(*all, *limit, &cancel).map(|mut data| {
+                    for attempt in &mut data {
+                        provenant_fabric_runtime::runs::project_peer_attempt_diagnostics(attempt);
                     }
-                })
-            }
+                    data
+                }),
+                |data| PeerResult::RunStatuses {
+                    data,
+                    extra: Default::default(),
+                },
+            ),
             PeerAction::LaneWaits { targets, .. } => {
                 if !(1..=100).contains(&targets.len()) {
                     PeerResult::Error {
@@ -1653,26 +1666,13 @@ pub(super) fn checked_output_origin(
     mut output: OutputResult,
     expected: &provenant_records::WorkKey,
 ) -> Result<OutputResult, FacadeError> {
-    let (OutputResult::Chunk { peer, extra, .. } | OutputResult::Artifact { peer, extra, .. }) =
-        &mut output;
-    if !peer_origin_matches(&peer.graph, expected) {
+    let (OutputResult::Chunk { peer, .. } | OutputResult::Artifact { peer, .. }) = &mut output;
+    if !peer_origin_matches(peer, expected) {
         return Err(FacadeError::StateCorrupt);
     }
-    // Serde's flatten does not consume the keys of a flattened struct that
-    // itself flattens a struct, so every peer key is also retained in `extra`.
-    // Drop those copies so only the typed fields below reach the projection.
-    if let Ok(serde_json::Value::Object(owned)) = serde_json::to_value(&*peer) {
-        extra.retain(|key, _| !owned.contains_key(key));
-    }
-    // These authenticate the peer read; the CLI output schema contains lane
-    // fields only. Consume transport metadata before rendering the payload.
-    let length = peer.length;
-    let planner_fallback = peer.planner_fallback.clone();
-    *peer = provenant_records::run::PeerOutputFields {
-        length,
-        planner_fallback,
-        ..Default::default()
-    };
+    // Graph identity authenticates the peer read. Output length and planner
+    // fallback remain owned by the output envelope for the CLI projection.
+    *peer = Default::default();
     Ok(output)
 }
 
@@ -1896,6 +1896,8 @@ mod peer_project_root_tests {
                 ..Default::default()
             };
 
+            assert!(!state.join("projects").exists());
+            assert!(!state.join("host-id").exists());
             let refusal = prepare_peer_project_roots(
                 &globals,
                 roots,
@@ -1910,6 +1912,8 @@ mod peer_project_root_tests {
 
         let plain = base.join("plain-project");
         std::fs::create_dir_all(&plain)?;
+        git(&plain, &["init", "-q", "--initial-branch=main"])?;
+        let common = plain.join(".git");
         let state = plain.join("state");
         std::fs::create_dir_all(&state)?;
         std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
@@ -1924,11 +1928,11 @@ mod peer_project_root_tests {
         let (roots, binding) = prepare_peer_project_roots(
             &globals,
             roots,
-            &plain,
+            &common,
             false,
             crate::roots::Product::Optional,
         )?;
-        assert_eq!(binding.common_dir(), plain);
+        assert_eq!(binding.common_dir(), common);
         assert!(roots.state.as_path().join("projects").is_dir());
         assert!(roots.state.as_path().join("host-id").is_file());
         Ok(())

@@ -121,14 +121,37 @@ impl LaneRoots {
     }
 
     fn project_roots(root: &Path, ports: provenant_config::PortTable) -> Self {
+        Self::layout_roots(root, ports, true)
+    }
+
+    /// Host-managed roots beneath a common Git directory with no project
+    /// checkout, as in a verified bare repository. Project scratch does not
+    /// belong to the common metadata directory.
+    fn host_only(root: &Path, host_state: &Path) -> Result<Self, TransportError> {
+        let ports = provenant_config::PortTable::read_for(None, host_state)
+            .map_err(|_| TransportError::Unreadable)?;
+        Ok(Self::layout_roots(root, ports, false))
+    }
+
+    /// Compiled host roots for a common-only layout when no validated state
+    /// root is available to provide host overrides.
+    fn host_only_without_host_state(root: &Path) -> Self {
+        Self::layout_roots(root, provenant_config::PortTable::builtin(), false)
+    }
+
+    fn layout_roots(root: &Path, ports: provenant_config::PortTable, project: bool) -> Self {
         let mut roots = ports.worktree_roots_under(root);
-        roots.extend([".provenant", ".agent-run"].map(|name| root.join(name)));
+        if project {
+            roots.extend([".provenant", ".agent-run"].map(|name| root.join(name)));
+        }
         Self::new(roots)
     }
 
     /// The lane areas for a repository whose private and common Git
     /// directories are known. A linked worktree is itself lane-writable, and
     /// the project that owns the common directory contributes its declared areas.
+    /// `project=None` is a verified common-only layout and uses host roots under
+    /// the common directory without treating its metadata as a project checkout.
     pub fn for_repository(
         root: &Path,
         private: &Path,
@@ -141,15 +164,31 @@ impl LaneRoots {
         if private != common {
             roots.push(root.to_path_buf());
         }
-        if let Some(project) = project {
-            roots.extend(
-                match host_state {
-                    Some(host_state) => Self::project(project, host_state)?,
-                    None => Self::project_without_host_state(project)?,
-                }
-                .0,
-            );
+        let layout = match (project, host_state) {
+            (Some(project), Some(host_state)) => Self::project(project, host_state)?,
+            (Some(project), None) => Self::project_without_host_state(project)?,
+            (None, Some(host_state)) => Self::host_only(common, host_state)?,
+            (None, None) => Self::host_only_without_host_state(common),
+        };
+        roots.extend(layout.0);
+        Ok(Self::new(roots))
+    }
+
+    /// Roots already proved before a linked checkout's project layout is
+    /// known. This bootstrap is intentionally limited to the selected checkout,
+    /// explicit runtime roots, and host-managed roots under its common dir.
+    pub(crate) fn bootstrap_for_repository(
+        root: &Path,
+        private: &Path,
+        common: &Path,
+        extra: &Self,
+        host_state: &Path,
+    ) -> Result<Self, TransportError> {
+        let mut roots = extra.0.clone();
+        if private != common {
+            roots.push(root.to_path_buf());
         }
+        roots.extend(Self::host_only(common, host_state)?.0);
         Ok(Self::new(roots))
     }
 
@@ -590,6 +629,57 @@ mod tests {
         assert!(roots.contains(&root.join(".provenant/state")));
         assert!(roots.contains(&root.join(".agent-run/state")));
         assert!(!roots.contains(&root.join(".worktrees/topic/helper")));
+        Ok(())
+    }
+
+    #[test]
+    fn bare_common_lane_roots_use_host_ports_without_project_scratch() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let parent = std::fs::canonicalize(temp.path())?;
+        let common = parent.join("common.git");
+        let linked = parent.join("linked-checkout");
+        let private = common.join("worktrees/linked");
+        std::fs::create_dir_all(&private)?;
+        std::fs::create_dir(&linked)?;
+
+        let state = parent.join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let mut host_ports = provenant_config::PortTable::builtin();
+        host_ports.worktree_layout.roots = vec![PathBuf::from("host-managed")];
+        host_ports.worktree_layout.default = PathBuf::from("host-managed/<branch>");
+        std::fs::write(state.join("ports.json"), serde_json::to_vec(&host_ports)?)?;
+
+        // A common Git directory is not a project checkout. A colocated
+        // project file must not contribute project-specific roots or scratch.
+        let project_config = common.join(provenant_config::PORTS_CONFIG);
+        std::fs::create_dir_all(
+            project_config
+                .parent()
+                .ok_or("common project config parent")?,
+        )?;
+        let mut project_ports = provenant_config::PortTable::builtin();
+        project_ports.worktree_layout.roots = vec![PathBuf::from("project-only")];
+        project_ports.worktree_layout.default = PathBuf::from("project-only/<branch>");
+        std::fs::write(project_config, serde_json::to_vec(&project_ports)?)?;
+
+        let extra = LaneRoots::default();
+        let with_host =
+            LaneRoots::for_repository(&linked, &private, &common, None, &extra, Some(&state))?;
+        assert!(with_host.contains(&linked.join("config.worktree")));
+        assert!(with_host.contains(&common.join("host-managed/branch/config")));
+        assert!(!with_host.contains(&common.join("project-only/branch/config")));
+        assert!(!with_host.contains(&common.join(".provenant/state/config")));
+        assert!(!with_host.contains(&common.join(".agent-run/state/config")));
+
+        // With no validated host state, only compiled host policy applies.
+        let without_host =
+            LaneRoots::for_repository(&linked, &private, &common, None, &extra, None)?;
+        assert!(without_host.contains(&linked.join("config.worktree")));
+        assert!(without_host.contains(&common.join(".worktrees/branch/config")));
+        assert!(!without_host.contains(&common.join("host-managed/branch/config")));
+        assert!(!without_host.contains(&common.join("project-only/branch/config")));
+        assert!(!without_host.contains(&common.join(".provenant/state/config")));
+        assert!(!without_host.contains(&common.join(".agent-run/state/config")));
         Ok(())
     }
 

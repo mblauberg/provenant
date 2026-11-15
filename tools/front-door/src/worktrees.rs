@@ -1123,6 +1123,18 @@ struct GcProject {
     path: PathBuf,
 }
 
+fn require_non_bare_gc_repository(bare: Option<bool>) -> Result<(), Error> {
+    match bare {
+        Some(false) => Ok(()),
+        Some(true) => Err(Error::GcObservation(
+            "GC cannot run on a bare repository because it has no primary checkout",
+        )),
+        None => Err(Error::GcObservation(
+            "GC cannot verify whether the repository is bare; a verified primary checkout is required",
+        )),
+    }
+}
+
 fn gc_project(
     roots: &provenant_core::Roots,
     home: &Path,
@@ -1147,20 +1159,17 @@ fn gc_project(
         read_only,
         Some((binding, layout)),
         |context, cancel| {
-            if facts.bare_setting(
+            require_non_bare_gc_repository(facts.bare_setting(
                 context.repo,
                 context.executor,
                 context.utility,
                 context.utility_budget,
                 cancel,
-            )? != Some(false)
-            {
-                return Err(Error::GcObservation(
-                    "GC requires a non-bare verified primary checkout",
-                ));
-            }
+            )?)?;
             if context.layout.project() != Some(context.repo.root_path()) {
-                return Err(Error::GcObservation("GC requires the primary checkout"));
+                return Err(Error::GcObservation(
+                    "GC requires the verified primary checkout; a linked checkout cannot serve as the GC owner",
+                ));
             }
             Ok(GcProject {
                 binding: context.binding.clone(),
@@ -1617,18 +1626,13 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 ..Default::default()
             });
         }
-        if facts.bare_setting(
+        require_non_bare_gc_repository(facts.bare_setting(
             &repo,
             &executor,
             &runtime,
             UtilityBudget::bounded(Duration::from_secs(5))?,
             &CancelToken::new(),
-        )? != Some(false)
-        {
-            return Err(Error::GcObservation(
-                "GC requires a non-bare verified primary checkout",
-            ));
-        }
+        )?)?;
         let location = if repo.private_git_dir() == repo.common_git_dir() {
             provenant_config::ProjectLocation::from_verified_primary_checkout(
                 repo.common_git_dir(),

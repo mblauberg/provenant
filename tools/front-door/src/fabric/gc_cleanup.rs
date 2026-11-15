@@ -305,7 +305,7 @@ fn release_settled_cache(
         roots,
         &settled.roots.home,
         &writer.project,
-        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(5),
         workers,
         store.repo_facts(),
         |context, _| {

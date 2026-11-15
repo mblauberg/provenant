@@ -1,5 +1,47 @@
 use super::*;
 
+fn mark_created_lane_as_managed(
+    rig: &TestRig,
+    roots: &provenant_core::Roots,
+    path: &Path,
+    branch: &str,
+    head: provenant_core::GitOid,
+) -> Result {
+    let clock = provenant_os::clock::SystemClock;
+    let cancel = provenant_core::CancelToken::new();
+    let created_at = clock.wall_now()?;
+    let operation_id = format!("gc-fixture-{}", branch.replace('/', "-"))
+        .parse::<provenant_core::OperationId>()?;
+    provenant_confinement::worktrees::with_context(
+        roots,
+        &rig.home,
+        &rig.project,
+        &clock,
+        &cancel,
+        |context| {
+            let tree = provenant_confinement::verify_worktree(context.repo, path)?;
+            let owner = provenant_confinement::worktrees::WorktreeOwner {
+                attempt_id: None,
+                operation_id: Some(operation_id),
+                branch: branch.to_owned(),
+                base: head.to_string(),
+                host: provenant_core::HostId::from_bytes([1; 16]),
+                created_at,
+                origin: provenant_confinement::worktrees::WorktreeOrigin::Lane,
+                label: None,
+                reference: provenant_confinement::worktrees::branch_ownership(
+                    context, branch, head,
+                )?,
+            };
+            provenant_confinement::worktrees::save_lane_owner_when_free(
+                context, &tree, &owner, head, None, false, &cancel,
+            )?;
+            Ok(())
+        },
+    )?;
+    Ok(())
+}
+
 pub(super) fn gc_refuses_bare_projects_and_their_linked_checkout_fallback() -> Result {
     for name in ["bare.git", ".git"] {
         let mut rig = repository()?;
@@ -145,9 +187,16 @@ pub(super) fn gc_pressure_collects_only_the_selected_primary_project() -> Result
     fs::write(other_tree.join("target/artifact"), "other output")?;
     age_gc_output(&other_tree.join("target"))?;
     rig.project = primary;
-    ok(&rig, &["worktree", "create", "idle", "--json"])?;
+    let created = ok(&rig, &["worktree", "create", "idle", "--json"])?;
     let tree = rig.project.join(".worktrees/idle");
-    let (_, context) = writer_context(&rig)?;
+    let (roots, context) = writer_context(&rig)?;
+    mark_created_lane_as_managed(
+        &rig,
+        &roots,
+        &tree,
+        "idle",
+        created["data"]["head"].as_str().ok_or("head")?.parse()?,
+    )?;
     fs::create_dir(tree.join("target"))?;
     fs::write(tree.join("target/artifact"), "selected output")?;
     age_gc_output(&tree.join("target"))?;
@@ -339,8 +388,16 @@ pub(super) fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_
     fs::write(rig.project.join(".gitignore"), ".worktrees/\ntarget/\n")?;
     git(&rig, &["add", ".gitignore"])?;
     git(&rig, &["commit", "-qm", "ignore output"])?;
-    ok(&rig, &["worktree", "create", "idle", "--json"])?;
+    let created = ok(&rig, &["worktree", "create", "idle", "--json"])?;
     let worktree = rig.project.join(".worktrees/idle");
+    let (roots, _) = writer_context(&rig)?;
+    mark_created_lane_as_managed(
+        &rig,
+        &roots,
+        &worktree,
+        "idle",
+        created["data"]["head"].as_str().ok_or("head")?.parse()?,
+    )?;
     let cache = prepare_lane_cache(&rig, &worktree, "idle")?;
     fn age(path: &Path) -> Result {
         if path.is_dir() {
@@ -785,6 +842,15 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
         std::os::unix::fs::PermissionsExt::from_mode(0o700),
     )?;
     fs::create_dir(rig.state.join("gc/alert.lock"))?;
+    let first_foreign_pass = ok(&rig, &["gc", "--scheduled", "--apply", "--json"])?;
+    assert!(
+        first_foreign_pass["data"]["worktree_cleanup"][0]["first_foreign_preview"]
+            .as_bool()
+            .ok_or("first foreign pass")?
+    );
+    assert!(merged.is_dir());
+    assert!(merged.join("target/artifact").is_file());
+    assert!(has_branch(&rig, "merged")?);
     let collected = ok(&rig, &["gc", "--scheduled", "--apply", "--json"])?;
     assert!(
         collected["data"]["alerts"][0]
@@ -1154,7 +1220,7 @@ fn merged_upstream(rig: &TestRig, lane: &Path) -> Result<String> {
     let lane = lane.to_str().ok_or("lane path")?;
     let base = git(rig, &["rev-parse", "HEAD"])?;
     let tip = git(rig, &["-C", lane, "rev-parse", "HEAD"])?;
-    let tree = git(rig, &["rev-parse", "HEAD^{tree}"])?;
+    let tree = git(rig, &["-C", lane, "rev-parse", "HEAD^{tree}"])?;
     git(
         rig,
         &[

@@ -1188,7 +1188,10 @@ fn graph_run_controls_reach_the_sealed_attempt() -> Result<(), Box<dyn std::erro
                     .join(".worktrees/controls-writer")
                     .canonicalize()?
             );
-            assert_eq!(writer.project, rig.project.canonicalize()?);
+            // The sealed project is the selected checkout used as the Git
+            // executor. Project config ownership is resolved independently
+            // from the verified primary during writer preparation.
+            assert_eq!(writer.project, writer.worktree);
             let delivery = task.deliver.as_ref().ok_or("sealed delivery missing")?;
             assert_eq!(Some(&delivery.mode), delivery_mode.as_ref());
             assert_eq!(

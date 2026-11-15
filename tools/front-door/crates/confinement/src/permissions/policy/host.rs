@@ -1489,6 +1489,11 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let root = std::fs::canonicalize(temp.path())?;
         let roots = fixture_roots(&root)?;
+        // Keep the active source outside the registered projects below. The
+        // inventory must not guess their custom allocation roots, while the
+        // source checkout remains an independent mandatory write boundary.
+        let active_source = root.join("active-source");
+        std::fs::create_dir_all(&active_source)?;
         let mut allocations = Vec::new();
         for project in ["source", "other-project"] {
             let primary = root.join(project);
@@ -1519,14 +1524,16 @@ mod tests {
         ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
         std::fs::write(config.join("ports.json"), serde_json::to_vec(&ports)?)?;
         allocations.push(separate.join(".claude/worktrees"));
-        let inventory = MandatoryRoots::for_host(
-            &roots,
-            &root.join("home"),
-            &root.join("source"),
-            &[],
-            &[],
-            &[],
-        )?;
+        let inventory =
+            MandatoryRoots::for_host(&roots, &root.join("home"), &active_source, &[], &[], &[])?;
+        assert!(
+            inventory
+                .validate_extra_write(&PathGrant {
+                    path: active_source,
+                    scope: PathScope::Subtree,
+                })
+                .is_err()
+        );
         for allocation in allocations {
             // A context-free host inventory cannot infer project layout from
             // the registered common directory. Git-aware launch callers add

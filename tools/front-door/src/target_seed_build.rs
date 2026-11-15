@@ -13,6 +13,7 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+const PUBLICATION_WAIT_SECONDS: u64 = 10;
 
 fn ensure_host_seed_environment_eligible() -> Result<()> {
     let environment = std::env::vars_os().collect::<Vec<_>>();
@@ -611,13 +612,23 @@ fn refresh_racing(
     between: impl FnOnce(),
     build: impl FnOnce(&Path) -> Result<Manifest>,
 ) -> Result<Refresh> {
+    refresh_racing_with_publication_wait(state, identity, between, PUBLICATION_WAIT_SECONDS, build)
+}
+
+fn refresh_racing_with_publication_wait(
+    state: &Path,
+    identity: &GenerationIdentity,
+    between: impl FnOnce(),
+    publication_wait_seconds: u64,
+    build: impl FnOnce(&Path) -> Result<Manifest>,
+) -> Result<Refresh> {
     if has_generation(state, identity) {
         return Ok(Refresh::Current);
     }
     // Another refresher may publish this commit between the check above and
     // our taking the build lock, so look again once we hold it.
     between();
-    let result = publish(state, |stage| {
+    let result = publish_with_publication_wait(state, publication_wait_seconds, |stage| {
         if has_generation(state, identity) {
             return Err(AlreadyCurrent.into());
         }
@@ -626,14 +637,7 @@ fn refresh_racing(
     match result {
         Ok(id) => Ok(Refresh::Built(id)),
         Err(error) if error.is::<AlreadyCurrent>() => Ok(Refresh::Current),
-        Err(error)
-            if matches!(
-                error.downcast_ref::<provenant_os::fs::FsError>(),
-                Some(provenant_os::fs::FsError::LockTimeout { .. })
-            ) =>
-        {
-            Ok(Refresh::Busy)
-        }
+        Err(error) if is_lock_timeout(error.as_ref()) => Ok(Refresh::Busy),
         Err(error) => Err(error),
     }
 }
@@ -759,6 +763,14 @@ fn build_into(
 }
 
 fn publish(state: &Path, build: impl FnOnce(&Path) -> Result<Manifest>) -> Result<String> {
+    publish_with_publication_wait(state, PUBLICATION_WAIT_SECONDS, build)
+}
+
+fn publish_with_publication_wait(
+    state: &Path,
+    publication_wait_seconds: u64,
+    build: impl FnOnce(&Path) -> Result<Manifest>,
+) -> Result<String> {
     let store_lock = target_seed::lock_store(state)?;
     let _build_lock = target_seed::lock_build(state)?;
     let store = target_seed::store_path(state);
@@ -780,8 +792,7 @@ fn publish(state: &Path, build: impl FnOnce(&Path) -> Result<Manifest>) -> Resul
         provenant_os::clock::SystemClock.wall_now()?.as_micros(),
         random.to_string_lossy()
     );
-    let _lock = target_seed::lock_store_for_publication(state)
-        .map_err(|error| io::Error::other(format!("lock publication: {error}")))?;
+    let _lock = target_seed::lock_store_for_publication(state, publication_wait_seconds)?;
     fs::rename(&stage.0, store.join("generations").join(&id))
         .map_err(|error| io::Error::new(error.kind(), format!("publish generation: {error}")))?;
     let generation = store.join("generations").join(&id);
@@ -895,7 +906,7 @@ mod checkout_tests {
             .unwrap();
         assert_ne!(pinned, local.trim());
         let state = temp.path().join("state");
-        fs::create_dir(&state).unwrap();
+        provenant_os::fixture::private_state_dir(&state).unwrap();
         let workspace = workspace_relative(&state, &project).unwrap().unwrap();
         let primary = verify_base(&state, &project, &workspace).unwrap();
         assert_eq!(primary.commit, pinned);
@@ -969,7 +980,7 @@ mod checkout_tests {
         .unwrap();
 
         let state = temp.path().join("state");
-        fs::create_dir(&state).unwrap();
+        provenant_os::fixture::private_state_dir(&state).unwrap();
         let workspace = PathBuf::new();
         let error = verify_base(&state, &project, &workspace)
             .err()
@@ -1030,7 +1041,7 @@ mod checkout_tests {
             .unwrap();
 
         let state = temp.path().join("state");
-        fs::create_dir(&state).unwrap();
+        provenant_os::fixture::private_state_dir(&state).unwrap();
         let result = refresh_identity_with_probe(&state, &project, |probe| {
             let pin = fs::read_to_string(probe.join("rust-toolchain.toml"))?;
             assert_eq!(pin, include_str!("../rust-toolchain.toml"));
@@ -1482,9 +1493,10 @@ mod tests {
         let (finished_tx, finished_rx) = std::sync::mpsc::channel();
         let publisher = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
-            let result = target_seed::lock_store_for_publication(&state_path)
-                .map(drop)
-                .map_err(|error| error.to_string());
+            let result =
+                target_seed::lock_store_for_publication(&state_path, PUBLICATION_WAIT_SECONDS)
+                    .map(drop)
+                    .map_err(|error| error.to_string());
             finished_tx.send(result).unwrap();
         });
         started_rx
@@ -1500,6 +1512,66 @@ mod tests {
             .expect("publisher should continue after the reader releases Store")
             .expect("bounded publication lock should succeed");
         publisher.join().unwrap();
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn publication_lock_timeout_is_a_busy_refresh_and_cleans_completed_stage() {
+        let state = tempfile::tempdir().unwrap();
+        let state_path = state.path().to_path_buf();
+        let (start_lock_tx, start_lock_rx) = std::sync::mpsc::channel();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let collector = std::thread::spawn(move || {
+            start_lock_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the build callback starts the publication contention");
+            let _lock = target_seed::lock_store(&state_path).unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("test releases the store lock after publication returns");
+        });
+
+        let identity = identity("repo", "aaa");
+        let build_entered = std::cell::Cell::new(false);
+        let outcome = refresh_racing_with_publication_wait(
+            state.path(),
+            &identity,
+            || {},
+            1,
+            |stage| {
+                fs::create_dir(stage.join("target"))?;
+                fs::write(stage.join("target/artifact"), b"built")?;
+                assert!(stage.join("target/artifact").is_file());
+                build_entered.set(true);
+                start_lock_tx.send(()).map_err(io::Error::other)?;
+                locked_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(io::Error::other)?;
+                Ok(manifest(&identity))
+            },
+        );
+        release_tx.send(()).unwrap();
+        collector.join().unwrap();
+        assert!(
+            build_entered.get(),
+            "publication contention follows build entry"
+        );
+        assert_eq!(outcome.unwrap(), Refresh::Busy);
+
+        let store = target_seed::store_path(state.path());
+        assert_eq!(
+            fs::read_dir(store.join("generations")).unwrap().count(),
+            0,
+            "a contended publication is retried rather than partially published"
+        );
+        assert!(
+            fs::read_dir(store)
+                .unwrap()
+                .filter_map(std::result::Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().starts_with(".staging-"))
+        );
     }
 
     #[test]

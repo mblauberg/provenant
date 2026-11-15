@@ -164,9 +164,9 @@ pub(super) fn read_output_with(
         max_bytes: command.max_bytes,
     })?;
     let fallback = match &chunk {
-        OutputResult::Chunk { peer, .. } if matches!(command.part, Part::Result) => {
-            peer.planner_fallback.clone()
-        }
+        OutputResult::Chunk {
+            planner_fallback, ..
+        } if matches!(command.part, Part::Result) => planner_fallback.clone(),
         _ => None,
     };
     let chunk = if let Some(lines) = command.tail {
@@ -413,6 +413,8 @@ mod tests {
         for (returned, accepted) in [(attempt, true), (other, false)] {
             let chunk = OutputResult::Chunk {
                 peer: Default::default(),
+                length: None,
+                planner_fallback: None,
                 extra: [("future_peer_field".into(), json!(other))].into(),
                 target: AttemptTarget {
                     extra: Default::default(),

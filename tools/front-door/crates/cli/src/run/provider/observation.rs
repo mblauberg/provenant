@@ -279,6 +279,8 @@ pub(super) enum AccountObservationError {
     VersionUnavailable(String),
     #[error("{0}")]
     Other(String),
+    #[error("{0}")]
+    ConfiguredDirectory(String),
 }
 impl From<String> for AccountObservationError {
     fn from(message: String) -> Self {
@@ -296,7 +298,7 @@ impl AccountObservationError {
         match self {
             Self::AuthRequired(_) => SkipKind::AuthRequired,
             Self::VersionUnavailable(_) => SkipKind::Unavailable,
-            Self::Other(_) => SkipKind::Account,
+            Self::Other(_) | Self::ConfiguredDirectory(_) => SkipKind::Account,
         }
     }
 }
@@ -305,10 +307,27 @@ pub(super) fn default_directory_error(
     spec: &AdapterSpec,
     path: &Path,
     detail: String,
+    configured_by: Option<&str>,
 ) -> AccountObservationError {
-    if std::fs::symlink_metadata(path)
-        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-    {
+    let unavailable = std::fs::symlink_metadata(path)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+    if let Some(setting) = configured_by {
+        let action = if unavailable {
+            format!("check or unset {setting}, or restore that directory")
+        } else {
+            format!("check {setting} and access to that directory")
+        };
+        return AccountObservationError::ConfiguredDirectory(format!(
+            "configured {} account directory from {setting} is {}; {action}",
+            spec.name,
+            if unavailable {
+                "unavailable"
+            } else {
+                "unreadable"
+            },
+        ));
+    }
+    if unavailable {
         AccountObservationError::AuthRequired(format!(
             "default {} login is missing; run `{}`",
             spec.name, spec.login_hint

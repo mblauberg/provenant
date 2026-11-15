@@ -1684,16 +1684,24 @@ fn absent_default_login_differs_from_directory_integrity_errors()
     spec.login_hint = "fixture login";
     let missing = temp.path().join("missing");
     assert!(
-        default_directory_error(&spec, &missing, "not found".into())
+        default_directory_error(&spec, &missing, "not found".into(), None)
             .to_string()
             .contains("fixture")
     );
     assert_eq!(
-        default_directory_error(&spec, &missing, "not found".into()).skip_kind(),
+        default_directory_error(&spec, &missing, "not found".into(), None).skip_kind(),
         SkipKind::AuthRequired
     );
+    let configured =
+        default_directory_error(&spec, &missing, "not found".into(), Some("CODEX_HOME"));
+    let configured_message = configured.to_string();
+    assert_eq!(configured.skip_kind(), SkipKind::Account);
+    assert!(configured_message.contains("CODEX_HOME"));
+    assert!(!configured_message.contains(&missing.display().to_string()));
+    assert!(configured_message.contains("check or unset CODEX_HOME"));
+    assert!(!configured_message.contains("login is missing"));
     assert_eq!(
-        default_directory_error(&spec, temp.path(), "permission denied".into()).skip_kind(),
+        default_directory_error(&spec, temp.path(), "permission denied".into(), None).skip_kind(),
         SkipKind::Account
     );
     #[cfg(unix)]
@@ -1701,7 +1709,7 @@ fn absent_default_login_differs_from_directory_integrity_errors()
         let broken = temp.path().join("broken-link");
         std::os::unix::fs::symlink(&missing, &broken)?;
         assert_eq!(
-            default_directory_error(&spec, &broken, "broken link".into()).skip_kind(),
+            default_directory_error(&spec, &broken, "broken link".into(), None).skip_kind(),
             SkipKind::Account
         );
     }
@@ -1810,9 +1818,10 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
     let state = base.join("state");
     let project = base.join("repo");
     let git_home = base.join("git-home");
-    for directory in [&home, &state, &project, &git_home] {
+    for directory in [&home, &project, &git_home] {
         std::fs::create_dir(directory)?;
     }
+    provenant_os::fixture::private_state_dir(&state)?;
     let executor = provenant_os::exec::SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
     std::fs::write(project.join("subject"), "registered source")?;
@@ -1879,7 +1888,10 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
             &credentials,
             crate::run::SourceAdmissionMode::Registered,
         )?;
-        let prepared = source_cwd(&registry, &task)?;
+        assert_eq!(admission.path, source);
+        let prepared = source_cwd(&registry, &task).unwrap_or_else(|error| {
+            panic!("source {}: {error}", source.display())
+        });
         assert_eq!(prepared, admission.path);
         assert!(
             !admission
