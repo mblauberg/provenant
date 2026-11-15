@@ -3545,7 +3545,11 @@ pub(super) fn prepare_candidates(
                     config_root: roots.state.as_path(),
                     private_state: &private_state,
                     selected_native_home: account.as_ref().map(|account| account.directory()),
-                    native_home_required: !sandbox.effective,
+                    native_home_required: prior
+                        .applied_route
+                        .as_ref()
+                        .and_then(|applied| applied.sandbox.as_ref())
+                        .is_some_and(|sandbox| !sandbox.effective),
                 },
                 &launch_policy,
             ) {
