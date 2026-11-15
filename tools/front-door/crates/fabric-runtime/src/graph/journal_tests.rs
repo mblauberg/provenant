@@ -8,8 +8,7 @@ fn stored_fixture() -> StoredCheckpoint {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -49,7 +48,8 @@ fn stored_fixture() -> StoredCheckpoint {
     attempt.launch_actor = "33333333333333333333333333333333".into();
     attempt.settled = 1;
     journal.save(&checkpoint).unwrap();
-    let path = base
+    let path = root
+        .as_path()
         .join("fabric/graphs")
         .join(project.to_string())
         .join("graph-g-test.json");
@@ -61,8 +61,7 @@ fn landing_review_query_reads_typed_settlement_on_only_the_exact_head() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base);
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -99,8 +98,7 @@ fn watching_the_checkpoint_observes_publication_after_the_precommit_event_log() 
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base);
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -137,8 +135,7 @@ fn interrupted_peer_origin_publication_never_reuses_the_launch_name() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -179,15 +176,15 @@ fn terminal_checkpoint_with_superseded_header_is_retired() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
     drop(FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap());
-    let path = base
+    let path = root
+        .as_path()
         .join("fabric/graphs")
         .join(project.to_string())
         .join("graph-g-test.json");
@@ -225,8 +222,7 @@ fn interrupted_marker_and_sentinel_publications_converge() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -275,7 +271,8 @@ fn interrupted_marker_and_sentinel_publications_converge() {
     fixture.checkpoint.nodes[0].state = NodeState::Running;
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
-    let sentinel = base
+    let sentinel = root
+        .as_path()
         .join("fabric/graphs")
         .join(project.to_string())
         .join("pending/complete");
@@ -302,8 +299,7 @@ fn manual_resume_publishes_marker_before_reopened_checkpoint() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -381,8 +377,7 @@ fn an_ask_link_publishes_marker_before_pending_checkpoint() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -443,15 +438,17 @@ fn checkpoint_scale_fixture() -> (tempfile::TempDir, StateRoot, ProjectId) {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
     drop(FileJournal::open(&root, project, "initial", budget, &cancel, &clock).unwrap());
-    let directory = base.join("fabric/graphs").join(project.to_string());
+    let directory = root
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string());
     let mut stored: StoredCheckpoint = stored_fixture();
     for number in 0..5020 {
         let id = format!("graph-{number:04}");
@@ -552,8 +549,7 @@ fn checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -632,7 +628,8 @@ fn checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names() {
             .is_none()
     );
     assert!(
-        !base
+        !root
+            .as_path()
             .join("fabric/graphs")
             .join(project.to_string())
             .join("graph-g-test.lock")
@@ -656,8 +653,7 @@ fn checkpoint_collection_removes_matching_scratch_documents() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -724,8 +720,7 @@ fn rebuild_keeps_healthy_graph_pending_beside_oversized_checkpoint() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -737,7 +732,10 @@ fn rebuild_keeps_healthy_graph_pending_beside_oversized_checkpoint() {
     journal.bind(fixture.execution).unwrap();
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
-    let directory = base.join("fabric/graphs").join(project.to_string());
+    let directory = root
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string());
     std::fs::remove_dir_all(directory.join("pending")).unwrap();
     std::fs::File::create(directory.join("graph-bad.json"))
         .unwrap()
@@ -766,8 +764,7 @@ fn pending_markers_follow_saves_and_rebuild_after_loss() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -788,7 +785,8 @@ fn pending_markers_follow_saves_and_rebuild_after_loss() {
         FileJournal::pending_graph_ids(&root, project).unwrap(),
         ["g-test"]
     );
-    let markers = base
+    let markers = root
+        .as_path()
         .join("fabric/graphs")
         .join(project.to_string())
         .join("pending");
@@ -820,7 +818,8 @@ fn pending_markers_follow_saves_and_rebuild_after_loss() {
     drop(journal);
     std::fs::remove_file(markers.join("complete")).unwrap();
     std::fs::write(
-        base.join("fabric/graphs")
+        root.as_path()
+            .join("fabric/graphs")
             .join(project.to_string())
             .join("graph-g-test.json"),
         b"invalid",
@@ -928,8 +927,7 @@ fn assert_delivery_retry_reopens_matching_attempt(outcome: AttemptOutcome) {
     let temp = crate::test_support::tempdir().expect("state fixture");
     let base = std::fs::canonicalize(temp.path()).expect("absolute state");
     std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).expect("private state");
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).expect("state root");
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -995,10 +993,7 @@ fn tick_reports_undecodable_checkpoint_once_and_recovers() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.join("state"));
-    std::fs::create_dir(base.join("state")).unwrap();
-    std::fs::set_permissions(base.join("state"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -1060,8 +1055,7 @@ fn tick_reports_undecodable_undelivered_pr_with_skipped_node() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -1075,7 +1069,8 @@ fn tick_reports_undecodable_undelivered_pr_with_skipped_node() {
     journal.bind(fixture.execution).unwrap();
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
-    let path = base
+    let path = root
+        .as_path()
         .join("fabric/graphs")
         .join(project.to_string())
         .join("graph-g-test.json");
@@ -1095,10 +1090,7 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
     let root = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(root.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.join("state"));
-    std::fs::create_dir(base.join("state")).unwrap();
-    std::fs::set_permissions(base.join("state"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -1169,10 +1161,7 @@ fn schema_two_document_with_optional_fields_absent_reloads() {
     let root = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(root.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.join("state"));
-    std::fs::create_dir(base.join("state")).unwrap();
-    std::fs::set_permissions(base.join("state"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -1217,10 +1206,7 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
     let root = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(root.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.join("state"));
-    std::fs::create_dir(base.join("state")).unwrap();
-    std::fs::set_permissions(base.join("state"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -1388,15 +1374,7 @@ fn bound_attempt_manifest_survives_file_journal_reopen_and_reattachment() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base_dir = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs =
-        provenant_core::RootInputs::new(base_dir.join("home"), base_dir.join("checkout"));
-    inputs.state_dir = Some(base_dir.join("state"));
-    std::fs::create_dir(base_dir.join("state")).unwrap();
-    std::fs::set_permissions(
-        base_dir.join("state"),
-        std::fs::Permissions::from_mode(0o700),
-    )
-    .unwrap();
+    let inputs = provenant_test_support::root_inputs(&base_dir).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -1513,15 +1491,7 @@ fn implicit_writer_binding_reattaches_without_resolving_the_moved_head() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let directory = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs =
-        provenant_core::RootInputs::new(directory.join("home"), directory.join("checkout"));
-    inputs.state_dir = Some(directory.join("state"));
-    std::fs::create_dir(directory.join("state")).unwrap();
-    std::fs::set_permissions(
-        directory.join("state"),
-        std::fs::Permissions::from_mode(0o700),
-    )
-    .unwrap();
+    let inputs = provenant_test_support::root_inputs(&directory).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -1582,15 +1552,15 @@ fn retired_checkpoint_cleanup_is_verified_and_failure_keeps_record() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
     drop(FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap());
-    let path = base
+    let path = root
+        .as_path()
         .join("fabric/graphs")
         .join(project.to_string())
         .join("graph-g-test.json");
@@ -1635,8 +1605,7 @@ fn prompts_are_stored_by_digest_and_collected_with_the_graph() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -1728,9 +1697,7 @@ mod launch_recovery {
             let temp = crate::test_support::tempdir().unwrap();
             let base = std::fs::canonicalize(temp.path()).unwrap();
             std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let mut inputs =
-                provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-            inputs.state_dir = Some(base.clone());
+            let inputs = provenant_test_support::root_inputs(&base).unwrap();
             let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
             Self {
                 _temp: temp,

@@ -812,13 +812,9 @@ fn fixture_task() -> GraphDocument {
 fn a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit() {
     use provenant_core::{Clock, ProjectId};
     use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
-    use std::os::unix::fs::PermissionsExt;
     let directory = crate::test_support::tempdir().unwrap();
     let base = std::fs::canonicalize(directory.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.join("state"));
-    std::fs::create_dir(base.join("state")).unwrap();
-    std::fs::set_permissions(base.join("state"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -907,8 +903,7 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
     let temp = crate::test_support::tempdir().unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
     std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();

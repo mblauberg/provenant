@@ -517,8 +517,7 @@ fn status_and_replay_agree_on_persisted_partial_composite() {
     use provenant_core::Clock;
     let temp = crate::test_support::tempdir().unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver).unwrap();
     let project = provenant_core::ProjectId::from_bytes([1; 16]);
     let clock = provenant_os::clock::SystemClock::new();

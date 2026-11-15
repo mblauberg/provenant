@@ -443,8 +443,7 @@ fn a_cancel_after_checkpoint_reload_closes_every_linked_inbox_request() {
     let temp = crate::test_support::tempdir().unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
     std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([2; 16]);
     let clock = SystemClock::new();

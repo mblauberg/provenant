@@ -6,6 +6,26 @@ use std::{
 
 static SKIP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Keep the fixture's state outside both its home and its checkout. A state
+/// root enclosing home would also enclose protected credentials and old state.
+/// The caller owns the temporary base; each root is an existing private directory.
+pub fn root_inputs(base: &std::path::Path) -> std::io::Result<provenant_core::RootInputs> {
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    let state = base.join("state");
+    for path in [&inputs.home, &inputs.checkout, &state] {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(path)?;
+    }
+    inputs.state_dir = Some(state);
+    Ok(inputs)
+}
+
 /// Poll an observation until it satisfies a condition, reporting the last value
 /// when the deadline expires.
 #[allow(clippy::disallowed_methods)] // Test-only polling has a bounded deadline.

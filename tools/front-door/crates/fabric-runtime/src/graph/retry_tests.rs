@@ -205,8 +205,7 @@ fn redo_container_after_checkpoint_crash(
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([37; 16]);
     let clock = SystemClock::new();
@@ -1435,8 +1434,7 @@ fn retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([39; 16]);
     let clock = SystemClock::new();
@@ -2058,8 +2056,7 @@ fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([42; 16]);
     let clock = SystemClock::new();
@@ -2155,8 +2152,7 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([42; 16]);
     let clock = SystemClock::new();

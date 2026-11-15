@@ -782,6 +782,9 @@ dependencies = [
 [[package]]
 name = "provenant-test-support"
 version = "1.11.2"
+dependencies = [
+ "provenant-core",
+]
 
 [[package]]
 name = "provenant-workflow"

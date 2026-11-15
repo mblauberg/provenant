@@ -7,8 +7,7 @@ fn graph_quality_reports_missing_checkpoint_without_failing()
     use provenant_records::{AttemptFact, AttemptOutcome, Usage};
     let temp = tempfile::tempdir()?;
     let base = std::fs::canonicalize(temp.path())?;
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("project"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base)?;
     let root = provenant_core::StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
     let project = ProjectId::from_bytes([3; 16]);
     let fact = AttemptFact {

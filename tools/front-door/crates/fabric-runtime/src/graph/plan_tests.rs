@@ -1,7 +1,6 @@
 use super::*;
 use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn fragments_cannot_inject_persisted_topology_through_extra_fields() {
@@ -982,10 +981,7 @@ fn fenced_handoff_examples_do_not_control_continuations() {
 fn refused_planner_fragment_retries_after_file_journal_reopen() {
     let directory = crate::test_support::tempdir().unwrap();
     let base = std::fs::canonicalize(directory.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.join("state"));
-    std::fs::create_dir(base.join("state")).unwrap();
-    std::fs::set_permissions(base.join("state"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
