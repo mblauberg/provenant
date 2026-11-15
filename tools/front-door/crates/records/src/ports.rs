@@ -143,9 +143,10 @@ mod tests {
                 case
             );
         }
+        // Wrong types are refused; unknown fields are tolerated (forward_compatibility).
         for malformed in [
             serde_json::json!({"argv":[1],"exit_codes":{"success":[0],"unknown":[],"other":"refused"}}),
-            serde_json::json!({"argv":["check"],"exit_codes":{"success":[0],"unknown":[],"other":"unknown","future":true}}),
+            serde_json::json!({"argv":["check"],"exit_codes":{"success":[0],"unknown":[],"other":"maybe"}}),
         ] {
             assert!(serde_json::from_value::<PortCommand>(malformed).is_err());
         }

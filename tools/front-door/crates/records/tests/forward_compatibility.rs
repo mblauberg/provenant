@@ -274,7 +274,6 @@ cases! {
     skipped_route_preserves_digest: run::SkippedRoute => skipped_route();
     artifact_record_preserves_digest: run::ArtifactRecord => artifact();
     write_grant_record_preserves_digest: run::WriteGrantRecord => write_grant();
-    lane_wait_preserves_digest: run::LaneWait => json!({"attempt_id":ID,"lane_class":"writer","waiting_for":{"kind":"provider_silence","silent_for_ms":5}});
     admission_ticket_preserves_digest: run::AdmissionTicket => json!({"schema_version":1,"operation_id":"operation","attempt_id":ID,"project_id":ID,"sequence":1,"generation":1,"active":true,"lane_class":"writer","memory_floor_basis_points":1000,"startup_spacing_ms":1,"run_concurrency":1,"runtime_seconds":60,"admission_deadline":NOW});
     run_event_preserves_digest: run::RunEvent => json!({"schema_version":1,"sequence":1,"project_id":ID,"attempt_id":ID,"revision":1,"change":terminal_state(),"trace":{}});
 
@@ -342,6 +341,18 @@ fn attempt_record_preserves_digest() -> TestResult {
     add_future_fields(&mut value);
     value["key"] = key;
     assert_preserved::<run::AttemptRecord>("run-attempt", value)
+}
+
+#[test]
+fn lane_wait_preserves_digest() -> TestResult {
+    let mut value = normalise::<run::LaneWait>(
+        json!({"attempt_id":ID,"lane_class":"writer","waiting_for":{"kind":"provider_silence","silent_for_ms":5}}),
+    )?;
+    // LaneWaitReason is a closed display sum; like WorkKey it discards unknown fields.
+    let reason = value["waiting_for"].clone();
+    add_future_fields(&mut value);
+    value["waiting_for"] = reason;
+    assert_preserved::<run::LaneWait>("lane_wait", value)
 }
 
 #[test]
@@ -551,7 +562,7 @@ fn stored_records_decode_with_a_future_field() -> TestResult {
     port["exit_codes"]["future_field"] = json!(1);
     let decoded: ports::PortCommand = serde_json::from_value(port)?;
     assert_eq!(decoded.argv, ["true"]);
-    let mut publisher = json!({"argv":["publish"],"unknown_exit_code":3});
+    let mut publisher = json!({"argv":["publish"],"unknown_exit_code":3,"timeout_seconds":60});
     publisher["future_field"] = json!({"nested":true});
     let decoded: landing::RepositoryCommand = serde_json::from_value(publisher)?;
     assert_eq!(decoded.unknown_exit_code, 3);

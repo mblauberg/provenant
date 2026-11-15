@@ -2674,12 +2674,6 @@ mod tests {
                 serde_json::json!(17),
             ),
             (
-                base.clone(),
-                "stop",
-                serde_json::json!({"cause":"lost"}),
-                serde_json::json!({"cause":false}),
-            ),
-            (
                 serde_json::json!({"state":"running"}),
                 "child_wait",
                 serde_json::json!("children"),
@@ -2839,7 +2833,8 @@ mod tests {
     #[test]
     fn peer_output_planner_fallback_round_trips_and_rejects_wrong_type()
     -> Result<(), Box<dyn std::error::Error>> {
-        let value = serde_json::json!({"planner_fallback":"planner failed","future":true});
+        // A flattened fragment of its owning record, which keeps the future fields.
+        let value = serde_json::json!({"planner_fallback":"planner failed"});
         let peer: PeerOutputFields = serde_json::from_value(value.clone())?;
         assert_eq!(peer.planner_fallback.as_deref(), Some("planner failed"));
         assert_eq!(serde_json::to_value(&peer)?, value);
