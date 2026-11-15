@@ -1279,7 +1279,7 @@ mod tests {
         let primary_key = provenant_run::target_seed::project_key(&primary_common);
         let retry = registered_seed_projects(
             &[primary_common, invalid.clone(), separate_git],
-            &[primary_key.clone()],
+            std::slice::from_ref(&primary_key),
             &executor,
             &git,
             &seed_git_environment(),
@@ -1397,13 +1397,16 @@ mod tests {
         let root = temp.path().canonicalize().unwrap();
         let directory = provenant_config::private_directory(&root, true).unwrap();
         let now = WallTime::from_micros(1_000_000).unwrap();
-        let mut queue = SeedQueue::default();
-        queue.retry = Some(SeedRequest::busy(
-            vec!["project-a".into()],
-            Some("project-b failed previously".into()),
-        ));
-        queue.retry_at =
-            Some(WallTime::from_micros(now.as_micros() - SEED_WORK_RETRY_MICROS).unwrap());
+        let queue = SeedQueue {
+            retry: Some(SeedRequest::busy(
+                vec!["project-a".into()],
+                Some("project-b failed previously".into()),
+            )),
+            retry_at: Some(
+                WallTime::from_micros(now.as_micros() - SEED_WORK_RETRY_MICROS).unwrap(),
+            ),
+            ..Default::default()
+        };
         write_seed_queue(&directory, &queue).unwrap();
 
         // The daily full request arrives after a tick has observed the old
@@ -1436,12 +1439,14 @@ mod tests {
         let root = temp.path().canonicalize().unwrap();
         let directory = provenant_config::private_directory(&root, true).unwrap();
         let now = WallTime::from_micros(1_500_000).unwrap();
-        let mut queue = SeedQueue::default();
-        queue.active = Some(SeedRequest::busy(
-            vec!["project-a".into()],
-            Some("project-b failed".into()),
-        ));
-        queue.active_at = Some(now);
+        let queue = SeedQueue {
+            active: Some(SeedRequest::busy(
+                vec!["project-a".into()],
+                Some("project-b failed".into()),
+            )),
+            active_at: Some(now),
+            ..Default::default()
+        };
         write_seed_queue(&directory, &queue).unwrap();
         let mut worker = Some(
             directory
@@ -1555,9 +1560,11 @@ mod tests {
         let root = temp.path().canonicalize().unwrap();
         let directory = provenant_config::private_directory(&root, true).unwrap();
         let now = WallTime::from_micros(3_000_000).unwrap();
-        let mut queue = SeedQueue::default();
-        queue.active = Some(SeedRequest::full());
-        queue.active_at = Some(now);
+        let queue = SeedQueue {
+            active: Some(SeedRequest::full()),
+            active_at: Some(now),
+            ..Default::default()
+        };
         write_seed_queue(&directory, &queue).unwrap();
         write_result(&directory, SEED_RESULT, "tick-seed", now, "running", None).unwrap();
         let worker = directory
