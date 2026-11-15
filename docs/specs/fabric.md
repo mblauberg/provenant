@@ -191,9 +191,12 @@ provider interrupt or resumed continuation; graph/run status owns those later
 outcomes. Status exposes `queued`, `resumed` or `not_continued`,
 the stable operation and message IDs, and the successor when known. A
 launcher’s typed `launched` receipt records admission but leaves the status
-`queued`. `resumed` requires validated child evidence that the provider
-acknowledged the exact predecessor session on the same provider, model and
-account route. A later terminal mismatch or incomplete proof changes that
+`queued`. `resumed` requires the child's observed session to match the
+predecessor session and its sealed applied route to retain the provider, model
+and account. Optional model telemetry keeps the configured identity policy:
+missing telemetry alone does not negate the session acknowledgement, while a
+known contradiction fences continuation. A later terminal session mismatch or
+incomplete session/capture proof changes that
 interim status to `not_continued`; Run retains the earlier live acknowledgement
 fact with the terminal disposition. Terminal matching evidence finalises
 `resumed`. The disposition is durable in Run even if child evidence is later
