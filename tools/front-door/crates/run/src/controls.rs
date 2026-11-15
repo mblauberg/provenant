@@ -4092,7 +4092,10 @@ impl RunStore {
         if !replay && writer.is_none() {
             self.check_continuation_writer(input.prior, call)?;
         }
-        let _retention = if replay || fresh.is_some() || parent_publication_locked {
+        let _retention = if replay || fresh.is_some() {
+            None
+        } else if parent_publication_locked {
+            self.ensure_provider_state_not_expired(input.prior)?;
             None
         } else {
             Some(self.retain_provider_state(input.prior, call)?)
