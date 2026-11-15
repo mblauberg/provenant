@@ -723,6 +723,7 @@ pub fn resume_pending_retirements(
                     let registered = inventory.iter().any(|entry| entry.path == path);
                     let old_incarnation_gone = if registered {
                         verify_worktree(context.repo, &path)
+                            .map_err(WorktreeError::from)
                             .and_then(|verified| super::worktree_subject(verified.repo()))
                             .is_ok_and(|current| current != *subject)
                     } else {
@@ -764,11 +765,7 @@ pub fn resume_pending_retirements(
                         continue;
                     }
                     let Some(evidence) = fresh_reference_retirement_evidence(
-                        context,
-                        &record,
-                        &reference,
-                        feeds,
-                        cancel,
+                        context, &record, &reference, feeds, cancel,
                     )?
                     else {
                         continue;
@@ -813,10 +810,7 @@ pub fn resume_pending_retirements(
                             return Err(WorktreeError::IdentityChanged);
                         }
                         let fresh = fresh_durable_retirement_evidence(
-                            context,
-                            &record,
-                            &reference,
-                            cancel,
+                            context, &record, &reference, cancel,
                         )?
                         .ok_or(WorktreeError::RegistrationUnconfirmed)?;
                         if record.accepts_completion_evidence(&outcome.step, &fresh) {
@@ -1877,7 +1871,8 @@ fn collect_impl(
             }
             if !report.removals.iter().any(|r| {
                 (r.subject.worktree_path().as_deref() == Some(lane.path.as_path())
-                    || (r.subject.kind == SubjectKind::Path && Path::new(&r.subject.id) == lane.path))
+                    || (r.subject.kind == SubjectKind::Path
+                        && Path::new(&r.subject.id) == lane.path))
                     && r.tip == lane.head
             }) {
                 let cause = match &error {

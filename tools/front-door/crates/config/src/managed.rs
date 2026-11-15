@@ -1365,7 +1365,7 @@ pub fn install(
     if receipt_bytes.len() as u64 > Limits::CONFIG.max_bytes {
         return Err(InstallError::Manifest("receipt byte bound"));
     }
-    let mut actions = plan.actions.clone();
+    let actions = plan.actions.clone();
     reporter.preview(&actions).map_err(InstallError::Preview)?;
     reporter
         .manual_includes(&plan.manual_includes)

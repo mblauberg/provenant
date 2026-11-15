@@ -221,7 +221,7 @@ pub fn legacy_harness_selectors(
                 || toml_legacy_selector(target.harness, selector))
                 && get_selector(&bytes, selector)?.is_some()
             {
-                found.push((target.config_file.clone(), selector));
+                found.push((target.config_file.clone(), *selector));
             }
         }
     }

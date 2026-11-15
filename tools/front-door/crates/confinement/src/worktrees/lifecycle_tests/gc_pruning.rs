@@ -3,8 +3,7 @@ use super::*;
 #[test]
 fn interrupted_linked_retirement_replays_its_reference_step() -> Result<(), Box<dyn Error>> {
     use provenant_records::custody::{
-        RemovalEvidence, RetirementDecision, RetirementIntent, RetirementStep,
-        RetirementStepState,
+        RemovalEvidence, RetirementDecision, RetirementIntent, RetirementStep, RetirementStepState,
     };
 
     struct UnavailableForge<'a>(&'a HostRetirementFixture);
@@ -52,7 +51,10 @@ fn interrupted_linked_retirement_replays_its_reference_step() -> Result<(), Box<
         .map_err(|error| io::Error::other(error.to_string()))?
         .as_ref()
         .ok_or("fixture lane has no owner")?;
-    let reference = owner.reference.clone().ok_or("fixture lane has no ref owner")?;
+    let reference = owner
+        .reference
+        .clone()
+        .ok_or("fixture lane has no ref owner")?;
     let reference_name = GitRefName::new(&reference.reference)?;
     let worktree = acquire_worktree_subject_at(&context, &lane.path)?;
     let evidence = gc_landing_evidence(&fixture, lane.head)?;
@@ -71,19 +73,23 @@ fn interrupted_linked_retirement_replays_its_reference_step() -> Result<(), Box<
         .ok_or("fixture retirement has no durable owner")?;
     let retirement_id = record.id.clone();
 
-    let path = lane.path.to_str().ok_or("fixture worktree path is not UTF-8")?;
+    let path = lane
+        .path
+        .to_str()
+        .ok_or("fixture worktree path is not UTF-8")?;
     let removed = fixture.run(&["worktree", "remove", "--", path])?;
     assert_eq!(removed.termination, Termination::Exit(0));
     custody.advance_retirement(
         &record,
-        RetirementStep::Worktree {
-            subject: worktree,
-        },
+        RetirementStep::Worktree { subject: worktree },
         RetirementStepState::Completed {
             evidence: decision.evidence().clone(),
         },
     )?;
-    assert_eq!(ref_tip(&context, &reference_name, &cancel())?, Some(lane.head));
+    assert_eq!(
+        ref_tip(&context, &reference_name, &cancel())?,
+        Some(lane.head)
+    );
 
     let unavailable = UnavailableForge(&custody);
     let pending = resume_pending_retirements(&context, &custody, &unavailable, &cancel())?;
@@ -93,17 +99,22 @@ fn interrupted_linked_retirement_replays_its_reference_step() -> Result<(), Box<
                 && !matches!(&outcome.state, RetirementStepState::Completed { .. })
         })
     }));
-    assert_eq!(ref_tip(&context, &reference_name, &cancel())?, Some(lane.head));
+    assert_eq!(
+        ref_tip(&context, &reference_name, &cancel())?,
+        Some(lane.head)
+    );
 
     let resumed = resume_pending_retirements(&context, &custody, &custody, &cancel())?;
     let completed = resumed
         .iter()
         .find(|record| record.id == retirement_id)
         .ok_or("pending retirement was not returned")?;
-    assert!(completed.outcomes.iter().all(|outcome| matches!(
-        &outcome.state,
-        RetirementStepState::Completed { .. }
-    )));
+    assert!(
+        completed
+            .outcomes
+            .iter()
+            .all(|outcome| matches!(&outcome.state, RetirementStepState::Completed { .. }))
+    );
     assert_eq!(ref_tip(&context, &reference_name, &cancel())?, None);
 
     fixture.run(&["branch", "d12-explicit-ref"])?;
@@ -128,16 +139,17 @@ fn interrupted_linked_retirement_replays_its_reference_step() -> Result<(), Box<
         })?
         .ok_or("explicit ref retirement has no durable owner")?;
     let explicit_id = explicit.id;
-    let explicit_resumed =
-        resume_pending_retirements(&context, &custody, &custody, &cancel())?;
+    let explicit_resumed = resume_pending_retirements(&context, &custody, &custody, &cancel())?;
     let explicit_completed = explicit_resumed
         .iter()
         .find(|record| record.id == explicit_id)
         .ok_or("explicit ref retirement was not returned")?;
-    assert!(explicit_completed.outcomes.iter().all(|outcome| matches!(
-        &outcome.state,
-        RetirementStepState::Completed { .. }
-    )));
+    assert!(
+        explicit_completed
+            .outcomes
+            .iter()
+            .all(|outcome| matches!(&outcome.state, RetirementStepState::Completed { .. }))
+    );
     assert_eq!(ref_tip(&context, &explicit_name, &cancel())?, None);
     Ok(())
 }

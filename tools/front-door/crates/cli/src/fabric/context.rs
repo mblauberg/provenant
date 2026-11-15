@@ -195,22 +195,37 @@ pub fn acquire_custody(
     }
 }
 /// Observe a checkout identity without creating state during previews.
-pub fn inspect_checkout_subject(roots: &Roots, path: &Path) -> Result<Option<provenant_records::custody::Subject>, EdgeError> {
+pub fn inspect_checkout_subject(
+    roots: &Roots,
+    path: &Path,
+) -> Result<Option<provenant_records::custody::Subject>, EdgeError> {
     let repo = custody_checkout(roots, path)?;
     match provenant_confinement::worktrees::worktree_subject(&repo) {
         Ok(subject) => Ok(Some(subject)),
-        Err(provenant_confinement::worktrees::WorktreeError::Filesystem(error)) if error.is_not_found() => Ok(None),
+        Err(provenant_confinement::worktrees::WorktreeError::Filesystem(error))
+            if error.is_not_found() =>
+        {
+            Ok(None)
+        }
         Err(error) => Err(error.into()),
     }
 }
 
 /// Acquire through the verified Git boundary shared by creation and launch.
-pub fn checkout_subject(roots: &Roots, path: &Path) -> Result<provenant_records::custody::Subject, EdgeError> {
+pub fn checkout_subject(
+    roots: &Roots,
+    path: &Path,
+) -> Result<provenant_records::custody::Subject, EdgeError> {
     let repo = custody_checkout(roots, path)?;
-    Ok(provenant_confinement::worktrees::acquire_worktree_subject(&repo)?)
+    Ok(provenant_confinement::worktrees::acquire_worktree_subject(
+        &repo,
+    )?)
 }
 
-fn custody_checkout(roots: &Roots, path: &Path) -> Result<provenant_confinement::repo::VerifiedRepo, EdgeError> {
+fn custody_checkout(
+    roots: &Roots,
+    path: &Path,
+) -> Result<provenant_confinement::repo::VerifiedRepo, EdgeError> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime};
     let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
     let runtime = UtilityRuntime::read_only(git, roots.state.as_path())?;

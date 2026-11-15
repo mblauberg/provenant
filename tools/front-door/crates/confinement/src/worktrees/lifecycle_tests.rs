@@ -37,7 +37,9 @@ pub(super) fn worktree_subject_matches_path(
     path: &Path,
 ) -> bool {
     match subject.kind {
-        provenant_records::custody::SubjectKind::Worktree => subject.worktree_path().as_deref() == Some(path),
+        provenant_records::custody::SubjectKind::Worktree => {
+            subject.worktree_path().as_deref() == Some(path)
+        }
         provenant_records::custody::SubjectKind::Path => Path::new(&subject.id) == path,
         _ => false,
     }
@@ -844,12 +846,20 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
             path.to_str().ok_or("path")?,
         ])?;
         if scenario == "detached-unique" {
-            run_in_worktree(&fixture, &path, &["commit", "--allow-empty", "-m", "unique detached work"])?;
+            run_in_worktree(
+                &fixture,
+                &path,
+                &["commit", "--allow-empty", "-m", "unique detached work"],
+            )?;
             run_in_worktree(&fixture, &path, &["checkout", "--detach"])?;
             fixture.run(&["branch", "-D", "native-no-state"])?;
         }
         let lanes = list(&context, &cancel())?;
-        let detached_tip = lanes.iter().find(|lane| lane.path == path).ok_or("missing foreign checkout")?.head;
+        let detached_tip = lanes
+            .iter()
+            .find(|lane| lane.path == path)
+            .ok_or("missing foreign checkout")?
+            .head;
         let retirement = HostRetirementFixture::new(&test_context)?;
         let state_name = state_dir_name(&path);
         assert!(
@@ -940,7 +950,10 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck_and_re
         if scenario == "detached-unique" {
             assert!(!branch_exists(&fixture, "native-no-state"));
             let preserved = GitRefName::preserved_tip(detached_tip.to_string())?;
-            assert_eq!(ref_tip(&context, &preserved, &cancel())?, Some(detached_tip));
+            assert_eq!(
+                ref_tip(&context, &preserved, &cancel())?,
+                Some(detached_tip)
+            );
         } else {
             assert!(branch_exists(&fixture, "native-no-state"));
         }

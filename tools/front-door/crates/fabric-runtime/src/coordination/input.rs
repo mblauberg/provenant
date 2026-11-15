@@ -237,7 +237,10 @@ fn path_text(path: &std::path::Path, field_path: &str) -> Result<(), InputError>
 
 fn subject(subject: &Subject) -> Result<(), InputError> {
     if subject.kind == provenant_records::custody::SubjectKind::Worktree {
-        return subject.worktree_identity().map(|_| ()).ok_or_else(|| field("subject.id"));
+        return subject
+            .worktree_identity()
+            .map(|_| ())
+            .ok_or_else(|| field("subject.id"));
     }
     bounded_text(
         &subject.id,
@@ -624,7 +627,11 @@ mod tests {
         for &kind in provenant_records::custody::SubjectKind::ALL {
             let input = ClaimInput::Renew {
                 extra: Default::default(),
-                subject: if kind == provenant_records::custody::SubjectKind::Worktree { Subject::worktree("/fixture/worktree", "fixture-1") } else { Subject::new(kind, "item") },
+                subject: if kind == provenant_records::custody::SubjectKind::Worktree {
+                    Subject::worktree("/fixture/worktree", "fixture-1")
+                } else {
+                    Subject::new(kind, "item")
+                },
             };
             let encoded = serde_json::to_value(&input).unwrap();
             let read: ClaimInput = serde_json::from_value(encoded).unwrap();
