@@ -15,6 +15,16 @@ procedure.
 <!-- REMOVED_CLI_START -->
 | Removed spelling | Replacement |
 |---|---|
+| `provenant dispatch --prompt-file` | provenant run TEMPLATE --brief-file PATH |
+| `provenant dispatch --prompt-stdin` | provenant run TEMPLATE --brief-file - |
+| `provenant resume --no-fallback` | provenant retry NAME/NODE#N |
+| `provenant run --prompt-file` | provenant run TEMPLATE --brief-file PATH |
+| `provenant run --prompt-stdin` | provenant run TEMPLATE --brief-file - |
+| `provenant retry --no-fallback` | provenant retry NAME/NODE#N |
+| `provenant retry --prompt-file` | provenant retry NAME/NODE --brief TEXT |
+| `provenant retry --prompt-stdin` | provenant retry NAME/NODE --brief TEXT |
+| `provenant retry --operation-id` | no direct equivalent; use `provenant retry NAME/NODE#N` |
+| `provenant output --host` | no direct equivalent; use `provenant output NAME` |
 | `provenant dispatch` | provenant run TEMPLATE BRIEF |
 | `provenant lanes` | provenant status |
 | `provenant resume` | provenant retry NAME/NODE |
@@ -25,19 +35,23 @@ procedure.
 | `provenant review` | provenant run review BRIEF |
 | `provenant stats` | provenant telemetry cost --by node |
 | `provenant pr land` | provenant land NUMBER --wait |
+| `provenant fabric claim` | provenant adopt KIND:ID or provenant release KIND:ID |
+| `provenant land --batch` | provenant land NUMBER [NUMBER ...] |
 | `provenant fabric graph` | provenant status NAME |
 | `provenant fabric mcp` | provenant fabric |
 | `provenant fabric_graph` | provenant run TEMPLATE BRIEF |
 | `provenant quota usage` | provenant telemetry cost --by account |
 | `provenant config migrate` | provenant config check |
-| `provenant resume --no-fallback` | provenant retry NAME/NODE#N |
-| `provenant retry --no-fallback` | provenant retry NAME/NODE#N |
-| `provenant land --batch` | provenant land NUMBER [NUMBER ...] |
+| `provenant telemetry backfill` | nothing; this binary reads no format-1 store |
 | `provenant run --use` | provenant run TEMPLATE BRIEF |
+| `provenant run --tier` | provenant run TEMPLATE BRIEF --route ROUTE |
+| `provenant run --operation-id` | provenant run TEMPLATE BRIEF --name NAME |
 | `provenant run --wait` | provenant wait NAME |
 | `provenant status --wait` | provenant wait NAME |
+| `provenant status --target` | provenant status NAME or provenant wait --pr NUMBER |
 | `provenant status --until` | provenant wait NAME --any |
 | `provenant status --follow` | provenant wait NAME --follow |
+| `provenant status --stats` | provenant telemetry cost NAME --by node |
 | `provenant status --by` | provenant telemetry cost NAME --by node |
 | `provenant status --id` | provenant status NAME |
 | `provenant stop --operation-id` | provenant stop NAME |
@@ -46,7 +60,12 @@ procedure.
 | `provenant retry --wait` | provenant wait NAME |
 | `provenant output --trace` | provenant trace NAME |
 | `provenant reconcile --id` | provenant reconcile NAME |
+| `provenant telemetry stats --run-id` | provenant telemetry cost NAME |
+| `provenant telemetry stats --by` | provenant telemetry cost --by route |
+| `provenant telemetry stats --detail` | provenant telemetry cost NAME |
+| `provenant telemetry trace --run` | provenant telemetry trace NAME |
 | `provenant pr status --wait` | provenant pr watch NUMBER |
+| `provenant steer --text-stdin` | provenant steer TARGET --brief-file - |
 <!-- REMOVED_CLI_END -->
 - **Environment.** `PROVENANT_SESSION_STATE` was removed in 1.x: session
   checkpoints are keyed by the host session ID. `PROVENANT_BUILD_WAIT_SECS`
