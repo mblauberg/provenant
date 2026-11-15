@@ -1,17 +1,10 @@
 use super::*;
-use provenant_core::{MonoTime, PathResolver, RootInputs, TimeError, WallTime};
+use provenant_core::{MonoTime, TimeError, WallTime};
+use provenant_test_support::{IdentityPathResolver, test_roots};
 use std::path::{Path, PathBuf};
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
-struct Resolver;
-impl PathResolver for Resolver {
-    fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
-        Ok(path.to_owned())
-    }
-}
 fn roots(path: &Path) -> Result<Roots> {
-    let mut inputs = RootInputs::new(path.join("home"), path.join("checkout"));
-    inputs.state_dir = Some(path.join("state"));
-    Ok(inputs.resolve(&Resolver)?)
+    Ok(test_roots(path)?.resolve(&IdentityPathResolver)?)
 }
 fn tempdir() -> Result<(tempfile::TempDir, PathBuf)> {
     let temp = tempfile::tempdir()?;
@@ -42,16 +35,19 @@ fn event_line(
         session: session.map(str::to_owned),
         config: None,
         wait,
+        extra: Default::default(),
     };
     Ok(format!("{}\n", serde_json::to_string(&event)?))
 }
 
 #[test]
-fn usage_log_read_errors_include_the_os_cause() {
+fn usage_log_read_errors_preserve_os_errno() {
     let error = UsageError::Io(std::io::Error::from_raw_os_error(13));
-    let rendered = error.to_string();
     assert_eq!(error.code(), "io");
-    assert!(rendered.contains("os error 13"));
+    let errno = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .and_then(std::io::Error::raw_os_error);
+    assert_eq!(errno, Some(13));
 }
 
 /// A clock fixed at one wall time.
@@ -88,6 +84,23 @@ fn every_account_identity_case_round_trips() -> Result {
         let decoded: AccountIdentity = serde_json::from_slice(&bytes)?;
         assert_eq!(decoded, identity);
     }
+    Ok(())
+}
+
+#[test]
+fn usage_event_retains_additive_fields_through_bounded_decode() -> Result {
+    let mut event: serde_json::Value = serde_json::from_str(&event_line(
+        "root",
+        0,
+        "2026-10-26T00:00:00Z",
+        Some("session"),
+        Some(ProjectId::from_bytes([1; 16])),
+        Some(true),
+    )?)?;
+    event["future_event"] = serde_json::json!(1);
+    event["trace"]["future_trace"] = serde_json::json!(2);
+    event["account_identity"]["future_identity"] = serde_json::json!(3);
+    crate::assert_record_round_trip::<super::Event>(event);
     Ok(())
 }
 

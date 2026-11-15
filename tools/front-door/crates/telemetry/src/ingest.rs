@@ -9,7 +9,7 @@
 //! no operation meets a whole-store size.
 use crate::usage::{Identity, UnknownIdentityReason};
 use crate::{claude::Raw, segments};
-use provenant_core::Roots;
+use provenant_core::{Clock, MonoTime, Roots};
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
 use provenant_records::AccountIdentity;
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,7 @@ use std::{
     ffi::OsStr,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    time::{Instant, SystemTime},
+    time::SystemTime,
 };
 use thiserror::Error;
 
@@ -119,6 +119,8 @@ pub struct Row {
     pub reasoning_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply: Option<crate::signals::ReplyContext>,
+    #[serde(default, flatten)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 impl Row {
@@ -195,8 +197,8 @@ pub struct Request<'a> {
     pub provider: Option<&'a str>,
     /// Skip files not written since and messages stamped before.
     pub since: Option<jiff::Timestamp>,
-    /// Stop reading at this instant. Rows read before it are still written.
-    pub deadline: Option<Instant>,
+    /// Stop reading at this monotonic time. Rows read before it are still written.
+    pub deadline: Option<MonoTime>,
     /// Resume complete transcript lines from durable cursors.
     pub incremental: bool,
 }
@@ -396,6 +398,8 @@ struct Cursor {
     /// Pending structural events survive across incremental ingestion.
     reply: crate::signals::ReplyContext,
     last_reply: Option<String>,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 fn identity(meta: &std::fs::Metadata) -> (u64, u64) {
@@ -425,16 +429,19 @@ struct CursorStore {
     schema_version: u64,
     store_digest: String,
     files: BTreeMap<String, Cursor>,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 /// A durable mask for every row from a session with conflicting identity evidence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SessionIdentityOverride {
     schema_version: u64,
     provider: String,
     session: String,
     identity: AccountIdentity,
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
 }
 
 impl SessionIdentityOverride {
@@ -444,32 +451,39 @@ impl SessionIdentityOverride {
             provider: PROVIDER.to_owned(),
             session: session.to_owned(),
             identity: AccountIdentity::conflicting_provider_observations(),
+            extra: Default::default(),
         }
     }
 }
 
-fn read_cursors(directory: &Directory, store: &str) -> BTreeMap<String, Cursor> {
+fn empty_cursor_store(store_digest: &str) -> CursorStore {
+    CursorStore {
+        schema_version: 2,
+        store_digest: store_digest.to_owned(),
+        files: BTreeMap::new(),
+        extra: Default::default(),
+    }
+}
+
+fn read_cursors(directory: &Directory, store: &str) -> CursorStore {
     let Ok(file) = directory.open_read(OsStr::new(CURSORS)) else {
-        return BTreeMap::new();
+        return empty_cursor_store(store);
     };
     let mut bytes = Vec::new();
     if file.metadata().map_or(true, |meta| meta.size > CURSOR_CAP)
         || file.take(CURSOR_CAP + 1).read_to_end(&mut bytes).is_err()
         || bytes.len() as u64 > CURSOR_CAP
     {
-        return BTreeMap::new();
+        return empty_cursor_store(store);
     }
-    serde_json::from_slice::<CursorStore>(&bytes)
+    crate::decode_record::<CursorStore>(&bytes, CURSOR_CAP)
         .ok()
         .filter(|cursor| cursor.schema_version == 2 && cursor.store_digest == store)
-        .map(|cursor| cursor.files)
-        .unwrap_or_default()
+        .unwrap_or_else(|| empty_cursor_store(store))
 }
 
-/// Real time is sampled only here, for a request's wall budget.
-#[allow(clippy::disallowed_methods)]
-fn expired(deadline: Option<Instant>) -> bool {
-    deadline.is_some_and(|at| Instant::now() >= at)
+fn expired(deadline: Option<MonoTime>, clock: &dyn Clock) -> bool {
+    deadline.is_some_and(|at| clock.mono_now() >= at)
 }
 
 fn read_transcript(
@@ -478,9 +492,9 @@ fn read_transcript(
     messages: &mut BTreeMap<(String, String), Pending>,
     report: &mut Report,
     cursor: Option<&Cursor>,
+    clock: &dyn Clock,
 ) -> Result<Cursor, ()> {
     let incremental = request.incremental;
-    let deadline = request.deadline;
     let since = if incremental { None } else { request.since };
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
@@ -525,7 +539,7 @@ fn read_transcript(
         .unwrap_or_default();
     let mut line = Vec::new();
     'read_loop: loop {
-        if expired(deadline) {
+        if expired(request.deadline, clock) {
             report.deadline_reached = true;
             break;
         }
@@ -543,7 +557,7 @@ fn read_transcript(
             // Drain the rest of an oversized line without keeping it.
             let mut sink = Vec::new();
             loop {
-                if expired(deadline) {
+                if expired(request.deadline, clock) {
                     report.deadline_reached = true;
                     break 'read_loop;
                 }
@@ -657,6 +671,7 @@ fn read_transcript(
         tail,
         reply,
         last_reply,
+        extra: Default::default(),
     })
 }
 
@@ -692,6 +707,7 @@ fn row(session: String, message: String, pending: Pending) -> Row {
         native_attempt: None,
         reasoning_tokens: raw.reasoning_tokens,
         reply: Some(pending.reply),
+        extra: Default::default(),
     }
 }
 
@@ -702,7 +718,7 @@ fn split(bytes: &[u8]) -> (Vec<Row>, Vec<&[u8]>) {
     let mut rows = Vec::new();
     let mut kept = Vec::new();
     for line in bytes.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
-        match serde_json::from_slice::<Row>(line) {
+        match crate::decode_record::<Row>(line, MAX_ROW_LINE as u64) {
             Ok(row) if row.schema_version == ROW_SCHEMA_VERSION => rows.push(row),
             _ => kept.push(line),
         }
@@ -714,6 +730,17 @@ fn split(bytes: &[u8]) -> (Vec<Row>, Vec<&[u8]>) {
 /// are visited in order and a path seen twice, or a message found under two
 /// directories, counts once, for the first directory's account.
 pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestError> {
+    let clock = provenant_os::clock::SystemClock::new();
+    ingest_with_clock(roots, request, &clock)
+}
+
+/// Ingest using the supplied monotonic clock. The CLI uses [`ingest`] and this
+/// boundary lets tests advance time without consulting the host clock.
+pub fn ingest_with_clock(
+    roots: &Roots,
+    request: &Request<'_>,
+    clock: &dyn Clock,
+) -> Result<Report, IngestError> {
     let mut report = Report::default();
     if request.provider.is_some_and(|p| p != PROVIDER) {
         return Ok(report);
@@ -757,11 +784,12 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
             }
         }
     }
-    let mut cursors = if request.incremental {
+    let mut cursor_store = if request.incremental {
         read_cursors(&directory, &fingerprint(&store)?)
     } else {
-        BTreeMap::new()
+        empty_cursor_store("")
     };
+    let mut cursors = std::mem::take(&mut cursor_store.files);
     let cutoff = request.since.map(|since| {
         SystemTime::UNIX_EPOCH
             + std::time::Duration::from_secs(since.as_second().max(0).unsigned_abs())
@@ -769,7 +797,7 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     let mut seen_paths = BTreeSet::new();
     let mut transcripts = Vec::new();
     for dir in request.dirs {
-        if expired(request.deadline) {
+        if expired(request.deadline, clock) {
             report.deadline_reached = true;
             break;
         }
@@ -787,7 +815,7 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     }
     let mut messages = BTreeMap::new();
     for transcript in &transcripts {
-        if expired(request.deadline) {
+        if expired(request.deadline, clock) {
             report.deadline_reached = true;
             break;
         }
@@ -799,6 +827,7 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
             &mut messages,
             &mut report,
             cursors.get(&key),
+            clock,
         ) {
             Ok(cursor) if request.incremental => {
                 cursors.insert(key, cursor);
@@ -975,12 +1004,10 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
         }
     }
     if request.incremental && !report.store_full {
-        let bytes = serde_json::to_vec(&CursorStore {
-            schema_version: 2,
-            store_digest: fingerprint(&store)?,
-            files: cursors,
-        })
-        .map_err(std::io::Error::other)?;
+        cursor_store.schema_version = 2;
+        cursor_store.store_digest = fingerprint(&store)?;
+        cursor_store.files = cursors;
+        let bytes = provenant_records::encode(&cursor_store).map_err(std::io::Error::other)?;
         if bytes.len() as u64 <= CURSOR_CAP {
             directory
                 .atomic_write(
@@ -1119,8 +1146,8 @@ fn read_identity_overrides(
         if bytes.len() as u64 > IDENTITY_OVERRIDE_CAP {
             return Err(IngestError::IdentityOverrideStore);
         }
-        let record: SessionIdentityOverride =
-            serde_json::from_slice(&bytes).map_err(|_| IngestError::IdentityOverrideStore)?;
+        let record: SessionIdentityOverride = crate::decode_record(&bytes, IDENTITY_OVERRIDE_CAP)
+            .map_err(|_| IngestError::IdentityOverrideStore)?;
         if record.schema_version != IDENTITY_OVERRIDE_SCHEMA_VERSION
             || record.provider != PROVIDER
             || !valid_session(&record.session)
@@ -1271,7 +1298,7 @@ pub fn read_rows(roots: &Roots, filter: &RowFilter) -> Result<Vec<Row>, IngestEr
             continue;
         }
         each_line(directory.open_read(OsStr::new(&name))?, |line| {
-            let Ok(mut row) = serde_json::from_slice::<Row>(line) else {
+            let Ok(mut row) = crate::decode_record::<Row>(line, MAX_ROW_LINE as u64) else {
                 return;
             };
             if let Some(identity) = identity_overrides.get(&row.session) {

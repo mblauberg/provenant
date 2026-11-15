@@ -207,7 +207,7 @@ fn account(n: u64, input: u64, label: &str) -> AttemptFact {
 #[test]
 fn empty_reader_has_complete_zero_cost() {
     let report = reduce([], None).unwrap();
-    assert_eq!(report.totals.cost.complete.unwrap().usd, "0.000000");
+    assert_eq!(report.totals.cost.complete.unwrap().microdollars, 0);
     assert_eq!(report.coverage.selected_attempts, 0);
     assert!(report.routes.is_empty());
     assert!(report.daily_accounts.is_none());
@@ -227,7 +227,7 @@ fn rounding_occurs_once_across_categories_attempts_and_groups() {
     let report = reduce([fact(1, Some(499_999))], Some(1)).unwrap();
     assert_eq!(cost(&report.totals), Some(0));
     let report = reduce([fact(1, Some(500_000))], Some(1)).unwrap();
-    assert_eq!(report.totals.cost.complete.unwrap().usd, "0.000001");
+    assert_eq!(report.totals.cost.complete.unwrap().microdollars, 1);
     // Summing rounded group totals would return 0 instead of 1.
     let report = reduce(
         [account(1, 300_000, "a"), account(2, 300_000, "b")],
@@ -247,8 +247,14 @@ fn missing_usage_and_prices_preserve_known_lower_bounds() {
     let report = reduce([first, second, third], Some(2_000_000)).unwrap();
     assert!(report.totals.cost.complete.is_none());
     assert_eq!(
-        report.totals.cost.known_lower_bound.as_ref().unwrap().usd,
-        "2.000000"
+        report
+            .totals
+            .cost
+            .known_lower_bound
+            .as_ref()
+            .unwrap()
+            .microdollars,
+        2_000_000
     );
     assert_eq!(report.totals.cost.missing_attempts, 3);
     assert_eq!(report.totals.usage.uncached_input.known, 2_000_000);
@@ -278,12 +284,12 @@ fn cost_coverage_distinguishes_unknown_partial_and_measured_zero() {
     assert_eq!(partial.totals.cost.priced_attempts, 1);
     assert_eq!(partial.totals.cost.missing_attempts, 1);
     assert_eq!(
-        partial.totals.cost.known_lower_bound.unwrap().usd,
-        "2.000000"
+        partial.totals.cost.known_lower_bound.unwrap().microdollars,
+        2_000_000
     );
     let zero = reduce([fact(1, Some(0))], None).unwrap();
     assert_eq!(zero.totals.cost.priced_attempts, 1);
-    assert_eq!(zero.totals.cost.known_lower_bound.unwrap().usd, "0.000000");
+    assert_eq!(zero.totals.cost.known_lower_bound.unwrap().microdollars, 0);
 }
 
 #[test]
@@ -299,7 +305,7 @@ fn zero_tokens_need_no_price_but_subscription_is_never_assumed_free() {
     free.models[0].billing = BillingKind::Free;
     let table = validate_prices(&free).unwrap();
     let report = stats([fact(1, Some(u64::MAX))], &table, Window::default()).unwrap();
-    assert_eq!(report.totals.cost.complete.unwrap().usd, "0.000000");
+    assert_eq!(report.totals.cost.complete.unwrap().microdollars, 0);
     for billing in [BillingKind::Free, BillingKind::Subscription] {
         free.models[0].billing = billing;
         let table = validate_prices(&free).unwrap();
@@ -319,6 +325,15 @@ fn zero_tokens_need_no_price_but_subscription_is_never_assumed_free() {
                 reasoning: 1
             }
         );
+    }
+}
+
+#[test]
+fn usd_formatter_covers_microdollar_values() {
+    for (microdollars, expected) in [(0, "0.000000"), (1, "0.000001"), (2_000_000, "2.000000")] {
+        let numerator = u128::from(microdollars) * 1_000_000;
+        let money = crate::reducer::Money::from_numerator(numerator).unwrap();
+        assert_eq!(money.usd, expected);
     }
 }
 
@@ -1145,45 +1160,29 @@ fn external_groups_include_only_joined_facts() {
 }
 
 #[test]
-fn ambiguous_external_allocations_are_counted_once_as_unknown() {
-    let fact = fact(1, Some(10));
-    let mut labels = BTreeMap::new();
-    labels.insert(
-        fact.attempt_id,
-        ["owner/repo#42", "owner/repo#43"]
-            .into_iter()
-            .map(|value| ExternalGroup {
-                value: value.into(),
-                weight_millionths: None,
-            })
-            .collect(),
-    );
-    let report =
-        stats_by_external_key([fact], &prices(Some(1)), Window::default(), &labels).unwrap();
-    let groups = report.context_groups.unwrap();
-    assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0].value, None);
-    assert_eq!(groups[0].totals.usage.uncached_input.known, 10);
-    assert_eq!(report.totals.usage.uncached_input.known, 10);
-}
-
-#[test]
-fn zero_weight_external_rows_leave_the_share_unknown() {
-    let fact = fact(1, Some(10));
-    let mut labels = BTreeMap::new();
-    labels.insert(
-        fact.attempt_id,
-        vec![ExternalGroup {
-            value: "owner/repo#0".into(),
-            weight_millionths: Some(0),
-        }],
-    );
-    let report =
-        stats_by_external_key([fact], &prices(Some(1)), Window::default(), &labels).unwrap();
-    let groups = report.context_groups.unwrap();
-    assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0].value, None);
-    assert_eq!(groups[0].totals.usage.uncached_input.known, 10);
+fn unresolved_external_allocations_count_once_as_unknown() {
+    let weights = [vec![None, None], vec![Some(0)]];
+    for row_weights in weights {
+        let fact = fact(1, Some(10));
+        let labels = BTreeMap::from([(
+            fact.attempt_id,
+            row_weights
+                .into_iter()
+                .enumerate()
+                .map(|(index, weight_millionths)| ExternalGroup {
+                    value: format!("owner/repo#{}", index + 42),
+                    weight_millionths,
+                })
+                .collect(),
+        )]);
+        let report =
+            stats_by_external_key([fact], &prices(Some(1)), Window::default(), &labels).unwrap();
+        let groups = report.context_groups.unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].value, None);
+        assert_eq!(groups[0].totals.usage.uncached_input.known, 10);
+        assert_eq!(report.totals.usage.uncached_input.known, 10);
+    }
 }
 
 #[test]
@@ -1573,6 +1572,7 @@ fn context_bands_price_each_reply_by_the_context_it_sent() {
         native_attempt: None,
         reasoning_tokens: None,
         reply: None,
+        extra: Default::default(),
     };
     use crate::ingest::Source;
     let rows = [

@@ -1,14 +1,20 @@
 use super::*;
-use provenant_core::{PathResolver, RootInputs};
+use provenant_test_support::{IdentityPathResolver, test_roots};
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
-struct Resolver;
-impl PathResolver for Resolver {
-    fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
-        Ok(path.to_owned())
+
+struct FixedClock;
+impl Clock for FixedClock {
+    fn wall_now(&self) -> std::result::Result<WallTime, TimeError> {
+        WallTime::from_micros(0)
+    }
+    fn mono_now(&self) -> MonoTime {
+        MonoTime::from_micros(1)
+    }
+    fn wait_until(&self, _: MonoTime) -> std::result::Result<(), TimeError> {
+        Ok(())
     }
 }
-
 fn message(id: &str, at: &str, input: u64, creation: u64, one_hour: u64, output: u64) -> String {
     format!(
         "{{\"type\":\"assistant\",\"timestamp\":\"{at}\",\"message\":{{\"id\":\"{id}\",\"model\":\"claude-opus\",\"content\":\"private words\",\"usage\":{{\"input_tokens\":{input},\"cache_read_input_tokens\":7,\"cache_creation_input_tokens\":{creation},\"cache_creation\":{{\"ephemeral_1h_input_tokens\":{one_hour}}},\"output_tokens\":{output}}}}}}}\n"
@@ -24,9 +30,8 @@ impl Fixture {
     fn new() -> Result<Self> {
         let temp = tempfile::tempdir()?;
         let base = std::fs::canonicalize(temp.path())?;
-        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
-        inputs.state_dir = Some(base.join("state"));
-        let roots = inputs.resolve(&Resolver)?;
+        let inputs = test_roots(&base)?;
+        let roots = inputs.resolve(&IdentityPathResolver)?;
         provenant_os::fixture::private_state_dir(roots.state.as_path())?;
         Ok(Self {
             _temp: temp,
@@ -282,7 +287,7 @@ fn session_identities_split_usage_when_a_config_directory_rotates() -> Result {
     let dirs = [ConfigDir {
         path: f.dir("rotating"),
     }];
-    let report = ingest(
+    let report = ingest_with_clock(
         &f.roots,
         &Request {
             dirs: &dirs,
@@ -514,7 +519,7 @@ fn linked_projects_and_session_directories_are_not_followed() -> Result {
 }
 
 #[test]
-fn transcript_directories_do_not_supply_account_identity() -> Result {
+fn config_directory_discovery_includes_registered_and_unregistered_locations() -> Result {
     let f = Fixture::new()?;
     populate(&f)?;
     let home = f.base.clone();
@@ -525,11 +530,14 @@ fn transcript_directories_do_not_supply_account_identity() -> Result {
     std::fs::write(home.join(".claude.json"), "{}")?;
     let registered = vec![home.join(".claude-pro")];
     let dirs = config_dirs(&registered, &home);
-    let names: Vec<_> = dirs
+    let names: BTreeSet<_> = dirs
         .iter()
         .map(|dir| dir.path.file_name().unwrap().to_str().unwrap())
         .collect();
-    assert_eq!(names, [".claude-pro", ".claude", ".claude-extra"]);
+    assert_eq!(
+        names,
+        BTreeSet::from([".claude-pro", ".claude", ".claude-extra"])
+    );
     Ok(())
 }
 
@@ -650,9 +658,10 @@ fn an_expired_deadline_reads_nothing_and_keeps_the_store() -> Result {
             chair_sessions: &BTreeMap::new(),
             provider: None,
             since: None,
-            deadline: Some(Instant::now()),
+            deadline: Some(MonoTime::from_micros(0)),
             incremental: false,
         },
+        &FixedClock,
     )?;
     assert!(report.deadline_reached);
     assert_eq!((report.files, report.added), (0, 0));
@@ -796,6 +805,7 @@ fn native_attempt_links_only_its_matching_subagent_and_updates_after_settlement(
             ended_at: None,
             settlement: None,
             agent_id: None,
+            extra: Default::default(),
         },
     )?;
     let dirs = [
@@ -880,6 +890,7 @@ fn native_attempt_store_preserves_unknown_versions_and_rejects_ambiguous_links()
         ended_at: None,
         settlement: None,
         agent_id: None,
+        extra: Default::default(),
     };
     native_attempts::start(&f.roots, attempt("tool-1"))?;
     native_attempts::start(&f.roots, attempt("tool-2"))?;
@@ -943,6 +954,60 @@ fn native_attempt_store_preserves_unknown_versions_and_rejects_ambiguous_links()
 }
 
 #[test]
+fn persisted_ingest_shapes_retain_additive_fields() {
+    let mut identity = serde_json::to_value(AccountIdentity::unknown()).unwrap();
+    identity["future_identity"] = serde_json::json!(1);
+    let mut reply = serde_json::to_value(crate::signals::ReplyContext::default()).unwrap();
+    reply["future_reply"] = serde_json::json!(2);
+    let mut row = serde_json::json!({
+        "schema_version": ROW_SCHEMA_VERSION,
+        "identity": identity,
+        "provider": "claude",
+        "model": "model",
+        "uncached_input": 1,
+        "cache_read": 0,
+        "cache_write": 0,
+        "cache_write_1h": 0,
+        "output": 1,
+        "timestamp": "2026-10-01T00:00:00Z",
+        "session": "session",
+        "message": "message",
+        "source": "lane",
+        "reply": reply
+    });
+    row["future_row"] = serde_json::json!(3);
+    crate::assert_record_round_trip::<Row>(row);
+
+    let cursor = serde_json::json!({
+        "device": 1,
+        "inode": 2,
+        "offset": 3,
+        "tail": "digest",
+        "reply": {
+            "recorded": [],
+            "inferred": "unknown",
+            "compactions": 0,
+            "unknown_evidence": false,
+            "future_reply": 4
+        },
+        "last_reply": null,
+        "future_cursor": 5
+    });
+    let mut cursors = serde_json::json!({
+        "schema_version": 2,
+        "store_digest": "store",
+        "files": {"path-digest": cursor}
+    });
+    cursors["future_cursor_store"] = serde_json::json!(6);
+    crate::assert_record_round_trip::<CursorStore>(cursors);
+
+    let mut override_record =
+        serde_json::to_value(SessionIdentityOverride::conflict("session")).unwrap();
+    override_record["future_override"] = serde_json::json!(7);
+    crate::assert_record_round_trip::<SessionIdentityOverride>(override_record);
+}
+
+#[test]
 fn concurrent_native_attempt_updates_wait_and_preserve_both() -> Result {
     use crate::native_attempts::{self, Attempt};
     use provenant_os::fs::{Directory, LockMode};
@@ -972,6 +1037,7 @@ fn concurrent_native_attempt_updates_wait_and_preserve_both() -> Result {
                             ended_at: None,
                             settlement: None,
                             agent_id: None,
+                            extra: Default::default(),
                         },
                     )
                 })
