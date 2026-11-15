@@ -925,9 +925,9 @@ fn unknown_template_fields_are_refused_across_compiled_shapes() {
         ),
         (
             None,
-            json!({"id":"stage", "use":"task", "auto_continue_no_work":true}),
+            json!({"id":"stage", "use":"task", "unknown_node_control":true}),
             "stage",
-            "auto_continue_no_work",
+            "unknown_node_control",
         ),
         (
             None,
