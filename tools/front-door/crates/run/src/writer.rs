@@ -1670,15 +1670,15 @@ fn verified_cargo_config(build: &Path, cargo_home: &Path) -> std::result::Result
             })
             .collect::<Vec<_>>()
     };
-    // The host config is data, with the same compiler-selection check as project config.
+    // The host config is data, with the same seed-eligibility check as project config.
     for path in present(cargo_home) {
-        cargo_config_cannot_select_compiler(&path)?;
+        cargo_config_ineligible_for_seed(&path)?;
     }
     // A checked-in `.cargo/config.toml` is ordinary (this repository has one).
-    // It is read as data and refused only if it can select the compiler.
+    // It is read as data and refused only for unrepresented build settings.
     for ancestor in build.ancestors() {
         for path in present(&ancestor.join(".cargo")) {
-            cargo_config_cannot_select_compiler(&path)?;
+            cargo_config_ineligible_for_seed(&path)?;
         }
     }
     Ok(())
@@ -1687,7 +1687,7 @@ fn verified_cargo_config(build: &Path, cargo_home: &Path) -> std::result::Result
 // Read a Cargo config file as data, without executing it. A config is refused
 // when it is not a small regular UTF-8 TOML file or can select a different
 // compiler/build target or unrecorded build flags.
-fn cargo_config_cannot_select_compiler(path: &Path) -> std::result::Result<(), &'static str> {
+fn cargo_config_ineligible_for_seed(path: &Path) -> std::result::Result<(), &'static str> {
     use std::io::Read;
     if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()) {
         return Err(codes::CARGO_CONFIG_UNREADABLE);
@@ -1696,7 +1696,7 @@ fn cargo_config_cannot_select_compiler(path: &Path) -> std::result::Result<(), &
     std::fs::File::open(path)
         .and_then(|file| file.take(65537).read_to_end(&mut bytes))
         .map_err(|_| codes::CARGO_CONFIG_UNREADABLE)?;
-    crate::target_seed::cargo_config_cannot_select_seed_compiler(&bytes)
+    crate::target_seed::cargo_config_seed_eligibility(&bytes)
 }
 
 // Refuse the host probe if a lane can alter the host compiler or an earlier
@@ -2555,6 +2555,10 @@ mod cargo_setup_tests {
                 codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
             ),
             (
+                "[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-s']\n",
+                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
+            ),
+            (
                 "[env]\nCARGO_BUILD_TARGET = 'x86_64-unknown-linux-gnu'\n",
                 codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
             ),
@@ -2589,11 +2593,10 @@ mod cargo_setup_tests {
         );
     }
 
-    // Regression for #2484: this repository checks in `.cargo/config.toml`, which
-    // refused every lane's target seed with `toolchain_unverified`. A config that
-    // cannot select a compiler must verify.
+    // Regression for #2484: harmless checked-in Cargo configuration must not
+    // disable seed use, while unrecorded target flags must.
     #[test]
-    fn checked_in_cargo_config_that_cannot_select_a_compiler_is_accepted() {
+    fn checked_in_cargo_config_without_unrecorded_build_settings_is_accepted() {
         let tmp = tempfile::tempdir().unwrap();
         let worktree = tmp.path().join("worktree");
         let cache = tmp.path().join("cache");
@@ -2615,11 +2618,20 @@ mod cargo_setup_tests {
         let config = nested.join(".cargo/config.toml");
         for text in [
             "# comments only\n",
-            "[alias]\nxtask = 'run -p xtask'\n[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-s']\n[env]\nFOO = 'bar'\n",
+            "[alias]\nxtask = 'run -p xtask'\n[env]\nFOO = 'bar'\n",
         ] {
             std::fs::write(&config, text).unwrap();
             assert_eq!(verified_cargo_config(&build, &cache.join(".cargo")), Ok(()));
         }
+        std::fs::write(
+            &config,
+            "[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-s']\n",
+        )
+        .unwrap();
+        assert_eq!(
+            verified_cargo_config(&build, &cache.join(".cargo")),
+            Err(codes::CARGO_CONFIG_CHANGES_BUILD_TARGET)
+        );
         // An intermediate config belongs to this Cargo invocation's cone too.
         let ancestor_config = nested.parent().unwrap().join(".cargo/config.toml");
         std::fs::create_dir_all(ancestor_config.parent().unwrap()).unwrap();

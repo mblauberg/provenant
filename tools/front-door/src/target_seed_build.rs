@@ -46,7 +46,7 @@ fn check_host_cargo_config_file(path: &Path) -> Result<()> {
     fs::File::open(path)
         .and_then(|file| file.take(65537).read_to_end(&mut bytes))
         .map_err(|_| cargo_config_ineligibility("cargo_config_unreadable"))?;
-    target_seed::cargo_config_cannot_select_seed_compiler(&bytes)
+    target_seed::cargo_config_seed_eligibility(&bytes)
         .map_err(|reason| cargo_config_ineligibility(reason).into())
 }
 
@@ -379,7 +379,7 @@ fn verify_base(host_state: &Path, project: &Path, workspace: &Path) -> Result<Ve
             if let Some(bytes) =
                 read_verify_base_file(&repo, &executor, &utility, budget, &cancel, tree, &path)?
             {
-                target_seed::cargo_config_cannot_select_seed_compiler(&bytes)
+                target_seed::cargo_config_seed_eligibility(&bytes)
                     .map_err(cargo_config_ineligibility)?;
             }
         }

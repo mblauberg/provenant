@@ -106,8 +106,8 @@ pub fn unsupported_seed_build_environment(
 
 /// Apply the same bounded TOML policy to live Cargo config files and config
 /// blobs read from a pinned verify-base tree. Input bytes are never retained.
-pub fn cargo_config_cannot_select_seed_compiler(bytes: &[u8]) -> Result<(), &'static str> {
-    crate::cargo_seed::cargo_config_cannot_select_seed_compiler(bytes)
+pub fn cargo_config_seed_eligibility(bytes: &[u8]) -> Result<(), &'static str> {
+    crate::cargo_seed::cargo_config_seed_eligibility(bytes)
 }
 
 fn open_store_directory(state: &Path) -> Result<Directory, Box<dyn std::error::Error>> {
@@ -485,18 +485,22 @@ mod lane_probe_tests {
                 codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
             ),
             (
+                "[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-s']\n",
+                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
+            ),
+            (
                 "[env]\nCARGO_BUILD_TARGET = 'x86_64-unknown-linux-gnu'\n",
                 codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
             ),
         ] {
             assert_eq!(
-                cargo_config_cannot_select_seed_compiler(config.as_bytes()),
+                cargo_config_seed_eligibility(config.as_bytes()),
                 Err(expected),
                 "{config:?}"
             );
         }
         assert_eq!(
-            cargo_config_cannot_select_seed_compiler(b"[env]\nRUST_MIN_STACK = '8388608'\n"),
+            cargo_config_seed_eligibility(b"[env]\nRUST_MIN_STACK = '8388608'\n"),
             Ok(())
         );
     }

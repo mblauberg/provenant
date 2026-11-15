@@ -92,7 +92,7 @@ detail_codes! {
 /// Refuse bounded Cargo config input when it can alter the rustc, target, or
 /// build flags represented by a shared target seed. Used by both lane setup
 /// and host seed currentness; values are never returned or logged.
-pub(crate) fn cargo_config_cannot_select_seed_compiler(bytes: &[u8]) -> Result<(), &'static str> {
+pub(crate) fn cargo_config_seed_eligibility(bytes: &[u8]) -> Result<(), &'static str> {
     if bytes.len() > 65536 {
         return Err(codes::CARGO_CONFIG_TOO_LARGE);
     }
@@ -140,7 +140,7 @@ pub(crate) fn cargo_config_cannot_select_seed_compiler(bytes: &[u8]) -> Result<(
                 settings.as_table_like().is_none_or(|settings| {
                     settings
                         .iter()
-                        .any(|(key, _)| matches!(key, "linker" | "ar"))
+                        .any(|(key, _)| matches!(key, "linker" | "ar" | "rustflags"))
                 })
             })
         }),
