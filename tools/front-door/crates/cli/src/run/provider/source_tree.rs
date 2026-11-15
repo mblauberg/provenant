@@ -64,7 +64,8 @@ impl SourceStep {
     }
 }
 
-/// A fixed-form cause: never Git output, file contents or credential values.
+/// A fixed-form cause or safe shared diagnostic: never Git output, file
+/// contents or credential values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum SourceCause {
     TimedOut,
@@ -74,6 +75,7 @@ pub(super) enum SourceCause {
     Cancelled,
     Refused(&'static str),
     Failed(&'static str),
+    ProjectBindingDirectory(provenant_records::diagnostic::Diagnostic),
 }
 
 impl std::fmt::Display for SourceCause {
@@ -87,6 +89,18 @@ impl std::fmt::Display for SourceCause {
             Self::Signalled(signal) => write!(f, "Git was ended by signal {signal}"),
             Self::Cancelled => f.write_str("cancelled"),
             Self::Refused(reason) | Self::Failed(reason) => f.write_str(reason),
+            Self::ProjectBindingDirectory(diagnostic) => {
+                f.write_str(
+                    diagnostic
+                        .detail
+                        .as_deref()
+                        .unwrap_or("project binding directory is unsafe"),
+                )?;
+                if let Some(next) = &diagnostic.next {
+                    write!(f, "; next: {next}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -688,7 +702,16 @@ pub(super) fn snapshot_source(
     let location = provenant_config::ProjectLocation::new(repo.common_git_dir())
         .map_err(|_| SourceViewError::failed(Step::Repository, "project location invalid"))?;
     let binding = provenant_config::lookup_project(roots, &location)
-        .map_err(|_| SourceViewError::failed(Step::Repository, "project binding unreadable"))?
+        .map_err(|error| {
+            let cause =
+                provenant_fabric_runtime::coordination::facade::FacadeError::project_binding_directory_diagnostic(
+                    &error,
+                    provenant_records::diagnostic::Destination::Local,
+                )
+                .map(SourceCause::ProjectBindingDirectory)
+                .unwrap_or(SourceCause::Failed("project binding unreadable"));
+            SourceViewError::new(Step::Repository, cause)
+        })?
         .ok_or_else(|| repository("dispatch project binding missing"))?;
     if binding.project_id() != project {
         return Err(repository(
@@ -865,6 +888,30 @@ pub(super) fn snapshot_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Spec: docs/specs/state.md#config-never-widens-authority
+    #[test]
+    fn unsafe_project_binding_refusal_keeps_safe_location_and_repair() {
+        let error = provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
+            path: std::path::PathBuf::from("/private/project-state"),
+            mode: 0o755,
+            owner_matches: true,
+        };
+        let diagnostic =
+            provenant_fabric_runtime::coordination::facade::FacadeError::project_binding_directory_diagnostic(
+                &error,
+                provenant_records::diagnostic::Destination::Local,
+            )
+            .unwrap();
+        let view_error = SourceViewError::new(
+            SourceStep::Repository,
+            SourceCause::ProjectBindingDirectory(diagnostic),
+        );
+        let rendered = view_error.to_string();
+        assert!(rendered.contains("/private/project-state"));
+        assert!(rendered.contains("chmod 700 '/private/project-state'"));
+        assert!(!rendered.contains("project binding unreadable"));
+    }
 
     #[test]
     fn source_tree_materialisation_is_independent_of_a_moving_checkout()

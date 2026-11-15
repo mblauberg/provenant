@@ -1160,8 +1160,22 @@ pub(super) enum ReadOnlyPlanError {
     MissingBinding,
     #[error("pinned source requires a Git repository")]
     PinnedSourceRequiresGit,
+    #[error("{}", read_only_diagnostic_text(.0))]
+    ProjectBindingDirectory(provenant_records::diagnostic::Diagnostic),
     #[error("{0}")]
     Other(String),
+}
+
+fn read_only_diagnostic_text(diagnostic: &provenant_records::diagnostic::Diagnostic) -> String {
+    let mut message = diagnostic
+        .detail
+        .clone()
+        .unwrap_or_else(|| "project binding directory is unsafe".into());
+    if let Some(next) = &diagnostic.next {
+        message.push_str("; next: ");
+        message.push_str(next);
+    }
+    message
 }
 
 impl From<String> for ReadOnlyPlanError {
@@ -1174,15 +1188,29 @@ impl From<&str> for ReadOnlyPlanError {
         Self::Other(value.into())
     }
 }
+impl From<provenant_config::ConfigError> for ReadOnlyPlanError {
+    fn from(error: provenant_config::ConfigError) -> Self {
+        let diagnostic =
+            provenant_fabric_runtime::coordination::facade::FacadeError::project_binding_directory_diagnostic(
+                &error,
+                provenant_records::diagnostic::Destination::Local,
+            );
+        diagnostic.map_or_else(
+            || Self::Other(error.to_string()),
+            Self::ProjectBindingDirectory,
+        )
+    }
+}
 impl ReadOnlyPlanError {
     pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass;
         match self {
             Self::Run(error) => error.boundary_class(),
             Self::Plan(error) => error.boundary_class(),
-            Self::BindingMismatch | Self::MissingBinding | Self::PinnedSourceRequiresGit => {
-                BoundaryClass::Authority
-            }
+            Self::BindingMismatch
+            | Self::MissingBinding
+            | Self::PinnedSourceRequiresGit
+            | Self::ProjectBindingDirectory(_) => BoundaryClass::Authority,
             Self::Other(_) => BoundaryClass::None,
         }
     }
@@ -1200,6 +1228,7 @@ fn read_only_plan_authority(error: ReadOnlyPlanError) -> ReadOnlyPlanError {
     }
 }
 
+// Spec: docs/specs/state.md#config-never-widens-authority
 #[test]
 fn read_only_plan_preserves_typed_authority_failures() {
     use provenant_records::diagnostic::BoundaryClass;
@@ -1215,6 +1244,24 @@ fn read_only_plan_preserves_typed_authority_failures() {
         ReadOnlyPlanError::PinnedSourceRequiresGit.boundary_class(),
         BoundaryClass::Authority
     );
+    let unsafe_binding = ReadOnlyPlanError::from(
+        provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
+            path: PathBuf::from("/private/state"),
+            mode: 0o755,
+            owner_matches: true,
+        },
+    );
+    assert!(matches!(
+        &unsafe_binding,
+        ReadOnlyPlanError::ProjectBindingDirectory(diagnostic)
+            if diagnostic.detail.as_deref().is_some_and(|detail| detail.contains("/private/state"))
+                && diagnostic.next.as_deref().is_some_and(|next| next.contains("chmod 700"))
+    ));
+    assert_eq!(unsafe_binding.boundary_class(), BoundaryClass::Authority);
+    assert!(matches!(
+        ReadOnlyPlanError::from(provenant_config::ConfigError::InvalidProjectBinding),
+        ReadOnlyPlanError::Other(_)
+    ));
     assert_eq!(
         ReadOnlyPlanError::Other("unavailable".into()).boundary_class(),
         BoundaryClass::None
@@ -1281,13 +1328,13 @@ pub(super) fn read_only_plan(
         let binding = if live {
             // Graph attribution stays with the parent; the read plan belongs to
             // the selected checkout, as it does for an ordinary host launch.
-            let binding = provenant_config::bind_project(roots, location)
-                .map_err(|error| error.to_string())?;
+            let binding =
+                provenant_config::bind_project(roots, location).map_err(ReadOnlyPlanError::from)?;
             request.scope = WorkScope::Project(binding.project_id());
             binding
         } else {
             let binding = provenant_config::lookup_project(roots, &location)
-                .map_err(|error| error.to_string())?
+                .map_err(ReadOnlyPlanError::from)?
                 .ok_or(ReadOnlyPlanError::MissingBinding)?;
             if binding.project_id() != project {
                 return Err(ReadOnlyPlanError::BindingMismatch);

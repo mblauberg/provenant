@@ -216,6 +216,10 @@ pub fn edge_diagnostic(error: &EdgeError) -> Option<provenant_records::diagnosti
         EdgeError::Relay(provenant_fabric_runtime::relay::ServiceError::Coordination(error)) => {
             Some(FacadeError::from(error).diagnostic())
         }
+        EdgeError::Config(error) => FacadeError::project_binding_directory_diagnostic(
+            error,
+            provenant_records::diagnostic::Destination::Local,
+        ),
         _ => None,
     }
 }
@@ -636,6 +640,33 @@ pub fn coordination_outcome(
 #[cfg(test)]
 mod outcome_tests {
     use super::*;
+
+    #[test]
+    fn fabric_config_edge_preserves_project_binding_location_and_repair() {
+        let error = EdgeError::Config(
+            provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
+                path: PathBuf::from("/private/project-state"),
+                mode: 0o755,
+                owner_matches: true,
+            },
+        );
+        let projection = edge_diagnostic(&error).unwrap();
+        assert!(projection.detail.as_deref().is_some_and(|detail| {
+            detail.contains("/private/project-state") && detail.contains("mode 0755")
+        }));
+        assert!(
+            projection
+                .next
+                .as_deref()
+                .is_some_and(|next| { next.contains("chmod 700 '/private/project-state'") })
+        );
+        assert!(
+            edge_diagnostic(&EdgeError::Config(
+                provenant_config::ConfigError::InvalidProjectBinding,
+            ))
+            .is_none()
+        );
+    }
 
     #[test]
     fn coordination_edge_uses_safe_owner_projection() {

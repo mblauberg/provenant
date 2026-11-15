@@ -88,21 +88,18 @@ fn config_projection(
     globals: &Globals,
 ) -> provenant_records::diagnostic::Diagnostic {
     use provenant_records::diagnostic::{Destination, Diagnostic};
-    match error {
-        provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
-            path,
-            mode,
-            owner_matches,
-        } => provenant_fabric_runtime::coordination::facade::FacadeError::state_directory_security(
-            path,
-            *mode,
-            *owner_matches,
+    if let Some(diagnostic) =
+        provenant_fabric_runtime::coordination::facade::FacadeError::project_binding_directory_diagnostic(
+            error,
             Destination::Local,
-        ),
-        _ => Diagnostic::new("CONFIG")
+        )
+    {
+        diagnostic
+    } else {
+        Diagnostic::new("CONFIG")
             .category("configuration")
             .detail(error.to_string())
-            .next(config_repair(globals)),
+            .next(config_repair(globals))
     }
 }
 
@@ -735,7 +732,7 @@ mod tests {
         assert!(repair.contains("'\\''"));
     }
 
-    // Spec: docs/specs/state.md#configuration
+    // Spec: docs/specs/state.md#config-never-widens-authority
     #[test]
     fn unsafe_project_binding_state_has_local_mode_and_owner_repairs() {
         use std::path::PathBuf;
