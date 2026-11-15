@@ -320,9 +320,9 @@ fn resolve_writer_with(
 pub struct WriterLaunch {
     pub worktree: VerifiedWorktree,
     pub branch: GitRefName,
-    layout: worktrees::ProjectLayout,
-    executor_root: PathBuf,
-    executor_root_identity: provenant_os::fs::Metadata,
+    pub(crate) layout: worktrees::ProjectLayout,
+    pub(crate) executor_root: PathBuf,
+    pub(crate) executor_root_identity: provenant_os::fs::Metadata,
     pub(crate) base: GitOid,
     pub(crate) custody: Option<(Directory, WriterBinding)>,
     /// Repository observations and caps shared by this writer operation.
