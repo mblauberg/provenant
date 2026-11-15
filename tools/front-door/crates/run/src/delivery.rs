@@ -592,8 +592,8 @@ impl HostDeliveryContext {
             "GIT_SSH_COMMAND",
             "GIT_SSH_VARIANT",
             "GIT_TERMINAL_PROMPT",
-            "PROVENANT_GIT",
-            "PROVENANT_STATE_DIR",
+            provenant_core::consumer_env::GIT,
+            provenant_core::STATE_DIRECTORY_ENV,
             "GIT_CONFIG_GLOBAL",
             "GIT_CONFIG_SYSTEM",
             "GIT_CONFIG_NOSYSTEM",
@@ -1155,7 +1155,7 @@ impl HostDeliveryContext {
             let override_path = self
                 .environment
                 .iter()
-                .find(|(key, _)| key == b"PROVENANT_GIT")
+                .find(|(key, _)| key == provenant_core::consumer_env::GIT.as_bytes())
                 .map(|(_, value)| OsString::from_vec(value.clone()));
             let path =
                 provenant_os::git::resolve_git_executable(override_path.as_deref().map(Path::new))

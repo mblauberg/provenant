@@ -1165,7 +1165,7 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
             let plan = fixture_access_plan(access, Some("login"), false);
             let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
             let sandbox_mode = |key: &str| {
-                (key == provenant_confinement::run_config::SANDBOX_ENV)
+                (key == provenant_core::consumer_env::SANDBOX)
                     .then(|| if sandboxed { "on" } else { "off" }.into())
             };
             let spec = opencode::OpenCode.prepare(PrepareInput {
@@ -1460,7 +1460,7 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
             Some(&token),
         );
         input.host_var =
-            &|name| (name == provenant_confinement::run_config::SANDBOX_ENV).then(|| "off".into());
+            &|name| (name == provenant_core::consumer_env::SANDBOX).then(|| "off".into());
         let native = adapter.prepare(input)?;
         for (key, value) in &host {
             // These selectors bind the child to its provider, Fabric context
@@ -1545,7 +1545,7 @@ fn every_adapter_finalises_missing_lane_environment() -> Result<(), ProviderErro
             let mut route = route(id, if id == "command" { "" } else { "fixture-model" });
             route.account_key = None;
             let host_var = |name: &str| {
-                (native && name == provenant_confinement::run_config::SANDBOX_ENV)
+                (native && name == provenant_core::consumer_env::SANDBOX)
                     .then(|| "off".into())
             };
             let mut input = fixture_input(

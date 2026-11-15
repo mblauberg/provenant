@@ -178,7 +178,7 @@ fn apply_to(
         .and_then(Path::parent)
         .unwrap_or(context.cwd);
     env.push((
-        "PROVENANT_PRIMARY_CHECKOUT".into(),
+        provenant_core::consumer_env::PRIMARY_CHECKOUT.into(),
         primary.as_os_str().to_owned(),
     ));
     if let Some(gitdir) = context
@@ -186,7 +186,7 @@ fn apply_to(
         .filter(|gitdir| context.writer || Some(*gitdir) != context.common_git)
     {
         env.push((
-            "PROVENANT_WORKTREE_GITDIR".into(),
+            provenant_core::consumer_env::WORKTREE_GITDIR.into(),
             gitdir.as_os_str().to_owned(),
         ));
         profile.spec.runtime_reads.push(PathGrant {
@@ -425,11 +425,11 @@ mod tests {
                 profile.spec.tool_writes.len()
             );
             assert!(env.contains(&(
-                "PROVENANT_PRIMARY_CHECKOUT".into(),
+                provenant_core::consumer_env::PRIMARY_CHECKOUT.into(),
                 primary.as_os_str().to_owned()
             )));
             assert!(env.contains(&(
-                "PROVENANT_WORKTREE_GITDIR".into(),
+                provenant_core::consumer_env::WORKTREE_GITDIR.into(),
                 admin.as_os_str().to_owned()
             )));
             assert!(profile.spec.runtime_reads.contains(&grant(admin.clone())));
@@ -544,7 +544,7 @@ mod tests {
         );
         assert!(
             !env.iter()
-                .any(|(key, _)| key == "PROVENANT_WORKTREE_GITDIR")
+                .any(|(key, _)| key == provenant_core::consumer_env::WORKTREE_GITDIR)
         );
         assert!(!profile.spec.runtime_reads.contains(&grant(common.clone())));
         Ok(())

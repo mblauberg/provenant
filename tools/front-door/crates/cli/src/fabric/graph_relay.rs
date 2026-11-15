@@ -1262,7 +1262,7 @@ pub fn from_lane(
     cancel: &CancelToken,
     within: std::time::Duration,
 ) -> Result<Value, ServiceError> {
-    let attempt = std::env::var("PROVENANT_PARENT_ATTEMPT_ID")
+    let attempt = std::env::var(provenant_core::consumer_env::PARENT_ATTEMPT_ID)
         .ok()
         .and_then(|id| provenant_core::AttemptId::parse(&id).ok())
         .ok_or_else(|| refused("graph_relay_unavailable", "not running inside a lane"))?;
@@ -1367,7 +1367,7 @@ fn template_library(
     }
     layered_templates(
         &config.join("provenant/templates"),
-        &repository.join(".provenant/templates"),
+        &repository.join(provenant_config::repository_files::TEMPLATES),
     )
 }
 

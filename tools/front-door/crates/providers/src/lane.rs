@@ -2,7 +2,7 @@
 use crate::launch::{exact, subtree};
 use crate::{ProviderError, SetupStep};
 use provenant_confinement::permissions::ProviderProfileSpec;
-use provenant_core::{AttemptId, RUN_STATE_DIRECTORY_ENV, STATE_DIRECTORY_ENV};
+use provenant_core::{AttemptId, RUN_STATE_DIRECTORY_ENV, STATE_DIRECTORY_ENV, consumer_env};
 use provenant_records::policy::{Facts, Policy};
 use std::{
     ffi::OsString,
@@ -129,19 +129,23 @@ impl crate::LaunchSpec {
             .map(|limits| {
                 let json = serde_json::to_string(&limits).map_err(|_| ProviderError::Malformed)?;
                 Ok::<_, ProviderError>(format!(
-                    "PROVENANT_BUILD_DISK_LIMITS={}\nexport PROVENANT_BUILD_DISK_LIMITS\n",
-                    shell_quote(&json)
+                    "{name}={}\nexport {name}\n",
+                    shell_quote(&json),
+                    name = consumer_env::BUILD_DISK_LIMITS,
                 ))
             })
             .transpose()?
             .unwrap_or_default();
         let script = format!(
-            "#!/bin/sh\n{disk}PROVENANT_BUILD_SLOT_STATE={} PROVENANT_BUILD_SLOTS={} PROVENANT_LOCAL_CARGO={}\nexport PROVENANT_BUILD_SLOT_STATE PROVENANT_BUILD_SLOTS PROVENANT_LOCAL_CARGO\nexec {} internal build-slot -- {} \"$@\"\n",
+            "#!/bin/sh\n{disk}{state}={} {slots}={} {local}={}\nexport {state} {slots} {local}\nexec {} internal build-slot -- {} \"$@\"\n",
             text(gate.state)?,
             gate.slots,
             gate.local_cargo,
             text(gate.provenant)?,
             text(gate.cargo)?,
+            state = consumer_env::BUILD_SLOT_STATE,
+            slots = consumer_env::BUILD_SLOTS,
+            local = consumer_env::LOCAL_CARGO,
         );
         // Validate the environment before mutating setup or grants. The caller
         // can then omit this optional shim if its paths cannot be represented.
@@ -813,14 +817,14 @@ impl LaneRuntime<'_> {
         };
         path(self.executable)?;
         Ok(vec![
-            ("PROVENANT_AGENT_LABEL", format!("lane-{}", self.attempt)),
-            ("PROVENANT_LANE_DEPTH", self.depth.to_string()),
-            ("PROVENANT_PARENT_ATTEMPT_ID", self.attempt.to_string()),
+            (consumer_env::AGENT_LABEL, format!("lane-{}", self.attempt)),
+            (consumer_env::LANE_DEPTH, self.depth.to_string()),
+            (consumer_env::PARENT_ATTEMPT_ID, self.attempt.to_string()),
             (RUN_STATE_DIRECTORY_ENV, path(self.state)?),
             (STATE_DIRECTORY_ENV, path(self.state)?),
-            ("HOME", path(self.home)?),
-            ("PROVENANT_ROOT", path(self.assets)?),
-            ("PROVENANT_GIT", path(self.git)?),
+            (consumer_env::HOME, path(self.home)?),
+            (consumer_env::ROOT, path(self.assets)?),
+            (consumer_env::GIT, path(self.git)?),
         ])
     }
 
@@ -935,15 +939,18 @@ impl LaneRuntime<'_> {
         });
         env.extend([
             (
-                "PROVENANT_AGENT_LABEL".into(),
+                consumer_env::AGENT_LABEL.into(),
                 format!("lane-{}", self.attempt).into(),
             ),
-            ("PROVENANT_ROOT".into(), self.assets.into()),
-            ("PROVENANT_GIT".into(), self.git.into()),
+            (consumer_env::ROOT.into(), self.assets.into()),
+            (consumer_env::GIT.into(), self.git.into()),
             (STATE_DIRECTORY_ENV.into(), self.state.into()),
-            ("PROVENANT_LANE_DEPTH".into(), self.depth.to_string().into()),
             (
-                "PROVENANT_PARENT_ATTEMPT_ID".into(),
+                consumer_env::LANE_DEPTH.into(),
+                self.depth.to_string().into(),
+            ),
+            (
+                consumer_env::PARENT_ATTEMPT_ID.into(),
                 self.attempt.to_string().into(),
             ),
             (RUN_STATE_DIRECTORY_ENV.into(), self.state.into()),

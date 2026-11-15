@@ -103,9 +103,6 @@ pub use reader::{
 pub use store::{PreparedRun, TerminalPublication};
 use thiserror::Error;
 
-pub const LANE_DEPTH_ENV: &str = "PROVENANT_LANE_DEPTH";
-pub const PARENT_ATTEMPT_ENV: &str = "PROVENANT_PARENT_ATTEMPT_ID";
-
 /// Return the depth of the run being dispatched under this lane.
 pub fn next_lane_depth(parent_depth: u64, max_depth: u64) -> Result<u64> {
     let depth = parent_depth.checked_add(1).ok_or(RunError::DepthOverflow)?;

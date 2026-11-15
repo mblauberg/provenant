@@ -129,9 +129,6 @@ pub struct RunConfig {
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectRunConfig>,
 }
-/// Set in every lane's environment to `on` or `off`, so a lane's own tools
-/// can choose, for example, a private cache when they cannot write a shared one.
-pub const SANDBOX_ENV: &str = "PROVENANT_SANDBOX";
 /// Default sandboxed route prefixes. Empty by default.
 pub const DEFAULT_SANDBOXED_ROUTES: [&str; 0] = [];
 const MAX_SANDBOXED_ROUTES: usize = 64;

@@ -220,7 +220,7 @@ pub(super) fn prepare_command(
             home: &home,
             user: &user,
             host_var: &|key| {
-                if key == provenant_confinement::run_config::SANDBOX_ENV {
+                if key == provenant_core::consumer_env::SANDBOX {
                     Some(sandbox.env_value().into())
                 } else {
                     host_provider_var(registry, key)
@@ -442,9 +442,11 @@ pub(super) fn configure_build_slots(
     state: &Path,
     knobs: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> Result<Vec<PathGrant>, String> {
-    if spec.env.iter().any(|(name, value)| {
-        name == provenant_confinement::run_config::SANDBOX_ENV && value == "off"
-    }) {
+    if spec
+        .env
+        .iter()
+        .any(|(name, value)| name == provenant_core::consumer_env::SANDBOX && value == "off")
+    {
         check_sandbox_off_build_disk(&spec.env, state)?;
         return Ok(Vec::new());
     }
@@ -685,10 +687,7 @@ mod refusal_tests {
             .unwrap();
             let env = vec![
                 ("CARGO_TARGET_DIR".into(), target.as_os_str().to_owned()),
-                (
-                    provenant_confinement::run_config::SANDBOX_ENV.into(),
-                    "off".into(),
-                ),
+                (provenant_core::consumer_env::SANDBOX.into(), "off".into()),
             ];
             let result = check_sandbox_off_build_disk(&env, state.path());
             assert_eq!(result.is_err(), refuses);

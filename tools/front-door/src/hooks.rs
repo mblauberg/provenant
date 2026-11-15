@@ -203,7 +203,7 @@ fn guard_reply(
         let config = provenant_cli::config_reads::show_for(&resolved.roots, "hook")?
             .domains
             .fabric;
-        let label = std::env::var_os("PROVENANT_AGENT_LABEL");
+        let label = std::env::var_os(provenant_core::consumer_env::AGENT_LABEL);
         let reader = crate::local_answers::LocalReader {
             root: &resolved.roots.state,
             workspace: &cwd,

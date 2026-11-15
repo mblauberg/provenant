@@ -251,7 +251,9 @@ fn invoke(
     };
     let announced = std::cell::Cell::new(false);
     let result = (|| -> Result<Value, Box<dyn std::error::Error>> {
-        if command == "run" && std::env::var_os(provenant_run::PARENT_ATTEMPT_ENV).is_some() {
+        if command == "run"
+            && std::env::var_os(provenant_core::consumer_env::PARENT_ATTEMPT_ID).is_some()
+        {
             let factory = fabric::read_factory(globals, workers)?;
             let wait_seconds = input["wait_seconds"]
                 .as_u64()

@@ -148,7 +148,7 @@ pub(super) fn project_scratch_reads(project: &Path) -> Vec<PathGrant> {
     let Ok(project) = std::fs::canonicalize(project) else {
         return Vec::new();
     };
-    [".provenant/scratch", ".agent-run"]
+    [provenant_config::repository_files::SCRATCH, ".agent-run"]
         .map(|name| project.join(name))
         .into_iter()
         .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()))
@@ -537,7 +537,7 @@ pub(super) fn apply_sandbox_mode(
     environment: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>,
     route: &mut provenant_records::run::RouteRecord,
 ) {
-    use provenant_confinement::run_config::SANDBOX_ENV;
+    use provenant_core::consumer_env::SANDBOX;
     if let Some(policy) = task
         .profile
         .extra
@@ -563,8 +563,8 @@ pub(super) fn apply_sandbox_mode(
             .and_then(|sources| sources.get("lanes.sandbox_floor"))
             .and_then(serde_json::Value::as_str).unwrap_or("default"),
     }));
-    environment.retain(|(name, _)| name != SANDBOX_ENV);
-    environment.push((SANDBOX_ENV.into(), mode.env_value().into()));
+    environment.retain(|(name, _)| name != SANDBOX);
+    environment.push((SANDBOX.into(), mode.env_value().into()));
     route.extra.insert(
         provenant_records::run::SANDBOX_ROUTE_FIELD.into(),
         serde_json::json!(mode),

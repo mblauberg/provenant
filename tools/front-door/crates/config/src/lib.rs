@@ -51,6 +51,7 @@ pub use ports::{
     remove_port_command_receipt, try_lock_port_command_receipts,
 };
 mod release;
+pub mod repository_files;
 mod repository_policy;
 pub use repository_policy::{REPOSITORY_CONFIG, RepositoryPolicy, read_land};
 pub mod removed;

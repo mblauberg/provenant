@@ -3,7 +3,7 @@ use provenant_cli::Globals;
 use provenant_records::{CommandResult, Outcome};
 
 pub fn run(root: u32, globals: &Globals) -> u8 {
-    let result = std::env::var_os(provenant_supervisor::process_tree::ENV)
+    let result = std::env::var_os(provenant_core::consumer_env::PROCESS_TREE)
         .ok_or(provenant_supervisor::process_tree::Unavailable)
         .and_then(|path| {
             provenant_supervisor::process_tree::read(std::path::Path::new(&path), root)

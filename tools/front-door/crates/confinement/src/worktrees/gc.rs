@@ -2218,7 +2218,7 @@ fn walk_output(
 /// The walker still prunes it only when Git reports it ignored, and only with
 /// the same writer custody and census proof as declared output.
 fn is_default_regenerable(path: &Path) -> bool {
-    path == Path::new(crate::scratch::PROJECT_SCRATCH)
+    path == Path::new(provenant_config::repository_files::SCRATCH)
 }
 
 /// A .git file or directory marks a protected repository boundary.
