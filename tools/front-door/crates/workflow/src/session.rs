@@ -1573,51 +1573,7 @@ mod tests {
     #[test]
     fn summary_save_race() {
         use provenant_core::{ActorId, HostId};
-        use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
-        struct LockWaitClock {
-            entered: (Mutex<bool>, Condvar),
-            released: (Mutex<bool>, Condvar),
-        }
-        impl LockWaitClock {
-            fn wait_until_blocked(&self) {
-                let (state, changed) = &self.entered;
-                let mut entered = state.lock().unwrap();
-                while !*entered {
-                    entered = changed.wait(entered).unwrap();
-                }
-            }
-
-            fn release(&self) {
-                let (state, changed) = &self.released;
-                *state.lock().unwrap() = true;
-                changed.notify_all();
-            }
-        }
-        impl Clock for LockWaitClock {
-            fn wall_now(&self) -> Result<UtcMicros, provenant_core::TimeError> {
-                UtcMicros::from_micros(20)
-            }
-
-            fn mono_now(&self) -> MonoTime {
-                MonoTime::from_micros(0)
-            }
-
-            fn wait_until(&self, _deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
-                let (state, changed) = &self.entered;
-                let mut entered = state.lock().unwrap();
-                if !*entered {
-                    *entered = true;
-                    changed.notify_all();
-                    drop(entered);
-                    let (state, changed) = &self.released;
-                    let mut released = state.lock().unwrap();
-                    while !*released {
-                        released = changed.wait(released).unwrap();
-                    }
-                }
-                Ok(())
-            }
-        }
+        use std::sync::{Arc, Barrier, mpsc};
         let (_temp, root, project) = setup();
         let selected = store(&root, project, "chair")
             .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([4; 16]));
@@ -1626,10 +1582,6 @@ mod tests {
         let changed = first.replace("Body", "Saved concurrently");
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let waiter_clock = Arc::new(LockWaitClock {
-            entered: (Mutex::new(false), Condvar::new()),
-            released: (Mutex::new(false), Condvar::new()),
-        });
         std::thread::scope(|scope| {
             let selected_ref = &selected;
             let changed_ref = &changed;
@@ -1671,9 +1623,11 @@ mod tests {
                 Err(SessionError::Filesystem(FsError::LockTimeout { .. }))
             ));
             let selected_ref = &selected;
-            let editing_clock = Arc::clone(&waiter_clock);
+            // The edit queues behind the held lock, or runs after the save; either
+            // way it applies on top of the concurrent save and is never lost.
             let editing = scope.spawn(move || {
-                let budget = WaitBudget::cli(editing_clock.mono_now(), 5).unwrap();
+                let clock = clock(20);
+                let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
                 selected_ref.update_summary(
                     SummaryPatch {
                         now: Some("Edited".into()),
@@ -1683,13 +1637,11 @@ mod tests {
                     &op("b"),
                     budget,
                     &CancelToken::new(),
-                    editing_clock.as_ref(),
+                    &clock,
                 )
             });
-            waiter_clock.wait_until_blocked();
             release_tx.send(()).unwrap();
             saving.join().unwrap();
-            waiter_clock.release();
             editing.join().unwrap().unwrap();
         });
         let checkpoint = selected.read().unwrap().unwrap().markdown;
@@ -2394,7 +2346,7 @@ mod tests {
         selected
             .write_autosave(
                 document.as_bytes(),
-                WaitBudget::cli(clock.mono_now(), 1_000_000).unwrap(),
+                WaitBudget::cli(clock.mono_now(), 1).unwrap(),
                 &CancelToken::new(),
                 &clock,
             )
@@ -2602,7 +2554,7 @@ mod tests {
         let selected = store(&root, project, "host-1");
         save(&selected, b"original").unwrap();
         let clock = MutableClock(AtomicI64::new(0));
-        let budget = WaitBudget::cli(MonoTime::from_micros(0), 1_000_000).unwrap();
+        let budget = WaitBudget::cli(MonoTime::from_micros(0), 1).unwrap();
         let result = selected.update(
             false,
             |current| {
