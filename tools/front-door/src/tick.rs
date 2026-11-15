@@ -19,6 +19,10 @@ use std::{
 mod steward;
 
 const DAY_SECONDS: u64 = 86_400;
+const MAX_SEED_DISCOVERY_ERRORS: usize = 16;
+const MAX_SEED_ERROR_BYTES: usize = 1024;
+const MAX_BUSY_SEED_PROJECTS: usize = 512;
+const MAX_SEED_RESULT_ERROR_BYTES: usize = 16 * 1024;
 
 #[derive(Default, Serialize, Deserialize)]
 struct Cadence {
@@ -34,6 +38,10 @@ struct GcResult {
     state: String,
     at: WallTime,
     error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    busy_retry_at: Option<WallTime>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    busy_project_keys: Vec<String>,
 }
 
 fn write_gc_result(
@@ -53,11 +61,46 @@ fn write_result(
     state: &str,
     error: Option<String>,
 ) -> Result<(), String> {
+    write_result_with_retry(directory, file, purpose, at, state, error, None, Vec::new())
+}
+
+fn write_seed_result(
+    directory: &Directory,
+    at: WallTime,
+    state: &str,
+    error: Option<String>,
+    busy_retry_at: Option<WallTime>,
+    busy_project_keys: Vec<String>,
+) -> Result<(), String> {
+    write_result_with_retry(
+        directory,
+        SEED_RESULT,
+        "tick-seed",
+        at,
+        state,
+        error,
+        busy_retry_at,
+        busy_project_keys,
+    )
+}
+
+fn write_result_with_retry(
+    directory: &Directory,
+    file: &str,
+    purpose: &str,
+    at: WallTime,
+    state: &str,
+    error: Option<String>,
+    busy_retry_at: Option<WallTime>,
+    busy_project_keys: Vec<String>,
+) -> Result<(), String> {
     let result = GcResult {
         extra: Default::default(),
         state: state.into(),
         at,
         error,
+        busy_retry_at,
+        busy_project_keys,
     };
     let bytes = serde_json::to_vec(&result).map_err(|error| error.to_string())?;
     directory
@@ -179,7 +222,7 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
         // that is now behind can be rebuilt. This only queues a detached
         // worker; a failure to queue is recorded for the tick and never fails
         // the collection.
-        let _ = queue_seed(&directory, clock.wall_now()?, || {
+        let _ = queue_seed(&directory, clock.wall_now()?, &[], None, || {
             spawn_seed_worker(resolved.roots.state.as_path(), &resolved.home)
         });
         collected.map_err(Into::into)
@@ -203,17 +246,27 @@ const SEED_RESULT: &str = "seed-result.json";
 fn queue_seed(
     directory: &Directory,
     now: WallTime,
+    retry_project_keys: &[String],
+    prior_error: Option<String>,
     spawn: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
-    write_result(directory, SEED_RESULT, "tick-seed", now, "queued", None)?;
+    write_seed_result(
+        directory,
+        now,
+        "queued",
+        prior_error.clone(),
+        None,
+        retry_project_keys.to_vec(),
+    )?;
     if let Err(error) = spawn() {
-        write_result(
+        let error = join_seed_errors(prior_error.as_deref(), &error);
+        write_seed_result(
             directory,
-            SEED_RESULT,
-            "tick-seed",
             now,
             "failed",
             Some(error.clone()),
+            (!retry_project_keys.is_empty()).then_some(now),
+            retry_project_keys.to_vec(),
         )?;
         return Err(error);
     }
@@ -232,16 +285,56 @@ fn spawn_seed_worker(state: &std::path::Path, home: &std::path::Path) -> Result<
     provenant_os::exec::spawn_detached(&argv, home).map_err(|error| error.to_string())
 }
 
-/// A pass that found a build already running ends `busy`; the tick retries it
-/// once a minute until a pass finds every project current or built.
+fn read_seed_retry_context(directory: &Directory) -> (Vec<String>, Option<String>) {
+    let result = directory
+        .read_bounded(SEED_RESULT.as_ref(), 64 * 1024)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<GcResult>(&bytes).ok());
+    result.map_or_else(
+        || (Vec::new(), None),
+        |result| {
+            if result.busy_project_keys.is_empty() {
+                (Vec::new(), None)
+            } else {
+                (result.busy_project_keys, result.error)
+            }
+        },
+    )
+}
+
+fn join_seed_errors(previous: Option<&str>, next: &str) -> String {
+    truncate_bytes(
+        match previous.filter(|error| !error.is_empty()) {
+            Some(previous) => format!("{previous}; {next}"),
+            None => next.to_owned(),
+        },
+        MAX_SEED_RESULT_ERROR_BYTES,
+    )
+}
+
+fn truncate_bytes(message: String, limit: usize) -> String {
+    if message.len() <= limit {
+        return message;
+    }
+    let mut end = limit;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &message[..end])
+}
+
+/// A pass that found a build already running records those projects for a
+/// minute retry. Other project failures stay visible for the next daily pass.
 fn seed_retry_due(directory: &Directory, now: WallTime) -> bool {
     directory
         .read_bounded(SEED_RESULT.as_ref(), 64 * 1024)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<GcResult>(&bytes).ok())
         .is_some_and(|result| {
-            result.state == "busy"
-                && now.as_micros().saturating_sub(result.at.as_micros()) >= 60_000_000
+            !result.busy_project_keys.is_empty()
+                && result
+                    .busy_retry_at
+                    .is_some_and(|at| now.as_micros().saturating_sub(at.as_micros()) >= 60_000_000)
         })
 }
 
@@ -254,12 +347,71 @@ struct SeedPass {
     /// Projects with no selected Cargo manifest, which have nothing to seed.
     skipped: usize,
     errors: Vec<String>,
+    busy_project_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeedProject {
+    root: PathBuf,
+    project_key: String,
+}
+
+#[derive(Debug, Default)]
+struct SeedDiscoveryError {
+    project_key: String,
+    message: String,
+}
+
+#[derive(Debug, Default)]
+struct SeedDiscovery {
+    projects: Vec<SeedProject>,
+    errors: Vec<SeedDiscoveryError>,
+    omitted_errors: usize,
+}
+
+impl SeedDiscovery {
+    #[cfg(test)]
+    fn from_paths(paths: Vec<PathBuf>) -> Self {
+        Self {
+            projects: paths
+                .into_iter()
+                .map(|root| SeedProject {
+                    project_key: provenant_run::target_seed::project_key(&root),
+                    root,
+                })
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    fn record_error(&mut self, project_key: String, message: String) {
+        if self.errors.len() < MAX_SEED_DISCOVERY_ERRORS {
+            let message = truncate_seed_error(message);
+            self.errors.push(SeedDiscoveryError {
+                project_key,
+                message,
+            });
+        } else {
+            self.omitted_errors += 1;
+        }
+    }
+}
+
+fn truncate_seed_error(message: String) -> String {
+    if message.len() <= MAX_SEED_ERROR_BYTES {
+        return message;
+    }
+    let mut end = MAX_SEED_ERROR_BYTES;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &message[..end])
 }
 
 /// Refresh each project in turn. A busy build is a no-op and one project's
 /// failure never stops the others.
 fn refresh_projects(
-    projects: &[std::path::PathBuf],
+    projects: &[SeedProject],
     host_state: &std::path::Path,
     refresh: impl Fn(
         &std::path::Path,
@@ -268,23 +420,35 @@ fn refresh_projects(
     use crate::target_seed_build::Refresh;
     let mut pass = SeedPass::default();
     for project in projects {
-        match provenant_run::target_seed::cargo_build_directory(project, host_state) {
+        match provenant_run::target_seed::cargo_build_directory(&project.root, host_state) {
             Ok(Some(_)) => {}
             Ok(None) => {
                 pass.skipped += 1;
                 continue;
             }
             Err(error) => {
-                pass.errors.push(format!("{}: {error}", project.display()));
+                pass.errors
+                    .push(format!("{}: {error}", project.root.display()));
                 continue;
             }
         }
-        match refresh(project) {
+        match refresh(&project.root) {
             Ok(Refresh::Built(_)) => pass.built += 1,
             Ok(Refresh::NotCargo) => pass.skipped += 1,
             Ok(Refresh::Current) => pass.current += 1,
-            Ok(Refresh::Busy) => pass.busy += 1,
-            Err(error) => pass.errors.push(format!("{}: {error}", project.display())),
+            Ok(Refresh::Busy) => {
+                pass.busy += 1;
+                if pass.busy_project_keys.len() < MAX_BUSY_SEED_PROJECTS {
+                    pass.busy_project_keys.push(project.project_key.clone());
+                } else if pass.busy == MAX_BUSY_SEED_PROJECTS + 1 {
+                    pass.errors.push(format!(
+                        "more than {MAX_BUSY_SEED_PROJECTS} project seeds are busy; excess projects wait for the next daily refresh"
+                    ));
+                }
+            }
+            Err(error) => pass
+                .errors
+                .push(format!("{}: {error}", project.root.display())),
         }
     }
     pass
@@ -297,7 +461,9 @@ fn seed_pass(
     host_state: &Path,
     clock: &dyn Clock,
     enabled: bool,
-    projects: impl FnOnce() -> Result<Vec<std::path::PathBuf>, String>,
+    retry_project_keys: &[String],
+    prior_error: Option<String>,
+    projects: impl FnOnce() -> Result<SeedDiscovery, String>,
     refresh: impl Fn(
         &std::path::Path,
     ) -> Result<crate::target_seed_build::Refresh, Box<dyn std::error::Error>>,
@@ -311,21 +477,70 @@ fn seed_pass(
     if !enabled {
         return write_result(directory, SEED_RESULT, "tick-seed", at()?, "disabled", None);
     }
-    write_result(directory, SEED_RESULT, "tick-seed", at()?, "running", None)?;
-    let outcome = projects().map(|projects| refresh_projects(&projects, host_state, refresh));
-    let (state, error) = match outcome {
-        Ok(pass) if !pass.errors.is_empty() => ("failed", Some(pass.errors.join("; "))),
-        Ok(pass) if pass.busy > 0 => (
-            "busy",
-            Some(format!(
-                "{} project(s) had a build running; retrying next tick",
-                pass.busy
-            )),
+    write_seed_result(
+        directory,
+        at()?,
+        "running",
+        prior_error.clone(),
+        None,
+        retry_project_keys.to_vec(),
+    )?;
+    let outcome = projects().map(|mut discovery| {
+        if !retry_project_keys.is_empty() {
+            discovery
+                .projects
+                .retain(|project| retry_project_keys.contains(&project.project_key));
+            discovery
+                .errors
+                .retain(|error| retry_project_keys.contains(&error.project_key));
+        }
+        let mut pass = refresh_projects(&discovery.projects, host_state, refresh);
+        pass.errors
+            .extend(discovery.errors.into_iter().map(|error| error.message));
+        if discovery.omitted_errors > 0 {
+            pass.errors.push(format!(
+                "{} additional registered project layout error(s) omitted",
+                discovery.omitted_errors
+            ));
+        }
+        pass
+    });
+    let (state, error, busy_retry_at, busy_project_keys) = match outcome {
+        Ok(pass) => {
+            let mut error = prior_error;
+            for message in &pass.errors {
+                error = Some(join_seed_errors(error.as_deref(), message));
+            }
+            let has_failure = error.is_some();
+            let state = if has_failure {
+                "failed"
+            } else if pass.busy > 0 {
+                "busy"
+            } else {
+                "complete"
+            };
+            (
+                state,
+                error,
+                if pass.busy > 0 { Some(at()?) } else { None },
+                pass.busy_project_keys,
+            )
+        }
+        Err(error) => (
+            "failed",
+            Some(join_seed_errors(prior_error.as_deref(), &error)),
+            None,
+            Vec::new(),
         ),
-        Ok(_) => ("complete", None),
-        Err(error) => ("failed", Some(error)),
     };
-    write_result(directory, SEED_RESULT, "tick-seed", at()?, state, error)
+    write_seed_result(
+        directory,
+        at()?,
+        state,
+        error,
+        busy_retry_at,
+        busy_project_keys,
+    )
 }
 
 fn seed_git_environment() -> Vec<(OsString, OsString)> {
@@ -346,36 +561,53 @@ fn seed_git_environment() -> Vec<(OsString, OsString)> {
 
 fn registered_seed_projects(
     common_dirs: &[PathBuf],
+    retry_project_keys: &[String],
     executor: &dyn Executor,
     git: &Path,
     environment: &[(OsString, OsString)],
     cancel: &provenant_core::CancelToken,
-) -> Result<Vec<PathBuf>, String> {
-    let mut projects = Vec::new();
+) -> SeedDiscovery {
+    let mut discovery = SeedDiscovery::default();
     let mut seen = BTreeSet::new();
     for common in common_dirs {
-        let layout = provenant_confinement::worktrees::project_layout_for_common(
+        let project_key = provenant_run::target_seed::project_key(common);
+        // Busy retries are scoped to the projects that actually had a seed
+        // lock. Do not re-inventory other registrations, which may include a
+        // separate project whose earlier discovery/build failed.
+        if !retry_project_keys.is_empty() && !retry_project_keys.contains(&project_key) {
+            continue;
+        }
+        let layout = match provenant_confinement::worktrees::project_layout_for_common(
             executor,
             common,
             git,
             environment,
             Duration::from_secs(5),
             cancel,
-        )
-        .map_err(|error| {
-            format!(
-                "cannot resolve registered seed project for {}: {error}",
-                common.display()
-            )
-        })?;
+        ) {
+            Ok(layout) => layout,
+            Err(error) => {
+                discovery.record_error(
+                    project_key,
+                    format!(
+                        "cannot verify registered Git directory {}: {error}",
+                        common.display()
+                    ),
+                );
+                continue;
+            }
+        };
         // A bare common directory owns host Git state, not a Cargo project.
         if let Some(project) = layout.project()
             && seen.insert(project.to_path_buf())
         {
-            projects.push(project.to_path_buf());
+            discovery.projects.push(SeedProject {
+                root: project.to_path_buf(),
+                project_key,
+            });
         }
     }
-    Ok(projects)
+    discovery
 }
 
 /// Detached cargo-seed refresh queued by the daily collector. The build can
@@ -395,6 +627,7 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
             &resolved.roots.state.as_path().join("tick"),
             true,
         )?;
+        let (retry_project_keys, prior_error) = read_seed_retry_context(&directory);
         let config = provenant_cli::config_reads::read_for(&resolved.roots, "tick")?;
         let state = resolved.roots.state.as_path();
         seed_pass(
@@ -402,6 +635,8 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
             state,
             &SystemClock,
             config.domains.fabric.lanes.cargo_seed.enabled,
+            &retry_project_keys,
+            prior_error,
             || {
                 let selection = provenant_config::registered_gc_project_selection(&resolved.roots)
                     .map_err(|error| error.to_string())?;
@@ -413,13 +648,14 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
                 let git = provenant_os::git::git_executable()
                     .ok_or_else(|| "Git executable unavailable".to_owned())?;
                 let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
-                registered_seed_projects(
+                Ok(registered_seed_projects(
                     &common_dirs,
+                    &retry_project_keys,
                     &executor,
                     &git,
                     &seed_git_environment(),
                     &provenant_core::CancelToken::new(),
-                )
+                ))
             },
             |project| crate::target_seed_build::refresh(state, project),
         )?;
@@ -578,13 +814,17 @@ fn tick(
         Ok(directory) => {
             // A busy pass is retried here; the worker is single-flight, so a
             // retry that finds a build still running costs one short process.
-            if seed_retry_due(&directory, now)
-                && queue_seed(&directory, now, || {
+            if seed_retry_due(&directory, now) {
+                let (retry_project_keys, prior_error) = read_seed_retry_context(&directory);
+                if queue_seed(&directory, now, &retry_project_keys, prior_error, || {
                     spawn_seed_worker(resolved.roots.state.as_path(), &resolved.home)
                 })
                 .is_err()
-            {
-                Task::idle("target_seed", "last_failed")
+                {
+                    Task::idle("target_seed", "last_failed")
+                } else {
+                    Task::idle("target_seed", seed_state(&directory))
+                }
             } else {
                 Task::idle("target_seed", seed_state(&directory))
             }
@@ -660,6 +900,7 @@ mod tests {
     #[allow(unused_imports)] // The worktree driver includes this module without libtest.
     use super::*;
 
+    /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
     fn registered_seed_projects_resolve_separate_gitdirs_and_skip_bare_repositories() {
         let temp = tempfile::tempdir().unwrap();
@@ -689,18 +930,55 @@ mod tests {
         let bare = root.join("host-only.git");
         provenant_os::fixture::run_git(&root, &["init", "--bare", "-q", bare.to_str().unwrap()])
             .unwrap();
+        let invalid = root.join("invalid-git-dir");
+        std::fs::create_dir(&invalid).unwrap();
 
         let git = provenant_os::git::git_executable().unwrap();
         let executor = SystemExecutor::new(4).unwrap();
-        let projects = registered_seed_projects(
-            &[primary.join(".git"), separate_git, bare],
+        let primary_common = primary.join(".git");
+        let discovery = registered_seed_projects(
+            &[
+                primary_common.clone(),
+                invalid.clone(),
+                separate_git.clone(),
+                bare,
+            ],
+            &[],
             &executor,
             &git,
             &seed_git_environment(),
             &provenant_core::CancelToken::new(),
-        )
-        .unwrap();
-        assert_eq!(projects, vec![primary, separate]);
+        );
+        assert_eq!(
+            discovery
+                .projects
+                .iter()
+                .map(|project| project.root.as_path())
+                .collect::<Vec<_>>(),
+            vec![primary.as_path(), separate.as_path()]
+        );
+        assert_eq!(discovery.errors.len(), 1);
+        assert!(
+            discovery.errors[0]
+                .message
+                .contains(&invalid.display().to_string())
+        );
+
+        let primary_key = provenant_run::target_seed::project_key(&primary_common);
+        let retry = registered_seed_projects(
+            &[primary_common, invalid.clone(), separate_git],
+            &[primary_key.clone()],
+            &executor,
+            &git,
+            &seed_git_environment(),
+            &provenant_core::CancelToken::new(),
+        );
+        assert_eq!(retry.projects.len(), 1);
+        assert_eq!(retry.projects[0].project_key, primary_key);
+        assert!(
+            retry.errors.is_empty(),
+            "unrelated failures are not retried"
+        );
     }
 
     #[test]
@@ -772,7 +1050,7 @@ mod tests {
         let now = WallTime::from_micros(1_000_000).unwrap();
         assert_eq!(seed_state(&directory), "idle");
         let mut spawned = 0;
-        queue_seed(&directory, now, || {
+        queue_seed(&directory, now, &[], None, || {
             spawned += 1;
             Ok(())
         })
@@ -781,7 +1059,10 @@ mod tests {
         assert_eq!(seed_state_of(&directory).0, "queued");
         // Queueing never builds: the refresh closure is only reachable from
         // the detached worker.
-        let error = queue_seed(&directory, now, || Err("no process budget".into())).unwrap_err();
+        let error = queue_seed(&directory, now, &[], None, || {
+            Err("no process budget".into())
+        })
+        .unwrap_err();
         assert_eq!(error, "no process budget");
         assert_eq!(
             seed_state_of(&directory),
@@ -789,8 +1070,9 @@ mod tests {
         );
     }
 
+    /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
-    fn seed_pass_treats_busy_as_a_noop_and_isolates_project_failures() {
+    fn seed_retry_retries_only_busy_projects_and_preserves_other_failures() {
         use crate::target_seed_build::Refresh;
         let temp = tempfile::tempdir().unwrap();
         // macOS temp roots sit behind a /var symlink, which private_directory refuses.
@@ -798,13 +1080,16 @@ mod tests {
         let directory = provenant_config::private_directory(&root, true).unwrap();
         let project = |name: &str| seed_project(&root, name, true);
         let projects = vec![project("a"), project("b"), project("c"), project("d")];
-        let listed = projects.clone();
+        let entries = SeedDiscovery::from_paths(projects.clone()).projects;
+        let busy_key = entries[0].project_key.clone();
         seed_pass(
             &directory,
             &root,
             &seed_clock(),
             true,
-            || Ok(listed),
+            &[],
+            None,
+            || Ok(SeedDiscovery::from_paths(projects.clone())),
             |project| match project.file_name().unwrap().to_str().unwrap() {
                 "a" => Ok(Refresh::Busy),
                 "b" => Err("origin/main missing".into()),
@@ -817,11 +1102,12 @@ mod tests {
         // is not itself failed: the later projects still ran.
         let (state, error) = seed_state_of(&directory);
         assert_eq!(state, "last_failed");
-        assert_eq!(
-            error.unwrap(),
-            format!("{}: origin/main missing", projects[1].display())
+        assert!(
+            error
+                .unwrap()
+                .contains(&format!("{}: origin/main missing", projects[1].display()))
         );
-        let pass = refresh_projects(&projects, &root, |project| {
+        let pass = refresh_projects(&entries, &root, |project| {
             match project.file_name().unwrap().to_str().unwrap() {
                 "a" => Ok(Refresh::Busy),
                 "b" => Err("origin/main missing".into()),
@@ -830,37 +1116,63 @@ mod tests {
             }
         });
         assert_eq!(
-            (pass.built, pass.current, pass.busy, pass.errors.len()),
-            (1, 1, 1, 1)
+            (
+                pass.built,
+                pass.current,
+                pass.busy,
+                pass.errors.len(),
+                pass.busy_project_keys
+            ),
+            (1, 1, 1, 1, vec![busy_key.clone()])
         );
-        let clean = vec![projects[0].clone()];
-        seed_pass(
-            &directory,
-            &root,
-            &seed_clock(),
-            true,
-            || Ok(clean),
-            |_| Ok(Refresh::Busy),
-        )
-        .unwrap();
-        let (state, note) = seed_state_of(&directory);
-        assert_eq!(state, "busy");
-        assert!(note.unwrap().contains("retrying next tick"));
         let wall = seed_clock().wall_now().unwrap();
         assert!(!seed_retry_due(&directory, wall), "just written: not due");
         let far = WallTime::from_micros(wall.as_micros() + 61_000_000).unwrap();
         assert!(seed_retry_due(&directory, far), "busy is retried next tick");
+        let (retry_keys, prior_error) = read_seed_retry_context(&directory);
+        assert_eq!(retry_keys, vec![busy_key]);
+        assert!(
+            prior_error
+                .as_deref()
+                .is_some_and(|error| error.contains("origin/main missing"))
+        );
+        let retried = std::cell::RefCell::new(Vec::new());
         seed_pass(
             &directory,
             &root,
             &seed_clock(),
             true,
-            || Ok(vec![projects[0].clone()]),
+            &retry_keys,
+            prior_error,
+            || Ok(SeedDiscovery::from_paths(projects.clone())),
+            |project| {
+                retried.borrow_mut().push(project.to_owned());
+                assert_eq!(project.file_name().unwrap(), "a");
+                Ok(Refresh::Current)
+            },
+        )
+        .unwrap();
+        assert_eq!(*retried.borrow(), vec![projects[0].clone()]);
+        let (state, error) = seed_state_of(&directory);
+        assert_eq!(state, "last_failed", "the failed project remains visible");
+        assert!(error.unwrap().contains("origin/main missing"));
+        assert!(
+            !seed_retry_due(&directory, far),
+            "resolved busy work is not retried"
+        );
+
+        seed_pass(
+            &directory,
+            &root,
+            &seed_clock(),
+            true,
+            &[],
+            None,
+            || Ok(SeedDiscovery::from_paths(projects)),
             |_| Ok(Refresh::Current),
         )
         .unwrap();
         assert_eq!(seed_state_of(&directory), ("complete", None));
-        assert!(!seed_retry_due(&directory, far), "only busy is retried");
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed
@@ -879,7 +1191,9 @@ mod tests {
             &root,
             &seed_clock(),
             true,
-            || Ok(listed),
+            &[],
+            None,
+            || Ok(SeedDiscovery::from_paths(listed)),
             |project| {
                 called.borrow_mut().push(project.to_owned());
                 Err(std::io::Error::other("temporary Git spawn failure").into())
@@ -890,7 +1204,11 @@ mod tests {
         let (state, note) = seed_state_of(&directory);
         assert_eq!(state, "last_failed");
         assert!(note.unwrap().contains("temporary Git spawn failure"));
-        let pass = refresh_projects(&[bare], &root, |_| panic!("no manifest, no refresh"));
+        let pass = refresh_projects(
+            &SeedDiscovery::from_paths(vec![bare]).projects,
+            &root,
+            |_| panic!("no manifest, no refresh"),
+        );
         assert_eq!(
             pass,
             SeedPass {
@@ -903,7 +1221,9 @@ mod tests {
             &root,
             &seed_clock(),
             true,
-            || Ok(vec![broken]),
+            &[],
+            None,
+            || Ok(SeedDiscovery::from_paths(vec![broken])),
             |_| Ok(Refresh::Built("generation".into())),
         )
         .unwrap();
@@ -944,6 +1264,8 @@ mod tests {
             &root,
             &seed_clock(),
             true,
+            &[],
+            None,
             || panic!("a second worker must not enumerate projects"),
             |_| -> Result<Refresh, Box<dyn std::error::Error>> { panic!("must not refresh") },
         )
@@ -961,6 +1283,8 @@ mod tests {
                     &root,
                     &seed_clock(),
                     false,
+                    &[],
+                    None,
                     || panic!("a disabled seed must not enumerate projects"),
                     |_| -> Result<Refresh, Box<dyn std::error::Error>> {
                         panic!("must not refresh")
@@ -978,6 +1302,8 @@ mod tests {
             &root,
             &seed_clock(),
             true,
+            &[],
+            None,
             || Err("registry unreadable".into()),
             |_| Ok(Refresh::Current),
         )

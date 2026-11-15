@@ -1,5 +1,6 @@
 //! Bounded retention for host-owned Cargo target generations.
 use std::{
+    collections::BTreeMap,
     fs, io,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -58,6 +59,12 @@ pub fn collect(
         Err(error) => return Err(error),
     }
     let root = store.join("generations");
+    struct Generation {
+        id: std::ffi::OsString,
+        path: PathBuf,
+        size: u64,
+        project_key: String,
+    }
     let mut generations = Vec::new();
     for entry in fs::read_dir(root)? {
         let entry = entry?;
@@ -69,24 +76,43 @@ pub fn collect(
                 continue;
             }
             let size = allocated_size(&entry.path())?;
-            generations.push((entry.file_name(), entry.path(), size));
+            let project_key = fs::read(entry.path().join("manifest.json"))
+                .ok()
+                .and_then(|bytes| {
+                    serde_json::from_slice::<crate::target_seed::Manifest>(&bytes).ok()
+                })
+                .map_or_else(String::new, |manifest| manifest.project_key);
+            generations.push(Generation {
+                id: entry.file_name(),
+                path: entry.path(),
+                size,
+                project_key,
+            });
         }
     }
-    generations.sort_by(|a, b| a.0.cmp(&b.0));
+    generations.sort_by(|a, b| a.id.cmp(&b.id));
     let mut total = generations
         .iter()
-        .fold(0u64, |sum, item| sum.saturating_add(item.2));
-    let mut kept = generations.len();
-    for (_, path, size) in generations {
-        if kept > max_generations || total > max_bytes {
+        .fold(0u64, |sum, item| sum.saturating_add(item.size));
+    let mut per_project = BTreeMap::<String, usize>::new();
+    for generation in &generations {
+        *per_project
+            .entry(generation.project_key.clone())
+            .or_default() += 1;
+    }
+    for generation in generations {
+        let Some(kept) = per_project.get_mut(&generation.project_key) else {
+            return Err(io::Error::other("target seed project count changed").into());
+        };
+        if *kept > max_generations || total > max_bytes {
             if !dry_run {
-                make_directories_writable(&path)?;
-                fs::remove_dir_all(&path)?;
+                make_directories_writable(&generation.path)?;
+                fs::remove_dir_all(&generation.path)?;
             }
-            report.bytes = report.bytes.saturating_add(size);
-            report.removed.push(path);
-            kept -= 1;
-            total = total.saturating_sub(size);
+            report.bytes = report.bytes.saturating_add(generation.size);
+            report.removed.push(generation.path);
+            *kept -= 1;
+            total = total.saturating_sub(generation.size);
         }
     }
     Ok(report)
@@ -139,12 +165,30 @@ fn make_directories_writable(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     fn generation(state: &Path, id: &str, bytes: usize) -> PathBuf {
+        generation_for_project(state, id, bytes, "project")
+    }
+
+    fn generation_for_project(state: &Path, id: &str, bytes: usize, project_key: &str) -> PathBuf {
         let dir = crate::target_seed::store_path(state)
             .join("generations")
             .join(id);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("payload"), vec![0; bytes]).unwrap();
         fs::write(dir.join("complete"), b"complete\n").unwrap();
+        let manifest = crate::target_seed::Manifest {
+            project_key: project_key.into(),
+            rustc_vv: "rustc fixture".into(),
+            host_triple: "fixture".into(),
+            commit: "fixture".into(),
+            profile: "dev".into(),
+            features: vec![],
+            flags: vec![],
+        };
+        fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
         dir
     }
@@ -162,6 +206,27 @@ mod tests {
         assert_eq!(preview.bytes, expected);
         assert_eq!(preview.bytes, applied.bytes);
         assert!(newest.exists() && !middle.exists() && !old.exists());
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn generation_count_is_per_project_while_bytes_remain_global() {
+        let state = tempfile::tempdir().unwrap();
+        let old_a = generation_for_project(state.path(), "001", 3, "project-a");
+        let only_b = generation_for_project(state.path(), "002", 4, "project-b");
+        let new_a = generation_for_project(state.path(), "003", 5, "project-a");
+        let report = collect(state.path(), 1, u64::MAX, false).unwrap();
+        assert_eq!(report.removed, vec![old_a.clone()]);
+        assert!(!old_a.exists());
+        assert!(only_b.exists() && new_a.exists());
+
+        let another = tempfile::tempdir().unwrap();
+        let older = generation_for_project(another.path(), "001", 3, "project-a");
+        let newer = generation_for_project(another.path(), "002", 4, "project-b");
+        let cap = allocated_size(&newer).unwrap();
+        collect(another.path(), 10, cap, false).unwrap();
+        assert!(!older.exists());
+        assert!(newer.exists());
     }
     #[test]
     fn active_clone_lock_prevents_collection() {

@@ -549,9 +549,9 @@ impl Lanes {
 #[serde(default, deny_unknown_fields)]
 pub struct CargoSeed {
     pub enabled: bool,
-    /// Maximum number of published target generations to retain.
+    /// Maximum published target generations to retain per project.
     pub max_generations: usize,
-    /// Maximum total apparent bytes in published target generations.
+    /// Maximum total allocated bytes across all published target generations.
     pub max_bytes: u64,
 }
 
