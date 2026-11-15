@@ -2626,6 +2626,9 @@ mod cargo_setup_tests {
             verified_cargo_config(&build, &cache.join(".cargo")),
             Err(codes::CARGO_CONFIG_CHANGES_BUILD_TARGET)
         );
+        // Keep the ancestor-compiler assertion independent of the target flag
+        // already rejected above; the first ineligible config owns the result.
+        std::fs::remove_file(&config).unwrap();
         // An intermediate config belongs to this Cargo invocation's cone too.
         let ancestor_config = nested.parent().unwrap().join(".cargo/config.toml");
         std::fs::create_dir_all(ancestor_config.parent().unwrap()).unwrap();
