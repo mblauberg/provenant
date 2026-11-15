@@ -10,45 +10,27 @@ fn tick_advances_expired_asks_and_cancelled_graphs_and_skips_future_and_busy_gra
         return Ok(());
     }
     use provenant_fabric_runtime::graph::{self, GraphJournal};
-    struct Seed {
-        actor: String,
-        at: provenant_core::WallTime,
-    }
-    impl graph::AttemptOwner for Seed {
-        type Error = FacadeError;
-        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
-            provenant_config::PortTable::builtin().worktree_layout
-        }
-        fn actor(&self) -> String {
-            self.actor.clone()
-        }
-        fn wall_now(&self) -> Option<provenant_core::WallTime> {
-            Some(self.at)
-        }
-        fn observe_or_start(
-            &mut self,
-            _: &graph::AttemptKey,
-            _: graph::NodeInput<'_>,
-            _: &graph::GraphRoute,
-            _: graph::AccessMode,
-            _: Option<&str>,
-            _: graph::Replay<'_>,
-        ) -> Result<graph::AttemptObservation, Self::Error> {
-            Err(FacadeError::OwnerUnavailable)
-        }
-    }
     let rig = crate::worktree_tests::support::TestRig::new()?;
     let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
     let context = Context::open(roots.clone(), &rig.home, &rig.project)?;
     let project = context.identity.project;
     let clock = SystemClock;
     let now = clock.wall_now()?;
+    let actor = context.identity.inbox.actor.to_string();
+    let seed_at = provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?;
+    let seed_clock = provenant_core::TestClock::new(
+        seed_at,
+        provenant_core::MonoTime::from_micros(0),
+    );
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 10)?;
-    let mut seed = Seed {
-        actor: context.identity.inbox.actor.to_string(),
-        at: provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?,
-    };
+    let inbox = provenant_fabric_runtime::inbox::InboxService::open(
+        &roots.state,
+        &context.identity,
+        &seed_clock,
+        &cancel,
+    )?;
+    let mut seed = super::InboxSeedOwner::new(actor, seed_at, &inbox, &cancel);
     // IDs sort the busy graph before the due graph, exercising failure isolation.
     for id in ["a-busy", "b-due", "c-future", "d-cancelled"] {
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
@@ -66,11 +48,7 @@ fn tick_advances_expired_asks_and_cancelled_graphs_and_skips_future_and_busy_gra
             directory: rig.project.clone(),
             document: document.clone(),
         })?;
-        seed.at = if id == "c-future" {
-            now
-        } else {
-            provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?
-        };
+        seed.at = if id == "c-future" { now } else { seed_at };
         let mut run = graph::advance_with_budget(
             &document,
             &mut seed,
@@ -78,6 +56,12 @@ fn tick_advances_expired_asks_and_cancelled_graphs_and_skips_future_and_busy_gra
             &Default::default(),
             &Default::default(),
         )?;
+        if id == "b-due" {
+            assert!(run.checkpoint.wake_at.is_some_and(|wake| wake <= now));
+        }
+        if id == "c-future" {
+            assert!(run.checkpoint.wake_at.is_some_and(|wake| wake > now));
+        }
         assert_eq!(run.checkpoint.nodes[0].state, graph::NodeState::Running);
         if id == "d-cancelled" {
             run.checkpoint.cancelled = true;

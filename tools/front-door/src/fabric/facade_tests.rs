@@ -598,6 +598,59 @@ pub(crate) mod peer_tests {
         }
     }
 
+    pub(crate) struct InboxSeedOwner<'a> {
+        actor: String,
+        pub(crate) at: provenant_core::WallTime,
+        inbox: &'a provenant_fabric_runtime::inbox::InboxService<'a>,
+        cancel: &'a provenant_core::CancelToken,
+    }
+
+    impl<'a> InboxSeedOwner<'a> {
+        pub(crate) fn new(
+            actor: String,
+            at: provenant_core::WallTime,
+            inbox: &'a provenant_fabric_runtime::inbox::InboxService<'a>,
+            cancel: &'a provenant_core::CancelToken,
+        ) -> Self {
+            Self { actor, at, inbox, cancel }
+        }
+    }
+
+    impl provenant_fabric_runtime::graph::AttemptOwner for InboxSeedOwner<'_> {
+        type Error = FacadeError;
+
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
+
+        fn actor(&self) -> String {
+            self.actor.clone()
+        }
+
+        fn wall_now(&self) -> Option<provenant_core::WallTime> {
+            Some(self.at)
+        }
+
+        fn file_ask(
+            &mut self,
+            filing: provenant_fabric_runtime::graph::AskFiling<'_>,
+        ) -> Result<provenant_fabric_runtime::graph::AskFiled, Self::Error> {
+            crate::fabric::owner::graph_ask_file(self.inbox, &filing, self.cancel)
+        }
+
+        fn observe_or_start(
+            &mut self,
+            _: &provenant_fabric_runtime::graph::AttemptKey,
+            _: provenant_fabric_runtime::graph::NodeInput<'_>,
+            _: &provenant_fabric_runtime::graph::GraphRoute,
+            _: provenant_fabric_runtime::graph::AccessMode,
+            _: Option<&str>,
+            _: provenant_fabric_runtime::graph::Replay<'_>,
+        ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, Self::Error> {
+            Ok(provenant_fabric_runtime::graph::AttemptObservation::Pending { attempt_ref: None })
+        }
+    }
+
     mod loop_repair_tests {
         include!("loop_repair_tests.rs");
     }

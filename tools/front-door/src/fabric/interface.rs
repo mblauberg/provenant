@@ -3476,7 +3476,14 @@ mod tests {
             project.path(),
             &ports,
         )?;
-        assert_eq!(node["worktree"], ".claude/worktrees/feature-topic");
+        assert_eq!(
+            node["worktree"],
+            json!(
+                project
+                    .path()
+                    .join(ports.managed_writer_path("feature/topic")?)
+            ),
+        );
         Ok(())
     }
 
@@ -4607,7 +4614,11 @@ mod tests {
             }
         }
         let node = writer_leaf(&controlled.launch.as_ref().unwrap().node).ok_or("writer leaf")?;
-        assert_eq!(node["worktree"], ".worktrees/fix-child");
+        let ports = provenant_config::PortTable::read_for(Some(&rig.project), &rig.state)?;
+        assert_eq!(
+            node["worktree"],
+            json!(rig.project.join(ports.managed_writer_path("fix/child")?)),
+        );
         assert_eq!(
             node["attempt"]["new_worktree"],
             json!({"branch":"fix/child", "base":"HEAD"})

@@ -49,33 +49,6 @@ fn tick_reports_unreadable_once_and_advances_another_graph()
         return Ok(());
     }
     use provenant_fabric_runtime::graph;
-    struct Seed {
-        actor: String,
-        at: provenant_core::WallTime,
-    }
-    impl graph::AttemptOwner for Seed {
-        type Error = FacadeError;
-        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
-            provenant_config::PortTable::builtin().worktree_layout
-        }
-        fn actor(&self) -> String {
-            self.actor.clone()
-        }
-        fn wall_now(&self) -> Option<provenant_core::WallTime> {
-            Some(self.at)
-        }
-        fn observe_or_start(
-            &mut self,
-            _: &graph::AttemptKey,
-            _: graph::NodeInput<'_>,
-            _: &graph::GraphRoute,
-            _: graph::AccessMode,
-            _: Option<&str>,
-            _: graph::Replay<'_>,
-        ) -> Result<graph::AttemptObservation, Self::Error> {
-            Err(FacadeError::OwnerUnavailable)
-        }
-    }
     let rig = crate::worktree_tests::support::TestRig::new()?;
     let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
     let context = Context::open(roots.clone(), &rig.home, &rig.project)?;
@@ -99,10 +72,23 @@ fn tick_reports_unreadable_once_and_advances_another_graph()
         directory: rig.project.clone(),
         document: document.clone(),
     })?;
-    let mut seed = Seed {
-        actor: context.identity.inbox.actor.to_string(),
-        at: provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?,
-    };
+    let seed_at = provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?;
+    let seed_clock = provenant_core::TestClock::new(
+        seed_at,
+        provenant_core::MonoTime::from_micros(0),
+    );
+    let inbox = provenant_fabric_runtime::inbox::InboxService::open(
+        &roots.state,
+        &context.identity,
+        &seed_clock,
+        &cancel,
+    )?;
+    let mut seed = super::InboxSeedOwner::new(
+        context.identity.inbox.actor.to_string(),
+        seed_at,
+        &inbox,
+        &cancel,
+    );
     let seeded = graph::advance_with_budget(
         &document,
         &mut seed,
@@ -111,6 +97,7 @@ fn tick_reports_unreadable_once_and_advances_another_graph()
         &Default::default(),
     )?;
     assert_eq!(seeded.checkpoint.nodes[0].state, graph::NodeState::Running);
+    assert!(seeded.checkpoint.wake_at.is_some_and(|wake| wake <= now));
     drop(journal);
     let directory = roots
         .state
@@ -244,30 +231,6 @@ fn tick_dispatches_capacity_waiter_with_future_decision() -> Result<(), Box<dyn 
         return Ok(());
     }
     use provenant_fabric_runtime::graph;
-    struct Seed(String);
-    impl graph::AttemptOwner for Seed {
-        type Error = std::convert::Infallible;
-        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
-            provenant_config::PortTable::builtin().worktree_layout
-        }
-        fn actor(&self) -> String {
-            self.0.clone()
-        }
-        fn wall_now(&self) -> Option<provenant_core::WallTime> {
-            SystemClock.wall_now().ok()
-        }
-        fn observe_or_start(
-            &mut self,
-            _: &graph::AttemptKey,
-            _: graph::NodeInput<'_>,
-            _: &graph::GraphRoute,
-            _: graph::AccessMode,
-            _: Option<&str>,
-            _: graph::Replay<'_>,
-        ) -> Result<graph::AttemptObservation, Self::Error> {
-            Ok(graph::AttemptObservation::Pending { attempt_ref: None })
-        }
-    }
     let rig = crate::worktree_tests::support::TestRig::new()?;
     let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
     let context = Context::open(roots.clone(), &rig.home, &rig.project)?;
@@ -289,13 +252,27 @@ fn tick_dispatches_capacity_waiter_with_future_decision() -> Result<(), Box<dyn 
         directory: rig.project.clone(),
         document: document.clone(),
     })?;
-    let seeded = graph::advance_with_budget(
-        &document,
-        &mut Seed(context.identity.inbox.actor.to_string()),
-        &mut journal,
-        &Default::default(),
-        &Default::default(),
-    )?;
+    let seeded = {
+        let inbox = provenant_fabric_runtime::inbox::InboxService::open(
+            &roots.state,
+            &context.identity,
+            &clock,
+            &cancel,
+        )?;
+        let mut seed = super::InboxSeedOwner::new(
+            context.identity.inbox.actor.to_string(),
+            clock.wall_now()?,
+            &inbox,
+            &cancel,
+        );
+        graph::advance_with_budget(
+            &document,
+            &mut seed,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?
+    };
     assert!(seeded.checkpoint.wake_at.unwrap() > clock.wall_now()?);
     let key = seeded.checkpoint.nodes[1].attempts[0].key.clone();
     drop(journal);
@@ -346,51 +323,8 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
         return Ok(());
     }
     use provenant_fabric_runtime::graph;
-    // A graph that stays open files its ask as a real inbox request, so a later
-    // close finds the request it links. An already expired ask cannot be filed
-    // there, so that graph keeps the host-less link and settles on its deadline.
-    struct Seed<'a> {
-        actor: String,
-        at: provenant_core::WallTime,
-        inbox: bool,
-        file: &'a dyn Fn(graph::AskFiling<'_>) -> Result<graph::AskFiled, FacadeError>,
-    }
-    impl graph::AttemptOwner for Seed<'_> {
-        type Error = FacadeError;
-        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
-            provenant_config::PortTable::builtin().worktree_layout
-        }
-        fn actor(&self) -> String {
-            self.actor.clone()
-        }
-        fn wall_now(&self) -> Option<provenant_core::WallTime> {
-            Some(self.at)
-        }
-        fn file_ask(
-            &mut self,
-            filing: graph::AskFiling<'_>,
-        ) -> Result<graph::AskFiled, Self::Error> {
-            if !self.inbox {
-                return Ok(graph::AskFiled {
-                    request: filing.ask.ask_id.clone(),
-                    deadline: filing.ask.wake_at,
-                    closed: false,
-                });
-            }
-            (self.file)(filing)
-        }
-        fn observe_or_start(
-            &mut self,
-            _: &graph::AttemptKey,
-            _: graph::NodeInput<'_>,
-            _: &graph::GraphRoute,
-            _: graph::AccessMode,
-            _: Option<&str>,
-            _: graph::Replay<'_>,
-        ) -> Result<graph::AttemptObservation, Self::Error> {
-            Err(FacadeError::OwnerUnavailable)
-        }
-    }
+    // File requests against a test clock so deadlines can be backdated without
+    // making the inbox consider the request expired when it is created.
     let rig = crate::worktree_tests::support::TestRig::new().map_err(|e| format!("rig: {e}"))?;
     let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())
         .map_err(|e| format!("roots: {e}"))?;
@@ -410,33 +344,24 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
         host_launch: None,
         workers: &FreeWorkers,
     };
-    let file = |filing: graph::AskFiling<'_>| {
-        let cancel = CancelToken::new();
-        crate::fabric::owner::graph_ask_with(
-            &factory,
-            &cancel,
-            filing.actor,
-            &filing.ask.ask_id,
-            |service| crate::fabric::owner::graph_ask_file(service, &filing, &cancel),
-        )
-    };
     let clock = SystemClock;
     let now = clock.wall_now()?;
+    let seed_at = provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?;
+    let seed_clock = provenant_core::TestClock::new(
+        seed_at,
+        provenant_core::MonoTime::from_micros(0),
+    );
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 10)?;
-    let mut seed = Seed {
-        actor,
-        file: &file,
-        inbox: true,
-        at: provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?,
-    };
+    let inbox = provenant_fabric_runtime::inbox::InboxService::open(
+        &roots.state,
+        &factory.context.identity,
+        &seed_clock,
+        &cancel,
+    )?;
+    let mut seed = super::InboxSeedOwner::new(actor, seed_at, &inbox, &cancel);
     for id in ["a-missing", "b-present"] {
-        seed.inbox = id == "a-missing";
-        seed.at = if seed.inbox {
-            now
-        } else {
-            provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?
-        };
+        seed.at = if id == "a-missing" { now } else { seed_at };
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":1, "graph_id":id, "decision_session":"chair-session",
             "nodes":[{"id":"choose", "kind":"decide", "access":"read_only", "decide":{"on_unanswered":"block_dependants",
@@ -456,7 +381,7 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
             },
             document: document.clone(),
         })?;
-        graph::advance_with_budget(
+        let seeded = graph::advance_with_budget(
             &document,
             &mut seed,
             &mut journal,
@@ -464,6 +389,9 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
             &Default::default(),
         )
         .map_err(|e| format!("seed: {e}"))?;
+        if id == "b-present" {
+            assert!(seeded.checkpoint.wake_at.is_some_and(|wake| wake <= now));
+        }
     }
     let resolved = crate::roots::Resolved {
         assets: rig.project.clone(),
@@ -552,7 +480,7 @@ fn graph_wait_observes_settlement_and_budget() -> Result<(), Box<dyn std::error:
         "schema_version":1, "graph_id":"wait-test", "nodes":[{"id":"one", "prompt":"work", "access":"read_only", "route":{"alias":"senior"}}]
     }))?;
     let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
-        "schema_version":1, "graph_id":"wait-test", "plan_digest":"digest", "nodes":[{"id":"one", "state":"running", "worktree":null, "attempts":[]}]
+        "schema_version":2, "graph_id":"wait-test", "plan_digest":"digest", "nodes":[{"id":"one", "state":"running", "worktree":null, "attempts":[]}]
     }))?;
     let mut journal = FileJournal::open(
         &roots.state,
@@ -676,7 +604,7 @@ fn graph_cancel_persists_reason_and_skips_pending_node() -> Result<(), Box<dyn s
         ]
     }))?;
     let checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
-        "schema_version": 1, "graph_id": "reason-test", "plan_digest": "digest", "nodes": [
+        "schema_version": 2, "graph_id": "reason-test", "plan_digest": "digest", "nodes": [
             {"id":"one", "state":"pending", "worktree":null, "attempts":[]}
         ]
     }))?;

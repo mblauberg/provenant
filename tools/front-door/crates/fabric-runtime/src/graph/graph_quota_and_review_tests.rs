@@ -292,9 +292,8 @@ fn writer_provision_recovery_keeps_the_checkpointed_base() {
 }
 
 #[test]
-fn new_worktree_authority_requires_matching_writer_location_and_safe_refs() {
+fn new_worktree_authority_requires_safe_writer_refs() {
     for (worktree, branch, base) in [
-        (".worktrees/other", "topic/fix", "main"),
         (".worktrees/-bad", "-bad", "main"),
         (".worktrees/topic-fix", "topic/fix", "--bad"),
         (".worktrees/topic-fix", "topic/fix", ""),
@@ -309,10 +308,7 @@ fn new_worktree_authority_requires_matching_writer_location_and_safe_refs() {
             }))
             .unwrap(),
         );
-        assert_eq!(
-            validate_plan(&graph(vec![writer])).unwrap_err(),
-            "node writer: invalid new worktree binding"
-        );
+        assert!(validate_plan(&graph(vec![writer])).is_err());
     }
     let mut writer = node("writer", route("first"));
     writer.access = AccessMode::WorktreeWrite;
