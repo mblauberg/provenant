@@ -63,6 +63,14 @@ fn include_local_login(
     })
 }
 
+fn effective_account_selector<'a>(
+    requested: Option<&'a str>,
+    prior_account: Option<&'a str>,
+    continuing: bool,
+) -> Option<&'a str> {
+    if continuing { prior_account } else { requested }
+}
+
 fn select_account<'a>(
     entries: &'a [provenant_providers::accounts::Registration],
     selector: &str,
@@ -2591,6 +2599,13 @@ pub(super) fn prepare_candidates(
         }
         run::RequestedRoute::Named { .. } | run::RequestedRoute::Review { .. } => None,
     };
+    // Resolve the prior identity before account discovery so its local login
+    // can be synthesized even when registered accounts now exist.
+    let prior_account = resume
+        .and_then(|prior| prior.applied_route.as_ref())
+        .and_then(|route| route.account_key.as_deref());
+    let effective_account_selector =
+        effective_account_selector(task.account.as_deref(), prior_account, resume.is_some());
     let mut default_failures = std::collections::BTreeMap::new();
     for spec in ADAPTER_SPECS.iter().filter(|spec| eligible(spec.name)) {
         let Some((environment, fallback)) = spec.default_account_directory else {
@@ -2653,7 +2668,7 @@ pub(super) fn prepare_candidates(
         .filter(|spec| spec.local_login && eligible(spec.name))
     {
         let adapter = spec.name;
-        if include_local_login(spec, &entries, task.account.as_deref())
+        if include_local_login(spec, &entries, effective_account_selector)
             && locate(adapter).is_ok()
             && !entries
                 .iter()
@@ -2870,18 +2885,11 @@ pub(super) fn prepare_candidates(
         }
     }
     // A continuation keeps the prior attempt's account, never a fresh pick.
-    let prior_account = resume
-        .and_then(|prior| prior.applied_route.as_ref())
-        .and_then(|route| route.account_key.as_deref());
-    let selected = task
-        .account
-        .as_deref()
-        .filter(|_| resume.is_none())
+    let selected = effective_account_selector
         .map(|selector| {
             select_account(&entries, selector, requested_adapter).map(|entry| entry.key.as_str())
         })
-        .transpose()?
-        .or(prior_account);
+        .transpose()?;
     let selected_adapter = resume
         .and_then(|prior| prior.applied_route.as_ref())
         .and_then(|route| route.provider.as_deref())
@@ -5326,6 +5334,18 @@ mod route_launch_boundary_regressions {
             std::slice::from_ref(&registered),
             Some(spec.local_account.0)
         ));
+        let resumed_local =
+            effective_account_selector(Some("agy-registered"), Some(spec.local_account.1), true);
+        assert_eq!(resumed_local, Some(spec.local_account.1));
+        assert!(include_local_login(
+            spec,
+            std::slice::from_ref(&registered),
+            resumed_local
+        ));
+        assert_eq!(
+            effective_account_selector(Some("agy-registered"), Some(spec.local_account.1), false),
+            Some("agy-registered")
+        );
 
         let mut settings = provenant_providers::accounts::Settings::default();
         settings.entries.insert("work".into(), registered.clone());
