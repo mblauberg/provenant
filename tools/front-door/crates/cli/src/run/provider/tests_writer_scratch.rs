@@ -1330,9 +1330,20 @@ printf 'agy 1.0.0\n'
         .github_credential
         .as_ref()
         .ok_or("GitHub credential receipt")?;
+    let sandbox_effective = publishing
+        .confinement
+        .as_ref()
+        .is_some_and(|confinement| confinement.sandbox.effective);
     assert_eq!(credential.identity.as_deref(), Some("user"));
     assert_eq!(credential.source, "default");
-    assert_eq!(credential.delivery, "injected");
+    assert_eq!(
+        credential.delivery,
+        if sandbox_effective {
+            "injected"
+        } else {
+            "ambient"
+        }
+    );
     assert_eq!(credential.mediation, "gh wrapper (advisory)");
     assert!(!serde_json::to_string(credential)?.contains("fixture-host-token"));
     let gh_config = publishing_paths.temporary.join("candidate-0/gh-config");

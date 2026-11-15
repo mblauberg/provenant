@@ -1204,7 +1204,10 @@ fn prepare_with_partial_account_estimates(
             observed_unix_seconds: now,
             source_ref: "fixture".into(),
             authority_ref: None,
-            details: None,
+            details: Some(provenant_quota::QuotaDetails {
+                coverage: Some("partial".into()),
+                ..Default::default()
+            }),
             windows: vec![provenant_quota::QuotaWindow { extra: Default::default(),
                 pool: "five_hour".into(),
                 window_seconds: None,

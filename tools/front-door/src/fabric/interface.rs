@@ -3697,6 +3697,50 @@ mod tests {
 
     #[test]
     fn replay_digest_tracks_launch_input_and_source_commit() -> Result {
+        // `Factory::template_library` honours the caller's XDG directory. Run
+        // this fixture with an empty user template root so unrelated templates
+        // installed on the test host cannot invalidate inline task compilation.
+        const FIXTURE: &str = "PROVENANT_TEST_REPLAY_DIGEST_CONFIG_HOME";
+        if let Some(config_home) = std::env::var_os(FIXTURE) {
+            let config_home = std::path::PathBuf::from(config_home);
+            std::fs::create_dir_all(&config_home)?;
+        } else {
+            use provenant_os::exec::{
+                ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+            };
+            use std::time::Duration;
+
+            let temp = tempfile::tempdir()?;
+            let config_home = temp.path().join("config");
+            std::fs::create_dir(&config_home)?;
+            let mut environment: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| key != "XDG_CONFIG_HOME" && key != FIXTURE)
+                .collect();
+            environment.push((FIXTURE.into(), config_home.as_os_str().to_owned()));
+            environment.push(("XDG_CONFIG_HOME".into(), config_home.as_os_str().to_owned()));
+            let argv = [
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "fabric::interface::tests::replay_digest_tracks_launch_input_and_source_commit"
+                    .into(),
+                "--nocapture".into(),
+            ];
+            let cwd = std::env::current_dir()?;
+            let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(60));
+            options.env = Some(&environment);
+            options.stdout = StreamPolicy::Capture { limit: 65_536 };
+            options.stderr = StreamPolicy::Capture { limit: 65_536 };
+            let output = SystemExecutor::new(1)?.execute(options)?;
+            assert_eq!(
+                output.termination,
+                Termination::Exit(0),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout.bytes),
+                String::from_utf8_lossy(&output.stderr.bytes)
+            );
+            assert!(!output.timed_out, "{output:?}");
+            return Ok(());
+        }
         let rig = crate::worktree_tests::repository()?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
