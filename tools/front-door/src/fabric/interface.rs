@@ -928,41 +928,25 @@ impl Factory {
             }
             _ => budget,
         };
+        // Resolve the observation cadence before launching, so a malformed
+        // configuration refuses the request rather than losing its receipt.
+        let cadence = settlement.map(|_| self.wait_cadence()).transpose()?;
         let within =
             std::time::Duration::from_micros(launch.remaining(self.clock.mono_now()).as_micros())
                 .saturating_add(std::time::Duration::from_secs(1));
         let receipt = provenant_cli::fabric::graph_relay::from_lane(&request, cancel, within)
             .map_err(relay_error)?;
-        if let Some(settlement) = settlement {
+        if let (Some(settlement), Some(cadence)) = (settlement, cadence) {
             let remaining = settlement.remaining(self.clock.mono_now()).as_micros();
             if remaining == 0 {
                 return Ok(json!({"receipt":receipt,"observation_error":"child wait timed out"}));
             }
-            let (interval, configuration_warning) =
-                match provenant_cli::config_reads::read_for(&self.context.roots, "wait") {
-                    Ok(config) => (
-                        std::time::Duration::from_millis(config.domains.wait.local_interval_ms),
-                        None,
-                    ),
-                    Err(error) => (
-                        std::time::Duration::from_millis(
-                            provenant_cli::wait::Settings::default().local_interval_ms,
-                        ),
-                        Some(format!(
-                            "configuration unavailable; compiled default: {error}"
-                        )),
-                    ),
-                };
-            let mut observation =
-                provenant_cli::fabric::graph_relay::child_wait_observation(interval);
-            if let Some(warning) = configuration_warning {
-                observation.push_str(&format!("; {warning}"));
-            }
+            let observation = provenant_cli::fabric::graph_relay::child_wait_observation(&cadence);
             return Ok(
                 match provenant_cli::fabric::graph_relay::wait_for_children(
                     cancel,
                     std::time::Duration::from_micros(remaining),
-                    interval,
+                    cadence.interval,
                 ) {
                     Ok(children) => {
                         json!({"receipt":receipt,"children":children,"observation":observation})
@@ -2383,8 +2367,8 @@ impl Factory {
             let wait = WaitBudget::cli(self.clock.mono_now(), seconds)
                 .map_err(|_| FacadeError::InvalidInput { detail: None })?
                 .cap_at(budget.deadline().as_mono_time());
-            let interval = self.wait_interval()?;
-            let mut observation = self.local_graph_observation(&target.graph, interval);
+            let cadence = self.wait_cadence()?;
+            let mut observation = self.local_graph_observation(&target.graph, cadence);
             let remote_target = if stopping {
                 target.clone()
             } else {
@@ -2497,22 +2481,18 @@ impl Factory {
         )
     }
 
-    fn wait_interval(&self) -> Result<std::time::Duration, FacadeError> {
-        let config = provenant_cli::config_reads::read_for(&self.context.roots, "wait")
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-        Ok(std::time::Duration::from_millis(
-            config.domains.wait.local_interval_ms,
-        ))
+    fn wait_cadence(&self) -> Result<provenant_cli::wait::LocalCadence, FacadeError> {
+        crate::status_wait::local_cadence(&self.context.roots)
     }
 
     fn local_graph_observation(
         &self,
         graph: &str,
-        interval: std::time::Duration,
+        cadence: provenant_cli::wait::LocalCadence,
     ) -> crate::status_wait::LocalObservation {
         if self.context.in_lane {
             return crate::status_wait::LocalObservation::paced(
-                interval,
+                cadence,
                 "lane graph state is observed through the host relay without a local event log",
             );
         }
@@ -2521,9 +2501,9 @@ impl Factory {
             self.context.identity.project,
             graph,
         ) {
-            Ok(paths) => crate::status_wait::LocalObservation::subscribe(&paths, interval),
+            Ok(paths) => crate::status_wait::LocalObservation::subscribe(&paths, cadence),
             Err(error) => crate::status_wait::LocalObservation::paced(
-                interval,
+                cadence,
                 format!("cannot resolve graph observation paths: {error}"),
             ),
         }
@@ -2556,8 +2536,8 @@ impl Factory {
         let wait = WaitBudget::cli(now, seconds)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?
             .cap_at(deadline);
-        let interval = self.wait_interval()?;
-        let mut observation = self.local_graph_observation(&run.checkpoint.graph_id, interval);
+        let cadence = self.wait_cadence()?;
+        let mut observation = self.local_graph_observation(&run.checkpoint.graph_id, cadence);
         let (run, observation_report, remote_read_allowed) = wait_submission(
             run,
             wait,

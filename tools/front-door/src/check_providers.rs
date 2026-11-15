@@ -367,7 +367,7 @@ fn mark_settlement_wait_expired(row: &mut Row) {
 fn live(
     row: &mut Row,
     settings: Settings,
-    interval: DurationMicros,
+    cadence: &provenant_cli::wait::LocalCadence,
     globals: &Globals,
     workers: &'static dyn WorkerObserver,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -376,7 +376,7 @@ fn live(
     let entropy = provenant_os::fs::entropy_128()?;
     let name = format!("provider-check-{:032x}", u128::from_le_bytes(entropy));
     row.graph = Some(name.clone());
-    let interval = Duration::from_micros(interval.as_micros());
+    let interval = cadence.interval;
     let budget =
         provenant_core::WaitBudget::cli(factory.clock.mono_now(), settings.timeout_seconds.value)?;
     let on_stop = provenant_records::OnStop::new(
@@ -415,7 +415,7 @@ fn live(
         };
     row.observation = Some(crate::status_wait::observation_text(
         watcher.as_ref(),
-        interval,
+        cadence,
         setup_error.as_deref(),
     ));
     // Wait on settlement events; paced rereads remain only the event-source fallback.
@@ -481,7 +481,7 @@ fn live(
                         watcher = None;
                         row.observation = Some(crate::status_wait::observation_text(
                             None,
-                            interval,
+                            cadence,
                             Some(&format!("event source failed: {error}")),
                         ));
                     }
@@ -537,11 +537,10 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
             crate::roots::Product::Required,
         )?;
         let mut rows = select(inventory(&resolved.roots)?, &args.routes)?;
-        let interval = provenant_cli::config_reads::read_for(&resolved.roots, "check providers")?
-            .domains
-            .wait
-            .local_interval_ms;
-        let interval = DurationMicros::from_micros(interval.saturating_mul(1000));
+        let config = provenant_cli::config_reads::read_for(&resolved.roots, "check providers")?;
+        let (wait, origin) = provenant_cli::wait::Settings::resolved(&config);
+        let cadence = origin.local_cadence(&wait);
+        let cadence = &cadence;
         if args.live {
             // Factories and SQLite connections belong to their worker, never
             // shared across threads. Each route stays on the normal run path.
@@ -552,7 +551,7 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
                     scope.spawn(move || loop {
                         let row = match queue.lock() { Ok(mut queue) => queue.next(), Err(_) => None };
                         let Some(row) = row else { break; };
-                        if let Err(error) = live(row, settings, interval, globals, workers) {
+                        if let Err(error) = live(row, settings, cadence, globals, workers) {
                             row.status = Verdict::Fail;
                             row.cause = Cause::Check(CheckCause::LaunchRefused);
                             row.error_code.get_or_insert_with(|| error.downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>().map_or("provider_check_error", |error| error.code()).to_owned());

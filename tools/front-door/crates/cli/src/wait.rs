@@ -1,8 +1,13 @@
 //! Settings for the `wait` verb. Source cadence remains overridable.
-use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
+use provenant_config::{ConfigError, DomainConfig, DomainSection, FieldMetadata, SectionError};
 use provenant_core::DurationMicros;
 use provenant_fabric_runtime::coordination::{LOCAL_OBSERVATION_INTERVAL_KEY, ObservationSettings};
 use serde::{Deserialize, Serialize};
+
+/// The configuration path every wait setting key starts with.
+pub const SECTION_KEY: &str = "domains.wait";
+/// The key that bounds every wait budget.
+pub const MAX_TIMEOUT_KEY: &str = "domains.wait.max_timeout_seconds";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -32,40 +37,168 @@ impl Default for Settings {
         }
     }
 }
-pub(crate) fn non_wait_observation_settings() -> ObservationSettings {
-    let settings = Settings::default();
-    ObservationSettings {
-        local_interval: DurationMicros::from_micros(settings.local_interval_ms * 1_000),
-        source: provenant_config::Origin::Compiled {
-            profile: provenant_config::Profile::default(),
-        },
+/// Where each effective wait setting came from. When the configuration file
+/// could not be read, every setting is its compiled default and `unavailable`
+/// says why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Origin {
+    profile: provenant_config::Profile,
+    origins: std::collections::BTreeMap<String, provenant_config::Origin>,
+    unavailable: Option<String>,
+}
+impl Origin {
+    /// Every setting from the compiled profile.
+    pub fn compiled(profile: provenant_config::Profile) -> Self {
+        Self {
+            profile,
+            origins: Default::default(),
+            unavailable: None,
+        }
     }
+
+    /// The layer that set `key`; a key no layer names is compiled.
+    pub fn of(&self, key: &str) -> provenant_config::Origin {
+        self.origins
+            .get(key)
+            .cloned()
+            .unwrap_or(provenant_config::Origin::Compiled {
+                profile: self.profile,
+            })
+    }
+
+    /// Why compiled defaults apply, when the configuration was unreadable.
+    pub fn unavailable(&self) -> Option<&str> {
+        self.unavailable.as_deref()
+    }
+
+    /// `KEY from SOURCE`, the form every wait report names a setting in.
+    pub fn describe(&self, key: &str) -> String {
+        let source = match self.of(key) {
+            provenant_config::Origin::Compiled { profile } => {
+                format!("the compiled {} profile", profile.as_str())
+            }
+            provenant_config::Origin::User { path } => {
+                path.as_path_text().unwrap_or("config.toml").to_owned()
+            }
+        };
+        match &self.unavailable {
+            Some(reason) => format!("{key} from {source}; configuration unavailable: {reason}"),
+            None => format!("{key} from {source}"),
+        }
+    }
+
+    /// The local paced-reread cadence these settings select.
+    pub fn local_cadence(&self, settings: &Settings) -> LocalCadence {
+        LocalCadence {
+            interval: std::time::Duration::from_millis(settings.local_interval_ms),
+            source: self.describe(LOCAL_OBSERVATION_INTERVAL_KEY),
+        }
+    }
+
+    /// The coordination service's view of the same cadence.
+    pub fn observation(&self, settings: &Settings) -> ObservationSettings {
+        ObservationSettings {
+            local_interval: DurationMicros::from_micros(
+                settings.local_interval_ms.saturating_mul(1_000),
+            ),
+            source: self.of(LOCAL_OBSERVATION_INTERVAL_KEY),
+        }
+    }
+}
+
+/// The paced-reread cadence for local observation and the setting that chose
+/// it. Every report of a paced reread renders it through [`Self::every`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalCadence {
+    pub interval: std::time::Duration,
+    source: String,
+}
+impl LocalCadence {
+    /// A cadence from the compiled default profile, for callers without a
+    /// resolved configuration.
+    pub fn compiled(interval: std::time::Duration) -> Self {
+        Origin::compiled(provenant_config::Profile::default()).local_cadence(&Settings {
+            local_interval_ms: u64::try_from(interval.as_millis()).unwrap_or(u64::MAX),
+            ..Settings::default()
+        })
+    }
+
+    /// `every N ms (KEY from SOURCE)`.
+    pub fn every(&self) -> String {
+        format!("every {} ms ({})", self.interval.as_millis(), self.source)
+    }
+}
+
+pub(crate) fn non_wait_observation_settings() -> ObservationSettings {
+    Origin::compiled(provenant_config::Profile::default()).observation(&Settings::default())
 }
 
 pub(crate) fn observation_settings(
     resolved: &provenant_config::ResolvedConfig<crate::domains::Domains>,
 ) -> ObservationSettings {
-    let source = resolved
-        .origins
-        .get(LOCAL_OBSERVATION_INTERVAL_KEY)
-        .cloned()
-        .unwrap_or(provenant_config::Origin::Compiled {
-            profile: resolved.profile,
-        });
-    ObservationSettings {
-        local_interval: DurationMicros::from_micros(
-            resolved.domains.wait.local_interval_ms * 1_000,
-        ),
-        source,
+    let (settings, origin) = Settings::resolved(resolved);
+    origin.observation(&settings)
+}
+
+/// The declared failure policy for reading wait settings. A configuration file
+/// that cannot be read leaves the wait on its compiled defaults, with a warning
+/// and the reason in every reported source. A file that is present but
+/// malformed is a typed error. A single out-of-range value is not a read
+/// failure: the loader recovers it with a warning and its origin is compiled.
+fn read_failure(error: ConfigError) -> Result<String, ConfigError> {
+    match error {
+        ConfigError::Read { .. } | ConfigError::PathEncoding { .. } => Ok(error.to_string()),
+        error => Err(error),
     }
 }
 
 impl Settings {
-    pub fn timeout(
-        &self,
-        override_seconds: Option<u64>,
-        origin: Option<&provenant_config::Origin>,
-    ) -> u64 {
+    /// The one resolution of `[domains.wait]` for every waiter.
+    pub fn resolve(roots: &provenant_core::Roots) -> Result<(Self, Origin), ConfigError> {
+        match crate::config_reads::read_for(roots, "wait") {
+            Ok(resolved) => Ok(Self::resolved(&resolved)),
+            Err(error) => {
+                let reason = read_failure(error)?;
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: wait settings use compiled defaults; configuration unavailable: {reason}"
+                );
+                let profile = provenant_config::Profile::default();
+                Ok((
+                    Self::default(),
+                    Origin {
+                        unavailable: Some(reason),
+                        ..Origin::compiled(profile)
+                    },
+                ))
+            }
+        }
+    }
+
+    /// Wait settings from a configuration a caller has already resolved.
+    pub fn resolved(
+        resolved: &provenant_config::ResolvedConfig<crate::domains::Domains>,
+    ) -> (Self, Origin) {
+        let prefix = format!("{}.", SECTION_KEY);
+        (
+            resolved.domains.wait.clone(),
+            Origin {
+                profile: resolved.profile,
+                origins: resolved
+                    .origins
+                    .iter()
+                    .filter(|(key, _)| key.starts_with(&prefix))
+                    .map(|(key, origin)| (key.clone(), origin.clone()))
+                    .collect(),
+                unavailable: None,
+            },
+        )
+    }
+
+    /// The effective wait budget in seconds: the request, else the configured
+    /// default, bounded by the configured maximum with a warning naming it.
+    pub fn timeout(&self, override_seconds: Option<u64>, origin: &Origin) -> u64 {
         let requested = override_seconds
             .filter(|seconds| *seconds != 0)
             .unwrap_or(self.timeout_seconds);
@@ -74,16 +207,10 @@ impl Settings {
             .unwrap_or(provenant_core::MAX_LANE_RUNTIME_SECONDS);
         if requested > maximum {
             use std::io::Write;
-            let source = if self.max_timeout_seconds.is_none() {
-                "shipped default".to_owned()
-            } else {
-                origin
-                    .map(|origin| format!("{origin:?}"))
-                    .unwrap_or_else(|| "explicit settings".into())
-            };
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning: wait budget clamped to {maximum}s; domains.wait.max_timeout_seconds (source: {source})"
+                "warning: wait budget clamped to {maximum}s; {}",
+                origin.describe(MAX_TIMEOUT_KEY)
             );
         }
         requested.min(maximum)
@@ -150,6 +277,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wait_settings_resolve_through_one_failure_policy() {
+        #[derive(Debug, PartialEq)]
+        enum Expect {
+            Configured,
+            Default { unavailable: bool },
+            Refused,
+        }
+        let configured = "schema_version=1\n[domains.wait]\nlocal_interval_ms=750\n";
+        for (shape, expect) in [
+            ("absent", Expect::Default { unavailable: false }),
+            ("configured", Expect::Configured),
+            ("out of range", Expect::Default { unavailable: false }),
+            ("malformed", Expect::Refused),
+            ("unreadable", Expect::Default { unavailable: true }),
+        ] {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            let mut input = provenant_core::RootInputs::new(
+                temporary.path().join("home"),
+                temporary.path().join("assets"),
+            );
+            input.state_dir = Some(temporary.path().join("state"));
+            let roots = input
+                .resolve(&provenant_os::fs::SystemPathResolver)
+                .expect("roots");
+            let state = roots.state.as_path();
+            std::fs::create_dir_all(state).expect("state directory");
+            let config = state.join("config.toml");
+            match shape {
+                "configured" => std::fs::write(&config, configured).expect("config"),
+                "out of range" => std::fs::write(
+                    &config,
+                    "schema_version=1\n[domains.wait]\nlocal_interval_ms=0\n",
+                )
+                .expect("config"),
+                "malformed" => {
+                    std::fs::write(&config, "schema_version=1\n[domains.wait\n").expect("config")
+                }
+                "unreadable" => {
+                    // A link is never followed, so the read fails rather than
+                    // finding the file absent.
+                    let target = temporary.path().join("elsewhere.toml");
+                    std::fs::write(&target, configured).expect("link target");
+                    std::os::unix::fs::symlink(&target, &config).expect("link");
+                }
+                _ => {}
+            }
+            let observed = match Settings::resolve(&roots) {
+                Err(_) => Expect::Refused,
+                Ok((settings, origin)) => {
+                    let user = matches!(
+                        origin.of(LOCAL_OBSERVATION_INTERVAL_KEY),
+                        provenant_config::Origin::User { .. }
+                    );
+                    if user {
+                        assert_eq!(settings.local_interval_ms, 750, "{shape}");
+                        Expect::Configured
+                    } else {
+                        assert_eq!(
+                            settings.local_interval_ms,
+                            Settings::default().local_interval_ms,
+                            "{shape}"
+                        );
+                        let cadence = origin.local_cadence(&settings);
+                        assert!(cadence.every().contains(LOCAL_OBSERVATION_INTERVAL_KEY));
+                        Expect::Default {
+                            unavailable: origin.unavailable().is_some(),
+                        }
+                    }
+                }
+            };
+            assert_eq!(observed, expect, "{shape}");
+        }
+    }
+
+    #[test]
     fn requested_wait_is_bounded_by_the_effective_maximum() {
         for configured in [None, Some(1), Some(90), Some(86400)] {
             let settings = Settings {
@@ -168,7 +370,10 @@ mod tests {
                 let effective = requested
                     .filter(|n| *n != 0)
                     .unwrap_or(settings.timeout_seconds);
-                assert_eq!(settings.timeout(requested, None), effective.min(maximum));
+                assert_eq!(
+                    settings.timeout(requested, &Origin::compiled(Default::default())),
+                    effective.min(maximum)
+                );
             }
         }
     }

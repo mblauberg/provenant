@@ -1291,10 +1291,10 @@ pub fn wait_for_children(
     })
 }
 
-pub fn child_wait_observation(interval: std::time::Duration) -> String {
+pub fn child_wait_observation(cadence: &crate::wait::LocalCadence) -> String {
     format!(
-        "paced reread every {} ms (domains.wait.local_interval_ms); relay socket has no remote event subscription",
-        interval.as_millis()
+        "paced reread {}; relay socket has no remote event subscription",
+        cadence.every()
     )
 }
 

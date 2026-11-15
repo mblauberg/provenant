@@ -191,13 +191,6 @@ struct Cadence {
     conditional_requests: bool,
 }
 
-#[derive(Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct WaitDomain {
-    wait: provenant_cli::wait::Settings,
-}
-static WAIT_SECTIONS: [provenant_config::DomainSection; 1] = [provenant_cli::wait::SECTION];
-
 fn adaptive_freshness(
     cached: &Cached,
     history: &[RunDuration],
@@ -394,12 +387,9 @@ impl Observer<port::SelectedTransport, WallClock> {
         let roots = settings_roots(state, project).map_err(|error| {
             ObserveError::Unavailable(format!("cannot read CI cadence configuration: {error}"))
         })?;
-        let sections = provenant_config::DomainSections::<WaitDomain>::new(&WAIT_SECTIONS);
-        let settings = provenant_config::read_with_domains(&roots, &sections)
-            .map(|config| config.domains.wait)
-            .map_err(|error| {
-                ObserveError::Unavailable(format!("cannot read CI cadence configuration: {error}"))
-            })?;
+        let (settings, _) = provenant_cli::wait::Settings::resolve(&roots).map_err(|error| {
+            ObserveError::Unavailable(format!("cannot read CI cadence configuration: {error}"))
+        })?;
         Self::with_settings(state, repository, transport, WallClock, settings)
     }
 }
