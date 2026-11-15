@@ -187,10 +187,6 @@ impl Admission<'_> {
         let comparable_newer = record.is_some_and(|r| r.last_error.is_none())
             && snapshot.is_some_and(|s| {
                 s.observed_unix_seconds > refusal.observed_unix_seconds
-                    && matches!(
-                        s.status,
-                        QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
-                    )
                     && pool.is_some_and(|pool| {
                         let mut windows = s
                             .windows
@@ -1028,6 +1024,93 @@ mod admission_tests {
         assert_eq!(admit(&fresh), Some(AccountBlock::ScopedRefusal));
         fresh.snapshot.as_mut().expect("snapshot").windows[1].used_basis_points = 2_000;
         assert_eq!(admit(&fresh), None);
+    }
+
+    #[test]
+    fn a_fresh_codex_usage_reading_clears_account_refusal_even_when_status_is_unknown() {
+        let account = AccountScope {
+            adapter: "codex".into(),
+            account_key: "opaque".into(),
+            label: "work".into(),
+        };
+        let mut route = route();
+        route.adapter = account.adapter.clone();
+        route.readiness = RouteReadiness::Ready {
+            availability_warning: None,
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 99_999,
+        };
+        let refusal = Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: "another-model".into(),
+            pool: Some(ACCOUNT_ROUTE.into()),
+            observed_unix_seconds: 1_000,
+            resets_unix_seconds: Some(30_000),
+        };
+        let policies = [QuotaPolicy {
+            adapter: "codex",
+            timer_seconds: 900,
+            panel_seconds: 300,
+            probe_seconds: 10,
+            low_power: true,
+            solo: false,
+        }];
+
+        // Codex can report a model-specific limit window without an account
+        // binding window. The provider decoder retains that observed window
+        // and labels the snapshot Unknown; that status is not a failed probe.
+        for (status, pool) in [
+            (QuotaStatus::Available, "primary"),
+            (QuotaStatus::Unknown, "gpt-5-codex.primary"),
+        ] {
+            let mut record = AccountRecord::empty(account.clone());
+            record.revision = 1;
+            record.refusals.push(refusal.clone());
+            record.snapshot = Some(QuotaSnapshot {
+                schema_version: 1,
+                account: account.clone(),
+                revision: 1,
+                status,
+                observed_unix_seconds: 1_001,
+                source_ref: "quota.provider.codex".into(),
+                authority_ref: Some("configured-local-quota".into()),
+                windows: vec![QuotaWindow {
+                    pool: pool.into(),
+                    window_seconds: Some(18_000),
+                    used_basis_points: 0,
+                    resets_unix_seconds: Some(30_000),
+                }],
+                details: None,
+            });
+
+            let admission = Admission {
+                policies: &policies,
+                now_unix_seconds: 1_002,
+                records: std::slice::from_ref(&record),
+                pools: &[],
+            };
+            assert!(!admission
+                .refusal_holds("codex", Some(&record), &record.refusals[0])
+                .unwrap());
+            assert!(admission.check(&route).is_ok());
+        }
+
+        // No snapshot is the actual not-probed case: it carries no window
+        // evidence, so the account-wide refusal continues to hold.
+        let mut not_probed = AccountRecord::empty(account.clone());
+        not_probed.refusals.push(refusal);
+        let admission = Admission {
+            policies: &policies,
+            now_unix_seconds: 1_002,
+            records: std::slice::from_ref(&not_probed),
+            pools: &[],
+        };
+        assert!(admission
+            .refusal_holds("codex", Some(&not_probed), &not_probed.refusals[0])
+            .unwrap());
+        assert!(admission.check(&route).is_err());
     }
     #[test]
     fn capacity_evidence_does_not_refuse_admission_but_quota_refusal_does() {
