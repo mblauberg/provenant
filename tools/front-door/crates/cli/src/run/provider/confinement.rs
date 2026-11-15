@@ -1170,7 +1170,7 @@ fn read_only_diagnostic_text(diagnostic: &provenant_records::diagnostic::Diagnos
     let mut message = diagnostic
         .detail
         .clone()
-        .unwrap_or_else(|| "project binding directory is unsafe".into());
+        .unwrap_or_else(|| "project binding state directory is unsafe".into());
     if let Some(next) = &diagnostic.next {
         message.push_str("; next: ");
         message.push_str(next);

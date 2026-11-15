@@ -94,7 +94,7 @@ impl std::fmt::Display for SourceCause {
                     diagnostic
                         .detail
                         .as_deref()
-                        .unwrap_or("project binding directory is unsafe"),
+                        .unwrap_or("project binding state directory is unsafe"),
                 )?;
                 if let Some(next) = &diagnostic.next {
                     write!(f, "; next: {next}")?;

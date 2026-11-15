@@ -797,7 +797,7 @@ impl FacadeError {
             *mode,
             *owner_matches,
             destination,
-            "project binding directory",
+            "project binding state directory",
         ))
     }
 
@@ -1673,7 +1673,7 @@ mod diagnostic_tests {
         )
         .unwrap();
         assert!(local.detail.as_deref().is_some_and(|detail| {
-            detail.contains("project binding directory /private/state with 'quote")
+            detail.contains("project binding state directory /private/state with 'quote")
                 && detail.contains("mode 0755")
         }));
         assert!(
