@@ -755,6 +755,7 @@ pub fn run_utility(
     budget: UtilityBudget,
     cancel: &CancelToken,
 ) -> Result<ExecOutcome, UtilityError> {
+    let stdin = git_stdin(&operation);
     execute_git(
         executor,
         repo,
@@ -762,17 +763,7 @@ pub fn run_utility(
         budget,
         cancel,
         false,
-        |attribute_source| {
-            let stdin = match &operation {
-                GitRead::BlobBatch { oids } => Some(
-                    oids.iter()
-                        .flat_map(|oid| format!("{oid}\n").into_bytes())
-                        .collect(),
-                ),
-                _ => None,
-            };
-            Ok((git_args(operation, repo, attribute_source)?, stdin))
-        },
+        |attribute_source| Ok((git_args(operation, repo, attribute_source)?, stdin)),
     )
 }
 
@@ -1056,6 +1047,7 @@ pub fn run_release_read_utility(
     budget: UtilityBudget,
     cancel: &CancelToken,
 ) -> Result<ExecOutcome, UtilityError> {
+    let stdin = git_stdin(&operation);
     execute_git(
         executor,
         &repo.0,
@@ -1063,8 +1055,19 @@ pub fn run_release_read_utility(
         budget,
         cancel,
         true,
-        |attribute_source| Ok((git_args(operation, &repo.0, attribute_source)?, None)),
+        |attribute_source| Ok((git_args(operation, &repo.0, attribute_source)?, stdin)),
     )
+}
+
+fn git_stdin(operation: &GitRead) -> Option<Vec<u8>> {
+    match operation {
+        GitRead::BlobBatch { oids } => Some(
+            oids.iter()
+                .flat_map(|oid| format!("{oid}\n").into_bytes())
+                .collect(),
+        ),
+        _ => None,
+    }
 }
 
 /// Query the remote's advertised HEAD using host transport credentials.
