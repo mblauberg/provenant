@@ -158,7 +158,7 @@ fn chair_custody_matches_checkpoint_identity_for_harnesses_and_overrides() -> Re
     let project = identity["project"].as_str().ok_or("project identity")?;
 
     // Spec: docs/specs/fabric.md#identity-and-store
-    let cases: [(&str, Option<(&str, &str)>, Option<&str>, Option<&str>); 5] = [
+    let cases = [
         (
             "codex",
             Some(("CODEX_THREAD_ID", "chair-fixture")),
