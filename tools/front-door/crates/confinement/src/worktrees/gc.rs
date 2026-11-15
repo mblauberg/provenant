@@ -181,7 +181,11 @@ pub fn branch_candidate(
 ) -> WorktreeInfo {
     WorktreeInfo {
         warnings: Vec::new(),
-        path: context.repo.root_path().into(),
+        path: context
+            .layout
+            .project()
+            .unwrap_or(context.layout.root())
+            .into(),
         branch: Some(reference.as_str().into()),
         head: tip,
         dirty: WorktreeCondition::Clean,
@@ -1317,9 +1321,8 @@ fn collect_impl(
         Some(entries) => entries,
         None => context.facts.fresh_inventory(context, cancel)?,
     };
-    let primary = canonicalize(context.repo.root_path())?;
-    let layout = context.project_layout()?;
-    let ports = provenant_config::PortTable::read_for(layout.project(), &context.host_state()?)
+    let primary = context.layout.project().map(canonicalize).transpose()?;
+    let ports = provenant_config::PortTable::read_for(primary.as_deref(), &context.host_state()?)
         .map_err(WorktreeError::PortConfiguration)?;
     let layout_roots = ports.worktree_layout.roots.clone();
     let known_refs = RefLedger::observe_context(context)?
@@ -1383,7 +1386,11 @@ fn collect_impl(
         .map(|feeds| feeds.integration_bases())
         .unwrap_or_default();
     for lane in lanes {
-        if lane.primary || lane.path == primary {
+        if lane.primary
+            || primary
+                .as_ref()
+                .is_some_and(|primary| lane.path == *primary)
+        {
             continue;
         }
         let class = if matches!(lane.owner, Ok(Some(_))) {
@@ -2430,9 +2437,9 @@ fn prepare_removal_before(
     preview_only: bool,
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
-    let layout = context.project_layout()?;
-    let ports = provenant_config::PortTable::read_for(layout.project(), &context.host_state()?)
-        .map_err(WorktreeError::PortConfiguration)?;
+    let ports =
+        provenant_config::PortTable::read_for(context.layout.project(), &context.host_state()?)
+            .map_err(WorktreeError::PortConfiguration)?;
     let layout_roots = ports.worktree_layout.roots;
     let protected = output_protection(context, repo, keep, cancel)?;
     let mut policy = WorktreeGcPolicy {

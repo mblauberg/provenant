@@ -47,7 +47,10 @@ A target seed store is shared across registered repositories on the host. Each
 generation records a hash of the verified canonical shared Git directory and
 verify-base commit plus its Rust compiler identity and effective
 `CARGO_INCREMENTAL` and `CARGO_PROFILE_DEV_DEBUG` values, so a toolchain or
-profile change rebuilds the seed even when the commit is unchanged. Linked
+profile change rebuilds the seed even when the commit is unchanged. Compiler
+identity uses toolchain pins read from the verify-base tree at the selected
+workspace, not the registered checkout's current toolchain. The same selected
+workspace path is used to validate and build the pinned checkout. Linked
 checkouts share identity and another repository's newer generation does not
 force a rebuild. A writer lane prefers the newest compatible generation for its
 verified project identity, then uses a compatible generation from another

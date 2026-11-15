@@ -10,6 +10,10 @@ impl super::Factory {
         else {
             return Err(FacadeError::io("capture requester PATH"));
         };
+        let binding = provenant_config::registered_projects(&self.context.roots)
+            .map_err(|_| FacadeError::io("capture requester PATH"))?
+            .into_iter()
+            .find(|binding| binding.project_id() == self.context.identity.project);
         let cancel = CancelToken::new();
         let path = provenant_cli::run::filtered_requester_lane_path(
             self.host_launch.as_ref(),
@@ -18,6 +22,7 @@ impl super::Factory {
             &git,
             &self.executor,
             &cancel,
+            binding.as_ref(),
         )
         .map_err(|_| FacadeError::io("capture requester PATH"))?;
         Ok(path.path().to_os_string().into_vec())

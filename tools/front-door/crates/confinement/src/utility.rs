@@ -467,39 +467,39 @@ impl UtilityRuntime {
     /// worktree, the project's worktree and scratch areas, and any extra roots.
     pub(crate) fn lane_roots(
         &self,
-        repo: &VerifiedRepo,
         executor: &dyn Executor,
+        repo: &VerifiedRepo,
+        budget: UtilityBudget,
         cancel: &CancelToken,
     ) -> Result<LaneRoots, UtilityError> {
-        let common = repo.common_git_dir();
-        let environment = [
-            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-            ("GIT_DIR".into(), common.as_os_str().to_owned()),
-        ];
-        let layout = if repo.private_git_dir() == common {
-            crate::worktrees::ProjectLayout::for_verified_repo(repo)
-                .map_err(|_| UtilityError::UnreadableGitConfiguration)?
+        // A verified checkout whose private directory is the common directory
+        // is the primary itself. Linked worktrees need the shared resolver so
+        // their own root never becomes the project-configuration owner.
+        let project_root = if repo.private_git_dir() == repo.common_git_dir() {
+            Some(repo.root_path().to_path_buf())
         } else {
-            crate::worktrees::project_layout_for_common(
+            let environment = crate::worktrees::project_layout_git_environment();
+            let git = self.git.program()?;
+            let layout = crate::worktrees::project_layout_for_common_at_state(
                 executor,
-                common,
-                self.git_program_path(),
+                repo.common_git_dir(),
+                &self.host_state,
+                &git,
                 &environment,
-                Duration::from_secs(5),
+                budget.timeout,
                 cancel,
             )
-            .map_err(|_| UtilityError::UnreadableGitConfiguration)?
+            .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+            layout.project().map(Path::to_path_buf)
         };
-        let mut roots = self.lane_roots.clone().into_paths();
-        if repo.private_git_dir() != common {
-            roots.push(repo.root_path().to_path_buf());
-        }
-        roots.extend(
-            LaneRoots::for_layout(layout.root(), layout.project(), &self.host_state)?.into_paths(),
-        );
-        Ok(LaneRoots::new(roots))
+        Ok(LaneRoots::for_repository(
+            repo.root_path(),
+            repo.private_git_dir(),
+            repo.common_git_dir(),
+            project_root.as_deref(),
+            &self.lane_roots,
+            Some(&self.host_state),
+        )?)
     }
 
     pub fn open_repo(
@@ -576,8 +576,15 @@ impl UtilityRuntime {
             match directory.metadata_at(OsStr::new(".git"), false) {
                 Ok(_) => {
                     let repo = self.open_repo(executor, ancestor, budget, cancel)?;
-                    let location = provenant_config::ProjectLocation::new(repo.common_git_dir())
-                        .map_err(|_| UtilityError::InvalidOperationValue)?;
+                    let location = if repo.private_git_dir() == repo.common_git_dir() {
+                        provenant_config::ProjectLocation::from_verified_primary_checkout(
+                            repo.common_git_dir(),
+                            repo.root_path(),
+                        )
+                    } else {
+                        provenant_config::ProjectLocation::new(repo.common_git_dir())
+                    }
+                    .map_err(|_| UtilityError::InvalidOperationValue)?;
                     return Ok(DiscoveredProject {
                         location,
                         repository: Some(repo),
@@ -836,7 +843,7 @@ impl<'a> HostGit<'a> {
             budget,
             cancel,
         };
-        let roots = runtime.lane_roots(repo, executor, cancel)?;
+        let roots = runtime.lane_roots(executor, repo, budget, cancel)?;
         transport::check_environment(&host.env, repo.root_path(), &roots)?;
         let listing = host.run(
             &transport::LISTING_ARGS
@@ -1936,7 +1943,7 @@ fn scan_configuration(
         .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
     let base = repo.root_path();
     let home = runtime.home.path.as_path();
-    let roots = runtime.lane_roots(repo, executor, cancel)?;
+    let roots = runtime.lane_roots(executor, repo, budget, cancel)?;
     let own: Vec<PathBuf> = [repo.private_git_dir(), repo.common_git_dir()]
         .iter()
         .flat_map(|dir| ["config", "config.worktree"].map(|name| dir.join(name)))
@@ -2102,7 +2109,7 @@ pub(crate) fn lane_configuration_files(
 ) -> Result<BTreeSet<PathBuf>, UtilityError> {
     let scan = scan_configuration(executor, repo, runtime, budget, cancel)?;
     let mut files = scan.lane_files;
-    let roots = runtime.lane_roots(repo, executor, cancel)?;
+    let roots = runtime.lane_roots(executor, repo, budget, cancel)?;
     // An include may be named inside a lane even when Git reports the
     // resolved target as its origin. Seed the graph with the declared path.
     for entry in &scan.entries {
@@ -2490,6 +2497,132 @@ pub(crate) mod tests {
         let staged = link.with_extension("new");
         std::os::unix::fs::symlink(target, &staged)?;
         fs::rename(staged, link)?;
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-git.md#project-layout-ownership
+    #[test]
+    fn linked_external_common_git_uses_registered_primary_lane_roots() -> Result<(), Box<dyn Error>>
+    {
+        use crate::test_support::{fixture_env, run_fixture_git};
+        use provenant_core::RootInputs;
+
+        let fixture = Fixture::new()?;
+        let temp = fixture._temp.path();
+        let root = temp.join("external-primary");
+        let common = temp.join("external-gitdir");
+        let linked = temp.join("linked-checkout");
+        let lane_root = root.join(".agent-worktrees");
+        let included = lane_root.join("linked-config.inc");
+        fs::create_dir(&root)?;
+        fs::create_dir(&lane_root)?;
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![PathBuf::from(".agent-worktrees")];
+        ports.worktree_layout.default = PathBuf::from(".agent-worktrees/<branch>");
+        fs::create_dir_all(root.join(".provenant"))?;
+        fs::write(
+            root.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports)?,
+        )?;
+        fs::write(&included, "[user]\nname = lane-config\n")?;
+
+        let env = fixture_env(&fixture.home, temp);
+        let root_text = root.to_str().ok_or("non-UTF8 primary path")?;
+        let common_text = common.to_str().ok_or("non-UTF8 common path")?;
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            temp,
+            &env,
+            &[
+                "init",
+                "--quiet",
+                "--separate-git-dir",
+                common_text,
+                root_text,
+            ],
+        )?;
+        for args in [
+            vec!["config", "user.name", "Fixture"],
+            vec!["config", "user.email", "fixture@example.invalid"],
+            vec!["config", "extensions.worktreeConfig", "true"],
+            vec!["commit", "--allow-empty", "-m", "fixture"],
+        ] {
+            run_fixture_git(&fixture.executor, &fixture.git, &root, &env, &args)?;
+        }
+        let linked_text = linked.to_str().ok_or("non-UTF8 linked path")?;
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            &root,
+            &env,
+            &["worktree", "add", "-b", "linked", linked_text],
+        )?;
+        let included_text = included.to_str().ok_or("non-UTF8 include path")?;
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            &linked,
+            &env,
+            &["config", "--worktree", "include.path", included_text],
+        )?;
+
+        let state = temp.join("state");
+        let mut inputs = RootInputs::new(fixture.home.clone(), root.clone());
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let common = common.canonicalize()?;
+        let root = root.canonicalize()?;
+        let configured = provenant_config::PortTable::read_for(Some(&root), &state)?;
+        assert!(
+            configured
+                .worktree_roots_under(&root)
+                .contains(&root.join(".agent-worktrees")),
+            "fixture must configure the primary-owned lane root"
+        );
+        let runtime = UtilityRuntime::new(&fixture.git, &fixture.home, &state)?;
+        let primary = runtime.open_repo(
+            &fixture.executor,
+            &root,
+            UtilityBudget::bounded(Duration::from_secs(10))?,
+            &CancelToken::new(),
+        )?;
+        assert_eq!(primary.private_git_dir(), common);
+        let discovered = runtime.project_location(
+            &fixture.executor,
+            &root,
+            UtilityBudget::bounded(Duration::from_secs(10))?,
+            &CancelToken::new(),
+        )?;
+        let binding = provenant_config::bind_project(&roots, discovered.location)?;
+        assert_eq!(binding.primary_checkout_hint(), Some(root.as_path()));
+        let linked_repo = runtime.open_repo(
+            &fixture.executor,
+            &linked,
+            UtilityBudget::bounded(Duration::from_secs(10))?,
+            &CancelToken::new(),
+        )?;
+        // Opening a repo captures the configuration view so later commands
+        // can be tied to it. The host transport boundary runs when a host-only
+        // remote operation is requested.
+        let result = fetch_missing_remote_branch(
+            &fixture.executor,
+            &linked_repo,
+            &runtime,
+            &fixture.home,
+            "origin/linked",
+            UtilityBudget::bounded(Duration::from_secs(10))?,
+            &CancelToken::new(),
+        );
+        match result {
+            Err(UtilityError::Transport(TransportError::LaneConfig { .. })) => {}
+            Err(error) => return Err(format!("unexpected refusal: {error}").into()),
+            Ok(_) => {
+                return Err(
+                    "host transport operation accepted config in a primary-owned lane root".into(),
+                );
+            }
+        }
         Ok(())
     }
 

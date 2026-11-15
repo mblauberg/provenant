@@ -862,7 +862,7 @@ fn seed_git_environment() -> Vec<(OsString, OsString)> {
 }
 
 fn registered_seed_projects(
-    common_dirs: &[PathBuf],
+    bindings: &[provenant_config::ProjectBinding],
     retry_project_keys: &[String],
     executor: &dyn Executor,
     git: &Path,
@@ -871,7 +871,8 @@ fn registered_seed_projects(
 ) -> SeedDiscovery {
     let mut discovery = SeedDiscovery::default();
     let mut seen = BTreeSet::new();
-    for common in common_dirs {
+    for binding in bindings {
+        let common = binding.common_dir();
         let project_key = provenant_run::target_seed::project_key(common);
         // Busy retries are scoped to the projects that actually had a seed
         // lock. Do not re-inventory other registrations, which may include a
@@ -879,9 +880,9 @@ fn registered_seed_projects(
         if !retry_project_keys.is_empty() && !retry_project_keys.contains(&project_key) {
             continue;
         }
-        let layout = match provenant_confinement::worktrees::project_layout_for_common(
+        let layout = match provenant_confinement::worktrees::project_layout_for_binding(
             executor,
-            common,
+            binding,
             git,
             environment,
             Duration::from_secs(5),
@@ -947,16 +948,11 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
                     let selection =
                         provenant_config::registered_gc_project_selection(&resolved.roots)
                             .map_err(|error| error.to_string())?;
-                    let common_dirs = selection
-                        .projects
-                        .iter()
-                        .map(|binding| binding.common_dir().to_path_buf())
-                        .collect::<Vec<_>>();
                     let git = provenant_os::git::git_executable()
                         .ok_or_else(|| "Git executable unavailable".to_owned())?;
                     let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
                     Ok(registered_seed_projects(
-                        &common_dirs,
+                        &selection.projects,
                         request.project_keys(),
                         &executor,
                         &git,
@@ -1213,10 +1209,27 @@ mod tests {
     use super::*;
 
     /// Spec: docs/specs/run.md#cargo-target-seed
+    /// Spec: docs/specs/run-git.md#project-layout-ownership
     #[test]
     fn registered_seed_projects_resolve_separate_gitdirs_and_skip_bare_repositories() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let source = root.join("source");
+        let state = root.join("state");
+        for path in [&home, &source, &state] {
+            std::fs::create_dir(path).unwrap();
+        }
+        std::fs::set_permissions(
+            &state,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        let mut inputs = provenant_core::RootInputs::new(home, source);
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
         let primary = root.join("primary");
         std::fs::create_dir(&primary).unwrap();
         provenant_os::fixture::run_git(&primary, &["init", "-q"]).unwrap();
@@ -1247,13 +1260,61 @@ mod tests {
 
         let git = provenant_os::git::git_executable().unwrap();
         let executor = SystemExecutor::new(4).unwrap();
+        let utility = provenant_confinement::UtilityRuntime::read_only(&git, &state).unwrap();
+        let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5)).unwrap();
+        let cancel = provenant_core::CancelToken::new();
+        let primary_binding = provenant_config::bind_project(
+            &roots,
+            utility
+                .project_location(&executor, &primary, budget, &cancel)
+                .unwrap()
+                .location,
+        )
+        .unwrap();
+        let separate_binding = provenant_config::bind_project(
+            &roots,
+            utility
+                .project_location(&executor, &separate, budget, &cancel)
+                .unwrap()
+                .location,
+        )
+        .unwrap();
+        let invalid_binding = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(&invalid).unwrap(),
+        )
+        .unwrap();
+        let bare_binding = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(&bare).unwrap(),
+        )
+        .unwrap();
         let primary_common = primary.join(".git");
+        let stale_primary_hint = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::from_verified_primary_checkout(
+                &primary_common,
+                &invalid,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let primary_layout = provenant_confinement::worktrees::project_layout_for_binding(
+            &executor,
+            &stale_primary_hint,
+            &git,
+            &seed_git_environment(),
+            Duration::from_secs(5),
+            &provenant_core::CancelToken::new(),
+        )
+        .unwrap();
+        assert_eq!(primary_layout.project(), Some(primary.as_path()));
         let discovery = registered_seed_projects(
             &[
-                primary_common.clone(),
-                invalid.clone(),
-                separate_git.clone(),
-                bare,
+                primary_binding.clone(),
+                invalid_binding.clone(),
+                separate_binding.clone(),
+                bare_binding,
             ],
             &[],
             &executor,
@@ -1278,7 +1339,7 @@ mod tests {
 
         let primary_key = provenant_run::target_seed::project_key(&primary_common);
         let retry = registered_seed_projects(
-            &[primary_common, invalid.clone(), separate_git],
+            &[primary_binding, invalid_binding, separate_binding],
             std::slice::from_ref(&primary_key),
             &executor,
             &git,

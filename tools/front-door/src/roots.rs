@@ -5,6 +5,7 @@ use std::{
     ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
+    time::Duration,
 };
 use thiserror::Error;
 #[derive(Debug, Error)]
@@ -171,6 +172,13 @@ pub enum Workspace<'a> {
     Home,
     /// A canonical directory the command has already chosen.
     At(&'a Path),
+    /// A path selected by the shared Git-layout resolver. The optional
+    /// metadata directory is added as a hard boundary, including when a bare
+    /// common directory is itself the workspace root.
+    VerifiedLayout {
+        root: &'a Path,
+        git_metadata: Option<&'a Path>,
+    },
 }
 
 /// Whether a command needs the installed product root. An optional product
@@ -206,25 +214,35 @@ pub fn resolve(
         Product::Required => Some(product_root()?),
         Product::Optional => None,
     };
-    let (project, home) = match workspace {
+    let (project, home, git_metadata) = match workspace {
         Workspace::Home => {
             let home = home()?;
-            (home.clone(), home)
+            (home.clone(), home, None)
         }
         Workspace::Directory => {
             let project = match &globals.project {
                 Some(project) => fs::canonicalize(project).map_err(|_| RootError::Checkout)?,
                 None => fs::canonicalize(std::env::current_dir()?)?,
             };
-            (project, home()?)
+            (project, home()?, None)
         }
         Workspace::Project => (
             selected_project(globals.project.as_deref(), false)?,
             home()?,
+            None,
         ),
-        Workspace::Checkout => (selected_project(globals.project.as_deref(), true)?, home()?),
-        Workspace::SessionSave => (session_project(globals.project.as_deref())?, home()?),
-        Workspace::At(path) => (path.to_owned(), home()?),
+        Workspace::Checkout => (
+            selected_project(globals.project.as_deref(), true)?,
+            home()?,
+            None,
+        ),
+        Workspace::SessionSave => (session_project(globals.project.as_deref())?, home()?, None),
+        Workspace::At(path) => (path.to_owned(), home()?, None),
+        Workspace::VerifiedLayout { root, git_metadata } => (
+            fs::canonicalize(root)?,
+            home()?,
+            git_metadata.map(fs::canonicalize).transpose()?,
+        ),
     };
     let assets = match installed {
         Some(assets) => assets,
@@ -242,6 +260,11 @@ pub fn resolve(
     inputs.environment_state_dir =
         std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
     inputs.workspaces.push(project.clone());
+    if let Some(metadata) = git_metadata
+        && !inputs.git_metadata.contains(&metadata)
+    {
+        inputs.git_metadata.push(metadata);
+    }
     let roots = provenant_os::fs::bind_roots(&inputs)?;
     report_warnings(&roots);
     Ok(Resolved {
@@ -252,6 +275,67 @@ pub fn resolve(
         claude_config: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
         codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
     })
+}
+
+/// Resolve the verified layout owner for a selected checkout. Git commands
+/// still run from that selected checkout; only primary-project configuration
+/// and managed-path allocation use the returned layout.
+pub fn project_layout(
+    roots: &Roots,
+    selected: &Path,
+) -> Result<provenant_confinement::worktrees::ProjectLayout, Box<dyn std::error::Error>> {
+    let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
+    let utility = provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())?;
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+    let discovered = utility.project_location(&executor, selected, budget, &cancel)?;
+    let binding = provenant_config::bind_project(roots, discovered.location)?;
+    let environment = provenant_confinement::worktrees::project_layout_git_environment();
+    Ok(
+        provenant_confinement::worktrees::project_layout_for_binding(
+            &executor,
+            &binding,
+            utility.git_program_path(),
+            &environment,
+            Duration::from_secs(5),
+            &cancel,
+        )?,
+    )
+}
+
+/// Resolve a project layout without allocating a binding or updating its
+/// saved primary hint. Unbound checkouts use Git's verified inventory only.
+pub fn project_layout_read_only(
+    roots: &Roots,
+    selected: &Path,
+) -> Result<provenant_confinement::worktrees::ProjectLayout, Box<dyn std::error::Error>> {
+    let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
+    let utility = provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())?;
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+    let discovered = utility.project_location(&executor, selected, budget, &cancel)?;
+    let environment = provenant_confinement::worktrees::project_layout_git_environment();
+    let repo = utility.open_read_repo(&executor, selected, budget, &cancel)?;
+    if let Some(binding) = provenant_config::lookup_project(roots, &discovered.location)? {
+        let layout = provenant_confinement::worktrees::project_layout_for_binding(
+            &executor,
+            &binding,
+            utility.git_program_path(),
+            &environment,
+            Duration::from_secs(5),
+            &cancel,
+        )?;
+        if layout.project().is_some() || repo.private_git_dir() != repo.common_git_dir() {
+            return Ok(layout);
+        }
+    }
+    Ok(
+        provenant_confinement::worktrees::project_layout_for_checkout(
+            &executor, &repo, &utility, budget, &cancel,
+        )?,
+    )
 }
 
 /// Resolve a new state candidate with every captured root input intact.
@@ -293,6 +377,63 @@ pub(crate) fn home() -> Result<PathBuf, RootError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn project_layout_restores_a_verified_primary_with_an_external_git_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let home = root.join("home");
+        let state = root.join("state");
+        let checkout = root.join("checkout");
+        let git_dir = root.join("git-metadata");
+        let linked = root.join("linked");
+        for path in [&home, &state, &checkout] {
+            fs::create_dir_all(path)?;
+        }
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
+
+        let mut inputs = RootInputs::new(home, checkout.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        provenant_os::fixture::run_git(
+            &checkout,
+            &[
+                "init",
+                "-q",
+                "--separate-git-dir",
+                git_dir.to_str().ok_or("non-UTF-8 fixture path")?,
+            ],
+        )?;
+        fs::write(checkout.join("tracked.txt"), "base\n")?;
+        provenant_os::fixture::run_git(&checkout, &["add", "tracked.txt"])?;
+        provenant_os::fixture::run_git(&checkout, &["commit", "-qm", "base"])?;
+
+        let primary = project_layout_read_only(&roots, &checkout)?;
+        assert_eq!(primary.project(), Some(checkout.as_path()));
+        assert_eq!(primary.root(), checkout);
+        assert!(provenant_config::registered_projects(&roots)?.is_empty());
+
+        let primary = project_layout(&roots, &checkout)?;
+        assert_eq!(primary.project(), Some(checkout.as_path()));
+        provenant_os::fixture::run_git(
+            &checkout,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().ok_or("non-UTF-8 fixture path")?,
+            ],
+        )?;
+
+        let from_linked = project_layout(&roots, &linked)?;
+        assert_eq!(from_linked.project(), Some(checkout.as_path()));
+        assert_eq!(from_linked.root(), checkout);
+        Ok(())
+    }
+
     #[test]
     fn git_boundaries_use_existing_metadata_and_preserve_installed_release_roots()
     -> Result<(), Box<dyn std::error::Error>> {

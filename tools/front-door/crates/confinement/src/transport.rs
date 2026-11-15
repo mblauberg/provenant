@@ -109,51 +109,47 @@ impl LaneRoots {
     pub fn project(root: &Path, host_state: &Path) -> Result<Self, TransportError> {
         let ports = provenant_config::PortTable::read_for(Some(root), host_state)
             .map_err(|_| TransportError::Unreadable)?;
+        Ok(Self::project_roots(root, ports))
+    }
+
+    /// Project-declared roots when the caller has no validated host state to
+    /// read host-level port overrides from.
+    pub fn project_without_host_state(root: &Path) -> Result<Self, TransportError> {
+        let ports = provenant_config::PortTable::read_project_only(root)
+            .map_err(|_| TransportError::Unreadable)?;
+        Ok(Self::project_roots(root, ports))
+    }
+
+    fn project_roots(root: &Path, ports: provenant_config::PortTable) -> Self {
         let mut roots = ports.worktree_roots_under(root);
         roots.extend([".provenant", ".agent-run"].map(|name| root.join(name)));
-        Ok(Self::new(roots))
+        Self::new(roots)
     }
 
-    /// Lane-writable areas from an inventory-resolved project layout. A
-    /// common-only bare repository gets host ports rooted at its common dir and
-    /// has no project scratch declaration.
-    pub fn for_layout(
-        root: &Path,
-        project: Option<&Path>,
-        host_state: &Path,
-    ) -> Result<Self, TransportError> {
-        let ports = provenant_config::PortTable::read_for(project, host_state)
-            .map_err(|_| TransportError::Unreadable)?;
-        let mut roots = ports.worktree_roots_under(root);
-        if project.is_some() {
-            roots.extend([".provenant", ".agent-run"].map(|name| root.join(name)));
-        }
-        Ok(Self::new(roots))
-    }
-
-    /// Conservative layout for callers without Git inventory. A primary
-    /// handle identifies its own root; conventional `.git` parent mapping is
-    /// accepted only after structural Git verification. An external linked
-    /// common directory uses host-only ports rooted at common.
+    /// The lane areas for a repository whose private and common Git
+    /// directories are known. A linked worktree is itself lane-writable, and
+    /// the project that owns the common directory contributes its declared areas.
     pub fn for_repository(
         root: &Path,
         private: &Path,
         common: &Path,
+        project: Option<&Path>,
         extra: &Self,
-        host_state: &Path,
+        host_state: Option<&Path>,
     ) -> Result<Self, TransportError> {
         let mut roots = extra.0.clone();
         if private != common {
             roots.push(root.to_path_buf());
         }
-        let project = if private == common {
-            Some(root.to_path_buf())
-        } else {
-            verified_conventional_primary(common)
-        };
-        let project = project.as_deref();
-        let layout_root = project.unwrap_or(common);
-        roots.extend(Self::for_layout(layout_root, project, host_state)?.0);
+        if let Some(project) = project {
+            roots.extend(
+                match host_state {
+                    Some(host_state) => Self::project(project, host_state)?,
+                    None => Self::project_without_host_state(project)?,
+                }
+                .0,
+            );
+        }
         Ok(Self::new(roots))
     }
 
@@ -186,16 +182,6 @@ impl LaneRoots {
                 || path.ancestors().skip(1).any(|parent| resolve(parent).starts_with(root))
         })
     }
-}
-
-fn verified_conventional_primary(common: &Path) -> Option<PathBuf> {
-    if common.file_name().is_none_or(|name| name != ".git") {
-        return None;
-    }
-    let project = common.parent()?;
-    let repo = crate::repo::VerifiedRepo::open_structure_only(project).ok()?;
-    (repo.private_git_dir() == common && repo.common_git_dir() == common)
-        .then(|| project.to_path_buf())
 }
 
 pub(crate) fn normalise(path: &Path) -> PathBuf {

@@ -95,6 +95,14 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         &roots,
         provenant_config::ProjectLocation::new(repo.common_git_dir())?,
     )?;
+    let layout = worktrees::project_layout_for_binding(
+        &executor,
+        &binding,
+        utility.git_program_path(),
+        &worktrees::project_layout_git_environment(),
+        Duration::from_secs(5),
+        &cancel,
+    )?;
     let worktree_state = state
         .join("worktrees")
         .join(binding.project_id().to_string());
@@ -108,6 +116,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         &worktrees::WorktreeContext {
             home: &home,
             repo: &repo,
+            layout: &layout,
             binding: &binding,
             project_state: &project_state,
             executor: &executor,

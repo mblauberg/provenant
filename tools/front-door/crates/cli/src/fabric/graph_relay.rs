@@ -1415,7 +1415,7 @@ pub fn provision_writer_checked(
                 lock_budget: budget,
                 ..*worktree_context
             };
-            let layout = worktree_context.project_layout()?;
+            let layout = worktree_context.layout;
             let ports = provenant_config::PortTable::read_for(
                 layout.project(),
                 context.roots.state.as_path(),
@@ -1436,7 +1436,7 @@ fn provision_in_context(
     cancel: &CancelToken,
 ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeError};
-    let layout = context.project_layout()?;
+    let layout = context.layout;
     let ports = provenant_config::PortTable::read_for(layout.project(), &context.host_state()?)
         .map_err(worktrees::WorktreeError::PortConfiguration)?;
     let expected = resolve_managed_writer_path(&ports, layout.root(), path, branch)?;

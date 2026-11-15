@@ -1484,8 +1484,8 @@ mod tests {
     }
 
     #[test]
-    fn host_inventory_protects_later_worktree_allocations() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn host_inventory_does_not_guess_registered_project_layouts()
+    -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = std::fs::canonicalize(temp.path())?;
         let roots = fixture_roots(&root)?;
@@ -1528,21 +1528,24 @@ mod tests {
             &[],
         )?;
         for allocation in allocations {
-            // Capture before even the allocation directory exists.
+            // A context-free host inventory cannot infer project layout from
+            // the registered common directory. Git-aware launch callers add
+            // those roots after resolving the binding's verified owner.
             let later = allocation.join("later-checkout");
             std::fs::create_dir_all(&later)?;
             assert!(
-                inventory.protected().iter().any(
+                !inventory.protected().iter().any(
                     |grant| grant.scope == PathScope::Subtree && later.starts_with(&grant.path)
                 )
             );
-            assert!(matches!(
-                inventory.validate_extra_write(&PathGrant {
-                    path: later,
-                    scope: PathScope::Subtree
-                }),
-                Err(PermissionError::ProtectedOverlap)
-            ));
+            assert!(
+                inventory
+                    .validate_extra_write(&PathGrant {
+                        path: later,
+                        scope: PathScope::Subtree
+                    })
+                    .is_ok()
+            );
             let sibling = PathGrant {
                 path: allocation.with_file_name(".worktrees-other"),
                 scope: PathScope::Subtree,

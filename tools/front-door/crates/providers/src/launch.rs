@@ -635,35 +635,128 @@ pub(crate) fn admit(
 pub(crate) const SYSTEM_TOOL_SEARCH_PATH: &str = "/usr/bin:/bin";
 pub(crate) const HOMEBREW_NODE_PREFIXES: [&str; 2] = ["/opt/homebrew", "/usr/local"];
 
-/// Resolve a Homebrew Node prefix only when the requester's PATH names its bin
-/// directory and both Node and npm resolve inside that prefix. Native package
-/// config lookup must not execute npm to discover its prefix.
-pub(crate) fn homebrew_node_prefix(host_var: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+/// Resolve the Node installation used by the first npm and node on requester
+/// PATH. Native package config lookup must not execute npm to discover its
+/// prefix. Unknown shims and split installations remain unresolved.
+pub(crate) fn selected_node_prefix(host_var: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     let path = host_var("PATH")?;
-    for directory in std::env::split_paths(&path) {
-        for prefix in HOMEBREW_NODE_PREFIXES.map(Path::new) {
-            let bin = prefix.join("bin");
-            if directory != bin || !bin.join("node").is_file() || !bin.join("npm").is_file() {
-                continue;
-            }
-            let Ok(canonical_prefix) = std::fs::canonicalize(prefix) else {
-                continue;
-            };
-            let Ok(canonical_bin) = std::fs::canonicalize(&bin) else {
-                continue;
-            };
-            let Ok(node) = std::fs::canonicalize(bin.join("node")) else {
-                continue;
-            };
-            let Ok(npm) = std::fs::canonicalize(bin.join("npm")) else {
-                continue;
-            };
-            if canonical_bin == canonical_prefix.join("bin")
-                && node.starts_with(&canonical_prefix)
-                && npm.starts_with(&canonical_prefix)
-            {
-                return Some(prefix.to_owned());
-            }
+    let homebrew_prefixes = HOMEBREW_NODE_PREFIXES.map(PathBuf::from);
+    selected_node_prefix_from_path(&path, &homebrew_prefixes)
+}
+
+fn selected_node_prefix_from_path(path: &OsStr, homebrew_prefixes: &[PathBuf]) -> Option<PathBuf> {
+    let npm = first_path_executable(path, "npm")?;
+    let node = first_path_executable(path, "node")?;
+    let selected_bin = npm.parent()?;
+    let npm_bin = std::fs::canonicalize(npm.parent()?).ok()?;
+    let node_bin = std::fs::canonicalize(node.parent()?).ok()?;
+    if npm_bin != node_bin {
+        return None;
+    }
+    let npm = std::fs::canonicalize(&npm).ok()?;
+    let node = std::fs::canonicalize(node).ok()?;
+
+    for prefix in homebrew_prefixes {
+        if let Some(prefix) =
+            homebrew_prefix_for_selected_bin(selected_bin, &npm_bin, &npm, &node, prefix)
+        {
+            return Some(prefix);
+        }
+    }
+
+    let prefix = node.parent()?.parent()?.to_owned();
+    if !npm.starts_with(&prefix) || !node.starts_with(&prefix) {
+        return None;
+    }
+    (nvm_installation_prefix(&prefix) || npm_cli_package_layout(&prefix, &npm)).then_some(prefix)
+}
+
+fn homebrew_prefix_for_selected_bin(
+    selected_bin: &Path,
+    canonical_bin: &Path,
+    npm: &Path,
+    node: &Path,
+    prefix: &Path,
+) -> Option<PathBuf> {
+    let canonical_prefix = std::fs::canonicalize(prefix).ok()?;
+    let stable_bin = prefix.join("bin");
+    if selected_bin == stable_bin && canonical_bin == std::fs::canonicalize(&stable_bin).ok()? {
+        return homebrew_node_cellar_formula(&canonical_prefix, npm, node)
+            .map(|_| prefix.to_owned());
+    }
+
+    let mut components = selected_bin.strip_prefix(prefix).ok()?.components();
+    if components.next()?.as_os_str() != OsStr::new("opt") {
+        return None;
+    }
+    let formula = components.next()?.as_os_str().to_str()?;
+    if components.next()?.as_os_str() != OsStr::new("bin")
+        || components.next().is_some()
+        || (formula != "node" && !formula.starts_with("node@"))
+    {
+        return None;
+    }
+    let canonical_formula = canonical_prefix.join("Cellar").join(formula);
+    let resolved_formula = homebrew_node_cellar_formula(&canonical_prefix, npm, node)?;
+    (resolved_formula == canonical_formula && canonical_bin.starts_with(&canonical_formula))
+        .then(|| prefix.to_owned())
+}
+
+fn homebrew_node_cellar_formula(
+    canonical_prefix: &Path,
+    npm: &Path,
+    node: &Path,
+) -> Option<PathBuf> {
+    let cellar = canonical_prefix.join("Cellar");
+    let npm_formula = npm
+        .strip_prefix(&cellar)
+        .ok()?
+        .components()
+        .next()?
+        .as_os_str()
+        .to_str()?;
+    let node_formula = node
+        .strip_prefix(&cellar)
+        .ok()?
+        .components()
+        .next()?
+        .as_os_str()
+        .to_str()?;
+    if npm_formula != node_formula || (node_formula != "node" && !node_formula.starts_with("node@"))
+    {
+        return None;
+    }
+    let formula = cellar.join(node_formula);
+    (npm.starts_with(&formula) && node.starts_with(&formula)).then_some(formula)
+}
+
+fn nvm_installation_prefix(prefix: &Path) -> bool {
+    let versioned = prefix.file_name().and_then(OsStr::to_str);
+    let node = prefix.parent().and_then(Path::file_name);
+    let versions = prefix
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name);
+    versioned.is_some_and(|name| name.starts_with('v'))
+        && node == Some(OsStr::new("node"))
+        && versions == Some(OsStr::new("versions"))
+}
+
+fn npm_cli_package_layout(prefix: &Path, npm: &Path) -> bool {
+    npm.strip_prefix(prefix)
+        .is_ok_and(|path| path == Path::new("lib/node_modules/npm/bin/npm-cli.js"))
+}
+
+fn first_path_executable(path: &OsStr, name: &str) -> Option<PathBuf> {
+    for directory in std::env::split_paths(path) {
+        // Relative and empty PATH entries depend on the launch cwd. Preserve
+        // the existing selector if that earlier lookup cannot be resolved.
+        if directory.as_os_str().is_empty() || !directory.is_absolute() {
+            return None;
+        }
+        let executable = directory.join(name);
+        if provenant_os::sys::is_executable(&executable) {
+            return Some(executable);
         }
     }
     None
@@ -2121,5 +2214,121 @@ mod git_config_quote_tests {
             .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout.strip_suffix(b"\n"), Some(identity.as_bytes()));
+    }
+}
+
+#[cfg(test)]
+mod selected_node_prefix_tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    fn executable(path: &Path) {
+        std::fs::create_dir_all(path.parent().expect("executable parent")).unwrap();
+        std::fs::write(path, b"fixture executable").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn homebrew_node(prefix: &Path) -> (PathBuf, PathBuf) {
+        let cellar = prefix.join("Cellar/node@22/22.18.0");
+        let cellar_bin = cellar.join("bin");
+        executable(&cellar_bin.join("node"));
+        executable(&cellar_bin.join("npm"));
+        let opt = prefix.join("opt");
+        std::fs::create_dir_all(&opt).unwrap();
+        symlink(&cellar, opt.join("node@22")).unwrap();
+        let stable_bin = prefix.join("bin");
+        std::fs::create_dir_all(&stable_bin).unwrap();
+        symlink(cellar_bin.join("node"), stable_bin.join("node")).unwrap();
+        symlink(cellar_bin.join("npm"), stable_bin.join("npm")).unwrap();
+        (opt.join("node@22/bin"), cellar_bin)
+    }
+
+    fn nvm_node(prefix: &Path) -> PathBuf {
+        let bin = prefix.join("bin");
+        executable(&bin.join("node"));
+        executable(&bin.join("npm"));
+        bin
+    }
+
+    // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
+    #[test]
+    fn homebrew_opt_node_formula_uses_stable_global_config_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        let prefix = root.path().join("homebrew");
+        let (selected_bin, cellar_bin) = homebrew_node(&prefix);
+        let npm = std::fs::canonicalize(cellar_bin.join("npm")).unwrap();
+        let node = std::fs::canonicalize(cellar_bin.join("node")).unwrap();
+        let canonical_bin = std::fs::canonicalize(&selected_bin).unwrap();
+
+        assert_eq!(
+            homebrew_prefix_for_selected_bin(&selected_bin, &canonical_bin, &npm, &node, &prefix,),
+            Some(prefix.clone()),
+            "opt/node@22 must resolve to the stable Homebrew prefix, not the Cellar version"
+        );
+        let path = std::env::join_paths([&selected_bin]).unwrap();
+        assert_eq!(
+            selected_node_prefix_from_path(&path, std::slice::from_ref(&prefix)),
+            Some(prefix.clone())
+        );
+        let stable_path = std::env::join_paths([prefix.join("bin")]).unwrap();
+        assert_eq!(
+            selected_node_prefix_from_path(&stable_path, std::slice::from_ref(&prefix)),
+            Some(prefix)
+        );
+    }
+
+    #[test]
+    fn unsupported_same_bin_shims_do_not_become_node_installation_prefixes() {
+        let root = tempfile::tempdir().unwrap();
+        let volta_bin = root.path().join("volta/bin");
+        executable(&volta_bin.join("node"));
+        executable(&volta_bin.join("npm"));
+        let path = std::env::join_paths([&volta_bin]).unwrap();
+
+        assert_eq!(selected_node_prefix_from_path(&path, &[]), None);
+    }
+
+    #[test]
+    fn canonical_npm_cli_package_layout_is_a_supported_node_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        let prefix = root.path().join("node-install");
+        let bin = prefix.join("bin");
+        let npm_cli = prefix.join("lib/node_modules/npm/bin/npm-cli.js");
+        executable(&bin.join("node"));
+        executable(&npm_cli);
+        std::fs::create_dir_all(&bin).unwrap();
+        symlink(&npm_cli, bin.join("npm")).unwrap();
+        let path = std::env::join_paths([&bin]).unwrap();
+
+        assert_eq!(selected_node_prefix_from_path(&path, &[]), Some(prefix));
+    }
+
+    #[test]
+    fn first_nvm_installation_wins_over_a_later_homebrew_opt_installation() {
+        let root = tempfile::tempdir().unwrap();
+        let nvm_prefix = root.path().join("nvm/versions/node/v24.0.1");
+        let nvm_bin = nvm_node(&nvm_prefix);
+        let homebrew_prefix = root.path().join("homebrew");
+        let (homebrew_bin, cellar_bin) = homebrew_node(&homebrew_prefix);
+        let npm = std::fs::canonicalize(cellar_bin.join("npm")).unwrap();
+        let node = std::fs::canonicalize(cellar_bin.join("node")).unwrap();
+        assert_eq!(
+            homebrew_prefix_for_selected_bin(
+                &homebrew_bin,
+                &std::fs::canonicalize(&homebrew_bin).unwrap(),
+                &npm,
+                &node,
+                &homebrew_prefix,
+            ),
+            Some(homebrew_prefix.clone()),
+            "the later Homebrew fixture must be a recognized install layout"
+        );
+
+        let path = std::env::join_paths([&nvm_bin, &homebrew_bin]).unwrap();
+        assert_eq!(
+            selected_node_prefix_from_path(&path, std::slice::from_ref(&homebrew_prefix)),
+            Some(nvm_prefix),
+            "later Homebrew cache configuration must not override the first PATH installation"
+        );
     }
 }

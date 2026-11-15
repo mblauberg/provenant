@@ -286,7 +286,7 @@ pub fn save_lane_owner_when_free(
         .any(|entry| {
             canonicalize(&entry.path).ok().as_deref() == Some(tree.path())
                 && entry.branch.as_ref().map(GitRefName::as_str) == Some(branch.as_str())
-                && entry.head == expected_head
+                && entry.head == Some(expected_head)
                 && !entry.locked
                 && !entry.prunable
         })
@@ -370,14 +370,11 @@ pub fn prune_owned(
 ) -> Result<(RemoveOutcome, provenant_records::custody::RetirementRecord), WorktreeError> {
     let verified = verify_worktree(context.repo, path)?;
     let owner = load_owner(&verified)?.ok_or(WorktreeError::UnknownWriter)?;
-    let layout = context.project_layout()?;
     let relative = path
-        .strip_prefix(layout.root())
+        .strip_prefix(context.layout.root())
         .map_err(|_| WorktreeError::UnknownWriter)?;
-    let managed = provenant_config::PortTable::read_for(layout.project(), &context.host_state()?)
-        .map_err(WorktreeError::PortConfiguration)?
-        .managed_writer_branch(relative)
-        .is_some();
+    let managed =
+        managed_writer_branch(context.layout.root(), &context.host_state()?, relative)?.is_some();
     if owner.origin != WorktreeOrigin::Lane || owner.attempt_id != Some(attempt) || !managed {
         return Err(WorktreeError::UnknownWriter);
     }
@@ -435,7 +432,7 @@ pub fn prune_owned(
         .find(|entry| canonicalize(&entry.path).ok().as_deref() == Some(path))
         .ok_or(WorktreeError::NotFound)?;
     let entry_branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
-    if entry_branch != &branch || entry.head != head {
+    if entry_branch != &branch || entry.head != Some(head) {
         return Err(WorktreeError::IdentityChanged);
     }
 

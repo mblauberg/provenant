@@ -83,6 +83,29 @@ fn config_repair(globals: &Globals) -> String {
     command
 }
 
+fn config_projection(
+    error: &provenant_config::ConfigError,
+    globals: &Globals,
+) -> provenant_records::diagnostic::Diagnostic {
+    use provenant_records::diagnostic::{Destination, Diagnostic};
+    match error {
+        provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
+            path,
+            mode,
+            owner_matches,
+        } => provenant_fabric_runtime::coordination::facade::FacadeError::state_directory_security(
+            path,
+            *mode,
+            *owner_matches,
+            Destination::Local,
+        ),
+        _ => Diagnostic::new("CONFIG")
+            .category("configuration")
+            .detail(error.to_string())
+            .next(config_repair(globals)),
+    }
+}
+
 fn file_input_error(path: &Path) -> Box<provenant_records::diagnostic::Diagnostic> {
     file_error("--file", path, "input could not be read")
 }
@@ -376,14 +399,7 @@ fn invoke(
                 error.downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>();
             let projection = facade
                 .map(|error| error.diagnostic())
-                .or_else(|| {
-                    config.map(|cause| {
-                        provenant_records::diagnostic::Diagnostic::new("CONFIG")
-                            .category("configuration")
-                            .detail(cause.to_string())
-                            .next(config_repair(globals))
-                    })
-                })
+                .or_else(|| config.map(|cause| config_projection(cause, globals)))
                 .or_else(|| {
                     error
                         .downcast_ref::<provenant_cli::fabric::EdgeError>()
@@ -717,6 +733,43 @@ mod tests {
         assert!(repair.contains("--state-dir"));
         assert!(repair.ends_with(" check config --json"));
         assert!(repair.contains("'\\''"));
+    }
+
+    // Spec: docs/specs/state.md#configuration
+    #[test]
+    fn unsafe_project_binding_state_has_local_mode_and_owner_repairs() {
+        use std::path::PathBuf;
+
+        let path = PathBuf::from("/private/state with 'quote");
+        let mode_error = provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
+            path: path.clone(),
+            mode: 0o755,
+            owner_matches: true,
+        };
+        let mode = config_projection(&mode_error, &Globals::default());
+        assert!(mode.detail.as_deref().is_some_and(|detail| {
+            detail.contains("mode 0755") && detail.contains("other users can")
+        }));
+        let mode_repair = mode.next.unwrap();
+        assert!(mode_repair.contains("chmod 700 '/private/state with '\\''quote'"));
+        assert!(!mode_repair.contains("chown"));
+        assert!(!mode_error.to_string().contains("/private"));
+
+        let owner_error = provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
+            path,
+            mode: 0o700,
+            owner_matches: false,
+        };
+        let owner = config_projection(&owner_error, &Globals::default());
+        assert!(
+            owner
+                .detail
+                .as_deref()
+                .is_some_and(|detail| { detail.contains("not owned by the current user") })
+        );
+        let owner_repair = owner.next.unwrap();
+        assert!(owner_repair.contains("sudo chown \"$(id -u)\""));
+        assert!(owner_repair.contains("&& chmod 700 '/private/state with '\\''quote'"));
     }
 
     #[allow(

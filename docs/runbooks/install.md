@@ -51,8 +51,10 @@ different versions: fix the reported cause and rerun; there is no distributed
 rollback.
 
 Drain first: no lane should run across a binary swap. Check
-`provenant status`, collect `provenant output TARGET`, and only then `retry`
-unfinished work.
+`provenant status` and the current attempt custody and process evidence, then
+collect `provenant output TARGET`. A workflow still labelled Running can retain
+an exited attempt; confirm its process identity before treating it as a live
+writer. Preserve unfinished work and retry it after installation.
 
 If installation fails after stopping agents, the output names the stopped
 agents and those that may still be running, prints the quoted state directory
@@ -100,9 +102,12 @@ source change. `--binary PATH` packages another build.
 
 ## Install
 
-Quit Claude Code and any other selected client or config editor before the
-preview, and keep them closed through `check install`; Claude rewrites
-`~/.claude.json` while running. Claude accounts live in exactly
+Inspect the preview for native configuration files it will write. Keep clients
+and editors that can rewrite those files closed from the preview through
+`check install`; the installer checks for drift before each write, but that is
+not an atomic compare-and-swap. In particular, quit Claude Code when the plan
+writes `~/.claude.json`, which Claude rewrites while running. Managed instruction
+or skill links alone do not require closing a client. Claude accounts live in exactly
 `~/.claude-$LABEL`; sign in there before registering. `~/.claude` is a sign-in
 source, never an account.
 

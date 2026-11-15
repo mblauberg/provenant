@@ -24,8 +24,8 @@ mod removal;
 mod setup;
 pub use census::*;
 pub use context::{
-    OpenProjectRepo, open_primary_repo, open_project_repo, with_context, with_context_using_facts,
-    with_context_using_workers, with_context_using_workers_and_facts,
+    with_context, with_context_using_facts, with_context_using_workers,
+    with_context_using_workers_and_facts,
 };
 pub use custody::*;
 pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, WorktreeRepairKind, doctor};
@@ -39,7 +39,10 @@ pub use landed::{
     CommitGraph, IntegrationEdge, LandedBy, Landing, LandingTarget, RepoGraph, Unproven,
     commit_parents, landed,
 };
-pub use layout::{ProjectLayout, project_layout_for_common};
+pub use layout::{
+    ProjectLayout, project_layout_for_binding, project_layout_for_checkout,
+    project_layout_for_common, project_layout_for_common_at_state, project_layout_git_environment,
+};
 pub use lifecycle::*;
 pub use owner::{
     WorktreeOrigin, WorktreeOwner, branch_ownership, load_owner, owned_worktree_paths, prune_owned,
@@ -200,6 +203,10 @@ pub enum WorktreeError {
     PortConfiguration(#[source] io::Error),
     #[error("worktree request is invalid")]
     InvalidRequest,
+    #[error(
+        "registered Git project has no verified primary checkout; run `provenant worktree list` from its primary checkout to refresh the layout, then retry"
+    )]
+    ProjectLayoutUnresolved,
     #[error("requested worktree path does not match the configured managed writer path")]
     ManagedPathMismatch {
         requested: PathBuf,
@@ -448,9 +455,6 @@ impl WorktreeError {
             Self::IdentityChanged => {
                 "run `provenant worktree list` and retry against the current checkout identity"
             }
-            Self::ManagedPathMismatch { .. } => {
-                "use `--branch` to create a writer in the configured project layout, or select an existing checkout with `--worktree`"
-            }
             Self::AmbiguousName { .. } => {
                 "run `provenant worktree list` and select an unambiguous branch or directory name"
             }
@@ -555,7 +559,12 @@ impl std::fmt::Display for ObservedProcess {
 /// binding and its `state/worktrees/<ProjectId>` directory.
 pub struct WorktreeContext<'a> {
     pub home: &'a Path,
+    /// The selected verified checkout is the Git execution anchor. It does
+    /// not own project configuration or managed worktree layout.
     pub repo: &'a VerifiedRepo,
+    /// Verified project configuration and allocation roots. Bare repositories
+    /// have a common-directory root and no project checkout.
+    pub layout: &'a ProjectLayout,
     pub binding: &'a ProjectBinding,
     pub project_state: &'a Directory,
     pub executor: &'a dyn Executor,
@@ -613,14 +622,6 @@ pub trait RetirementPort {
 }
 
 impl WorktreeContext<'_> {
-    /// Resolve the stable source for project ports and managed paths from the
-    /// selected verified Git handle. `with_context` has already replaced an
-    /// ordinary linked checkout with its primary; a linked handle therefore
-    /// means the registered common repository has no primary checkout.
-    pub fn project_layout(&self) -> Result<ProjectLayout, WorktreeError> {
-        ProjectLayout::for_verified_repo(self.repo)
-    }
-
     /// Host config root shared by project and host port declarations.
     pub fn host_state(&self) -> Result<PathBuf, WorktreeError> {
         self.project_state
@@ -792,7 +793,7 @@ impl Serialize for WorktreeInfo {
         state.serialize_field("writer", self.occupancy.label())?;
         state.serialize_field("owner", self.owner_label())?;
         if self.is_unowned() {
-            state.serialize_field("next", "No Provenant lane currently owns this checkout. If its custody is unclear, run `provenant worktree doctor <path>`, then select it with `--worktree <path>` to launch a writer.")?;
+            state.serialize_field("next", "No Provenant lane currently owns this checkout. Inspect its custody, then select it explicitly with --worktree <path>.")?;
         }
         state.end()
     }

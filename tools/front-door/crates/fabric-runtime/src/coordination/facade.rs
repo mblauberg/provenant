@@ -718,6 +718,31 @@ fn delivery_stage_wire<S: serde::Serializer>(
     wire.end()
 }
 
+fn state_directory_security_detail(
+    path: Option<&str>,
+    mode: u32,
+    owner_matches: bool,
+    exposed: bool,
+) -> String {
+    let directory = path.map_or_else(
+        || "Fabric state directory".to_owned(),
+        |path| format!("Fabric state directory {path}"),
+    );
+    if owner_matches && exposed {
+        format!("{directory} has mode {mode:04o}; other users can read or access it")
+    } else if exposed {
+        format!(
+            "{directory} is not owned by the current user and has mode {mode:04o}; other users can read or access it"
+        )
+    } else if owner_matches {
+        format!("{directory} failed its private permission check (mode {mode:04o})")
+    } else {
+        format!(
+            "{directory} is not owned by the current user; ownership must be restored before use"
+        )
+    }
+}
+
 impl FacadeError {
     /// Project a state directory permission refusal for the selected edge.
     pub fn state_directory_permissions(
@@ -725,18 +750,37 @@ impl FacadeError {
         mode: u32,
         destination: provenant_records::diagnostic::Destination<'_>,
     ) -> provenant_records::diagnostic::Diagnostic {
+        Self::state_directory_security(path, mode, true, destination)
+    }
+
+    /// Project a state-directory owner and permission refusal for its edge.
+    pub fn state_directory_security(
+        path: &std::path::Path,
+        mode: u32,
+        owner_matches: bool,
+        destination: provenant_records::diagnostic::Destination<'_>,
+    ) -> provenant_records::diagnostic::Diagnostic {
         use provenant_records::diagnostic::{Diagnostic, safe_path, shell_path};
+        let exposed = mode & 0o077 != 0;
         let detail = safe_path(path, destination).map_or_else(
-            || format!("Fabric state directory has mode {mode:04o}; other users can access it"),
-            |path| {
-                format!(
-                    "Fabric state directory {path} has mode {mode:04o}; other users can access it"
-                )
-            },
+            || state_directory_security_detail(None, mode, owner_matches, exposed),
+            |path| state_directory_security_detail(Some(&path), mode, owner_matches, exposed),
         );
         let action = shell_path(path, destination).map_or_else(
-            || "restrict the state directory to its owner, then retry".into(),
-            |path| format!("run chmod 700 {path} and retry"),
+            || {
+                if owner_matches {
+                    "restrict the state directory to its owner, then retry".into()
+                } else {
+                    "restore state-directory ownership to the current user, restrict it to the owner, then retry".into()
+                }
+            },
+            |path| {
+                if owner_matches {
+                    format!("run chmod 700 {path} and retry")
+                } else {
+                    format!("run sudo chown \"$(id -u)\" {path} && chmod 700 {path} and retry")
+                }
+            },
         );
         Diagnostic::new("invalid_input")
             .category("invalid")

@@ -106,6 +106,7 @@ pub(super) struct TestContext<'a> {
     pub(super) fixture: &'a Fixture,
     pub(super) facts: RepoFacts,
     pub(super) binding: ProjectBinding,
+    pub(super) layout: ProjectLayout,
     pub(super) roots: provenant_core::Roots,
     pub(super) project_state: Directory,
     pub(super) workers: FreeWorkers,
@@ -134,6 +135,18 @@ impl<'a> TestContext<'a> {
         fs::create_dir(&state_path)?;
         fs::set_permissions(&state_path, fs::Permissions::from_mode(0o700))?;
         let project_state = Directory::open_anchor(&state_path)?;
+        let layout = if fixture.repo.private_git_dir() == fixture.repo.common_git_dir() {
+            ProjectLayout::from_repo(&fixture.repo, true)?
+        } else {
+            project_layout_for_binding(
+                &fixture.executor,
+                &binding,
+                &fixture.git,
+                &project_layout_git_environment(),
+                std::time::Duration::from_secs(5),
+                &CancelToken::new(),
+            )?
+        };
         // Baseline fixtures model a repository whose first foreign preview has
         // already been observed. The first-pass invariant removes this receipt.
         let identity = fixture.repo.common_identity();
@@ -154,6 +167,7 @@ impl<'a> TestContext<'a> {
             fixture,
             facts: RepoFacts::default(),
             binding,
+            layout,
             roots,
             project_state,
             workers: FreeWorkers,
@@ -168,6 +182,7 @@ impl<'a> TestContext<'a> {
         WorktreeContext {
             home: &self.fixture.home,
             repo: &self.fixture.repo,
+            layout: &self.layout,
             binding: &self.binding,
             project_state: &self.project_state,
             executor: &self.fixture.executor,

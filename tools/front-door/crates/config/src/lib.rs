@@ -171,6 +171,12 @@ pub enum ConfigError {
     InvalidRepositoryPolicy,
     #[error("project binding state is invalid")]
     InvalidProjectBinding,
+    #[error("project binding directory ownership or permissions are invalid")]
+    ProjectBindingDirectoryUnsafe {
+        path: PathBuf,
+        mode: u32,
+        owner_matches: bool,
+    },
     #[error("project binding lock budget is invalid")]
     ProjectBindingBudget,
     #[error(transparent)]

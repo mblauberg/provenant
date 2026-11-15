@@ -78,6 +78,10 @@ pub(super) fn prepare_command(
         .map(|entry| entry.adapter)
         .ok_or_else(|| unavailable(format!("{provider} is not registered")))?;
     let roots = registry.roots.ok_or("routing context is unavailable")?;
+    let project = registry
+        .project_id
+        .ok_or("selected project identity is unavailable")?;
+    let project_binding = super::confinement::registered_project_binding(roots, project)?;
     let config = crate::config_reads::read_for(roots, "run").map_err(|error| error.to_string())?;
     let command = config.domains.fabric.commands.get(name).ok_or_else(|| {
         unavailable(format!(
@@ -118,6 +122,7 @@ pub(super) fn prepare_command(
         &git,
         &git_executor,
         cancel,
+        project_binding.as_ref(),
     )?;
     let invocation = command_executable(program, &cwd, &lane_path, locate_override)?;
     let executable = canonical(&invocation).map_err(|_| executable_unavailable(program))?;
@@ -128,9 +133,6 @@ pub(super) fn prepare_command(
         .collect::<Result<Vec<_>, _>>()?;
     let home = canonical(registry.home.ok_or("home directory is unavailable")?)?;
     let assets = registry.assets.ok_or("product assets are unavailable")?;
-    let project = registry
-        .project_id
-        .ok_or("selected project identity is unavailable")?;
     let launch_policy = run::launch_policy(roots.state.as_path(), &project.to_string(), task);
     let (scratch_directory, scratch_name) =
         super::preparation::fresh_scratch_directory(&paths.temporary, provider, None)?;

@@ -110,6 +110,77 @@ fn budget() -> Result<UtilityBudget> {
     UtilityBudget::bounded(Duration::from_secs(5))
         .map_err(error("set writer Git utility budget", None))
 }
+
+fn project_location(
+    repo: &provenant_confinement::repo::VerifiedRepo,
+) -> Result<provenant_config::ProjectLocation> {
+    if repo.private_git_dir() == repo.common_git_dir() {
+        Ok(
+            provenant_config::ProjectLocation::from_verified_primary_checkout(
+                repo.common_git_dir(),
+                repo.root_path(),
+            )
+            .map_err(error(
+                "resolve writer project location",
+                Some(repo.common_git_dir()),
+            ))?,
+        )
+    } else {
+        Ok(
+            provenant_config::ProjectLocation::new(repo.common_git_dir()).map_err(error(
+                "resolve writer project location",
+                Some(repo.common_git_dir()),
+            ))?,
+        )
+    }
+}
+
+fn registered_project_layout(
+    state: &Path,
+    repo: &provenant_confinement::repo::VerifiedRepo,
+    executor: &dyn provenant_os::exec::Executor,
+    utility: &UtilityRuntime,
+    cancel: &CancelToken,
+) -> Result<(provenant_config::ProjectBinding, worktrees::ProjectLayout)> {
+    if repo.private_git_dir() != repo.common_git_dir() {
+        // A linked checkout is a Git executor only after Git's inventory
+        // proves that it belongs to this common repository.
+        provenant_confinement::verify_worktree(repo, repo.root_path())
+            .map_err(worktrees::WorktreeError::from)?;
+    }
+    let location = project_location(repo)?;
+    let binding = provenant_config::lookup_project_at_state(state, &location)
+        .map_err(error(
+            "read writer project binding",
+            Some(repo.common_git_dir()),
+        ))?
+        .ok_or(RunError::Validation(
+            "writer custody project is not registered",
+        ))?;
+    let layout = worktrees::project_layout_for_binding(
+        executor,
+        &binding,
+        utility.git_program_path(),
+        &worktrees::project_layout_git_environment(),
+        Duration::from_secs(5),
+        cancel,
+    )?;
+    Ok((binding, layout))
+}
+
+fn same_project_layout(
+    expected: &worktrees::ProjectLayout,
+    actual: &worktrees::ProjectLayout,
+) -> Result<bool> {
+    if expected.root() != actual.root() || expected.project() != actual.project() {
+        return Ok(false);
+    }
+    Ok(expected
+        .directory()
+        .metadata()?
+        .same_identity(&actual.directory().metadata()?))
+}
+
 /// Resolve relative paths from the selected repository's primary root. Git's
 /// linked-worktree registration proves membership and excludes the primary.
 pub fn resolve_writer(state: &Path, cwd: &Path, path: &Path) -> Result<WriterRequest> {
@@ -132,10 +203,39 @@ pub fn resolve_reader_source(state: &Path, cwd: &Path, path: &Path) -> Result<Pa
     let repo = selected
         .repository
         .ok_or(RunError::Validation("source needs a Git project"))?;
-    let project = repo
-        .common_git_dir()
-        .parent()
-        .ok_or_else(|| RunError::unsafe_path(repo.common_git_dir(), PathCheck::Containment))?;
+    if repo.private_git_dir() != repo.common_git_dir() {
+        provenant_confinement::verify_worktree(&repo, repo.root_path())
+            .map_err(worktrees::WorktreeError::from)?;
+    }
+    let location = project_location(&repo)?;
+    let layout =
+        if let Some(binding) = provenant_config::lookup_project_at_state(state, &location).map_err(
+            error("read source project binding", Some(repo.common_git_dir())),
+        )? {
+            worktrees::project_layout_for_binding(
+                &executor,
+                &binding,
+                utility.git_program_path(),
+                &worktrees::project_layout_git_environment(),
+                Duration::from_secs(5),
+                &CancelToken::new(),
+            )?
+        } else {
+            let read_repo = utility
+                .open_read_repo(&executor, repo.root_path(), budget()?, &CancelToken::new())
+                .map_err(utility_error(
+                    "open read-only source repository",
+                    Some(repo.root_path()),
+                ))?;
+            worktrees::project_layout_for_checkout(
+                &executor,
+                &read_repo,
+                &utility,
+                budget()?,
+                &CancelToken::new(),
+            )?
+        };
+    let project = layout.project().unwrap_or_else(|| repo.root_path());
     let selected = project.join(path);
     let path = canonicalize(&selected).map_err(|error| {
         if error.is_not_found() {
@@ -183,11 +283,10 @@ fn resolve_writer_with(
     let repo = selected
         .repository
         .ok_or(RunError::Validation("writer needs a Git project"))?;
-    let project = repo
-        .common_git_dir()
-        .parent()
-        .ok_or_else(|| RunError::unsafe_path(repo.common_git_dir(), PathCheck::Containment))?;
-    let selected = project.join(path);
+    let (binding, layout) =
+        registered_project_layout(state, &repo, &executor, &utility, &CancelToken::new())?;
+    let managed_root = layout.root();
+    let selected = managed_root.join(path);
     let path = canonicalize(&selected).map_err(|error| {
         if error.is_not_found() {
             RunError::WorktreeMissing(selected)
@@ -195,28 +294,16 @@ fn resolve_writer_with(
             error.into()
         }
     })?;
-    let location = provenant_config::ProjectLocation::new(repo.common_git_dir()).map_err(error(
-        "resolve writer project binding",
-        Some(repo.common_git_dir()),
-    ))?;
-    let binding = provenant_config::lookup_project_at_state(state, &location)
-        .map_err(error(
-            "read writer project binding",
-            Some(repo.common_git_dir()),
-        ))?
-        .ok_or(RunError::Validation(
-            "writer custody project is not registered",
-        ))?;
     let custody_project = binding.project_id();
     let extra = provenant_records::ExtraFields::default();
     if !verify {
-        if !path.starts_with(project) {
+        if !path.starts_with(managed_root) {
             return Err(RunError::unsafe_path(path, PathCheck::Containment));
         }
         return Ok(WriterRequest {
             extra,
             custody_project: Some(custody_project),
-            project: project.to_path_buf(),
+            project: repo.root_path().to_path_buf(),
             worktree: path,
         });
     }
@@ -225,7 +312,7 @@ fn resolve_writer_with(
     Ok(WriterRequest {
         extra,
         custody_project: Some(custody_project),
-        project: project.to_path_buf(),
+        project: repo.root_path().to_path_buf(),
         worktree: worktree.path().to_path_buf(),
     })
 }
@@ -233,12 +320,35 @@ fn resolve_writer_with(
 pub struct WriterLaunch {
     pub worktree: VerifiedWorktree,
     pub branch: GitRefName,
+    pub(crate) layout: worktrees::ProjectLayout,
+    pub(crate) executor_root: PathBuf,
+    pub(crate) executor_root_identity: provenant_os::fs::Metadata,
     pub(crate) base: GitOid,
     pub(crate) custody: Option<(Directory, WriterBinding)>,
     /// Repository observations and caps shared by this writer operation.
     pub(crate) facts: worktrees::RepoFacts,
 }
 impl WriterLaunch {
+    /// The verified checkout that owns project configuration, if one exists.
+    pub fn project_root(&self) -> Option<&Path> {
+        self.layout.project()
+    }
+
+    /// Root used for managed worktree paths. Bare repositories use their
+    /// common Git directory and deliberately have no project config owner.
+    pub fn managed_root(&self) -> &Path {
+        self.layout.root()
+    }
+
+    /// Safe checkout to exclude from automatic tool lookup. Bare-backed
+    /// writers use the verified selected linked checkout here.
+    pub fn lane_path_roots(&self) -> Vec<&Path> {
+        self.project_root()
+            .into_iter()
+            .chain(std::iter::once(self.executor_root.as_path()))
+            .collect()
+    }
+
     /// The verified branch head captured while preparing this writer.
     pub fn source_commit(&self) -> GitOid {
         self.base
@@ -868,26 +978,26 @@ fn prepare_writer_with_facts_and_clock(
         branch.clone(),
         &CancelToken::new(),
     )?;
-    // Run attribution may belong to a graph in another project. Custody must
-    // still share the selected repository's ordinary writer-lock namespace.
-    let location = provenant_config::ProjectLocation::new(repo.common_git_dir()).map_err(error(
-        "resolve writer project binding",
-        Some(repo.common_git_dir()),
-    ))?;
     let custody_project = writer_project_id(request)?;
-    let binding = provenant_config::lookup_project_at_state(state, &location)
-        .map_err(error(
-            "read writer project binding",
-            Some(repo.common_git_dir()),
-        ))?
-        .ok_or(RunError::Validation(
-            "writer custody project is not registered",
-        ))?;
+    let (binding, layout) = registered_project_layout(state, &repo, &executor, &utility, &cancel)?;
     if binding.project_id() != custody_project {
         return Err(RunError::Validation(
             "writer custody project does not match its repository",
         ));
     }
+    match (
+        repo.private_git_dir() == repo.common_git_dir(),
+        layout.project(),
+    ) {
+        (true, Some(primary)) if primary == repo.root_path() => {}
+        // The selected linked checkout remains the Git executor. Its verified
+        // inventory membership and the binding's common directory establish
+        // its relation to the separately owned project layout.
+        (false, _) => {}
+        _ => return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into()),
+    }
+    let executor_root = repo.root_path().to_path_buf();
+    let executor_root_identity = repo.root_identity();
     let state_dir = Directory::open_anchor(state)?;
     if custody_project != project {
         let references =
@@ -925,6 +1035,9 @@ fn prepare_writer_with_facts_and_clock(
     Ok(WriterLaunch {
         worktree,
         branch,
+        layout,
+        executor_root,
+        executor_root_identity,
         base,
         custody: Some((directory, binding)),
         facts: facts.clone(),
@@ -1249,13 +1362,7 @@ fn prepare_writer_git(
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
     let old_repo = writer.worktree.repo();
-    let project = old_repo
-        .common_git_dir()
-        .parent()
-        .ok_or(RunError::Validation(
-            "writer common Git directory has no project",
-        ))?
-        .to_path_buf();
+    let project = writer.executor_root.clone();
     let path = writer.worktree.path().to_path_buf();
     let common = old_repo.common_dir().try_clone()?;
     let lock_config = |mode| -> Result<provenant_os::fs::LockGuard> {
@@ -1276,6 +1383,19 @@ fn prepare_writer_git(
     let repo = utility
         .open_repo(&executor, &project, budget()?, cancel)
         .map_err(utility_error("reopen writer repository", Some(&project)))?;
+    if repo.root_path() != project
+        || !writer
+            .executor_root_identity
+            .same_identity(&repo.root_identity())
+        || !repo.common_identity().same_identity(&common_identity)
+    {
+        return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into());
+    }
+    let (_, layout) = registered_project_layout(state, &repo, &executor, &utility, cancel)?;
+    if !same_project_layout(&writer.layout, &layout)? {
+        return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into());
+    }
+    writer.layout = layout;
     let refreshed = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
     if !root_identity.same_identity(&refreshed.identity())
@@ -1327,6 +1447,19 @@ fn prepare_writer_git(
             "reopen writer repository after fetch",
             Some(&project),
         ))?;
+    if fresh_repo.root_path() != project
+        || !writer
+            .executor_root_identity
+            .same_identity(&fresh_repo.root_identity())
+        || !fresh_repo.common_identity().same_identity(&common_identity)
+    {
+        return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into());
+    }
+    let (_, layout) = registered_project_layout(state, &fresh_repo, &executor, &utility, cancel)?;
+    if !same_project_layout(&writer.layout, &layout)? {
+        return Err(worktrees::WorktreeError::ProjectLayoutUnresolved.into());
+    }
+    writer.layout = layout;
     let refreshed = provenant_confinement::verify_worktree(&fresh_repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
     if !root_identity.same_identity(&refreshed.identity())
@@ -1531,25 +1664,24 @@ fn verified_cargo_config(build: &Path, cargo_home: &Path) -> std::result::Result
             })
             .collect::<Vec<_>>()
     };
-    // The host config is data, with the same compiler-selection check as project config.
+    // The host config is data, with the same seed-eligibility check as project config.
     for path in present(cargo_home) {
-        cargo_config_cannot_select_compiler(&path)?;
+        cargo_config_ineligible_for_seed(&path)?;
     }
     // A checked-in `.cargo/config.toml` is ordinary (this repository has one).
-    // It is read as data and refused only if it can select the compiler.
+    // It is read as data and refused only for unrepresented build settings.
     for ancestor in build.ancestors() {
         for path in present(&ancestor.join(".cargo")) {
-            cargo_config_cannot_select_compiler(&path)?;
+            cargo_config_ineligible_for_seed(&path)?;
         }
     }
     Ok(())
 }
 
 // Read a Cargo config file as data, without executing it. A config is refused
-// when it is not a small regular UTF-8 TOML file or when it can change which
-// compiler runs: `build.rustc*`, an `include`, or `[env]` entries that reach
-// rustup, rustc or the search path.
-fn cargo_config_cannot_select_compiler(path: &Path) -> std::result::Result<(), &'static str> {
+// when it is not a small regular UTF-8 TOML file or can select a different
+// compiler/build target or unrecorded build flags.
+fn cargo_config_ineligible_for_seed(path: &Path) -> std::result::Result<(), &'static str> {
     use std::io::Read;
     if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()) {
         return Err(codes::CARGO_CONFIG_UNREADABLE);
@@ -1558,30 +1690,7 @@ fn cargo_config_cannot_select_compiler(path: &Path) -> std::result::Result<(), &
     std::fs::File::open(path)
         .and_then(|file| file.take(65537).read_to_end(&mut bytes))
         .map_err(|_| codes::CARGO_CONFIG_UNREADABLE)?;
-    if bytes.len() > 65536 {
-        return Err(codes::CARGO_CONFIG_TOO_LARGE);
-    }
-    let document: toml_edit::DocumentMut = String::from_utf8(bytes)
-        .map_err(|_| codes::CARGO_CONFIG_INVALID)?
-        .parse()
-        .map_err(|_| codes::CARGO_CONFIG_INVALID)?;
-    let compiler_key = |key: &str| {
-        key.starts_with("RUSTUP_")
-            || key.starts_with("RUSTC")
-            || key.starts_with("CARGO_BUILD_RUSTC")
-            || key == "PATH"
-    };
-    let build = document.get("build").and_then(|item| item.as_table_like());
-    let env = document.get("env").and_then(|item| item.as_table_like());
-    if document.contains_key("include")
-        || build.is_some_and(|table| table.iter().any(|(key, _)| key.starts_with("rustc")))
-        || env.is_some_and(|table| table.iter().any(|(key, _)| compiler_key(key)))
-        || (document.contains_key("build") && build.is_none())
-        || (document.contains_key("env") && env.is_none())
-    {
-        return Err(codes::CARGO_CONFIG_SELECTS_COMPILER);
-    }
-    Ok(())
+    crate::target_seed::cargo_config_seed_eligibility(&bytes)
 }
 
 // Refuse the host probe if a lane can alter the host compiler or an earlier
@@ -1852,6 +1961,226 @@ mod cargo_setup_tests {
             .status()?;
         assert!(status.success());
         Ok(true)
+    }
+
+    // Spec: docs/specs/run-git.md#project-layout-ownership
+    #[test]
+    fn source_and_writer_resolution_use_the_registered_primary_with_separate_git_dir()
+    -> FixtureResult<()> {
+        if clean_environment_child(stringify!(
+            source_and_writer_resolution_use_the_registered_primary_with_separate_git_dir
+        ))? {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let project = root.join("project");
+        let git_dir = root.join("unrelated/metadata/project.git");
+        let caller = root.join("caller");
+        let writer = project.join(".worktrees/writer");
+        let home = root.join("home");
+        let state = root.join("state");
+        for path in [
+            &project,
+            git_dir.parent().ok_or("metadata parent")?,
+            writer.parent().ok_or("writer parent")?,
+            &home,
+        ] {
+            std::fs::create_dir_all(path)?;
+        }
+        provenant_os::fixture::private_state_dir(&state)?;
+        let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+        let run_git = |cwd: &Path, args: &[&str]| -> FixtureResult<String> {
+            let output = provenant_os::fixture::git_command_at(&git)
+                .env_clear()
+                .envs(provenant_os::fixture::fixture_git_settings())
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(cwd)
+                .args(args)
+                .output()?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+            }
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        run_git(
+            &root,
+            &[
+                "init",
+                "-q",
+                "--separate-git-dir",
+                git_dir.to_str().ok_or("git dir path")?,
+                project.to_str().ok_or("project path")?,
+            ],
+        )?;
+        run_git(&project, &["config", "user.name", "Fixture"])?;
+        run_git(
+            &project,
+            &["config", "user.email", "fixture@example.invalid"],
+        )?;
+        run_git(&project, &["commit", "--allow-empty", "-qm", "initial"])?;
+        run_git(
+            &project,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "chore/caller",
+                caller.to_str().ok_or("caller path")?,
+            ],
+        )?;
+        run_git(
+            &project,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "chore/writer",
+                writer.to_str().ok_or("writer path")?,
+            ],
+        )?;
+
+        let mut roots = provenant_core::RootInputs::new(home, project.clone());
+        roots.state_dir = Some(state.clone());
+        let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let utility = UtilityRuntime::read_only(&git, &state)?;
+        let executor = SystemExecutor::new(1)?;
+        let discovered =
+            utility.project_location(&executor, &project, budget()?, &CancelToken::new())?;
+        let binding = provenant_config::bind_project(&roots, discovered.location)?;
+
+        let request = resolve_writer(&state, &caller, Path::new(".worktrees/writer"))?;
+        assert_eq!(request.project, caller);
+        assert_eq!(request.worktree, writer);
+        assert_eq!(
+            resolve_reader_source(&state, &caller, Path::new(".worktrees/writer"))?,
+            writer
+        );
+        assert_eq!(binding.common_dir(), git_dir);
+        let launch = prepare_writer(&request, &state, binding.project_id())?;
+        assert_eq!(launch.project_root(), Some(project.as_path()));
+        assert_eq!(launch.managed_root(), project);
+
+        let primary_bin = project.join("tools");
+        let linked_bin = caller.join("tools");
+        let safe_bin = root.join("safe-tools");
+        for path in [&primary_bin, &linked_bin, &safe_bin] {
+            std::fs::create_dir_all(path)?;
+        }
+        let path = std::env::join_paths([&primary_bin, &linked_bin, &safe_bin])?;
+        let excluded = launch
+            .lane_path_roots()
+            .into_iter()
+            .chain(std::iter::once(launch.worktree.path()))
+            .collect::<Vec<_>>();
+        let filtered = crate::FilteredLanePath::from_path_excluding_roots(&path, &excluded)?;
+        assert_eq!(
+            std::env::split_paths(filtered.path()).collect::<Vec<_>>(),
+            vec![safe_bin]
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-git.md#project-layout-ownership
+    #[test]
+    fn bare_backed_writer_uses_common_layout_and_verified_linked_executor() -> FixtureResult<()> {
+        if clean_environment_child(stringify!(
+            bare_backed_writer_uses_common_layout_and_verified_linked_executor
+        ))? {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let seed = root.join("seed");
+        let common = root.join("metadata/project.git");
+        let source = root.join("source");
+        let writer_path = common.join(".worktrees/lane");
+        let home = root.join("home");
+        let state = root.join("state");
+        std::fs::create_dir_all(&seed)?;
+        std::fs::create_dir_all(common.parent().ok_or("common parent")?)?;
+        std::fs::create_dir_all(writer_path.parent().ok_or("writer parent")?)?;
+        std::fs::create_dir(&home)?;
+        provenant_os::fixture::private_state_dir(&state)?;
+        let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+        let run_git = |cwd: &Path, args: &[&str]| -> FixtureResult<String> {
+            let output = provenant_os::fixture::git_command_at(&git)
+                .env_clear()
+                .envs(provenant_os::fixture::fixture_git_settings())
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(cwd)
+                .args(args)
+                .output()?;
+            if output.status.success() {
+                Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+            } else {
+                Err(String::from_utf8_lossy(&output.stderr).into_owned().into())
+            }
+        };
+        run_git(&root, &["init", "-q", seed.to_str().ok_or("seed path")?])?;
+        run_git(&seed, &["config", "user.name", "Fixture"])?;
+        run_git(&seed, &["config", "user.email", "fixture@example.invalid"])?;
+        std::fs::write(seed.join("README.md"), "bare layout\n")?;
+        run_git(&seed, &["add", "README.md"])?;
+        run_git(&seed, &["commit", "-qm", "initial"])?;
+        run_git(
+            &root,
+            &[
+                "clone",
+                "--bare",
+                seed.to_str().ok_or("seed path")?,
+                common.to_str().ok_or("common path")?,
+            ],
+        )?;
+        run_git(
+            &root,
+            &[
+                "--git-dir",
+                common.to_str().ok_or("common path")?,
+                "worktree",
+                "add",
+                "main",
+                source.to_str().ok_or("source path")?,
+            ],
+        )?;
+        run_git(
+            &root,
+            &[
+                "--git-dir",
+                common.to_str().ok_or("common path")?,
+                "worktree",
+                "add",
+                "-b",
+                "lane",
+                writer_path.to_str().ok_or("writer path")?,
+            ],
+        )?;
+
+        let mut roots = provenant_core::RootInputs::new(home, source.clone());
+        roots.state_dir = Some(state.clone());
+        let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let binding = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(common.clone())?,
+        )?;
+        let request = resolve_writer(&state, &source, Path::new(".worktrees/lane"))?;
+        assert_eq!(request.project, source);
+        assert_eq!(request.worktree, writer_path);
+        assert_eq!(
+            resolve_reader_source(&state, &source, Path::new("README.md"))?,
+            source.join("README.md")
+        );
+        let launch = prepare_writer(&request, &state, binding.project_id())?;
+        assert_eq!(launch.project_root(), None);
+        assert_eq!(launch.managed_root(), common);
+        assert_eq!(launch.lane_path_roots(), vec![source.as_path()]);
+        Ok(())
     }
 
     #[test]
@@ -2197,7 +2526,7 @@ mod cargo_setup_tests {
         assert!(verified_cargo_config(&worktree, &cache.join(".cargo")).is_ok());
         std::fs::create_dir_all(worktree.join(".cargo")).unwrap();
         let config = worktree.join(".cargo/config.toml");
-        // Selecting a compiler, directly or through include or [env], is refused.
+        // Selecting a compiler/target, directly or through include or [env], is refused.
         for (text, expected) in [
             (
                 "[build]\nrustc = 'evil'\n",
@@ -2210,6 +2539,22 @@ mod cargo_setup_tests {
             (
                 "build.rustc-workspace-wrapper = 'evil'\n",
                 codes::CARGO_CONFIG_SELECTS_COMPILER,
+            ),
+            (
+                "[build]\ntarget = 'x86_64-unknown-linux-gnu'\n",
+                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
+            ),
+            (
+                "[target.x86_64-unknown-linux-gnu]\nlinker = 'secret-linker'\n",
+                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
+            ),
+            (
+                "[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-s']\n",
+                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
+            ),
+            (
+                "[env]\nCARGO_BUILD_TARGET = 'x86_64-unknown-linux-gnu'\n",
+                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
             ),
             (
                 "include = 'elsewhere.toml'\n",
@@ -2242,11 +2587,10 @@ mod cargo_setup_tests {
         );
     }
 
-    // Regression for #2484: this repository checks in `.cargo/config.toml`, which
-    // refused every lane's target seed with `toolchain_unverified`. A config that
-    // cannot select a compiler must verify.
+    // Regression for #2484: harmless checked-in Cargo configuration must not
+    // disable seed use, while unrecorded target flags must.
     #[test]
-    fn checked_in_cargo_config_that_cannot_select_a_compiler_is_accepted() {
+    fn checked_in_cargo_config_without_unrecorded_build_settings_is_accepted() {
         let tmp = tempfile::tempdir().unwrap();
         let worktree = tmp.path().join("worktree");
         let cache = tmp.path().join("cache");
@@ -2268,11 +2612,20 @@ mod cargo_setup_tests {
         let config = nested.join(".cargo/config.toml");
         for text in [
             "# comments only\n",
-            "[alias]\nxtask = 'run -p xtask'\n[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-s']\n[env]\nFOO = 'bar'\n",
+            "[alias]\nxtask = 'run -p xtask'\n[env]\nFOO = 'bar'\n",
         ] {
             std::fs::write(&config, text).unwrap();
             assert_eq!(verified_cargo_config(&build, &cache.join(".cargo")), Ok(()));
         }
+        std::fs::write(
+            &config,
+            "[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-s']\n",
+        )
+        .unwrap();
+        assert_eq!(
+            verified_cargo_config(&build, &cache.join(".cargo")),
+            Err(codes::CARGO_CONFIG_CHANGES_BUILD_TARGET)
+        );
         // An intermediate config belongs to this Cargo invocation's cone too.
         let ancestor_config = nested.parent().unwrap().join(".cargo/config.toml");
         std::fs::create_dir_all(ancestor_config.parent().unwrap()).unwrap();

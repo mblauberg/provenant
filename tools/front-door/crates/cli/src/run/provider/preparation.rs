@@ -2514,16 +2514,16 @@ pub(super) fn prepare_candidates(
     let fallback_cancel = provenant_core::CancelToken::new();
     let cancel = registry.cancel.unwrap_or(&fallback_cancel);
     let git_executor = provenant_os::exec::SystemExecutor::new(1).map_err(|e| e.to_string())?;
+    let project_binding = super::confinement::registered_project_binding(roots, project_id)?;
     let requester_cwd = registry.cwd.unwrap_or(&source);
     let lane_path = match writer.as_ref() {
         Some(writer) => {
-            let project = verified_project_root(
-                writer.worktree.repo().common_git_dir(),
-                &git,
-                &git_executor,
-                cancel,
-            )?;
-            run::FilteredLanePath::for_requester(registry.host, &project, writer.worktree.path())
+            let excluded_roots = writer
+                .lane_path_roots()
+                .into_iter()
+                .chain(std::iter::once(writer.worktree.path()))
+                .collect::<Vec<_>>();
+            run::FilteredLanePath::for_requester_excluding_roots(registry.host, &excluded_roots)
                 .map_err(|error| error.to_string())?
         }
         None => crate::run::filtered_requester_lane_path(
@@ -2533,6 +2533,7 @@ pub(super) fn prepare_candidates(
             &git,
             &git_executor,
             cancel,
+            project_binding.as_ref(),
         )?,
     };
     let locate = |name: &str| match locate_override {
@@ -2568,8 +2569,10 @@ pub(super) fn prepare_candidates(
         .base
         .as_deref()
         .map(|base| match task.head.as_deref() {
-            Some(head) => run::GitContext::capture_at(&git, &source, base, head),
-            None => run::GitContext::capture(&git, &source, base),
+            Some(head) => {
+                run::GitContext::capture_at(&git, &source, roots.state.as_path(), base, head)
+            }
+            None => run::GitContext::capture(&git, &source, roots.state.as_path(), base),
         })
         .transpose()?;
     let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
