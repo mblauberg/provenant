@@ -273,7 +273,6 @@ fn seed_queue_lock(directory: &Directory) -> Result<LockGuard, String> {
             &provenant_core::CancelToken::new(),
             &clock,
         )
-        .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
@@ -294,6 +293,7 @@ fn write_seed_queue(directory: &Directory, queue: &SeedQueue) -> Result<(), Stri
             &bytes,
             PublishMode::Replace,
         )
+        .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
