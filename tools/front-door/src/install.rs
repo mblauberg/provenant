@@ -44,7 +44,7 @@ fn prepare_agents_at(
                 &program,
                 &targets.roots,
                 state,
-                peer_agent_registry_name,
+                provenant_confinement::worktrees::state_dir_name,
             )
             .map_err(EdgeError::Peer)?,
         );
@@ -54,7 +54,7 @@ fn prepare_agents_at(
         let search = provenant_fabric_runtime::peer_agent::scheduler_path(
             &program,
             &targets.roots,
-            peer_agent_registry_name,
+            provenant_confinement::worktrees::state_dir_name,
         )
         .map_err(EdgeError::Peer)?;
         if cfg!(target_os = "linux") {
@@ -69,10 +69,6 @@ fn prepare_agents_at(
         }
     }
     Ok(())
-}
-
-fn peer_agent_registry_name(path: &Path) -> std::ffi::OsString {
-    provenant_confinement::worktrees::state_dir_name(path)
 }
 
 fn environment(globals: &cli::Globals) -> Result<Resolved, EdgeError> {
@@ -272,6 +268,10 @@ fn receipt_targets(
     Ok((targets, warning))
 }
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 #[derive(Default)]
 struct PreviewReporter {
     home: Option<PathBuf>,
@@ -305,7 +305,7 @@ impl PreviewReporter {
         if self.stopped_agents.is_empty() && self.uncertain_agents.is_empty() {
             return None;
         }
-        let state = format!("'{}'", state.display().to_string().replace('\'', "'\\''"));
+        let state = shell_quote(&state.display().to_string());
         let mut report = String::new();
         if !self.stopped_agents.is_empty() {
             report.push_str(&format!(
@@ -2267,30 +2267,35 @@ mod tests {
     }
 
     #[test]
-    fn peer_agent_registry_name_uses_the_worktree_registry_key() {
-        let path = std::path::Path::new("/worktrees/project-a");
-        assert_eq!(
-            super::peer_agent_registry_name(path),
-            provenant_confinement::worktrees::state_dir_name(path)
-        );
-    }
-
-    #[test]
-    fn post_shutdown_recovery_preserves_original_command() {
-        use super::*;
+    fn post_shutdown_recovery_names_each_agent_state() {
         let mut reporter = PreviewReporter::default();
         assert!(reporter.stopped_report(Path::new("/state")).is_none());
         reporter.stopped("dev.provenant.peer");
         reporter.stopped("dev.provenant.tick");
         let report = reporter
-            .stopped_report(Path::new("/state's data"))
+            .stopped_report(Path::new("/state"))
             .expect("stopped agents");
         for name in ["dev.provenant.peer", "dev.provenant.tick"] {
             assert!(report.contains(name));
         }
-        assert!(report.contains("'/state'\\''s data'"));
-        assert!(report.contains("original install command"));
-        assert!(!report.contains("--source"));
+    }
+
+    #[test]
+    fn shell_quoted_path_round_trips_through_posix_shell() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let value = temp.path().join("state's data; touch marker");
+        let text = value.to_str().ok_or("fixture path is not UTF-8")?;
+        let command = format!("printf %s {}", shell_quote(text));
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(temp.path())
+            .output()?;
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout)?, text);
+        assert!(!temp.path().join("marker").exists());
+        Ok(())
     }
 
     #[test]

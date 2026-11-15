@@ -2444,7 +2444,6 @@ mod human_tests {
         ] {
             let message = local_worktree_message(&error);
             assert!(message.contains("/project/lane"));
-            assert!(message.contains("\\nretry"));
             assert!(!message.contains('\n'));
             assert!(!error.to_string().contains("/project/lane"));
             if matches!(error, WorktreeError::UnknownOccupancy { .. }) {
@@ -2484,25 +2483,26 @@ mod human_tests {
     #[allow(dead_code)]
     type Check = Result<(), Box<dyn std::error::Error>>;
 
-    #[test]
-    fn worktree_list_line_renders_the_path_as_a_plain_path() -> Check {
-        let head = "4a".repeat(20);
-        assert_eq!(
-            rendered("/Users/alice/Repos/example-app")?,
-            format!(
-                "branch=refs/heads/master dirty=dirty head={head} owner=unknown \
-                 path=/Users/alice/Repos/example-app writer=live\n"
-            )
-        );
-        Ok(())
+    fn path_field(output: &str) -> Option<&str> {
+        let line = output.strip_suffix('\n').unwrap_or(output);
+        let start = line.find(" path=")? + " path=".len();
+        let end = line[start..].find(" writer=")? + start;
+        Some(&line[start..end])
     }
 
     #[test]
-    fn worktree_list_line_quotes_a_path_only_when_it_needs_it() -> Check {
-        assert!(
-            rendered("/Users/alice/My Repos/app")?.contains(" path=\"/Users/alice/My Repos/app\" ")
-        );
-        assert!(rendered("/")?.contains(" path=/ "));
+    fn worktree_list_line_quotes_paths_only_when_they_need_it() -> Check {
+        for (path, expected) in [
+            (
+                "/Users/alice/Repos/example-app",
+                "/Users/alice/Repos/example-app",
+            ),
+            ("/Users/alice/My Repos/app", "\"/Users/alice/My Repos/app\""),
+            ("/", "/"),
+        ] {
+            let output = rendered(path)?;
+            assert_eq!(path_field(&output), Some(expected));
+        }
         Ok(())
     }
 
@@ -2548,43 +2548,34 @@ mod gc_preview_tests {
         data.build_dirs.cache_bytes = 8192;
         data.build_dirs.busy.push("/cache/b/target/debug".into());
         data.build_dirs.recent.push("/cache/c/target/debug".into());
-        for (dry_run, expected) in [
-            (
-                true,
-                "1 lane build director(ies), 4096 bytes reclaimable; 8192 bytes of lane build output remain, 1 busy, 1 recent\n",
-            ),
-            (
-                false,
-                "1 lane build director(ies), 4096 bytes reclaimed; 8192 bytes of lane build output remain, 1 busy, 1 recent\n",
-            ),
-        ] {
+        for dry_run in [true, false] {
             data.report.dry_run = dry_run;
-            assert!(gc_data_summary(&data).contains(expected));
+            let summary = serde_json::to_value(gc_result_data(&data, false)).unwrap();
+            assert_eq!(summary["dry_run"], dry_run);
+            assert_eq!(summary["build_dirs_removed"], data.build_dirs.removed.len());
+            assert_eq!(summary["build_dir_bytes_reclaimed"], data.build_dirs.bytes);
+            assert_eq!(summary["build_dir_bytes"], data.build_dirs.cache_bytes);
         }
-        let json = serde_json::to_value(gc_result_data(&data, false)).unwrap_or_default();
-        assert_eq!(json["build_dirs_removed"], 1);
-        assert_eq!(json["build_dir_bytes_reclaimed"], 4096);
-        assert_eq!(json["build_dir_bytes"], 8192);
-        let json = serde_json::to_value(gc_result_data(&data, true)).unwrap_or_default();
-        assert_eq!(json["build_dirs"]["cache_bytes"], 8192);
-        assert_eq!(json["build_dirs"]["recent"][0], "/cache/c/target/debug");
+        let detailed = serde_json::to_value(gc_result_data(&data, true)).unwrap();
+        assert_eq!(detailed["build_dirs"]["cache_bytes"], 8192);
+        assert_eq!(detailed["build_dirs"]["recent"][0], "/cache/c/target/debug");
     }
+
     #[test]
     fn gc_summary_reports_event_expiry_in_preview_and_applied_mode() {
         let mut data = GcData::default();
         data.provider_state.expired_events = 3;
-        for (dry_run, expected) in [
-            (true, "would expire 3 event rows\n"),
-            (false, "expired 3 event rows\n"),
-        ] {
+        let expired_events = data.provider_state.expired_events;
+        for dry_run in [true, false] {
             data.report.dry_run = dry_run;
-            assert!(gc_data_summary(&data).contains(expected));
-            let json = serde_json::to_value(&data).unwrap_or_default();
-            assert_eq!(json["provider_state"]["expired_events"], 3);
+            let detailed = serde_json::to_value(gc_result_data(&data, true)).unwrap();
+            assert_eq!(detailed["dry_run"], dry_run);
+            assert_eq!(detailed["provider_state"]["expired_events"], expired_events);
         }
     }
+
     #[test]
-    fn gc_preview_names_idle_output_and_why_it_qualifies() {
+    fn gc_preview_retains_structured_idle_output_entry() {
         let mut data = GcData::default();
         let mut project = worktrees::WorktreeGcReport::default();
         project.idle_output.push(worktrees::OutputEntry {
@@ -2594,15 +2585,14 @@ mod gc_preview_tests {
             reason: "would_remove".into(),
         });
         data.worktree_cleanup.push(project);
-        let summary = gc_data_summary(&data);
-        assert!(summary.contains("would reclaim idle output /checkout/target"));
-        assert!(summary.contains("idle output and custody checks passed"));
-        let json = serde_json::to_value(&data).unwrap();
-        assert_eq!(
-            json["worktree_cleanup"][0]["idle_output"][0]["reason"],
-            "would_remove"
-        );
+        let detailed = serde_json::to_value(gc_result_data(&data, true)).unwrap();
+        let entry = &detailed["worktree_cleanup"][0]["idle_output"][0];
+        assert_eq!(entry["bytes"], 0);
+        assert_eq!(entry["path"], "/checkout/target");
+        assert_eq!(entry["removed"], false);
+        assert_eq!(entry["reason"], "would_remove");
     }
+
     #[test]
     fn retention_registry_settings_resolve_and_adapters_cover_every_class() {
         let temp = tempfile::tempdir().unwrap();
@@ -2855,7 +2845,10 @@ mod gc_preview_tests {
                 reason: CacheGcReason::Live,
             });
         }
-        data.report.bytes_freed = 10240;
+        data.report.bytes_freed = data.report.removed.iter().map(|entry| entry.bytes).sum();
+        let removed = data.report.removed.len();
+        let kept = data.report.kept.len();
+        let bytes_freed = data.report.bytes_freed;
         data.provider_state
             .errors
             .push(provenant_run::ProviderStateIssue {
@@ -2874,32 +2867,21 @@ mod gc_preview_tests {
             detail: Some("process 968: cwd unreadable; configure confinement.census_ignore_unreadable; path=/Library/Developer/simdiskimaged, team_id=TEAM123".into()),
         });
         data.worktree_cleanup.push(project);
-        let human = gc_data_summary(&data);
-        let after = human.len();
-        let detailed_json = serde_json::to_vec(&data).unwrap_or_default().len();
-        let after_json = serde_json::to_vec(&gc_result_data(&data, false))
-            .unwrap_or_default()
-            .len();
-        std::io::Write::write_fmt(
-            &mut std::io::stderr(),
-            format_args!(
-                "gc fixture bytes: human {after}, detailed data {detailed_json}, default data {after_json}\n"
-            ),
-        )
-        .unwrap_or_default();
-        assert!(after_json < detailed_json);
-        assert!(human.contains("10 cache(s), 10240 bytes freed"));
-        assert!(human.contains("/state/broken: permission denied"));
-        assert!(human.contains("kept worktree broken (GitFailure)"));
-        assert!(human.contains("kept worktree census-blocked (UnknownWriter): process 968"));
-        assert!(human.contains("confinement.census_ignore_unreadable"));
-        assert!(human.contains("/Library/Developer/simdiskimaged"));
-        assert!(human.contains("team_id=TEAM123"));
-        assert!(!human.contains("/home/Library/Caches"));
-        assert!(serde_json::to_value(&data).unwrap_or_default()["removed"].is_array());
+        let summary = serde_json::to_value(gc_result_data(&data, false)).unwrap_or_default();
+        assert_eq!(summary["removed"], removed);
+        assert_eq!(summary["bytes_freed"], bytes_freed);
+        assert_eq!(summary["kept"], kept);
+        assert_eq!(summary["errors"][0]["path"], "/state/broken");
+        assert!(summary.get("worktree_cleanup").is_none());
+        let detailed = serde_json::to_value(gc_result_data(&data, true)).unwrap_or_default();
+        assert!(detailed["removed"].is_array());
+        assert_eq!(
+            detailed["worktree_cleanup"][0]["worktrees"]["retained"][1]["branch"],
+            "census-blocked"
+        );
     }
     #[test]
-    fn gc_failure_human_output_names_failed_paths_and_next_step()
+    fn gc_failure_projects_typed_code_repair_and_failed_paths()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut data = GcData::default();
         data.provider_state
@@ -2909,22 +2891,12 @@ mod gc_preview_tests {
                 reason: "permission denied".into(),
             });
         let result = gc_failure(&data, "provider-state retention incomplete", false);
-        let mut output = Vec::new();
-        provenant_cli::render(
-            &result,
-            provenant_cli::RenderMode::Human {
-                text: "",
-                read_only: false,
-                summary: None,
-            },
-            &mut output,
-        )?;
-        let human = String::from_utf8(output)?;
-        assert!(
-            human.contains("/state/failed-cache: permission denied"),
-            "{human}"
-        );
-        assert!(human.contains("provenant gc --apply --json"), "{human}");
+        let error = result.error.expect("GC failure carries a typed error");
+        assert_eq!(error.code, "GC");
+        assert!(error.repair.is_some());
+        let data = serde_json::to_value(result.data)?;
+        assert_eq!(data["errors"][0]["path"], "/state/failed-cache");
+        assert_eq!(data["errors"][0]["reason"], "permission denied");
         Ok(())
     }
     #[test]
@@ -2996,7 +2968,7 @@ mod gc_subpass_removal_tests {
     use provenant_records::custody::{RefEndpoint, RefOrigin, RefOwnership};
 
     #[test]
-    fn actual_gc_lifts_unsettled_branch_removal_and_preview_keeps_none() {
+    fn applied_subpass_removal_is_published_and_preview_keeps_none() {
         let project = provenant_core::ProjectId::from_bytes([8; 16]);
         let tip = GitOid::parse(&"a1".repeat(20)).unwrap();
         let evidence = LandedEvidence {

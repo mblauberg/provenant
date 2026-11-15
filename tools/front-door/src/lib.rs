@@ -1854,13 +1854,27 @@ mod unpublished_result_tests {
     }
 
     #[test]
-    fn an_oversized_result_is_refused_and_writes_nothing() {
-        let result = provenant_records::CommandResult::new(
+    fn unpublished_result_obeys_its_size_bound_and_publishes_atomically() {
+        let limit = 1024;
+        let empty = provenant_records::CommandResult::new(
             "telemetry stats",
             provenant_records::Outcome::Ok,
-            "x".repeat(4096),
+            String::new(),
         );
-        for json in [true, false] {
+        let envelope_bytes = serde_json::to_vec(&empty).unwrap().len();
+        let payload_at_limit = limit - envelope_bytes - 1;
+        for (json, size, fits) in [
+            (true, payload_at_limit - 1, true),
+            (true, payload_at_limit, true),
+            (true, payload_at_limit + 1, false),
+            (false, 64, true),
+            (false, limit * 4, false),
+        ] {
+            let result = provenant_records::CommandResult::new(
+                "telemetry stats",
+                provenant_records::Outcome::Ok,
+                "x".repeat(size),
+            );
             let globals = provenant_cli::Globals {
                 json,
                 full: true,
@@ -1868,39 +1882,24 @@ mod unpublished_result_tests {
             };
             let (mut out, mut err) = (Vec::new(), Vec::new());
             let rendered = super::render_unpublished(
-                &result, &globals, "", false, None, 1024, &mut out, &mut err,
+                &result,
+                &globals,
+                "fixture\n",
+                false,
+                None,
+                limit,
+                &mut out,
+                &mut err,
             );
-            assert!(
-                matches!(rendered, Err(provenant_cli::RenderError::TooLarge)),
-                "json={json}"
-            );
-            assert!(out.is_empty() && err.is_empty(), "json={json}");
+            match (fits, rendered) {
+                (true, Ok(())) => assert!(!out.is_empty(), "json={json}, size={size}"),
+                (false, Err(provenant_cli::RenderError::TooLarge)) => {
+                    assert!(out.is_empty() && err.is_empty(), "json={json}, size={size}")
+                }
+                (expected_fit, result) => panic!(
+                    "unexpected result for json={json}, size={size}, fits={expected_fit}: {result:?}"
+                ),
+            }
         }
-    }
-
-    #[test]
-    fn a_result_within_the_bound_is_rendered() {
-        let result = provenant_records::CommandResult::new(
-            "telemetry stats",
-            provenant_records::Outcome::Ok,
-            "x".repeat(64),
-        );
-        let globals = provenant_cli::Globals {
-            json: true,
-            ..Default::default()
-        };
-        let mut out = Vec::new();
-        super::render_unpublished(
-            &result,
-            &globals,
-            "",
-            false,
-            None,
-            1024,
-            &mut out,
-            &mut Vec::new(),
-        )
-        .expect("within the bound");
-        assert!(!out.is_empty());
     }
 }

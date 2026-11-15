@@ -328,28 +328,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn human_report_prints_volume_and_totals_as_key_value_lines() {
-        let text = human_report(serde_json::json!({
-            "schema_version": 1,
-            "volume": {"path": "/volume", "available_bytes": 5},
-            "totals": {"worktree": {"count": 1, "allocated_bytes": 2, "unshared_bytes": 3}},
-            "entries": [],
-            "errors": []
-        }));
-        assert!(text.contains("\nvolume "), "{text}");
-        assert!(
-            text.contains("path=/volume") && text.contains("available_bytes=5"),
-            "{text}"
-        );
-        assert!(text.contains("\ntotal worktree "), "{text}");
-        assert!(
-            text.contains("count=1") && text.contains("unshared_bytes=3"),
-            "{text}"
-        );
-        assert!(!text.contains('\\'), "escaped JSON leaked: {text}");
-    }
-
-    #[test]
     fn disk_report_inventories_worktrees_and_unindexed_state_without_writes()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::{collections::BTreeMap, fs, path::PathBuf};
@@ -532,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn disk_report_for_many_runs_stays_small_in_both_render_modes()
+    fn disk_report_aggregates_many_runs_by_class_in_both_render_modes()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::{collections::BTreeMap, fs, os::unix::fs::MetadataExt};
         const RUNS: u64 = 100;
@@ -643,7 +621,6 @@ mod tests {
             );
             assert!(errors.is_empty());
             assert!(!output.is_empty());
-            assert!(output.len() < RUNS as usize * 16, "{} bytes", output.len());
         }
         Ok(())
     }

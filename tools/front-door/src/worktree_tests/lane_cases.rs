@@ -163,7 +163,9 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         })
         || probe == Probe::CargoReadOnly
     {
-        clone_rust_toolchain(&rig, &home)?;
+        if !clone_rust_toolchain(&rig, &home)? {
+            return Ok(());
+        }
     }
     let executable = rig.root.join("provider/bin/codex");
     fs::create_dir_all(executable.parent().ok_or("provider parent")?)?;

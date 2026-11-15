@@ -601,12 +601,11 @@ pub(super) fn merged_pruning_deletes_a_merged_branch_without_a_worktree() -> Res
     rig.assert_legacy_unchanged()
 }
 
-pub(super) fn dispatch_into_git_worktree_without_prior_state() -> Result {
-    git_worktree_dispatch_is_accepted(false)
-}
-
-pub(super) fn dispatch_into_git_worktree_beside_managed_tree() -> Result {
-    git_worktree_dispatch_is_accepted(true)
+pub(super) fn dispatch_into_git_worktrees_is_accepted() -> Result {
+    for register_sibling in [false, true] {
+        git_worktree_dispatch_is_accepted(register_sibling)?;
+    }
+    Ok(())
 }
 
 pub(super) fn cross_project_writer_names_both_projects() -> Result {

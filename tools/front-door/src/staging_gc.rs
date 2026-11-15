@@ -101,7 +101,7 @@ mod tests {
             ".ingest-vanished",
             ".ingest-survivor",
         ];
-        collect_entries(
+        let vanished = collect_entries(
             &root,
             names.into_iter().map(|name| Ok(name.into())),
             i128::MAX,
@@ -110,10 +110,11 @@ mod tests {
             false,
         )
         .unwrap();
+        assert!(vanished.is_empty());
         assert!(!temp.path().join(".ingest-survivor").exists());
 
         let names = [".ingest-invalid/name", ".provenant-staging.invalid/name"];
-        collect_entries(
+        let busy = collect_entries(
             &root,
             names.into_iter().map(|name| Ok(name.into())),
             i128::MAX,
@@ -122,6 +123,15 @@ mod tests {
             false,
         )
         .unwrap();
+        assert_eq!(
+            busy.into_iter().collect::<std::collections::BTreeSet<_>>(),
+            [
+                PathBuf::from(".ingest-invalid/name"),
+                PathBuf::from(".provenant-staging.invalid/name"),
+            ]
+            .into_iter()
+            .collect()
+        );
     }
 
     #[test]

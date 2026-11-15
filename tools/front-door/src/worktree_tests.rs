@@ -301,8 +301,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "remove_by_name_deletes_a_branch_fully_contained_in_integration",
             "remove_resolves_directory_names_and_remote_integration_refs",
             "escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root",
-            "dispatch_into_git_worktree_without_prior_state",
-            "dispatch_into_git_worktree_beside_managed_tree",
+            "dispatch_into_git_worktrees_is_accepted",
             "cross_project_writer_names_both_projects",
             "git_created_and_recreated_worktrees_are_dispatchable",
             "pr_land_merges_then_fetches_fast_forwards_and_prunes",
@@ -490,11 +489,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "pr_land_leaves_a_local_namesake_of_a_fork_branch_alone" => {
                     crate::pr_land_tests::pr_land_leaves_a_local_namesake_of_a_fork_branch_alone()
                 }
-                "dispatch_into_git_worktree_without_prior_state" => {
-                    dispatch_into_git_worktree_without_prior_state()
-                }
-                "dispatch_into_git_worktree_beside_managed_tree" => {
-                    dispatch_into_git_worktree_beside_managed_tree()
+                "dispatch_into_git_worktrees_is_accepted" => {
+                    dispatch_into_git_worktrees_is_accepted()
                 }
                 "cross_project_writer_names_both_projects" => {
                     cross_project_writer_names_both_projects()
@@ -502,7 +498,10 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "git_created_and_recreated_worktrees_are_dispatchable" => {
                     git_created_and_recreated_worktrees_are_dispatchable()
                 }
-                _ => escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root(),
+                "escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root" => {
+                    escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root()
+                }
+                _ => Err("unmapped worktree suite case".into()),
             };
             result.map_err(|error| std::io::Error::other(error.to_string()))
         },
@@ -557,6 +556,9 @@ pub(super) fn repository() -> Result<TestRig> {
 
 pub(super) fn writer_backend_available() -> Result<bool> {
     if !cfg!(target_os = "macos") {
+        provenant_test_support::skip_sandbox_dependent_test(
+            "writer fixture requires the macOS confinement backend",
+        )?;
         return Ok(false);
     }
     let executor = provenant_os::exec::SystemExecutor::new(1)?;
@@ -1357,7 +1359,7 @@ fn git_worktree_dispatch_is_accepted(register_sibling: bool) -> Result {
 
 // Git membership makes a recreated tree dispatchable without adoption.
 
-fn escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root() -> Result {
+pub(super) fn escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root() -> Result {
     let rig = repository()?;
     let output = rig.command(&["worktree", "create", "../escape", "--json"])?;
     assert_eq!(code(&output), 2);
@@ -1370,14 +1372,21 @@ fn escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root() -> 
 }
 
 #[cfg(target_os = "macos")]
-fn clone_rust_toolchain(rig: &TestRig, home: &Path) -> Result {
+fn clone_rust_toolchain(rig: &TestRig, home: &Path) -> Result<bool> {
     // Build-time rustup identity locates tools only. The child HOME and all
     // mutable state stay in the rig. APFS clones avoid a toolchain-size copy.
-    let rustup = option_env!("RUSTUP_HOME")
-        .map(PathBuf::from)
-        .or_else(|| option_env!("HOME").map(|home| PathBuf::from(home).join(".rustup")))
-        .ok_or("build-time Rust home")?;
-    let toolchain = option_env!("RUSTUP_TOOLCHAIN").ok_or("build-time Rust toolchain")?;
+    let Some(rustup) = option_env!("RUSTUP_HOME").map(PathBuf::from) else {
+        provenant_test_support::skip_sandbox_dependent_test(
+            "RUSTUP_HOME was not configured at build time",
+        )?;
+        return Ok(false);
+    };
+    let Some(toolchain) = option_env!("RUSTUP_TOOLCHAIN") else {
+        provenant_test_support::skip_sandbox_dependent_test(
+            "RUSTUP_TOOLCHAIN was not configured at build time",
+        )?;
+        return Ok(false);
+    };
     let source = rustup.join("toolchains").join(toolchain);
     let target = home.join(".rustup/toolchains/fixture");
     let output = rig.execute_os(
@@ -1410,7 +1419,7 @@ fn clone_rust_toolchain(rig: &TestRig, home: &Path) -> Result {
     }) {
         rig.copy_executable(&nextest, &home.join(".cargo/bin/cargo-nextest"))?;
     }
-    Ok(())
+    Ok(true)
 }
 
 /// The credential process boundary returns synthetic bytes and runs nothing.
@@ -1474,6 +1483,120 @@ fn age_gc_output(path: &Path) -> Result {
 
 #[cfg(test)]
 mod predicate_tests {
+    #[test]
+    fn suite_names_have_dispatch_arms() {
+        use std::collections::BTreeSet;
+
+        let source = include_str!("worktree_tests.rs");
+        let suite = source.split_once("fn suite(").expect("suite declaration").1;
+        let names = suite
+            .split_once("&[")
+            .expect("libtest name table")
+            .1
+            .split_once("],")
+            .expect("end of libtest name table")
+            .0
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                line.strip_prefix('"')?
+                    .split_once('"')
+                    .map(|(name, _)| name.to_owned())
+            })
+            .collect::<Vec<_>>();
+        let dispatch = suite
+            .split_once("let result = match name {")
+            .expect("dispatch match")
+            .1
+            .split_once("\n            };\n            result.map_err")
+            .expect("end of dispatch match")
+            .0
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let name = line.strip_prefix('"')?.split_once('"')?.0;
+                line.contains("=>").then(|| name.to_owned())
+            })
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(names.iter().cloned().collect::<BTreeSet<_>>(), dispatch);
+        assert_eq!(names.len(), dispatch.len());
+
+        let case_files = [
+            ("gc_cases", include_str!("worktree_tests/gc_cases.rs")),
+            ("graph_cases", include_str!("worktree_tests/graph_cases.rs")),
+            ("lane_cases", include_str!("worktree_tests/lane_cases.rs")),
+            (
+                "worktree_cases",
+                include_str!("worktree_tests/worktree_cases.rs"),
+            ),
+            (
+                "writer_cases",
+                include_str!("worktree_tests/writer_cases.rs"),
+            ),
+        ];
+        let declared_modules = source
+            .lines()
+            .filter_map(|line| line.strip_prefix("mod ")?.strip_suffix(';'))
+            .collect::<BTreeSet<_>>();
+        let scanned_modules = case_files
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(declared_modules, scanned_modules);
+
+        let mut defined = BTreeSet::new();
+        for source in
+            std::iter::once(source).chain(case_files.into_iter().map(|(_, source)| source))
+        {
+            let lines = source.lines().collect::<Vec<_>>();
+            for (index, line) in lines.iter().enumerate() {
+                if !line.starts_with("pub ")
+                    && !line.starts_with("pub(")
+                    && !line.starts_with("fn ")
+                {
+                    continue;
+                }
+                let mut signature = String::new();
+                for part in &lines[index..] {
+                    if !signature.is_empty() {
+                        signature.push(' ');
+                    }
+                    signature.push_str(part.trim());
+                    if part.contains('{') {
+                        break;
+                    }
+                }
+                let Some((visibility, declaration)) = signature.split_once("fn ") else {
+                    continue;
+                };
+                let visibility = visibility.trim();
+                if !visibility.is_empty()
+                    && visibility != "pub"
+                    && !(visibility.starts_with("pub(") && visibility.ends_with(')'))
+                {
+                    continue;
+                }
+                let Some((name, signature)) = declaration.split_once('(') else {
+                    continue;
+                };
+                let Some((arguments, signature)) = signature.split_once(')') else {
+                    continue;
+                };
+                if arguments.trim().is_empty()
+                    && signature.split('{').next().unwrap_or_default().trim() == "-> Result"
+                {
+                    defined.insert(name.to_owned());
+                }
+            }
+        }
+        assert!(
+            defined.is_subset(&dispatch),
+            "unregistered case: {:?}",
+            defined.difference(&dispatch)
+        );
+    }
+
     #[test]
     fn nextest_missing_tool_is_reported_when_required() -> super::Result {
         use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};

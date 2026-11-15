@@ -82,6 +82,20 @@ fn git_checkout(path: &Path) -> Result<PathBuf, RootError> {
     repository_path(path, RepositoryPath::Toplevel).map_err(discovery_error)
 }
 
+fn workspace_directory(
+    globals: &provenant_cli::Globals,
+    at: Option<&Path>,
+    cwd: impl FnOnce() -> io::Result<PathBuf>,
+) -> Result<PathBuf, RootError> {
+    match at {
+        Some(path) => Ok(path.to_owned()),
+        None => match globals.project.as_deref() {
+            Some(project) => fs::canonicalize(project).map_err(|_| RootError::Checkout),
+            None => fs::canonicalize(cwd()?).map_err(Into::into),
+        },
+    }
+}
+
 fn discovery_error(error: io::Error) -> RootError {
     match error
         .into_inner()
@@ -211,20 +225,20 @@ pub fn resolve(
             let home = home()?;
             (home.clone(), home)
         }
-        Workspace::Directory => {
-            let project = match &globals.project {
-                Some(project) => fs::canonicalize(project).map_err(|_| RootError::Checkout)?,
-                None => fs::canonicalize(std::env::current_dir()?)?,
-            };
-            (project, home()?)
-        }
+        Workspace::Directory => (
+            workspace_directory(globals, None, std::env::current_dir)?,
+            home()?,
+        ),
         Workspace::Project => (
             selected_project(globals.project.as_deref(), false)?,
             home()?,
         ),
         Workspace::Checkout => (selected_project(globals.project.as_deref(), true)?, home()?),
         Workspace::SessionSave => (session_project(globals.project.as_deref())?, home()?),
-        Workspace::At(path) => (path.to_owned(), home()?),
+        Workspace::At(path) => (
+            workspace_directory(globals, Some(path), std::env::current_dir)?,
+            home()?,
+        ),
     };
     let assets = match installed {
         Some(assets) => assets,
@@ -384,32 +398,28 @@ mod tests {
     }
 
     #[test]
-    fn resolve_directory_workspace_uses_the_current_directory() {
-        let globals = provenant_cli::Globals::default();
-        let resolved = crate::roots::resolve(
-            &globals,
-            crate::roots::Workspace::Directory,
-            crate::roots::Product::Optional,
-        )
-        .unwrap();
-        assert_eq!(
-            resolved.project,
-            std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap()
-        );
-    }
-
-    #[test]
-    fn resolve_at_workspace_uses_the_supplied_directory() {
+    fn directory_and_at_workspaces_resolve_the_selected_directory() {
         let temp = tempfile::tempdir().unwrap();
         let path = std::fs::canonicalize(temp.path()).unwrap();
-        let globals = provenant_cli::Globals::default();
-        let resolved = crate::roots::resolve(
-            &globals,
-            crate::roots::Workspace::At(&path),
-            crate::roots::Product::Optional,
-        )
+        let globals = provenant_cli::Globals {
+            project: Some(path.clone()),
+            ..Default::default()
+        };
+        let selected = super::workspace_directory(&globals, None, || {
+            Err(std::io::Error::other(
+                "project selection should not read cwd",
+            ))
+        })
         .unwrap();
-        assert_eq!(resolved.project, path);
+        assert_eq!(selected, path);
+        let globals = provenant_cli::Globals::default();
+        let selected = super::workspace_directory(&globals, Some(&path), || {
+            Err(std::io::Error::other("explicit path should not read cwd"))
+        })
+        .unwrap();
+        assert_eq!(selected, path);
+        let selected = super::workspace_directory(&globals, None, || Ok(path.clone())).unwrap();
+        assert_eq!(selected, path);
     }
 
     #[test]

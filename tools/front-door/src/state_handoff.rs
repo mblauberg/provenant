@@ -429,75 +429,58 @@ mod tests {
     }
 
     #[test]
-    fn failed_staged_preflight_leaves_agents_running_and_root_unpublished() -> Result {
-        let (_temp, home, state) = legacy_home()?;
-        let legacy = home.join(provenant_core::LEGACY_V1_STATE_SUFFIX);
-        let before = tree(&legacy)?;
-        let plan = plan(&state, &home)?.ok_or("hand-off planned")?;
-        let mut stopped = false;
-        assert!(
-            run(
-                &plan,
-                &install_roots(&home)?,
-                |_| Err(io::Error::other("release verification failed")),
-                || {
-                    stopped = true;
-                    Ok(())
-                },
-            )
-            .is_err()
-        );
-        assert!(!stopped);
-        assert!(!state.exists());
-        assert_eq!(tree(&legacy)?, before);
-        Ok(())
-    }
+    fn handoff_failures_preserve_legacy_state_and_never_publish_partial_root() -> Result {
+        #[derive(Clone, Copy)]
+        enum Failure {
+            InvalidOwnerFile(&'static str, &'static str),
+            InstallPreflight,
+            AgentStop,
+        }
 
-    #[test]
-    fn invalid_owner_configuration_never_stops_agents_or_publishes_state() -> Result {
-        for (file, invalid) in [
-            ("config.toml", "not valid TOML ["),
-            ("host-id", "invalid host identity"),
+        for failure in [
+            Failure::InvalidOwnerFile("config.toml", "not valid TOML ["),
+            Failure::InvalidOwnerFile("host-id", "invalid host identity"),
+            Failure::InstallPreflight,
+            Failure::AgentStop,
         ] {
             let (_temp, home, state) = legacy_home()?;
             let legacy = home.join(provenant_core::LEGACY_V1_STATE_SUFFIX);
-            std::fs::write(legacy.join(file), invalid)?;
+            if let Failure::InvalidOwnerFile(file, invalid) = &failure {
+                std::fs::write(legacy.join(file), invalid)?;
+            }
             let before = tree(&legacy)?;
             let plan = plan(&state, &home)?.ok_or("hand-off planned")?;
-            let mut stopped = false;
-            assert!(
-                run(
-                    &plan,
-                    &install_roots(&home)?,
-                    |_| Ok(()),
-                    || {
-                        stopped = true;
+            let preflight_called = std::cell::Cell::new(false);
+            let stop_called = std::cell::Cell::new(false);
+            let result = run(
+                &plan,
+                &install_roots(&home)?,
+                |_| {
+                    preflight_called.set(true);
+                    if matches!(failure, Failure::InstallPreflight) {
+                        Err(io::Error::other("fixture preflight failure"))
+                    } else {
                         Ok(())
-                    },
-                )
-                .is_err()
+                    }
+                },
+                || {
+                    stop_called.set(true);
+                    if matches!(failure, Failure::AgentStop) {
+                        Err(io::Error::other("fixture stop failure"))
+                    } else {
+                        Ok(())
+                    }
+                },
             );
-            assert!(!stopped);
+            assert!(result.is_err());
+            assert_eq!(
+                preflight_called.get(),
+                !matches!(failure, Failure::InvalidOwnerFile(..))
+            );
+            assert_eq!(stop_called.get(), matches!(failure, Failure::AgentStop));
             assert!(!state.exists());
             assert_eq!(tree(&legacy)?, before);
         }
-        Ok(())
-    }
-
-    #[test]
-    fn a_failed_agent_stop_publishes_nothing() -> Result {
-        let (_temp, home, state) = legacy_home()?;
-        let plan = plan(&state, &home)?.ok_or("hand-off planned")?;
-        assert!(
-            run(
-                &plan,
-                &install_roots(&home)?,
-                |_| Ok(()),
-                || Err(io::Error::other("still running")),
-            )
-            .is_err()
-        );
-        assert!(!state.exists());
         Ok(())
     }
 
