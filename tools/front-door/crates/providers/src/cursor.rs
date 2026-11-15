@@ -145,7 +145,7 @@ const MODEL_ON_WIRE: bool = false;
 
 fn prepare(
     input: &PrepareInput<'_>,
-    access: Access,
+    _access: Access,
     session: Session,
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
@@ -170,10 +170,9 @@ fn prepare(
         "--sandbox".into(),
         "disabled".into(),
     ];
-    match access {
-        Access::ReadOnly => argv.extend(["--mode".into(), "ask".into()]),
-        Access::WorktreeWrite => argv.push("--force".into()),
-    }
+    // Cursor's native approval mode can block a headless lane. The outer
+    // profile decides which paths the agent can change.
+    argv.push("--force".into());
     if session == Session::Resume {
         let continuation = input.continuation.ok_or_else(|| {
             input.boundary_error(
@@ -211,7 +210,8 @@ fn prepare(
         crate::launch::OmissionSource::Toolchain,
         &mut omitted_discovery,
     )?;
-    let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
+    let path = crate::launch::tool_search_path(input.home, true, input.policy)?;
+    let mut env = base_env(input, &plan.scratch.path, path);
     if input.sandboxed() {
         env.extend([
             ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),

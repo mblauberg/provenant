@@ -27,12 +27,13 @@ pub use github_policy::{
 mod harness;
 pub use harness::legacy_harness_selectors;
 mod hooks;
-pub use hooks::{CLAUDE_HOOKS, claude_lane_settings};
+pub use hooks::{hook_plugin_source, lane_hook_settings, registrations as hook_registrations};
 mod inspection;
 mod knobs;
 mod loader;
 mod managed;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
+pub const NATIVE_CAPABILITY_UNAVAILABLE: &str = "native_capability_unavailable";
 pub mod policy;
 mod presets;
 mod providers;

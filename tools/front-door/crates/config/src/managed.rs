@@ -7,8 +7,8 @@ use provenant_os::fs::{
     Directory, FileKind, FsError, LockMode, Metadata, Publication, PublishMode,
 };
 use provenant_records::{
-    AbsolutePath, CanonicalV1, FileDigest, Harness, InstallReceipt, Limits, OwnedEntry, OwnedValue,
-    PathWire, ResolvedHarnessTarget, VersionInfo,
+    AbsolutePath, CanonicalV1, CapabilitySupport, FileDigest, Harness, HookAction, HookProtocol,
+    InstallReceipt, Limits, OwnedEntry, OwnedValue, PathWire, ResolvedHarnessTarget, VersionInfo,
 };
 use serde::Serialize;
 use std::{
@@ -18,9 +18,7 @@ use std::{
 };
 use thiserror::Error;
 
-/// The release asset every harness instruction link and the shared
-/// instructions file point to.
-pub(crate) const INSTRUCTION_ASSET: &str = "instructions/AGENTS.md";
+pub(crate) use provenant_records::INSTRUCTION_ASSET;
 
 /// Shared path components for installed releases and their owned instructions.
 /// `release_root` and name-based instruction recognition use the same shape.
@@ -170,11 +168,12 @@ impl AccountHome {
 /// `None` harness denotes Git, outside the managed harness configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct HookRegistration {
-    pub harness: Option<Harness>,
+    pub harness: Harness,
+    pub action: HookAction,
+    pub protocol: HookProtocol,
     pub event: &'static str,
     pub matcher: Option<&'static str>,
-    pub timeout: Option<u64>,
-    pub command: &'static [&'static str],
+    pub timeout_seconds: Option<u64>,
 }
 #[derive(Debug, Clone)]
 pub struct Targets {
@@ -219,12 +218,11 @@ impl HarnessTarget {
     /// The target of `harness` whose configuration directory is `base`.
     /// `home` is the user's home, which decides where Claude keeps its config file.
     pub fn at(harness: Harness, home: &Path, base: &Path) -> Self {
-        let instruction = match harness {
-            Harness::Claude => Some("CLAUDE.md"),
-            Harness::Codex | Harness::Opencode => Some("AGENTS.md"),
-            Harness::Agy => Some("GEMINI.md"),
-            _ => None,
-        };
+        let instruction = harness.spec().install.and_then(|install| {
+            (install.instructions == CapabilitySupport::Supported)
+                .then_some(install.instruction)
+                .flatten()
+        });
         Self {
             harness,
             config_file: crate::harness::default_config(harness, home, base),
@@ -241,21 +239,19 @@ impl Targets {
     /// Defaults from captured HOME. Composition applies explicit config/flag
     /// paths once before snapshotting; no environment is read in this crate.
     pub fn new(roots: Roots, home: &Path, harnesses: &[Harness]) -> Self {
-        let targets = harnesses
+        let targets: Vec<_> = harnesses
             .iter()
-            .filter(|h| !h.spec().binary.is_empty())
+            .filter(|h| h.spec().install.is_some())
             .map(|h| {
-                let base = match h {
-                    Harness::Claude => ".claude",
-                    Harness::Codex => ".codex",
-                    Harness::Cursor => ".cursor",
-                    Harness::Agy => ".gemini",
-                    Harness::Opencode => ".config/opencode",
-                    _ => "",
-                };
+                let base = h.spec().install.map_or("", |install| install.home);
                 HarnessTarget::at(*h, home, &home.join(base))
             })
             .collect();
+        let hook_harnesses = targets
+            .iter()
+            .map(|target| target.harness)
+            .collect::<Vec<_>>();
+        let hook_specs = crate::hooks::registrations(&hook_harnesses);
         Self {
             roots,
             home: home.to_path_buf(),
@@ -268,7 +264,7 @@ impl Targets {
             peer_agent: None,
             tick_agent: None,
             tick_service: None,
-            hook_specs: Vec::new(),
+            hook_specs,
             accounts: Vec::new(),
             shared_settings: None,
             force_settings: false,
@@ -340,7 +336,7 @@ impl Targets {
             && !self.harnesses.iter().any(|target| {
                 self.hook_specs
                     .iter()
-                    .any(|spec| spec.harness == Some(target.harness))
+                    .any(|spec| spec.harness == target.harness)
             })
         {
             return Err(InstallError::HooksUnavailable);
@@ -1871,6 +1867,12 @@ pub struct InstallFinding {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
+impl InstallFinding {
+    /// Source-backed native limits are informative warnings, not install drift.
+    pub fn is_advisory(&self) -> bool {
+        self.rule == crate::NATIVE_CAPABILITY_UNAVAILABLE
+    }
+}
 #[cfg(test)]
 pub(crate) fn read_receipt(targets: &Targets) -> Result<Option<InstallReceipt>, InstallError> {
     Ok(read_receipt_inspected(targets, None)?.map(|decoded| decoded.receipt))
@@ -2240,6 +2242,14 @@ fn permitted_for(
     state_root: &Path,
 ) -> Result<bool, InstallError> {
     let path = entry.path.to_path_buf()?;
+    if entry.selector == "hook-plugin" {
+        let plugin_target = entry.harness == Some(target.harness)
+            && target.hook_file.as_ref() == Some(&entry.path)
+            && target.harness.spec().install.is_some_and(|install| {
+                matches!(install.hook_protocol, Some(HookProtocol::OpenCodePlugin))
+            });
+        return Ok(plugin_target && matches!(entry.expected, OwnedValue::File { .. }));
+    }
     if matches!(entry.expected, OwnedValue::Selector { .. }) {
         return crate::harness::permitted_selector(entry, target);
     }
@@ -2351,13 +2361,16 @@ fn check_install_inspected(
     let state_root = targets.roots.state.as_path();
     let receipt_path = state_root.join("install/receipt.json");
     let Some(decoded) = read_receipt_inspected(targets, Some(evidence))? else {
-        return Ok(vec![InstallFinding {
+        let mut findings = vec![InstallFinding {
             rule: "missing_receipt".into(),
             detail: None,
             path: AbsolutePath::new(&receipt_path)?,
-        }]);
+        }];
+        findings.extend(crate::harness::capability_findings(targets)?);
+        return Ok(findings);
     };
     let mut findings = decoded.findings()?;
+    findings.extend(crate::harness::capability_findings(targets)?);
     let stale_binary = decoded.stale.iter().any(|entry| entry.selector == "binary");
     let stale_targets = decoded.stale_targets;
     let receipt = decoded.receipt;

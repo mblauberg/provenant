@@ -34,6 +34,20 @@ work.
 - Why: advisory checks must not become accidental authority boundaries.
 - Test: none (review gate)
 
+Every provider lane has its native tool and shell surface. Read-only mode
+constrains filesystem writes; it does not remove shell, editing or web tools
+from the provider. The common confinement planner owns worktree writes, reads
+of the primary and sibling checkouts, explicit read roots, credential denials
+and network reach. Network defaults to open, and explicit network reach is
+applied by that same planner for every adapter. Every launch finalises the
+host Cargo home and lane target binding through the common environment path.
+Private harness instruction files receive the canonical global rules compiled
+into the binary, so source checkouts and packaged releases use identical content
+without depending on the installed asset layout. Native integration differences
+belong to `AdapterSpec`, with a reason and source for an unavailable capability.
+- Why: provider selection must not silently narrow a lane's working surface.
+- Test: `crates/providers/src/tests_lane_parity.rs::registered_adapters_render_common_lane_capabilities`
+
 The selected sandbox floor applies to each candidate and is sealed for
 continuations. Unsupported confinement is reported rather than represented as
 sandboxed execution.

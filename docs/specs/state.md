@@ -207,6 +207,17 @@ identity, not publisher trust.
 
 ## Managed install
 
+### Harness integrations have one declaration
+
+Managed harness paths and native hook event mappings come from `AdapterSpec`.
+Every supported instruction target links the same release instruction asset.
+An unavailable integration names its reason and source in install findings.
+The current CLI exposes no MCP server; install removes retired Fabric MCP
+registrations and does not register a removed command.
+- Why: adapters share capability intent while native formats remain replaceable.
+- Test: `crates/config/src/managed_tests.rs`
+- Owner: `crates/records/src/adapters.rs`, `crates/config/src/harness.rs`
+
 ### Preview before every write
 
 A failed preview prevents writes, and `--dry-run` creates no root, lock or

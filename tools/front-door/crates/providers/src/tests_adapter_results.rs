@@ -99,6 +99,8 @@ fn command_prepare_preserves_invocation_and_literal_argv_without_a_rust_install(
         "$(touch forbidden); a b".into(),
     ];
     let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.home = Path::new("/fixture/no-rust-install");
+    input.credential_roots = provenant_core::CredentialRoots::for_home(input.home);
     input.command = Some(command::Invocation {
         argv: &argv,
         runtimes: &[],

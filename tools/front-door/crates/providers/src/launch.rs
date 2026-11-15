@@ -969,6 +969,8 @@ pub(crate) fn finalise_provider_env(
         ("TMPDIR".into(), scratch.into()),
         ("TMPPREFIX".into(), scratch.join("zsh").into()),
     ]);
+    lane_instructions(input, spec)?;
+    let hooks = lane_hooks(input, spec)?;
     let access = match input.confined.permissions().mode {
         provenant_confinement::permissions::AccessMode::ReadOnly => Access::ReadOnly,
         provenant_confinement::permissions::AccessMode::WorktreeWrite(_) => Access::WorktreeWrite,
@@ -998,7 +1000,178 @@ pub(crate) fn finalise_provider_env(
     );
     binding.source_environment(input.confined.permissions().network, &mut spec.env);
     spec.tool_requirements.cargo_home = Some(binding);
+    if input.sandboxed() {
+        // Native shell tools are one lane capability. Adapters supply their
+        // private runtime roots; this common layer supplies shared toolchains
+        // and caches with identical access and network boundaries.
+        spec.tool_requirements.applied = false;
+        rust_tools(
+            input,
+            access,
+            &mut spec.tool_requirements,
+            &mut spec.env,
+            &mut spec.setup,
+        );
+        node_tools(
+            input.home,
+            access,
+            cache,
+            &mut spec.tool_requirements,
+            &mut spec.env,
+        );
+    }
+    input
+        .provenant
+        .grant(&mut spec.profile.spec, &mut spec.setup, hooks);
     Ok(())
+}
+
+/// Project the instruction content bound into this product build into each
+/// sandboxed harness's private configuration home, using only its install data.
+fn lane_instructions(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<(), ProviderError> {
+    if !input.sandboxed() {
+        return Ok(());
+    }
+    let Some(install) = provenant_records::AdapterSpec::get(&input.route.adapter)
+        .and_then(|adapter| adapter.install)
+    else {
+        return Ok(());
+    };
+    if !install.instructions.is_supported() {
+        return Ok(());
+    }
+    let instruction = install.instruction.ok_or(ProviderError::InvalidPath)?;
+    let relative = Path::new(instruction);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(ProviderError::InvalidPath);
+    }
+    let (home_variable, suffix) = install.lane_home;
+    let home = spec
+        .env
+        .iter()
+        .find(|(key, _)| key == home_variable)
+        .map(|(_, value)| PathBuf::from(value))
+        .filter(|path| path.is_absolute())
+        .ok_or(ProviderError::InvalidPath)?;
+    let config_home = home.join(suffix);
+    let destination = config_home.join(relative);
+    let parent = destination.parent().ok_or(ProviderError::InvalidPath)?;
+    spec.setup.push(SetupStep::CreateDir(parent.to_owned()));
+    spec.setup.push(SetupStep::WriteFile {
+        path: destination,
+        bytes: provenant_records::INSTRUCTION_CONTENT.to_vec(),
+    });
+    Ok(())
+}
+
+/// Render Provenant's declared hooks into the isolated harness configuration.
+/// Native Claude uses its explicit settings file in scratch, and OpenCode
+/// always uses a private config home; other native harnesses keep their
+/// install-managed host configuration untouched.
+fn lane_hooks(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<bool, ProviderError> {
+    let Some(adapter) = provenant_records::AdapterSpec::get(&input.route.adapter) else {
+        return Ok(false);
+    };
+    let Some(install) = adapter.install else {
+        return Ok(false);
+    };
+    if !install.hooks.is_supported() {
+        return Ok(false);
+    }
+    let warn_skip = |detail| {
+        policy_warning(
+            input.policy,
+            "LANE_LANERUNTIME_HOOK_PROJECTION",
+            format!(
+                "{} {detail}; continuing without its lane hooks",
+                adapter.name
+            ),
+        )
+    };
+    let Some(protocol) = install.hook_protocol else {
+        warn_skip("hook protocol is not declared")?;
+        return Ok(false);
+    };
+    let Some(hook_file) = install.hook_file else {
+        warn_skip("hook file is not declared")?;
+        return Ok(false);
+    };
+    let relative = Path::new(hook_file);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        warn_skip("hook file path is invalid")?;
+        return Ok(false);
+    }
+
+    let config_home =
+        if input.sandboxed() || protocol == provenant_records::HookProtocol::OpenCodePlugin {
+            let (home_variable, suffix) = install.lane_home;
+            let Some(home) = spec
+                .env
+                .iter()
+                .find(|(key, _)| key == home_variable)
+                .map(|(_, value)| PathBuf::from(value))
+                .filter(|path| path.is_absolute())
+            else {
+                warn_skip("hook config home is unavailable")?;
+                return Ok(false);
+            };
+            home.join(suffix)
+        } else if install.hook_settings_arg.is_some() {
+            input.confined.permissions().scratch.path.clone()
+        } else {
+            // This native harness keeps its install-managed host hook file. The
+            // launcher must not create or rewrite a user configuration file.
+            return Ok(true);
+        };
+    let destination = config_home.join(relative);
+    let Some(parent) = destination.parent() else {
+        warn_skip("hook file has no parent directory")?;
+        return Ok(false);
+    };
+    let bytes = match protocol {
+        provenant_records::HookProtocol::OpenCodePlugin => {
+            provenant_config::hook_plugin_source(input.provenant.executable, input.provenant.state)
+        }
+        _ => provenant_config::lane_hook_settings(
+            adapter.id,
+            input.provenant.executable,
+            input.provenant.state,
+        )
+        .and_then(|mut settings| {
+            if install.hook_settings_arg.is_some() {
+                settings["attribution"] = serde_json::json!({"commit": "", "pr": ""});
+            }
+            serde_json::to_vec(&settings)
+                .map_err(|_| provenant_config::InstallError::InvalidConfig("hook settings"))
+        }),
+    };
+    let bytes = match bytes {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            warn_skip(
+                "hook settings cannot represent the selected Provenant executable or state path",
+            )?;
+            return Ok(false);
+        }
+    };
+    spec.setup.push(SetupStep::CreateDir(parent.to_owned()));
+    spec.setup.push(SetupStep::WriteFile {
+        path: destination.clone(),
+        bytes,
+    });
+    if let Some(argument) = install.hook_settings_arg {
+        spec.argv
+            .extend([argument.into(), destination.into_os_string()]);
+    }
+    Ok(true)
 }
 
 impl LaunchSpec {

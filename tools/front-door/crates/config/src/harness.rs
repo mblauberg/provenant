@@ -2,7 +2,8 @@
 use crate::managed::{self, InstallError, SelectorChange, Snapshot, Targets, Value};
 use crate::{Harness, Release};
 use provenant_records::{
-    AbsolutePath, InstallReceipt, Limits, OwnedEntry, OwnedValue, ResolvedHarnessTarget,
+    AbsolutePath, CapabilitySupport, InstallReceipt, Limits, OwnedEntry, OwnedValue,
+    ResolvedHarnessTarget,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
@@ -11,27 +12,23 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const OPENCODE_INSTRUCTION_ASSETS: [&str; 1] = [managed::INSTRUCTION_ASSET];
-
 pub(crate) fn default_config(h: Harness, home: &Path, base: &Path) -> PathBuf {
-    match h {
-        // Claude Code keeps `.claude.json` beside `CLAUDE_CONFIG_DIR` when set.
-        Harness::Claude if base == home.join(".claude") => home.join(".claude.json"),
-        Harness::Claude => base.join(".claude.json"),
-        Harness::Codex => base.join("config.toml"),
-        Harness::Cursor => base.join("mcp.json"),
-        Harness::Agy => base.join("config/mcp_config.json"),
-        Harness::Opencode => base.join("opencode.jsonc"),
-        // An adapter without a managed configuration has no default path.
-        _ => PathBuf::new(),
+    let Some(install) = h.spec().install else {
+        return PathBuf::new();
+    };
+    if let Some(default_home_config) = install.default_home_config
+        && base == home.join(install.home)
+    {
+        return home.join(default_home_config);
     }
+    base.join(install.config)
 }
 pub(crate) fn default_hooks(h: Harness, base: &Path) -> Option<PathBuf> {
-    match h {
-        Harness::Claude => Some(base.join("settings.json")),
-        Harness::Codex => Some(base.join("hooks.json")),
-        _ => None,
-    }
+    let install = h.spec().install?;
+    (install.hooks.is_supported())
+        .then_some(install.hook_file)
+        .flatten()
+        .map(|path| base.join(path))
 }
 fn get_selector(bytes: &[u8], sel: &str) -> Result<Option<Json>, InstallError> {
     let limits = Limits::CONFIG;
@@ -187,7 +184,7 @@ pub fn legacy_harness_selectors(
     let harnesses: Vec<_> = provenant_records::ADAPTER_SPECS
         .iter()
         .map(|spec| spec.id)
-        .filter(|harness| !harness.spec().binary.is_empty())
+        .filter(|harness| harness.spec().install.is_some())
         .collect();
     let mut targets = Targets::new(roots.clone(), home, &harnesses);
     targets.accounts = accounts.to_vec();
@@ -266,6 +263,7 @@ pub(crate) fn capture(
     previous: Option<&InstallReceipt>,
 ) -> Result<HarnessPlan, InstallError> {
     let mut plan = HarnessPlan::default();
+    plan.findings.extend(capability_findings(targets)?);
     let root = managed::release_root(
         targets.roots.state.as_path(),
         release.manifest().source_digest,
@@ -300,7 +298,8 @@ pub(crate) fn capture(
         let inherited_hooks = !targets.remove_hooks
             && previous.is_some_and(|receipt| {
                 receipt.entries.iter().any(|entry| {
-                    entry.harness == Some(target.harness) && entry.selector.starts_with("hook:")
+                    entry.harness == Some(target.harness)
+                        && (entry.selector.starts_with("hook:") || entry.selector == "hook-plugin")
                 })
             });
         let hooks = targets.hooks || inherited_hooks;
@@ -316,112 +315,186 @@ pub(crate) fn capture(
         }
         if let Some(hook) = &target.hook_file
             && (hooks || targets.remove_hooks)
-            && target.harness == Harness::Claude
         {
             let hook_snapshot = capture_one(hook, entries)?;
-            let (old, hook_mode) = file(&hook_snapshot, hook)?;
-            let mut base = Value::File {
-                bytes: old.clone(),
-                mode: hook_mode,
-            };
-            let mut removed_changes = Vec::new();
-            let mut inherited = BTreeSet::new();
-            let mut had_own_hooks = false;
-            if let Some(previous) = previous {
-                for entry in &previous.entries {
-                    if entry.harness != Some(target.harness)
-                        || !entry.path.to_path_buf().is_ok_and(|path| &path == hook)
-                        || !entry.selector.starts_with("hook:")
-                    {
-                        continue;
+            let protocol = target
+                .harness
+                .spec()
+                .install
+                .and_then(|install| install.hook_protocol)
+                .ok_or(InstallError::Manifest("hook protocol missing"))?;
+            if matches!(protocol, provenant_records::HookProtocol::OpenCodePlugin) {
+                let old_owned = previous
+                    .into_iter()
+                    .flat_map(|receipt| &receipt.entries)
+                    .find(|entry| {
+                        entry.harness == Some(target.harness)
+                            && entry.selector == "hook-plugin"
+                            && entry.path.to_path_buf().is_ok_and(|path| path == *hook)
+                    });
+                if hooks {
+                    let (old, mode) = file(&hook_snapshot, hook)?;
+                    let generated = crate::hooks::hook_plugin_source(
+                        &targets.bin_dir.join("provenant"),
+                        targets.roots.state.as_path(),
+                    )?;
+                    let write_allowed = if let Some(entry) = old_owned {
+                        if !managed::matches_owned(
+                            &Value::File {
+                                bytes: old.clone(),
+                                mode,
+                            },
+                            &entry.expected,
+                        ) {
+                            add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
+                            plan.relinquished.insert(target.id());
+                            false
+                        } else {
+                            true
+                        }
+                    } else if hook_snapshot.is_some() {
+                        return Err(InstallError::Conflict(hook.clone()));
+                    } else {
+                        true
+                    };
+                    if write_allowed {
+                        let value = Value::File {
+                            bytes: generated,
+                            mode: if hook_snapshot.is_some() { mode } else { 0o600 },
+                        };
+                        plan.owned.push(OwnedEntry {
+                            extra: Default::default(),
+                            path: AbsolutePath::new(hook)?,
+                            harness: Some(target.harness),
+                            selector: "hook-plugin".into(),
+                            expected: managed::owned(&value)?,
+                        });
+                        if hook_snapshot
+                            .as_ref()
+                            .is_none_or(|snapshot| snapshot.value != value)
+                        {
+                            plan.files.insert(hook.clone(), value);
+                        }
                     }
-                    had_own_hooks = true;
-                    if hooks && !targets.hooks && !entry_matches(&base, entry)? {
-                        add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
-                        continue;
-                    }
-                    inherited.insert(entry.selector.clone());
-                    // Keep current registrations in place so re-install is a no-op.
-                    let still_desired = hooks
-                        && targets.hook_specs.iter().any(|spec| {
-                            spec.harness == Some(target.harness)
-                                && crate::hooks::value(spec, targets).is_ok_and(|value| {
-                                    value.get("command").and_then(Json::as_str).is_some_and(
-                                        |command| {
-                                            crate::hooks::selector(
-                                                spec.event,
-                                                spec.matcher,
-                                                command,
-                                            )
-                                            .is_ok_and(|selector| selector == entry.selector)
-                                        },
-                                    ) && entry.expected
-                                        == OwnedValue::Selector {
+                } else if targets.remove_hooks && old_owned.is_some() {
+                    plan.relinquished.insert(target.id());
+                }
+            } else {
+                let (old, hook_mode) = file(&hook_snapshot, hook)?;
+                let mut base = Value::File {
+                    bytes: old.clone(),
+                    mode: hook_mode,
+                };
+                let mut removed_changes = Vec::new();
+                let mut inherited = BTreeSet::new();
+                let mut had_own_hooks = false;
+                if let Some(previous) = previous {
+                    for entry in &previous.entries {
+                        if entry.harness != Some(target.harness)
+                            || !entry.path.to_path_buf().is_ok_and(|path| &path == hook)
+                            || !entry.selector.starts_with("hook:")
+                        {
+                            continue;
+                        }
+                        had_own_hooks = true;
+                        if hooks && !targets.hooks && !entry_matches(&base, entry)? {
+                            add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
+                            continue;
+                        }
+                        inherited.insert(entry.selector.clone());
+                        // Keep current registrations in place so re-install is a no-op.
+                        let still_desired = hooks
+                            && targets.hook_specs.iter().any(|spec| {
+                                if spec.harness != target.harness {
+                                    return false;
+                                }
+                                let Ok(value) = crate::hooks::value(spec, targets) else {
+                                    return false;
+                                };
+                                let Some(command) = value.get("command").and_then(Json::as_str)
+                                else {
+                                    return false;
+                                };
+                                crate::hooks::selector(spec, command)
+                                    .is_ok_and(|selector| selector == entry.selector)
+                                    && entry.expected
+                                        == (OwnedValue::Selector {
                                             extra: Default::default(),
                                             value,
-                                        }
-                                })
-                        });
-                    if !still_desired {
-                        if let Some((value, changes)) = remove_selector(&base, entry)? {
-                            base = value;
-                            removed_changes.extend(changes);
-                        } else {
-                            add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
+                                        })
+                            });
+                        if !still_desired {
+                            if let Some((value, changes)) = remove_selector(&base, entry)? {
+                                base = value;
+                                removed_changes.extend(changes);
+                            } else {
+                                add_finding(
+                                    &mut plan.findings,
+                                    "relinquished_modified_entry",
+                                    hook,
+                                )?;
+                            }
                         }
                     }
                 }
-            }
-            let Value::File { bytes: base, .. } = base else {
-                return Err(InstallError::ConfigFile(hook.clone()));
-            };
-            let (mut updated, mut changes, owned) = if hooks && target.harness == Harness::Claude {
-                // A target with no hooks of its own yet takes the full set its
-                // siblings own; an established target keeps what it relinquished.
-                // One that removed them all (`hooks_relinquished`) stays without.
-                let follows_siblings =
-                    inherited_hooks && inherited.is_empty() && !had_own_hooks && !was_relinquished;
-                let registration =
-                    crate::hooks::register(&base, targets, &inherited, follows_siblings)?;
-                if registration.relinquished_modified {
-                    add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
-                }
-                if !targets.hooks
-                    && registration.owned.is_empty()
-                    && (had_own_hooks || was_relinquished)
-                {
-                    plan.relinquished.insert(target.id());
-                }
-                (registration.bytes, registration.changes, registration.owned)
-            } else {
-                (base, Vec::new(), Vec::new())
-            };
-            changes.extend(removed_changes);
-            for (selector, value) in owned {
-                plan.owned.push(OwnedEntry {
-                    extra: Default::default(),
-                    path: AbsolutePath::new(hook)?,
-                    harness: Some(target.harness),
-                    selector,
-                    expected: OwnedValue::Selector {
+                let Value::File { bytes: base, .. } = base else {
+                    return Err(InstallError::ConfigFile(hook.clone()));
+                };
+                let (mut updated, mut changes, owned) = if hooks {
+                    // A target with no hooks of its own yet takes the full set its
+                    // siblings own; an established target keeps what it relinquished.
+                    // One that removed them all (`hooks_relinquished`) stays without.
+                    let follows_siblings = inherited_hooks
+                        && inherited.is_empty()
+                        && !had_own_hooks
+                        && !was_relinquished;
+                    let registration = crate::hooks::register(
+                        target.harness,
+                        &base,
+                        targets,
+                        &inherited,
+                        follows_siblings,
+                    )?;
+                    if registration.relinquished_modified {
+                        add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
+                    }
+                    if !targets.hooks
+                        && registration.owned.is_empty()
+                        && (had_own_hooks || was_relinquished)
+                    {
+                        plan.relinquished.insert(target.id());
+                    }
+                    (registration.bytes, registration.changes, registration.owned)
+                } else {
+                    (base, Vec::new(), Vec::new())
+                };
+                changes.extend(removed_changes);
+                for (selector, value) in owned {
+                    plan.owned.push(OwnedEntry {
                         extra: Default::default(),
-                        value,
-                    },
-                });
-            }
-            if updated != old {
-                updated = crate::splice::pretty_json(&updated)?;
-                plan.files.insert(
-                    hook.clone(),
-                    Value::File {
-                        bytes: updated,
-                        mode: hook_mode,
-                    },
-                );
-                plan.changes
-                    .entry(hook.clone())
-                    .or_default()
-                    .extend(changes);
+                        path: AbsolutePath::new(hook)?,
+                        harness: Some(target.harness),
+                        selector,
+                        expected: OwnedValue::Selector {
+                            extra: Default::default(),
+                            value,
+                        },
+                    });
+                }
+                if updated != old {
+                    updated = crate::splice::pretty_json(&updated)?;
+                    plan.files.insert(
+                        hook.clone(),
+                        Value::File {
+                            bytes: updated,
+                            mode: hook_mode,
+                        },
+                    );
+                    plan.changes
+                        .entry(hook.clone())
+                        .or_default()
+                        .extend(changes);
+                }
             }
         }
         if let Some(settings) = &targets.shared_settings
@@ -512,7 +585,7 @@ pub(crate) fn capture(
                 let array = array
                     .as_array()
                     .ok_or(InstallError::InvalidConfig("instructions must be an array"))?;
-                for asset in OPENCODE_INSTRUCTION_ASSETS.map(PathBuf::from) {
+                for asset in [PathBuf::from(managed::INSTRUCTION_ASSET)] {
                     let path_value = root.join(&asset);
                     let text = path_value.to_str().ok_or(InstallError::InvalidConfig(
                         "instruction path requires UTF-8",
@@ -562,9 +635,15 @@ pub(crate) fn permitted_selector(
     target: &ResolvedHarnessTarget,
 ) -> Result<bool, InstallError> {
     if entry.selector.starts_with("hook:") {
-        return Ok(
-            target.harness == Harness::Claude && target.hook_file.as_ref() == Some(&entry.path)
-        );
+        return Ok(target.hook_file.as_ref() == Some(&entry.path)
+            && crate::hooks::belongs_to(&entry.selector, target.harness)?
+            && target.harness.spec().install.is_some_and(|install| {
+                install.hooks.is_supported()
+                    && !matches!(
+                        install.hook_protocol,
+                        Some(provenant_records::HookProtocol::OpenCodePlugin)
+                    )
+            }));
     }
     if let Some(key) = entry.selector.strip_prefix(crate::shared_settings::PREFIX) {
         return Ok(target.harness == Harness::Claude
@@ -858,4 +937,103 @@ fn add_finding(
         });
     }
     Ok(())
+}
+
+pub(crate) fn capability_findings(
+    targets: &Targets,
+) -> Result<Vec<managed::InstallFinding>, InstallError> {
+    fn unsupported(capability: CapabilitySupport) -> Option<(&'static str, &'static str)> {
+        match capability {
+            CapabilitySupport::Supported => None,
+            CapabilitySupport::Unsupported { reason, source } => Some((reason, source)),
+        }
+    }
+
+    let mut findings = Vec::new();
+    for target in &targets.harnesses {
+        let Some(install) = target.harness.spec().install else {
+            continue;
+        };
+        let path = target.hook_file.as_deref().unwrap_or(&target.config_file);
+        for (name, support) in [
+            ("MCP", install.mcp),
+            ("instructions", install.instructions),
+            ("answer delivery", install.answer_delivery),
+        ] {
+            if let Some((reason, source)) = unsupported(support) {
+                findings.push(managed::InstallFinding {
+                    rule: crate::NATIVE_CAPABILITY_UNAVAILABLE.into(),
+                    path: AbsolutePath::new(path)?,
+                    detail: Some(format!("{name}: {reason} (source: {source})")),
+                });
+            }
+        }
+        let has_precompact_event = install.hook_events.iter().any(|event| {
+            matches!(
+                event,
+                provenant_records::HookEvent::Supported {
+                    action: provenant_records::HookAction::PreCompact,
+                    ..
+                }
+            )
+        });
+        if has_precompact_event
+            && let Some((reason, source)) = unsupported(install.precompact_context)
+        {
+            findings.push(managed::InstallFinding {
+                rule: crate::NATIVE_CAPABILITY_UNAVAILABLE.into(),
+                path: AbsolutePath::new(path)?,
+                detail: Some(format!(
+                    "pre-compaction model context: {reason} (source: {source})"
+                )),
+            });
+        }
+        if !install.hooks.is_supported() {
+            if let Some((reason, source)) = unsupported(install.hooks) {
+                findings.push(managed::InstallFinding {
+                    rule: crate::NATIVE_CAPABILITY_UNAVAILABLE.into(),
+                    path: AbsolutePath::new(path)?,
+                    detail: Some(format!("hooks: {reason} (source: {source})")),
+                });
+            }
+        } else {
+            let unsupported_actions = install
+                .hook_events
+                .iter()
+                .filter_map(|event| match event {
+                    provenant_records::HookEvent::Unsupported {
+                        action,
+                        reason,
+                        source,
+                    } if !matches!(
+                        action,
+                        provenant_records::HookAction::ChairPrompt
+                            | provenant_records::HookAction::ChairStart
+                            | provenant_records::HookAction::ChairStop
+                            | provenant_records::HookAction::PreToolUse
+                    ) =>
+                    {
+                        Some(format!(
+                            "{}: {} (source: {})",
+                            action.command(),
+                            reason,
+                            source
+                        ))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !unsupported_actions.is_empty() {
+                findings.push(managed::InstallFinding {
+                    rule: crate::NATIVE_CAPABILITY_UNAVAILABLE.into(),
+                    path: AbsolutePath::new(path)?,
+                    detail: Some(format!(
+                        "native hooks unavailable: {}",
+                        unsupported_actions.join("; ")
+                    )),
+                });
+            }
+        }
+    }
+    Ok(findings)
 }

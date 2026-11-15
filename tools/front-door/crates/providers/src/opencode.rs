@@ -145,9 +145,9 @@ pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, Pr
 }
 
 /// OpenCode uses the user's configuration and stored provider accounts.
-/// Read-only runs deny edits but allow shell commands inside outer confinement
-/// so they can atomically publish progress in their private state. Its
-/// built-in search tools still run ripgrep, which the profile grants by path.
+/// Native tools remain available while the outer profile grants their paths
+/// and bounds filesystem and network access. Search tools run ripgrep, which
+/// the profile grants by path.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -155,7 +155,6 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    let mut tool_requirements = crate::launch::ToolRequirements::default();
     if plan.selected_authentication.as_deref() != Some("login") {
         return Err(input.boundary_error(
             "OPENCODE_PREPARE_CREDENTIALS",
@@ -205,16 +204,10 @@ fn prepare(
     let user_skills = staged_skills.root.clone();
     let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
     let mut omitted_discovery = Vec::new();
-    let permission = if access == Access::WorktreeWrite {
-        // Confinement enforces path and credential access. Do not add headless
-        // approval prompts for writer tools or directories outside the cwd.
-        serde_json::json!({"*": "allow"})
-    } else {
-        let mut permission = serde_json::json!({
-            "edit": "deny",
-            "bash": "allow",
-            "webfetch": "deny",
-        });
+    let permission = {
+        // The provider's own prompt layer cannot answer in a headless lane.
+        // The outer profile remains the source of path and network authority.
+        let mut permission = serde_json::json!({"*": "allow"});
         let mut external = serde_json::Map::new();
         let mut reads = serde_json::Map::new();
         // The pinned cwd and candidate state are siblings. Headless tools must
@@ -250,6 +243,20 @@ fn prepare(
             external.insert(pattern.clone(), "allow".into());
             reads.insert(pattern, "allow".into());
         }
+        if access == Access::ReadOnly {
+            for grant in &plan.read_roots {
+                let pattern = match grant.scope {
+                    provenant_confinement::permissions::PathScope::Exact => {
+                        grant.path.display().to_string()
+                    }
+                    provenant_confinement::permissions::PathScope::Subtree => {
+                        format!("{}/**", grant.path.display())
+                    }
+                };
+                external.insert(pattern.clone(), "allow".into());
+                reads.insert(pattern, "allow".into());
+            }
+        }
         if !external.is_empty() {
             permission["external_directory"] = external.into();
             permission["read"] = reads.into();
@@ -260,20 +267,19 @@ fn prepare(
         "autoupdate": false,
         "share": "disabled",
         "mcp": {},
-        "plugin": [],
         "permission": permission,
     })
     .to_string();
     let package = package_grant(input.executable, &mut omitted_discovery, input.policy)?;
     // Bypass Apple's Git shim, including when the selected binary is Homebrew's.
     let bin = plan.scratch.path.join("bin");
-    let shell = access == Access::WorktreeWrite;
-    let defaults = crate::launch::tool_search_path(input.home, shell, input.policy)?;
+    let writer = access == Access::WorktreeWrite;
+    let defaults = crate::launch::tool_search_path(input.home, true, input.policy)?;
     let path = match std::env::join_paths(
         std::iter::once(bin.clone()).chain(std::env::split_paths(&defaults)),
     ) {
         Ok(path) => path,
-        Err(_) if !shell => {
+        Err(_) if !writer => {
             crate::launch::policy_warning(
                 input.policy,
                 "OPENCODE_PREPARE_NONE_2",
@@ -316,8 +322,8 @@ fn prepare(
             &mut omitted_discovery,
         )?;
     }
-    // Preserve the existing provider configuration without making skills
-    // readable when discovery is off. Do not follow unrelated config links.
+    // Preserve ordinary provider configuration without importing user plugins
+    // or skills into the lane. Do not follow unrelated config links.
     let config_dir = config_home.join("opencode");
     let optional_start = runtime_reads.len();
     if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
@@ -326,7 +332,7 @@ fn prepare(
     {
         runtime_reads.push(exact(&config_dir));
         for entry in entries.flatten() {
-            if entry.file_name() == "skills" {
+            if matches!(entry.file_name().to_str(), Some("skills" | "plugins")) {
                 continue;
             }
             if let Ok(kind) = entry.file_type() {
@@ -373,7 +379,8 @@ fn prepare(
             target: input.provenant.git.to_owned(),
         },
     ];
-    // Mirror provider configuration as individual links; staged skills have their own tree.
+    // Mirror ordinary provider settings as individual links. Lane-owned
+    // instructions, hooks and skills use their own private paths.
     let private_config = private.join("config");
     {
         let private_opencode = private_config.join("opencode");
@@ -383,7 +390,7 @@ fn prepare(
             && let Ok(entries) = std::fs::read_dir(&config_dir)
         {
             for entry in entries.flatten() {
-                if entry.file_name() != "skills"
+                if !matches!(entry.file_name().to_str(), Some("skills" | "plugins"))
                     && entry.file_type().is_ok_and(|kind| !kind.is_symlink())
                 {
                     setup.push(SetupStep::Symlink {
@@ -409,14 +416,9 @@ fn prepare(
     }
     // Writers' system roots do not cover a host-selected Homebrew Git.
     let process_executables = vec![exact(input.executable), exact(input.provenant.git)];
-    // Read-only Bash needs a shell and atomic rename utilities, but receives
-    // no writer toolchain or source write grant. As for Claude, Codex and AGY
-    // readers, the rendered profile denies writes to the source and protected
-    // checkouts (`push_boundaries`); OpenCode's permission config is not that boundary.
-    let mut tool_exec_roots = vec![subtree("/bin"), subtree("/usr/bin")];
-    if shell {
-        tool_exec_roots.push(package.clone());
-    }
+    // Shell tools run under the outer lane profile. Its write grants and
+    // protected checkouts, not OpenCode's prompt config, set write authority.
+    let mut tool_exec_roots = vec![subtree("/bin"), subtree("/usr/bin"), package.clone()];
     if access == Access::ReadOnly {
         // OpenCode's grep, glob and list tools execute ripgrep. It resolves
         // `rg` from PATH, then from its cache bin ($XDG_CACHE_HOME/opencode/bin),
@@ -457,19 +459,9 @@ fn prepare(
             private.join("state").into_os_string(),
         ),
     ]);
-    // Only lanes whose permissions allow bash can run the toolchain.
-    if shell {
-        crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
-        crate::launch::node_tools(
-            input.home,
-            access,
-            crate::launch::lane_cache(input),
-            &mut tool_requirements,
-            &mut env,
-        );
-    }
     env.push(("OPENCODE_CONFIG_CONTENT".into(), config.into()));
-    // No repository configuration or plugins, and no Claude Code files.
+    // No repository configuration or Claude Code files. Provenant's global
+    // plugin is loaded from the private OpenCode config home.
     for key in [
         "OPENCODE_DISABLE_AUTOUPDATE",
         "OPENCODE_DISABLE_PROJECT_CONFIG",
@@ -487,7 +479,7 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: staged_skills,
-        tool_requirements,
+        tool_requirements: Default::default(),
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),
@@ -1417,13 +1409,7 @@ mod tests {
             std::path::Path::new("/fixture/repo"),
             None,
         );
-        let spec = prepare(
-            &input,
-            Access::ReadOnly,
-            Session::Fresh,
-            OpenCode.stream(None).unwrap(),
-        )
-        .unwrap();
+        let spec = OpenCode.prepare(input).unwrap();
         let shell = plan
             .permissions()
             .private_state
@@ -1439,7 +1425,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_search_grants_cached_ripgrep_and_system_grep() {
+    fn read_only_tools_keep_shell_and_declared_reads_under_outer_confinement() {
         use provenant_confinement::permissions::{PathGrant, PathScope};
         use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 
@@ -1449,6 +1435,10 @@ mod tests {
         // root, as in the Seatbelt snapshot fixture.
         permissions.private_state = Some(PathGrant {
             path: "/fixture/provider-state".into(),
+            scope: PathScope::Subtree,
+        });
+        permissions.read_roots.push(PathGrant {
+            path: "/fixture/shared-read".into(),
             scope: PathScope::Subtree,
         });
         let plan = ConfinedPlan::new(PlanRequest {
@@ -1468,13 +1458,15 @@ mod tests {
             std::path::Path::new("/fixture/repo"),
             None,
         );
-        let spec = prepare(
-            &input,
-            Access::ReadOnly,
-            Session::Fresh,
-            OpenCode.stream(None).unwrap(),
-        )
-        .unwrap();
+        let spec = OpenCode
+            .prepare(crate::tests::fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                std::path::Path::new("/fixture/repo"),
+                None,
+            ))
+            .unwrap();
         let env = |key: &str| {
             spec.env
                 .iter()
@@ -1487,8 +1479,13 @@ mod tests {
                 .to_string_lossy(),
         )
         .unwrap();
-        assert_eq!(config["permission"]["bash"], "allow");
-        assert_eq!(config["permission"]["edit"], "deny");
+        assert_eq!(config["permission"]["*"], "allow");
+        let declared_pattern = "/fixture/shared-read/**";
+        assert_eq!(
+            config["permission"]["external_directory"][declared_pattern],
+            "allow"
+        );
+        assert_eq!(config["permission"]["read"][declared_pattern], "allow");
 
         // OpenCode resolves ripgrep from PATH and then its cache bin, which is
         // XDG_CACHE_HOME/opencode/bin under the lane's private state.
@@ -1499,19 +1496,23 @@ mod tests {
             spec.profile.spec.process_executables,
             [exact(input.executable), exact(input.provenant.git)]
         );
-        assert_eq!(
-            spec.profile.spec.tool_exec_roots,
-            [
-                subtree("/bin"),
-                subtree("/usr/bin"),
-                rg.clone(),
-                exact("/usr/bin/grep")
-            ]
+        assert!(spec.profile.spec.tool_exec_roots.contains(&rg.clone()));
+        assert!(
+            spec.profile
+                .spec
+                .tool_exec_roots
+                .contains(&exact("/usr/bin/grep"))
         );
-        // No writer toolchain leaks into a read-only lane.
+        // Shell and toolchain access stay available; the outer profile still
+        // blocks writes to the read-only worktree.
         let path: Vec<_> = std::env::split_paths(&env("PATH").expect("PATH")).collect();
-        assert!(!path.contains(&input.home.join(".cargo/bin")), "{path:?}");
-        assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
+        assert!(path.contains(&input.home.join(".cargo/bin")), "{path:?}");
+        assert!(
+            spec.profile
+                .spec
+                .tool_exec_roots
+                .contains(&subtree(input.home.join(".cargo/bin")))
+        );
 
         let profile = provenant_confinement::permissions::snapshot::render(
             plan.permissions(),
@@ -2080,20 +2081,26 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
             None,
         );
         for access in [Access::ReadOnly, Access::WorktreeWrite] {
-            let spec = prepare(
-                &input,
-                access,
-                Session::Fresh,
-                OpenCode.stream(None).unwrap(),
-            )
-            .unwrap();
+            let plan = crate::tests::fixture_access_plan(access, Some("login"), false);
+            let input = crate::tests::fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                std::path::Path::new("/fixture/repo"),
+                None,
+            );
+            let git = input.provenant.git;
+            let git_path = git.to_owned();
+            let cwd = input.cwd;
+            let home = input.home;
+            let spec = OpenCode.prepare(input).unwrap();
             let profile = provenant_confinement::permissions::snapshot::render(
                 plan.permissions(),
                 &spec.profile,
-                input.home,
+                home,
             )
             .unwrap();
-            let git = input.provenant.git.display();
+            let git = git.display();
             let literal = format!("(allow process-exec (literal \"{git}\"))");
             assert!(profile.contains(&literal), "{access:?} lacks {literal}");
             let subtree_rule = format!("(allow process-exec (subpath \"{git}\"))");
@@ -2112,37 +2119,31 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
             assert_eq!(std::env::split_paths(&path.1).next(), Some(bin.clone()));
             assert!(spec.setup.contains(&SetupStep::Symlink {
                 link: bin.join("git"),
-                target: input.provenant.git.to_owned(),
+                target: git_path,
             }));
-            // Read-only discovery enables OpenCode's cached search binary and system grep; a
-            // writer's toolchain roots follow the system and package roots.
             let roots = &spec.profile.spec.tool_exec_roots;
+            for required in [
+                subtree("/bin"),
+                subtree("/usr/bin"),
+                subtree(home.join(".cargo/bin")),
+                subtree(cwd),
+            ] {
+                assert!(roots.contains(&required), "{access:?} lacks {required:?}");
+            }
             if access == Access::ReadOnly {
-                assert_eq!(
-                    roots,
-                    &[
-                        subtree("/bin"),
-                        subtree("/usr/bin"),
-                        exact(
-                            plan.permissions()
-                                .private_state
-                                .as_ref()
-                                .unwrap()
-                                .path
-                                .join("cache/opencode/bin/rg")
-                        ),
-                        exact("/usr/bin/grep"),
-                    ]
-                );
-            } else {
-                assert_eq!(
-                    roots[..3],
-                    [
-                        subtree("/bin"),
-                        subtree("/usr/bin"),
-                        subtree(crate::launch::package_root(input.executable).unwrap()),
-                    ]
-                );
+                for required in [
+                    exact(
+                        plan.permissions()
+                            .private_state
+                            .as_ref()
+                            .unwrap()
+                            .path
+                            .join("cache/opencode/bin/rg"),
+                    ),
+                    exact("/usr/bin/grep"),
+                ] {
+                    assert!(roots.contains(&required), "{access:?} lacks {required:?}");
+                }
             }
         }
     }

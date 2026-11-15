@@ -658,10 +658,14 @@ pub(super) fn credential_roots(
     settings: &provenant_providers::accounts::Settings,
 ) -> Result<provenant_core::CredentialRoots, String> {
     use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
-    // The package exception belongs to the default Codex home alone,
-    // whichever declaration names it; every other path is a plain store.
     let kind = |adapter: &str, path: &Path| {
-        if adapter == "codex" && path == home.join(provenant_core::CODEX_ACCOUNT_DIRECTORY.1) {
+        let codex_home = AdapterSpec::get(adapter).is_some_and(|spec| {
+            spec.credential_home_kind == &CredentialKind::CodexHome
+                && spec
+                    .default_account_directory
+                    .is_some_and(|(_, directory)| path == home.join(directory))
+        });
+        if codex_home {
             CredentialKind::CodexHome
         } else {
             CredentialKind::Store
