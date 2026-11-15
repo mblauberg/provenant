@@ -672,7 +672,7 @@ fn existing_read_lock_waits_for_writer_and_respects_timeout() {
     std::thread::scope(|scope| {
         let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let (dir, cancel, clock) = (&dir, &cancel, &clock);
+        let (dir, cancel) = (&dir, &cancel);
         let waiter = scope.spawn(move || {
             dir.lock_existing_with_timeout(
                 name,

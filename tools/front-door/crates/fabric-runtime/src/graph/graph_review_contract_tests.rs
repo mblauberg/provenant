@@ -622,7 +622,9 @@ fn typed_contract_reports_malformed_findings_and_preserves_usable_entries() {
         assert_eq!(progress.state, NodeState::Failed);
         assert_eq!(
             progress.advance_error_code.as_deref(),
-            Some("review_findings_invalid")
+            Some("review_findings_invalid"),
+            "{bad} {:?}",
+            progress.advance_error
         );
         assert!(
             progress

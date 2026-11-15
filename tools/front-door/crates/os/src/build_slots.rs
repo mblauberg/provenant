@@ -284,7 +284,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn provisioning_again_repairs_the_directory_and_its_slot_files() {
         use std::os::unix::fs::MetadataExt;
         let _serial = serial();

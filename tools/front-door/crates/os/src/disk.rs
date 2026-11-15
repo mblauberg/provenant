@@ -218,12 +218,6 @@ pub struct DiskTotal {
     pub unshared_bytes: u64,
 }
 
-#[derive(Debug, Serialize)]
-pub struct DiskError {
-    pub path: PathBuf,
-    pub reason: String,
-}
-
 /// The `data` of `provenant disk report`: a sequence of read-only
 /// observations, not an atomic filesystem snapshot. Per-path errors
 /// accompany a successful partial report.

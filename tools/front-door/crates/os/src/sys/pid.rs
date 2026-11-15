@@ -2168,7 +2168,7 @@ mod tests {
 
     fn root_owned_executable_fixtures() -> io::Result<Vec<(std::path::PathBuf, std::fs::File)>> {
         use std::os::unix::fs::MetadataExt;
-        let mut fixtures = Vec::new();
+        let mut fixtures: Vec<(std::path::PathBuf, std::fs::File)> = Vec::new();
         for directory in DARWIN_DAEMON_DIRECTORIES {
             let Ok(entries) = std::fs::read_dir(directory) else {
                 continue;
