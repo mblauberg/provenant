@@ -1623,9 +1623,8 @@ fn verified_cargo_config(build: &Path, cargo_home: &Path) -> std::result::Result
 }
 
 // Read a Cargo config file as data, without executing it. A config is refused
-// when it is not a small regular UTF-8 TOML file or when it can change which
-// compiler runs: `build.rustc*`, an `include`, or `[env]` entries that reach
-// rustup, rustc or the search path.
+// when it is not a small regular UTF-8 TOML file or can select a different
+// compiler/build target or unrecorded build flags.
 fn cargo_config_cannot_select_compiler(path: &Path) -> std::result::Result<(), &'static str> {
     use std::io::Read;
     if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()) {
@@ -1635,30 +1634,7 @@ fn cargo_config_cannot_select_compiler(path: &Path) -> std::result::Result<(), &
     std::fs::File::open(path)
         .and_then(|file| file.take(65537).read_to_end(&mut bytes))
         .map_err(|_| codes::CARGO_CONFIG_UNREADABLE)?;
-    if bytes.len() > 65536 {
-        return Err(codes::CARGO_CONFIG_TOO_LARGE);
-    }
-    let document: toml_edit::DocumentMut = String::from_utf8(bytes)
-        .map_err(|_| codes::CARGO_CONFIG_INVALID)?
-        .parse()
-        .map_err(|_| codes::CARGO_CONFIG_INVALID)?;
-    let compiler_key = |key: &str| {
-        key.starts_with("RUSTUP_")
-            || key.starts_with("RUSTC")
-            || key.starts_with("CARGO_BUILD_RUSTC")
-            || key == "PATH"
-    };
-    let build = document.get("build").and_then(|item| item.as_table_like());
-    let env = document.get("env").and_then(|item| item.as_table_like());
-    if document.contains_key("include")
-        || build.is_some_and(|table| table.iter().any(|(key, _)| key.starts_with("rustc")))
-        || env.is_some_and(|table| table.iter().any(|(key, _)| compiler_key(key)))
-        || (document.contains_key("build") && build.is_none())
-        || (document.contains_key("env") && env.is_none())
-    {
-        return Err(codes::CARGO_CONFIG_SELECTS_COMPILER);
-    }
-    Ok(())
+    crate::target_seed::cargo_config_cannot_select_seed_compiler(&bytes)
 }
 
 // Refuse the host probe if a lane can alter the host compiler or an earlier
@@ -2374,7 +2350,7 @@ mod cargo_setup_tests {
         assert!(verified_cargo_config(&worktree, &cache.join(".cargo")).is_ok());
         std::fs::create_dir_all(worktree.join(".cargo")).unwrap();
         let config = worktree.join(".cargo/config.toml");
-        // Selecting a compiler, directly or through include or [env], is refused.
+        // Selecting a compiler/target, directly or through include or [env], is refused.
         for (text, expected) in [
             (
                 "[build]\nrustc = 'evil'\n",
@@ -2387,6 +2363,18 @@ mod cargo_setup_tests {
             (
                 "build.rustc-workspace-wrapper = 'evil'\n",
                 codes::CARGO_CONFIG_SELECTS_COMPILER,
+            ),
+            (
+                "[build]\ntarget = 'x86_64-unknown-linux-gnu'\n",
+                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
+            ),
+            (
+                "[target.x86_64-unknown-linux-gnu]\nlinker = 'secret-linker'\n",
+                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
+            ),
+            (
+                "[env]\nCARGO_BUILD_TARGET = 'x86_64-unknown-linux-gnu'\n",
+                codes::CARGO_CONFIG_CHANGES_BUILD_TARGET,
             ),
             (
                 "include = 'elsewhere.toml'\n",

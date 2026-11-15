@@ -48,6 +48,7 @@ detail_codes! {
     CARGO_CONFIG_TOO_LARGE = "cargo_config_too_large",
     CARGO_CONFIG_INVALID = "cargo_config_invalid",
     CARGO_CONFIG_SELECTS_COMPILER = "cargo_config_selects_compiler",
+    CARGO_CONFIG_CHANGES_BUILD_TARGET = "cargo_config_changes_build_target",
     WORKTREE_UNRESOLVABLE = "worktree_unresolvable",
     RUSTUP_HOME_WRITABLE = "rustup_home_writable",
     CARGO_BIN_WRITABLE = "cargo_bin_writable",
@@ -86,6 +87,68 @@ detail_codes! {
     COMPILER_HOST_MISSING = "compiler_host_missing",
     TOOLCHAIN_PIN_INVALID = "toolchain_pin_invalid",
     TOOLCHAIN_PIN_CHANNEL_MISSING = "toolchain_pin_channel_missing",
+}
+
+/// Refuse bounded Cargo config input when it can alter the rustc, target, or
+/// build flags represented by a shared target seed. Used by both lane setup
+/// and host seed currentness; values are never returned or logged.
+pub(crate) fn cargo_config_cannot_select_seed_compiler(bytes: &[u8]) -> Result<(), &'static str> {
+    if bytes.len() > 65536 {
+        return Err(codes::CARGO_CONFIG_TOO_LARGE);
+    }
+    let document: toml_edit::DocumentMut = String::from_utf8(bytes.to_vec())
+        .map_err(|_| codes::CARGO_CONFIG_INVALID)?
+        .parse()
+        .map_err(|_| codes::CARGO_CONFIG_INVALID)?;
+    let compiler_key = |key: &str| {
+        key == "PATH"
+            || key.starts_with("RUSTUP_")
+            || key.starts_with("RUSTC")
+            || key.starts_with("CARGO_BUILD_RUSTC")
+    };
+    let target_key = |key: &str| {
+        matches!(
+            key,
+            "CARGO_BUILD_TARGET"
+                | "RUSTFLAGS"
+                | "CARGO_ENCODED_RUSTFLAGS"
+                | "CARGO_BUILD_RUSTFLAGS"
+        ) || key.starts_with("CARGO_TARGET_")
+            || (key.starts_with("CARGO_PROFILE_") && key != "CARGO_PROFILE_DEV_DEBUG")
+    };
+    let build = document.get("build").and_then(|item| item.as_table_like());
+    let env = document.get("env").and_then(|item| item.as_table_like());
+    if document.contains_key("include")
+        || build.is_some_and(|table| table.iter().any(|(key, _)| key.starts_with("rustc")))
+        || env.is_some_and(|table| table.iter().any(|(key, _)| compiler_key(key)))
+        || (document.contains_key("build") && build.is_none())
+        || (document.contains_key("env") && env.is_none())
+    {
+        return Err(codes::CARGO_CONFIG_SELECTS_COMPILER);
+    }
+
+    let build_changes_target = build.is_some_and(|table| {
+        table
+            .iter()
+            .any(|(key, _)| matches!(key, "target" | "rustflags" | "rustdocflags" | "incremental"))
+    });
+    let env_changes_target = env.is_some_and(|table| table.iter().any(|(key, _)| target_key(key)));
+    let target_changes_build = match document.get("target") {
+        None => false,
+        Some(item) => item.as_table_like().is_none_or(|targets| {
+            targets.iter().any(|(_, settings)| {
+                settings.as_table_like().is_none_or(|settings| {
+                    settings
+                        .iter()
+                        .any(|(key, _)| matches!(key, "linker" | "ar"))
+                })
+            })
+        }),
+    };
+    if build_changes_target || env_changes_target || target_changes_build {
+        return Err(codes::CARGO_CONFIG_CHANGES_BUILD_TARGET);
+    }
+    Ok(())
 }
 
 /// Every reason persisted in `cargo-target-setup.json` when target seeding
