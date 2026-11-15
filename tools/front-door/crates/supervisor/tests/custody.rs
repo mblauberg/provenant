@@ -759,12 +759,22 @@ fn unchanged_census_does_not_publish_tracking(root: &Path) -> Result<()> {
         .join("tracking-writer")
         .join(scope().attempt.to_string())
         .join("reservation.json");
+    // The first censuses may still publish a changing process tree (the trace
+    // line precedes its publication); take the baseline once two more have run.
+    let settled = provenant_test_support::wait_for(
+        "tracking settled",
+        Duration::from_secs(5),
+        || std::fs::read(&trace).map(|trace| count_full_censuses(&trace)),
+        |observed| observed.as_ref().is_ok_and(|count| *count > baseline + 2),
+    )
+    .map_err(io::Error::other)?
+    .map_err(io::Error::other)?;
     let before = std::fs::read(&reservation)?;
     let _observed = provenant_test_support::wait_for(
         "next full census",
         Duration::from_secs(5),
         || std::fs::read(&trace).map(|trace| count_full_censuses(&trace)),
-        |observed| observed.as_ref().is_ok_and(|count| *count > baseline),
+        |observed| observed.as_ref().is_ok_and(|count| *count > settled + 1),
     )
     .map_err(io::Error::other)?;
     assert_eq!(std::fs::read(&reservation)?, before);

@@ -279,6 +279,7 @@ fn ownership_journal_uses_bounded_decode_and_rejects_invalid_scope() -> TestResu
             "attempt": scope().attempt,
             "generation": 1
         },
+        "binding": {"kind": "read_only"},
         "future_journal": [1, 2]
     });
     let journal: OwnershipJournal =
