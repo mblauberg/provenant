@@ -2174,6 +2174,11 @@ impl Recovery {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }
+    /// The provider process identity retained by this verified custody
+    /// reservation. This observation grants no signalling authority.
+    pub fn provider_identity(&self) -> Option<&crate::census::ProcessIdentity> {
+        self.reservation.provider.as_ref()
+    }
     /// Whether this recovery holds exclusion for the given writer directory.
     pub fn holds_writer_lock(&self, directory: &Directory) -> Result<bool> {
         let held = self.lock_directory.metadata()?;
