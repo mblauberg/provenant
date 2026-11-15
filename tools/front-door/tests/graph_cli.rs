@@ -2,6 +2,7 @@
     clippy::disallowed_methods,
     reason = "integration tests exercise the CLI process"
 )]
+mod support;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -878,7 +879,7 @@ fn review_test_lens_receives_risk_selected_mutation_guidance() -> Result {
         }
     }
     let rig = GraphProject::new()?;
-    let advice = provenant_routing::review::TESTS_ADVICE.trim();
+    let advice = include_str!("../assets/review-tests-advice.txt").trim();
     for (risk, expected) in [
         ("substantial", false),
         ("crucial", true),

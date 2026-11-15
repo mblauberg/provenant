@@ -144,9 +144,9 @@ fn no_flags_compact_view_shows_all_configured_accounts_including_exhausted() -> 
     for (label, key) in &accounts {
         let row = rows
             .iter()
-            .find(|row| row["account"]["account_key"] == key)
+            .find(|row| row["account"]["account_key"] == key.as_str())
             .ok_or("configured account row")?;
-        assert_eq!(row["account"]["label"], label);
+        assert_eq!(row["account"]["label"], label.as_str());
         if key == "claude-0" {
             assert_eq!(row["status"], "exhausted");
         } else {
@@ -453,6 +453,7 @@ fn failed_auth_refresh_shows_last_known_usage_age_and_auth_marker() -> Result {
     assert_eq!(row["status"], "auth_required");
     assert!(row["age_seconds"].as_u64().is_some_and(|age| age >= 10));
     assert_eq!(row["snapshot"]["windows"][0]["used_basis_points"], 5300);
+    let text = String::from_utf8(rig.command(&["quota", "show"])?.stdout.bytes)?;
     assert!(!text.contains('\u{1b}'));
     assert!(text.contains("\\n"));
     rig.assert_v1_root_untouched()

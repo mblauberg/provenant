@@ -277,16 +277,14 @@ fn removed_spelling(argv: &[OsString]) -> Option<&'static Removed> {
             words.push(word);
         }
     }
-    REMOVED
-        .iter()
-        .find(|removed| {
-            words.len() >= removed.words.len()
-                && words
-                    .iter()
-                    .zip(removed.words)
-                    .all(|(word, path)| word == path)
-                && removed.flag.is_none_or(|flag| flags.contains(&flag))
-        })
+    REMOVED.iter().find(|removed| {
+        words.len() >= removed.words.len()
+            && words
+                .iter()
+                .zip(removed.words)
+                .all(|(word, path)| word == path)
+            && removed.flag.is_none_or(|flag| flags.contains(&flag))
+    })
 }
 
 fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
@@ -2313,10 +2311,9 @@ mod tests {
                 let name = option
                     .strip_prefix("--")
                     .expect("fixture options use long spellings");
-                let exact = REMOVED.iter().any(|removed| {
-                    removed.flag == Some(name)
-                        && removed.words == path
-                });
+                let exact = REMOVED
+                    .iter()
+                    .any(|removed| removed.flag == Some(name) && removed.words == path);
                 if !has_option(current, &model, name) && !exact && !retired_command(&path) {
                     missing.push(format!("option {option} at {}", path.join(" ")));
                 }

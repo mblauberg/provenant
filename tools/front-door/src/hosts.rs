@@ -954,7 +954,8 @@ mod tests {
     #[test]
     fn doctor_login_projection_keeps_account_reason_and_recovery() {
         let row = provenant_quota::AccountRow {
-            account: provenant_quota::AccountScope { extra: Default::default(),
+            account: provenant_quota::AccountScope {
+                extra: Default::default(),
                 adapter: "claude".into(),
                 account_key: "key".into(),
                 label: "work".into(),
@@ -974,9 +975,11 @@ mod tests {
                 expires_unix_seconds: Some(90),
                 observed_unix_seconds: Some(100),
             }),
-            snapshot: Some(provenant_quota::QuotaSnapshot { extra: Default::default(),
+            snapshot: Some(provenant_quota::QuotaSnapshot {
+                extra: Default::default(),
                 schema_version: 1,
-                account: provenant_quota::AccountScope { extra: Default::default(),
+                account: provenant_quota::AccountScope {
+                    extra: Default::default(),
                     adapter: "claude".into(),
                     account_key: "key".into(),
                     label: "work".into(),

@@ -347,7 +347,8 @@ fn switch(
     }
     let path = store.path(&input.session_id);
     terminal_path(&path)?;
-    let mut handoff = Handoff { extra: Default::default(),
+    let mut handoff = Handoff {
+        extra: Default::default(),
         session_id: input.session_id.clone(),
         cwd: context.cwd.clone(),
         transcript_path: input.transcript_path.clone(),

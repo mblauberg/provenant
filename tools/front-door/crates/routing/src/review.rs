@@ -2329,7 +2329,11 @@ mod tests {
         assert_eq!(docs.synthesis, docs_shape.synthesis);
         assert_eq!(
             docs.slots.len(),
-            docs_shape.reviewers.iter().map(|group| group.count).sum::<usize>()
+            docs_shape
+                .reviewers
+                .iter()
+                .map(|group| group.count)
+                .sum::<usize>()
         );
         assert!(!docs.omitted.is_empty());
 
@@ -2395,7 +2399,11 @@ mod tests {
         let quick_shape = &config.shapes["quick"];
         assert_eq!(
             quick.slots.len(),
-            quick_shape.reviewers.iter().map(|group| group.count).sum::<usize>()
+            quick_shape
+                .reviewers
+                .iter()
+                .map(|group| group.count)
+                .sum::<usize>()
         );
         for (index, reviewer) in quick_shape.reviewers.iter().enumerate() {
             let group: Vec<_> = quick
@@ -2443,7 +2451,11 @@ mod tests {
         let deep_shape = &config.shapes["deep"];
         assert_eq!(
             deep.slots.len(),
-            deep_shape.reviewers.iter().map(|group| group.count).sum::<usize>()
+            deep_shape
+                .reviewers
+                .iter()
+                .map(|group| group.count)
+                .sum::<usize>()
         );
         for (index, reviewer) in deep_shape.reviewers.iter().enumerate() {
             let group: Vec<_> = deep

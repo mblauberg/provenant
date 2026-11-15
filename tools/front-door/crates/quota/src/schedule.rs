@@ -1239,7 +1239,8 @@ mod tests {
         for rule in BACKOFF_RULES {
             let encoded = provenant_records::encode(&rule.failure).unwrap();
             let decoded: ProbeFailure =
-                provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG).unwrap();
+                provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG)
+                    .unwrap();
             assert_eq!(decoded, rule.failure);
             for attempt in [1u64, 2, 5, 50] {
                 let exponent = attempt.saturating_sub(1) as u32;

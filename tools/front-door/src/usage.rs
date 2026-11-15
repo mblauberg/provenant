@@ -293,7 +293,8 @@ pub fn native(cmd: provenant_cli::Native, globals: &Globals) -> u8 {
                 effort,
             } => native_attempts::start(
                 &resolved.roots,
-                Attempt { extra: Default::default(),
+                Attempt {
+                    extra: Default::default(),
                     id,
                     session,
                     alias,

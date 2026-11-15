@@ -228,7 +228,8 @@ mod tests {
             schema_version: 1,
             generated_unix_seconds: 100,
             accounts: vec![AccountRow {
-                account: AccountScope { extra: Default::default(),
+                account: AccountScope {
+                    extra: Default::default(),
                     adapter: "claude".into(),
                     account_key: "key".into(),
                     label: "work".into(),
@@ -269,8 +270,10 @@ mod tests {
         .unwrap();
         let directory = super::super::child(&readiness, std::ffi::OsStr::new("key")).unwrap();
         let file = provenant_quota::ReadinessFile {
-            login: Some(LoginObservation { extra: Default::default(),
-                scope: provenant_quota::ReadinessScope { extra: Default::default(),
+            login: Some(LoginObservation {
+                extra: Default::default(),
+                scope: provenant_quota::ReadinessScope {
+                    extra: Default::default(),
                     host: provenant_quota::LOCAL_HOST.into(),
                     adapter: "claude".into(),
                     account_key: "key".into(),
@@ -341,13 +344,16 @@ mod tests {
             WallTime::from_micros(100_000_000).unwrap(),
             MonoTime::from_micros(0),
         );
-        let account = AccountScope { extra: Default::default(),
+        let account = AccountScope {
+            extra: Default::default(),
             adapter: "claude".into(),
             account_key: "key".into(),
             label: "work".into(),
         };
-        let mut evidence = LoginObservation { extra: Default::default(),
-            scope: provenant_quota::ReadinessScope { extra: Default::default(),
+        let mut evidence = LoginObservation {
+            extra: Default::default(),
+            scope: provenant_quota::ReadinessScope {
+                extra: Default::default(),
                 host: provenant_quota::LOCAL_HOST.into(),
                 adapter: "claude".into(),
                 account_key: "key".into(),

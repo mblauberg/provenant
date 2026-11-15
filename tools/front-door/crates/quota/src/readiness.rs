@@ -842,7 +842,8 @@ mod tests {
         for &reason in ReadinessReason::ALL {
             let encoded = provenant_records::encode(&reason).unwrap();
             let decoded: ReadinessReason =
-                provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG).unwrap();
+                provenant_records::decode(encoded.as_slice(), provenant_records::Limits::CONFIG)
+                    .unwrap();
             assert_eq!(decoded, reason);
             let expected = unavailable_projection(reason);
             let mut read = ReadinessRead::unknown(reason);

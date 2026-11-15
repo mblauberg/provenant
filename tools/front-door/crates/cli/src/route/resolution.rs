@@ -187,7 +187,8 @@ pub(crate) fn recorded_model_readiness(
             {
                 return None;
             }
-            let mut scope = provenant_quota::ReadinessScope { extra: Default::default(),
+            let mut scope = provenant_quota::ReadinessScope {
+                extra: Default::default(),
                 host: provenant_quota::LOCAL_HOST.into(),
                 adapter: entry.adapter,
                 account_key: entry.key.clone(),

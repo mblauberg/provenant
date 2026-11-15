@@ -384,7 +384,8 @@ mod tests {
     use super::*;
 
     fn row(at: i64) -> ingest::Row {
-        ingest::Row { extra: Default::default(),
+        ingest::Row {
+            extra: Default::default(),
             schema_version: ingest::ROW_SCHEMA_VERSION,
             identity: provenant_telemetry::usage::AccountIdentity::known(
                 "claude",

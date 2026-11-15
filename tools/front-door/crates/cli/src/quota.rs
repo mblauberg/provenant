@@ -333,7 +333,8 @@ pub(crate) fn persist_provider_refusal_once(
         .model
         .as_deref()
         .ok_or(QuotaError::Invalid("provider refusal route"))?;
-    let account = AccountScope { extra: Default::default(),
+    let account = AccountScope {
+        extra: Default::default(),
         adapter: adapter.to_owned(),
         account_key: route
             .account_key
@@ -399,7 +400,8 @@ pub(crate) fn persist_capacity_cooldown(
         .model
         .as_deref()
         .ok_or(QuotaError::Invalid("capacity cooldown route"))?;
-    let account = AccountScope { extra: Default::default(),
+    let account = AccountScope {
+        extra: Default::default(),
         adapter: adapter.to_owned(),
         account_key: route
             .account_key
@@ -474,7 +476,8 @@ pub(crate) fn persist_provider_success(
             let Some(label) = route.account_label.as_ref() else {
                 return Ok(());
             };
-            let account = AccountScope { extra: Default::default(),
+            let account = AccountScope {
+                extra: Default::default(),
                 adapter: adapter.into(),
                 account_key: key.into(),
                 label: label.clone(),
@@ -757,8 +760,10 @@ fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), E
             file.sync_probe_result(record, LOCAL_HOST, now, interval, reason)?;
         }
         if let Some((expiry, interval)) = intent.login_probe_expiry {
-            file.login = Some(LoginObservation { extra: Default::default(),
-                scope: ReadinessScope { extra: Default::default(),
+            file.login = Some(LoginObservation {
+                extra: Default::default(),
+                scope: ReadinessScope {
+                    extra: Default::default(),
                     host: LOCAL_HOST.into(),
                     adapter: adapter.clone(),
                     account_key: key.clone(),
@@ -961,7 +966,8 @@ fn credential_metadata(
             let stat = match std::fs::metadata(&path) {
                 Ok(metadata) => {
                     let metadata = provenant_os::fs::Metadata::from_std(metadata);
-                    Some(CredentialStat { extra: Default::default(),
+                    Some(CredentialStat {
+                        extra: Default::default(),
                         device: metadata.device,
                         inode: metadata.inode,
                         mode: metadata.mode,
@@ -974,7 +980,11 @@ fn credential_metadata(
                 // An inaccessible path is not a credential change.
                 Err(_) => return None,
             };
-            Some(CredentialMetadata { extra: Default::default(), path, stat })
+            Some(CredentialMetadata {
+                extra: Default::default(),
+                path,
+                stat,
+            })
         })
         .collect()
 }
@@ -1002,7 +1012,8 @@ fn refresh_auth_metadata(
         let Some(metadata) = credential_metadata(registration, home) else {
             continue;
         };
-        let account = AccountScope { extra: Default::default(),
+        let account = AccountScope {
+            extra: Default::default(),
             adapter: registration.adapter.clone(),
             account_key: registration.key.clone(),
             label: registration.label.clone(),
@@ -1286,7 +1297,8 @@ fn decorate_login(
     for row in &mut report.accounts {
         row.readiness = Some(read_readiness(
             state,
-            &ReadinessScope { extra: Default::default(),
+            &ReadinessScope {
+                extra: Default::default(),
                 host: LOCAL_HOST.into(),
                 adapter: row.account.adapter.clone(),
                 account_key: row.account.account_key.clone(),
@@ -1366,7 +1378,8 @@ fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError
     let mut configured: Vec<_> = accounts
         .entries
         .values()
-        .map(|entry| AccountScope { extra: Default::default(),
+        .map(|entry| AccountScope {
+            extra: Default::default(),
             adapter: entry.adapter.clone(),
             account_key: entry.key.clone(),
             label: entry.label.clone(),
@@ -1680,7 +1693,8 @@ pub(crate) fn execute(
                         let access_token_expiry = effects.access_token_expiry_unix_seconds();
                         let signed_in = effects.signed_in();
                         if access_token_expiry.is_some() || signed_in.is_some() {
-                            auth_state = Some(AuthState { extra: Default::default(),
+                            auth_state = Some(AuthState {
+                                extra: Default::default(),
                                 access_token_expiry_unix_seconds: access_token_expiry,
                                 signed_in,
                                 refresh_pending: effects.refresh_pending(),
@@ -2529,7 +2543,8 @@ mod tests {
         )?;
         let dir = child(&root, OsStr::new("quota"))?;
         let now = SystemClock::new().unix_seconds();
-        let account = AccountScope { extra: Default::default(),
+        let account = AccountScope {
+            extra: Default::default(),
             adapter: "claude".into(),
             account_key: "key".into(),
             label: "work".into(),
@@ -2537,7 +2552,8 @@ mod tests {
         let mut record = AccountRecord::empty(account.clone());
         record.revision = 1;
         record.last_error = Some(ProbeFailure::LoginExpired);
-        record.snapshot = Some(QuotaSnapshot { extra: Default::default(),
+        record.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: account.clone(),
             revision: 1,
@@ -2567,7 +2583,8 @@ mod tests {
         let read_at = SystemClock::new().unix_seconds();
         let readiness = read_readiness(
             roots.state.as_path(),
-            &ReadinessScope { extra: Default::default(),
+            &ReadinessScope {
+                extra: Default::default(),
                 host: LOCAL_HOST.into(),
                 adapter: "claude".into(),
                 account_key: "key".into(),
@@ -2690,7 +2707,8 @@ mod tests {
                 schema_version: 1,
                 generated_unix_seconds: 0,
                 accounts: vec![AccountRow {
-                    account: AccountScope { extra: Default::default(),
+                    account: AccountScope {
+                        extra: Default::default(),
                         adapter: "agy".into(),
                         account_key: "agy-google-abc".into(),
                         label: "work".into(),
@@ -2735,7 +2753,8 @@ mod tests {
     #[test]
     fn decorate_gives_generic_keychain_repair_without_a_matching_registration() {
         let row = |label: &str| AccountRow {
-            account: AccountScope { extra: Default::default(),
+            account: AccountScope {
+                extra: Default::default(),
                 adapter: "agy".into(),
                 account_key: "agy-google-abc".into(),
                 label: label.into(),
@@ -2826,7 +2845,8 @@ mod tests {
     #[test]
     fn quota_summary_shows_every_configured_account() {
         let row = |status| AccountRow {
-            account: AccountScope { extra: Default::default(),
+            account: AccountScope {
+                extra: Default::default(),
                 adapter: "test".into(),
                 account_key: "key".into(),
                 label: format!("{status:?}"),
@@ -2907,7 +2927,8 @@ mod tests {
         let zone = jiff::tz::TimeZone::get("Australia/Brisbane").unwrap();
         let second = |value: &str| value.parse::<jiff::Timestamp>().unwrap().as_second();
         let row = |label: &str, resets_at: Option<&str>| AccountRow {
-            account: AccountScope { extra: Default::default(),
+            account: AccountScope {
+                extra: Default::default(),
                 adapter: "opencode".into(),
                 account_key: label.into(),
                 label: label.into(),
@@ -2976,7 +2997,8 @@ mod tests {
         let mut failed = today.clone();
         let row = &mut failed.accounts[0];
         row.error = Some(ProbeFailure::Auth);
-        row.snapshot = Some(QuotaSnapshot { extra: Default::default(),
+        row.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: row.account.clone(),
             revision: 0,
@@ -3112,7 +3134,8 @@ mod tests {
         )?;
         assert_eq!(shared_pool_exhaustions(&ungrouped), None);
         let row = |snapshot, status| AccountRow {
-            account: AccountScope { extra: Default::default(),
+            account: AccountScope {
+                extra: Default::default(),
                 adapter: "agy".into(),
                 account_key: "k".into(),
                 label: "agy".into(),
@@ -3181,7 +3204,8 @@ mod tests {
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
         let root = private(temp.path())?;
         let dir = child(&root, OsStr::new("quota"))?;
-        let account = AccountScope { extra: Default::default(),
+        let account = AccountScope {
+            extra: Default::default(),
             adapter: "codex".into(),
             account_key: "work".into(),
             label: "work".into(),
@@ -3301,7 +3325,8 @@ mod tests {
             entries: [("codex-work".into(), registration)].into(),
             ..Default::default()
         };
-        let account = AccountScope { extra: Default::default(),
+        let account = AccountScope {
+            extra: Default::default(),
             adapter: "codex".into(),
             account_key: "work".into(),
             label: "work".into(),
@@ -3466,7 +3491,8 @@ mod tests {
         let dir = child(&root, OsStr::new("quota"))?;
         let mut records = Vec::new();
         for key in ["first", "second", "mismatch"] {
-            let account = AccountScope { extra: Default::default(),
+            let account = AccountScope {
+                extra: Default::default(),
                 adapter: "claude".into(),
                 account_key: key.into(),
                 label: key.into(),
@@ -3480,7 +3506,8 @@ mod tests {
                 ProbeFailure::Auth
             });
             record.failures = 1;
-            record.claim = Some(RefreshClaim { extra: Default::default(),
+            record.claim = Some(RefreshClaim {
+                extra: Default::default(),
                 token: "old".into(),
                 deadline_unix_seconds: 155,
             });
@@ -3596,14 +3623,16 @@ mod tests {
         ] {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
         }
-        let scope = ReadinessScope { extra: Default::default(),
+        let scope = ReadinessScope {
+            extra: Default::default(),
             host: LOCAL_HOST.into(),
             adapter: "codex".into(),
             account_key: "key".into(),
             route: "codex/model".into(),
         };
         let mut file = ReadinessFile::default();
-        let mut account = AccountRecord::empty(provenant_quota::AccountScope { extra: Default::default(),
+        let mut account = AccountRecord::empty(provenant_quota::AccountScope {
+            extra: Default::default(),
             adapter: "codex".into(),
             account_key: "key".into(),
             label: "work".into(),
@@ -3647,13 +3676,15 @@ mod tests {
         for path in [state, state.join("readiness").as_path(), dir.as_path()] {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
         }
-        let scope = ReadinessScope { extra: Default::default(),
+        let scope = ReadinessScope {
+            extra: Default::default(),
             host: LOCAL_HOST.into(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             route: "opencode/model".into(),
         };
-        let account = AccountRecord::empty(provenant_quota::AccountScope { extra: Default::default(),
+        let account = AccountRecord::empty(provenant_quota::AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             label: "go".into(),
@@ -3684,7 +3715,8 @@ mod tests {
             Some(ReadinessReason::SignedOut)
         );
         file = ReadinessFile::default();
-        file.login = Some(provenant_quota::LoginObservation { extra: Default::default(),
+        file.login = Some(provenant_quota::LoginObservation {
+            extra: Default::default(),
             scope: ReadinessScope {
                 route: provenant_quota::ACCOUNT_ROUTE.into(),
                 ..scope.clone()
@@ -3788,7 +3820,8 @@ mod tests {
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
         let state = temp.path();
         let now = SystemClock::new().unix_seconds();
-        let scope = |adapter: &str, key: &str, route: &str| ReadinessScope { extra: Default::default(),
+        let scope = |adapter: &str, key: &str, route: &str| ReadinessScope {
+            extra: Default::default(),
             host: LOCAL_HOST.into(),
             adapter: adapter.into(),
             account_key: key.into(),
@@ -3854,7 +3887,8 @@ mod tests {
         let current = records[0].clone();
         let mut next = current.clone();
         next.revision += 1;
-        next.snapshot = Some(QuotaSnapshot { extra: Default::default(),
+        next.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: next.account.clone(),
             revision: 0,
@@ -3863,7 +3897,8 @@ mod tests {
             source_ref: "fixture".into(),
             authority_ref: None,
             details: None,
-            windows: vec![QuotaWindow { extra: Default::default(),
+            windows: vec![QuotaWindow {
+                extra: Default::default(),
                 pool: "pool".into(),
                 window_seconds: None,
                 used_basis_points: 1000,
@@ -3910,7 +3945,8 @@ mod tests {
         }
         impl QuotaEffects for Effects {
             fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
-                Ok(vec![AccountScope { extra: Default::default(),
+                Ok(vec![AccountScope {
+                    extra: Default::default(),
                     adapter: "codex".into(),
                     account_key: "key".into(),
                     label: "fixture".into(),
@@ -3935,7 +3971,8 @@ mod tests {
                 })
             }
         }
-        let account = AccountScope { extra: Default::default(),
+        let account = AccountScope {
+            extra: Default::default(),
             adapter: "codex".into(),
             account_key: "key".into(),
             label: "fixture".into(),
@@ -3993,7 +4030,8 @@ mod tests {
         }
         impl QuotaEffects for Effects {
             fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
-                Ok(vec![AccountScope { extra: Default::default(),
+                Ok(vec![AccountScope {
+                    extra: Default::default(),
                     adapter: "codex".into(),
                     account_key: "key".into(),
                     label: "fixture".into(),
@@ -4127,7 +4165,8 @@ mod tests {
             );
             let read = read_readiness(
                 roots.state.as_path(),
-                &ReadinessScope { extra: Default::default(),
+                &ReadinessScope {
+                    extra: Default::default(),
                     host: LOCAL_HOST.into(),
                     adapter: "codex".into(),
                     account_key: "key".into(),
@@ -4162,16 +4201,19 @@ mod tests {
         let readiness = child(&root, OsStr::new(READINESS_DIRECTORY))?;
         let _account = child(&readiness, OsStr::new("key"))?;
         let path = temp.path().join("readiness/key/claude.json");
-        let scope = ReadinessScope { extra: Default::default(),
+        let scope = ReadinessScope {
+            extra: Default::default(),
             host: LOCAL_HOST.into(),
             adapter: "claude".into(),
             account_key: "key".into(),
             route: "claude/model".into(),
         };
-        let file = ReadinessFile { extra: Default::default(),
+        let file = ReadinessFile {
+            extra: Default::default(),
             schema_version: 1,
             login: None,
-            records: vec![provenant_quota::RouteReadiness { extra: Default::default(),
+            records: vec![provenant_quota::RouteReadiness {
+                extra: Default::default(),
                 schema_version: 1,
                 scope: scope.clone(),
                 state: ReadinessState::Ready,
@@ -4212,7 +4254,8 @@ mod tests {
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
         let state = temp.path();
         let dir = child(&private(state)?, OsStr::new("quota"))?;
-        let account = AccountScope { extra: Default::default(),
+        let account = AccountScope {
+            extra: Default::default(),
             adapter: "agy".into(),
             account_key: "work".into(),
             label: "work".into(),
@@ -4256,7 +4299,8 @@ mod tests {
             login_probe_expiry: None,
         };
         write_intent(&dir, state, &failure, &mut records)?;
-        let route = ReadinessScope { extra: Default::default(),
+        let route = ReadinessScope {
+            extra: Default::default(),
             host: LOCAL_HOST.into(),
             adapter: "agy".into(),
             account_key: "work".into(),
@@ -4301,7 +4345,8 @@ mod tests {
         let temp = tempfile::tempdir()?;
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
         let dir = private(temp.path())?;
-        let account = AccountScope { extra: Default::default(),
+        let account = AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             label: "go".into(),
@@ -4345,13 +4390,15 @@ mod tests {
     #[test]
     fn quota_human_and_json_display_partial_ledger_with_calibration()
     -> Result<(), Box<dyn std::error::Error>> {
-        let account = AccountScope { extra: Default::default(),
+        let account = AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             label: "go".into(),
         };
         let mut record = AccountRecord::empty(account.clone());
-        record.snapshot = Some(QuotaSnapshot { extra: Default::default(),
+        record.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
             schema_version: 1,
             account: account.clone(),
             revision: 0,
@@ -4359,7 +4406,8 @@ mod tests {
             observed_unix_seconds: 100,
             source_ref: "quota.provider.opencode".into(),
             authority_ref: None,
-            windows: vec![QuotaWindow { extra: Default::default(),
+            windows: vec![QuotaWindow {
+                extra: Default::default(),
                 pool: "five_hour".into(),
                 used_basis_points: 401,
                 resets_unix_seconds: None,
@@ -4424,7 +4472,8 @@ mod tests {
     fn quota_human_output_prints_three_of_three_current_readings() {
         let accounts =
             [("claude", "michael"), ("claude", "pro"), ("codex", "work")].map(|(adapter, key)| {
-                AccountScope { extra: Default::default(),
+                AccountScope {
+                    extra: Default::default(),
                     adapter: adapter.into(),
                     account_key: key.into(),
                     label: key.into(),
@@ -4435,7 +4484,8 @@ mod tests {
             .map(|a| {
                 let mut r = AccountRecord::empty(a.clone());
                 r.revision = 1;
-                r.snapshot = Some(QuotaSnapshot { extra: Default::default(),
+                r.snapshot = Some(QuotaSnapshot {
+                    extra: Default::default(),
                     schema_version: 1,
                     account: a.clone(),
                     revision: 1,
@@ -4451,7 +4501,8 @@ mod tests {
             .collect();
         // Include an unregistered cached account and an unsupported source adapter.
         let mut all_records = records;
-        all_records.push(AccountRecord::empty(AccountScope { extra: Default::default(),
+        all_records.push(AccountRecord::empty(AccountScope {
+            extra: Default::default(),
             adapter: "opencode".into(),
             account_key: "go".into(),
             label: "go".into(),
@@ -4603,7 +4654,8 @@ mod tests {
             display_name: "Claude",
             quota: policy,
         };
-        let account = AccountScope { extra: Default::default(),
+        let account = AccountScope {
+            extra: Default::default(),
             adapter: "claude".into(),
             account_key: "michael".into(),
             label: "michael".into(),
@@ -4647,7 +4699,8 @@ mod tests {
                 plan: &QuotaProbePlan,
                 _: &ProbeCapture,
             ) -> Result<QuotaSnapshot, QuotaError> {
-                Ok(QuotaSnapshot { extra: Default::default(),
+                Ok(QuotaSnapshot {
+                    extra: Default::default(),
                     schema_version: 1,
                     account: plan.account.clone(),
                     revision: 0,
@@ -4663,7 +4716,8 @@ mod tests {
         struct Effects(std::cell::Cell<u32>);
         impl QuotaEffects for Effects {
             fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
-                Ok(vec![AccountScope { extra: Default::default(),
+                Ok(vec![AccountScope {
+                    extra: Default::default(),
                     adapter: "fixture-provider".into(),
                     account_key: "work".into(),
                     label: "work".into(),

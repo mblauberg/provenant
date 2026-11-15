@@ -1752,7 +1752,10 @@ fn unknown_key_in_a_serde_decoded_section_reports_unknown_key_at_the_key() {
             .collect();
         assert_eq!(unknown.len(), 1, "{text}: {:?}", config.warnings);
         let warning = unknown[0];
-        assert_eq!(warning.path.to_relative_path().unwrap().as_path(), Path::new("config.toml"));
+        assert_eq!(
+            warning.path.to_relative_path().unwrap().as_path(),
+            Path::new("config.toml")
+        );
         assert_eq!(warning.line, line);
         assert!(warning.message.starts_with(&format!("{key_path}:")));
     }

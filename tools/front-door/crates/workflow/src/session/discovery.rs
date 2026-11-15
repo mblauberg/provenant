@@ -377,9 +377,15 @@ pub fn chair_sessions_for(
     let mut candidates: Vec<SessionDiscovery> = entries
         .filter_map(|entry| {
             let file = std::fs::File::open(entry.ok()?.path()).ok()?;
-            provenant_records::decode::<SessionDiscovery, _>(file, super::json_limits(DISCOVERY_LIMIT)).ok()
+            provenant_records::decode::<SessionDiscovery, _>(
+                file,
+                super::json_limits(DISCOVERY_LIMIT),
+            )
+            .ok()
         })
-        .filter(|found: &SessionDiscovery| found.project_id == project && found.chair_actor == actor)
+        .filter(|found: &SessionDiscovery| {
+            found.project_id == project && found.chair_actor == actor
+        })
         .collect();
     candidates.sort_by_key(|found| std::cmp::Reverse(found.last_saved_at));
     candidates

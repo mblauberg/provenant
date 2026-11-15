@@ -545,7 +545,8 @@ fn typed_route_selection_roundtrips_and_rejects_malformed_fields() {
 /// field, so rollback and mixed-version peers keep reading them.
 #[test]
 fn stored_records_decode_with_a_future_field() -> TestResult {
-    let mut port = json!({"argv":["true"],"exit_codes":{"success":[0],"unknown":[2],"other":"refused"}});
+    let mut port =
+        json!({"argv":["true"],"exit_codes":{"success":[0],"unknown":[2],"other":"refused"}});
     port["future_field"] = json!(1);
     port["exit_codes"]["future_field"] = json!(1);
     let decoded: ports::PortCommand = serde_json::from_value(port)?;

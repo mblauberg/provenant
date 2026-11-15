@@ -2133,7 +2133,8 @@ fn name_skipped_accounts(
     let accounts: Vec<_> = skipped_accounts
         .iter()
         .cloned()
-        .map(|account| provenant_records::SkippedAccount { extra: Default::default(),
+        .map(|account| provenant_records::SkippedAccount {
+            extra: Default::default(),
             account: entries
                 .iter()
                 .find(|entry| entry.adapter == route.adapter && entry.key == account.account)
@@ -2613,7 +2614,8 @@ pub(super) fn prepare_candidates(
                         spec.login_reprobe
                     });
                 if strategy != provenant_records::LoginReprobe::None {
-                    let scope = provenant_quota::ReadinessScope { extra: Default::default(),
+                    let scope = provenant_quota::ReadinessScope {
+                        extra: Default::default(),
                         host: provenant_quota::LOCAL_HOST.into(),
                         adapter: entry.adapter.clone(),
                         account_key: entry.key.clone(),

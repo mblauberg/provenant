@@ -1799,7 +1799,8 @@ fn candidate(
     let skipped: Vec<_> = evaluated
         .iter()
         .filter_map(|(a, reason, _)| {
-            Some(provenant_records::SkippedAccount { extra: Default::default(),
+            Some(provenant_records::SkippedAccount {
+                extra: Default::default(),
                 account: a.account_key.clone()?,
                 reason: reason.clone()?,
             })
