@@ -12,4 +12,5 @@
 
 ### CLI and install
 
+- The configuration reference lists `gc.projects.<project>.foreign_worktrees` as `keep` or `collect` with default `collect`, matching what the runtime accepts; every enumerated key now takes its values and default from the owning declaration. (#3078)
 - `wait --timeout` clamps oversized budgets to `domains.wait.max_timeout_seconds`, with the effective limit and source shown. (#3078)

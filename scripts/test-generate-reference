@@ -21,7 +21,8 @@ class ReferenceTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix='provenant-reference-test-')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        declarations = {'external_contract': {'schema_version': 1, 'interfaces': []}, 'policy': []}
+        declarations = {'external_contract': {'schema_version': 1, 'interfaces': []}, 'policy': [],
+                        'enums': []}
         self.declarations = patch.dict(GLOBALS, reference_data=lambda _: declarations)
         self.declarations.start()
         self.addCleanup(self.declarations.stop)
@@ -61,6 +62,33 @@ class ReferenceTests(unittest.TestCase):
                     'threshold': 'domains.fabric.lanes.arbitrary_cap', 'effect': effect}])
                 text = GEN['config_reference'](data, all_fields=True)
                 self.assertIn(effect, text)
+
+    def test_declared_enums_supply_values_and_runtime_defaults_once(self):
+        declared = [{'path': 'gc.projects.{project}.choice', 'values': ['first', 'second'],
+                     'default': 'second'},
+                    {'path': 'gc.projects.{project}.inherited', 'values': ['up', 'down']}]
+
+        def section(**settings):
+            return {'knobs': {}, 'host_gc_settings': {'path': 'gc', 'settings': settings}}
+
+        data = GEN['with_declared_enums'](section(**{
+            'projects.{project}.choice': {'type': 'string', 'effect': 'Choose.'},
+            'projects.{project}.inherited': {'type': 'string', 'default': 'host value',
+                                             'effect': 'Inherit.'}}), declared)
+        settings = data['host_gc_settings']['settings']
+        for entry in declared:
+            setting = settings[entry['path'].removeprefix('gc.')]
+            self.assertEqual(setting['values'], entry['values'])
+            self.assertEqual(setting['default'], entry.get('default', 'host value'))
+        text = GEN['config_reference'](data, all_fields=True)
+        for entry in declared:
+            for value in entry['values']:
+                self.assertIn(value, text)
+        for restated in ({'allowed': 'first or third'}, {'values': ['first']}, {'default': 'first'}):
+            with self.subTest(restated=restated):
+                with self.assertRaises(ValueError):
+                    GEN['with_declared_enums'](section(**{'projects.{project}.choice': {
+                        'type': 'string', 'effect': 'Choose.', **restated}}), declared)
 
     def test_external_contract_document_preserves_every_declared_interface(self):
         interfaces = [{'kind': 'lane_environment', 'name': 'FIXTURE'},

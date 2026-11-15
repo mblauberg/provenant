@@ -823,6 +823,11 @@ pub enum ForeignWorktrees {
     #[default]
     Collect,
 }
+impl ForeignWorktrees {
+    /// The configuration spellings. Schema metadata and the generated
+    /// reference read this one declaration; a schema test deserialises each.
+    pub const NAMES: [&'static str; 2] = ["keep", "collect"];
+}
 
 /// Remote deletion is independent of local preservation evidence.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -831,6 +836,10 @@ pub enum RemoteBranches {
     Never,
     #[default]
     Managed,
+}
+impl RemoteBranches {
+    /// The configuration spellings, declared once like [`ForeignWorktrees::NAMES`].
+    pub const NAMES: [&'static str; 2] = ["never", "managed"];
 }
 
 impl Default for ProjectGcSettings {

@@ -13,6 +13,7 @@ fn main() -> std::process::ExitCode {
     let data = serde_json::json!({
         "external_contract": provenant_cli::external_contract::external_contract(),
         "policy": policy,
+        "enums": provenant_config::declared_enums(&provenant_cli::domains::SECTIONS),
     });
     let mut out = std::io::stdout().lock();
     match serde_json::to_writer(&mut out, &data) {

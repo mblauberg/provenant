@@ -81,7 +81,9 @@ pub use project_binding::{
     registered_gc_projects, registered_projects, transient_location,
 };
 pub use provenant_records::Finding;
-pub use schema::{Layer, Schema, SchemaField, apply_patch, schema};
+pub use schema::{
+    DeclaredEnum, Layer, Schema, SchemaField, apply_patch, declared_enums, probe_field, schema,
+};
 
 use serde::{Deserialize, Serialize, Serializer};
 use std::{collections::BTreeMap, fmt, path::PathBuf};

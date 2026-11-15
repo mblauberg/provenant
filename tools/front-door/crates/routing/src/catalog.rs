@@ -1109,10 +1109,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("outcome_priors.exploration_percent", 0, 100),
     FieldMetadata::int("capability_preferences.{selector}.{capability}", 1, 100),
     FieldMetadata::new("review.floors.{floor}.paths", "list"),
-    FieldMetadata::enumeration(
-        "review.floors.{floor}.tier",
-        &["routine", "substantial", "crucial", "terminal"],
-    ),
+    FieldMetadata::enumeration("review.floors.{floor}.tier", &crate::review::FLOOR_TIERS),
     FieldMetadata::new("review.floors.{floor}.lenses", "list"),
     FieldMetadata::new("review.shapes.{shape}.frame", "bool"),
     FieldMetadata::int("review.shapes.{shape}.verifiers", 0, 32),
