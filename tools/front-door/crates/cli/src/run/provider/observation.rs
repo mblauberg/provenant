@@ -1,11 +1,5 @@
 use super::*;
 
-#[derive(serde::Deserialize)]
-struct NativeHome {
-    schema_version: u64,
-    home: provenant_records::StructuredPathWire,
-}
-
 #[derive(serde::Deserialize, serde::Serialize)]
 struct NativeSessionLocation {
     schema_version: u64,
@@ -100,128 +94,44 @@ pub(super) fn native_session_location_for_route(
     Ok(root)
 }
 
-pub(super) fn write_native_codex_selector(
-    provider_state: &Path,
-    candidate: &str,
-    home: &Path,
-    route: &ResolvedRoute,
-) -> Result<(), String> {
-    let valid_candidate = candidate
-        .strip_prefix("candidate-")
-        .is_some_and(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()));
-    if !valid_candidate || !home.is_absolute() || route.adapter != "codex" || route.model.is_empty()
-    {
-        return Err("native Codex selector has an invalid candidate route".into());
-    }
-    let selector = provider_state.join(format!("codex-observation-{candidate}.json"));
-    let bytes = serde_json::to_vec(&serde_json::json!({
-        "schema_version": 1,
-        "home": provenant_records::StructuredPathWire::from_path(home)
-            .map_err(|error| error.to_string())?,
-    }))
-    .map_err(|error| error.to_string())?;
-    super::confinement::write_setup_file(&[provider_state], &selector, &bytes, false)
-}
-
-/// Read the launch-time native Codex HOME selectors and find the exact,
-/// validated rollout for `session`. No account config or sibling session data
-/// is copied into the successor.
+/// Read Codex's route-bound native root and find the exact validated rollout
+/// for `session`. The v1 rollout format remains unchanged; account config and
+/// sibling session data are not copied into the successor.
 pub(super) fn find_native_codex_rollout(
     provider_state: &Path,
     session: &str,
     model: &str,
+    account_key: Option<&str>,
     selected_home: Option<&Path>,
 ) -> Result<Option<provenant_providers::codex_rollout::Turn>, provenant_providers::ProviderError> {
     use provenant_providers::ProviderError;
     if model.is_empty() {
         return Err(ProviderError::UnknownIdentity);
     }
-    let state = match Directory::open_anchor(provider_state) {
-        Ok(state) => state,
-        Err(error) if error.is_not_found() => return Ok(None),
-        Err(_) => return Err(ProviderError::UnknownIdentity),
-    };
-    let entries = state
-        .entries()
-        .map_err(|_| ProviderError::UnknownIdentity)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| ProviderError::UnknownIdentity)?;
-    if entries.len() > 128 {
-        return Err(ProviderError::Overflow);
-    }
-    let mut selector_seen = false;
-    let mut selected_home_seen = false;
-    let mut homes = std::collections::BTreeSet::new();
-    let mut found = None;
-    let expected_model = format!("codex/{model}");
-    for name in entries {
-        let candidate_index = name
-            .to_str()
-            .and_then(|name| name.strip_prefix("candidate-"));
-        if !candidate_index.is_some_and(|index| {
-            !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
-        }) {
-            continue;
-        }
-        let _candidate_dir = state
-            .open_verified_directory(&name)
-            .map_err(|_| ProviderError::UnknownIdentity)?;
-        let selector =
-            std::ffi::OsString::from(format!("codex-observation-{}.json", name.to_string_lossy()));
-        let bytes = match state.read_stable(&selector, 16 * 1024) {
-            Ok(bytes) => bytes,
-            Err(error) if error.is_not_found() => continue,
-            Err(_) => return Err(ProviderError::UnknownIdentity),
-        };
-        selector_seen = true;
-        let record: NativeHome =
-            serde_json::from_slice(&bytes).map_err(|_| ProviderError::UnknownIdentity)?;
-        if record.schema_version != 1 {
-            return Err(ProviderError::UnknownIdentity);
-        }
-        let home = record
-            .home
-            .to_path_buf()
-            .map_err(|_| ProviderError::UnknownIdentity)?;
-        if !home.is_absolute() {
-            return Err(ProviderError::UnknownIdentity);
-        }
-        if let Some(selected) = selected_home
-            && selected != home.as_path()
-        {
-            continue;
-        }
-        selected_home_seen = true;
-        if homes.iter().any(|known| known != &home) {
-            return Err(ProviderError::IdentityMismatch);
-        }
-        if !homes.insert(home.clone()) {
-            continue;
-        }
-        match provenant_providers::codex_rollout::observe(&home, session) {
-            Ok(_) if found.is_some() => return Err(ProviderError::IdentityMismatch),
-            Ok(observed) => {
-                let observed_model = if observed.model.contains('/') {
-                    observed.model.clone()
-                } else {
-                    format!("codex/{}", observed.model)
-                };
-                if observed_model != expected_model {
-                    return Err(ProviderError::IdentityMismatch);
-                }
-                found = Some(observed);
+    let selected =
+        match native_session_location_for_route(provider_state, "codex", model, account_key) {
+            Ok(home) => home,
+            Err(NativeSessionLocationError::Missing | NativeSessionLocationError::Unavailable) => {
+                return Ok(None);
             }
-            Err(ProviderError::UnknownIdentity) => {}
-            Err(error) => return Err(error),
-        }
+            Err(NativeSessionLocationError::Invalid | NativeSessionLocationError::Mismatch) => {
+                return Err(ProviderError::IdentityMismatch);
+            }
+        };
+    if selected_home.is_some_and(|expected| expected != selected.as_path()) {
+        return Err(ProviderError::IdentityMismatch);
     }
-    if !selector_seen {
-        return Ok(None);
+    let expected_model = format!("codex/{model}");
+    let observed = provenant_providers::codex_rollout::observe(&selected, session)?;
+    let observed_model = if observed.model.contains('/') {
+        observed.model.clone()
+    } else {
+        format!("codex/{}", observed.model)
+    };
+    if observed_model != expected_model {
+        return Err(ProviderError::IdentityMismatch);
     }
-    if selected_home.is_some() && !selected_home_seen {
-        return Err(ProviderError::UnknownIdentity);
-    }
-    found.map(Some).ok_or(ProviderError::UnknownIdentity)
+    Ok(Some(observed))
 }
 
 /// Host context for fresh account identity and version probes.
@@ -255,8 +165,14 @@ pub(crate) fn observe_codex_rollout(
         .and_then(|model| model.strip_prefix("codex/"))
         .ok_or(ProviderError::UnknownIdentity)?;
     if native_home_required {
-        return find_native_codex_rollout(provider_state, thread, model, None)?
-            .ok_or(ProviderError::UnknownIdentity);
+        return find_native_codex_rollout(
+            provider_state,
+            thread,
+            model,
+            route.account_key.as_deref(),
+            None,
+        )?
+        .ok_or(ProviderError::UnknownIdentity);
     }
     let entries = std::fs::read_dir(provider_state).map_err(|_| ProviderError::UnknownIdentity)?;
     let mut observed = Err(ProviderError::UnknownIdentity);

@@ -112,13 +112,21 @@ fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std:
             // Host metadata uses its own explicit root, independently of
             // adapter setup's scratch-only file authority. Replay is idempotent.
             for _ in 0..2 {
-                write_native_codex_selector(&base, "candidate-1", &home, &route)?;
+                write_native_session_location(&base, &home, &route)?;
             }
         }
         // Candidate-local bytes cannot redirect host observation.
         std::fs::write(
-            candidate.join("codex-observation-candidate-1.json"),
-            br#"{"schema_version":1,"home":"/unrelated-home"}"#,
+            candidate.join("native-session-location.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "provider": "codex",
+                "model": "gpt-6-luna",
+                "account_key": "selected-account-key",
+                "root": provenant_records::StructuredPathWire::from_path(
+                    std::path::Path::new("/unrelated-home")
+                )?,
+            }))?,
         )?;
         std::fs::write(
             day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
@@ -136,7 +144,7 @@ fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std:
         assert!(observe_codex_rollout(&base, "another-thread", &route_record, native).is_err());
         if native {
             // Two fallback candidates can launch against the same login home.
-            write_native_codex_selector(&base, "candidate-0", &home, &route)?;
+            write_native_session_location(&base, &home, &route)?;
             assert_eq!(
                 observe_codex_rollout(&base, thread, &route_record, native)?.model,
                 "gpt-6-luna"
@@ -144,8 +152,14 @@ fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std:
             let wrong_model = codex_route_record("other-model", Some("selected-account-key"));
             assert!(observe_codex_rollout(&base, thread, &wrong_model, native).is_err());
             assert!(
-                find_native_codex_rollout(&base, thread, "gpt-6-luna", Some(candidate.as_path()))
-                    .is_err()
+                find_native_codex_rollout(
+                    &base,
+                    thread,
+                    "gpt-6-luna",
+                    Some("selected-account-key"),
+                    Some(candidate.as_path()),
+                )
+                .is_err()
             );
         }
         // Independent homes that claim the same thread remain ambiguous.
@@ -164,12 +178,17 @@ fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std:
                 day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
                 other_native_day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl")),
             )?;
-            write_native_codex_selector(&base, "candidate-0", &other_home, &route)?;
+            let other_route = codex_resolved_route("gpt-6-luna", Some("other-account"));
+            write_native_session_location(&base, &other_home, &other_route)?;
             assert!(matches!(
                 observe_codex_rollout(&base, thread, &route_record, true),
                 Err(provenant_providers::ProviderError::IdentityMismatch)
             ));
-            std::fs::remove_file(base.join("codex-observation-candidate-0.json"))?;
+            let other_route_record = codex_route_record("gpt-6-luna", Some("other-account"));
+            assert!(matches!(
+                observe_codex_rollout(&base, thread, &other_route_record, true),
+                Ok(_)
+            ));
         } else {
             assert!(matches!(
                 observe_codex_rollout(&base, thread, &route_record, native),
@@ -311,7 +330,7 @@ fn native_codex_observation_uses_launch_selected_home_without_registered_account
     std::fs::create_dir_all(&candidate)?;
     std::fs::create_dir_all(&day)?;
     let route = codex_resolved_route("gpt-6-luna", None);
-    write_native_codex_selector(&provider_state, "candidate-0", &home, &route)?;
+    write_native_session_location(&provider_state, &home, &route)?;
     std::fs::write(
         day.join(format!("rollout-2026-11-16T00-00-00-{session}.jsonl")),
         format!(
@@ -324,6 +343,54 @@ fn native_codex_observation_uses_launch_selected_home_without_registered_account
     let route = codex_route_record("gpt-6-luna", None);
     assert_eq!(
         observe_codex_rollout(&provider_state, session, &route, true)?.model,
+        "gpt-6-luna"
+    );
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/fabric.md#session-ready-steering
+fn codex_terminal_observation_uses_final_route_bound_native_home()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let provider_state = temp.path().join("provider-state");
+    std::fs::create_dir_all(&provider_state)?;
+    let session = "same-session-id-in-two-accounts";
+    let home_a = temp.path().join("account-a");
+    let home_b = temp.path().join("account-b");
+    for home in [&home_a, &home_b] {
+        let day = home.join("sessions/2026/11/16");
+        std::fs::create_dir_all(&day)?;
+        std::fs::write(
+            day.join(format!("rollout-2026-11-16T00-00-00-{session}.jsonl")),
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({"type":"session_meta","payload":{"id":session}}),
+                serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna"}}),
+            ),
+        )?;
+    }
+
+    let route_a = codex_resolved_route("gpt-6-luna", Some("account-a"));
+    let record_a = codex_route_record("gpt-6-luna", Some("account-a"));
+    write_native_session_location(&provider_state, &home_a, &route_a)?;
+    assert_eq!(
+        observe_codex_rollout(&provider_state, session, &record_a, true)?.model,
+        "gpt-6-luna"
+    );
+
+    // A later prepared fallback candidate owns the one selector. The sealed
+    // applied route then picks its root without reading another account's
+    // matching session ID or model.
+    let route_b = codex_resolved_route("gpt-6-luna", Some("account-b"));
+    let record_b = codex_route_record("gpt-6-luna", Some("account-b"));
+    write_native_session_location(&provider_state, &home_b, &route_b)?;
+    assert!(matches!(
+        observe_codex_rollout(&provider_state, session, &record_a, true),
+        Err(provenant_providers::ProviderError::IdentityMismatch)
+    ));
+    assert_eq!(
+        observe_codex_rollout(&provider_state, session, &record_b, true)?.model,
         "gpt-6-luna"
     );
     Ok(())
@@ -373,7 +440,7 @@ fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
         ),
     )?;
     let route = codex_resolved_route("gpt-6-luna", Some("selected-account-key"));
-    write_native_codex_selector(&provider_state, "candidate-0", &native_home, &route)?;
+    write_native_session_location(&provider_state, &native_home, &route)?;
 
     let prior: run::AttemptRecord = serde_json::from_value(serde_json::json!({
         "schema_version": 1,

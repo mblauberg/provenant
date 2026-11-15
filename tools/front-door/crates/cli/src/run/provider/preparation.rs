@@ -3927,7 +3927,7 @@ pub(super) fn prepare_candidates(
             provenant_providers::SessionStateLocation::Native { root }
                 if !sandbox.effective && root.is_absolute() =>
             {
-                Some(root.as_path())
+                Some(root.clone())
             }
             _ => {
                 reasons.push(skip(
@@ -3959,7 +3959,7 @@ pub(super) fn prepare_candidates(
                 );
                 continue;
             }
-            if let Some(root) = native_root
+            if let Some(root) = native_root.as_deref()
                 && let Err(error) = verify_native_continuation(prior, &route, root, state_root)
             {
                 let class = error.boundary_class();
@@ -4242,25 +4242,6 @@ pub(super) fn prepare_candidates(
             reasons.push(setup_skip(&label, format!("setup failed: {error}")));
             continue;
         }
-        if let Some(root) = native_root {
-            if route.adapter == "codex"
-                && adapter_spec.is_some_and(|spec| {
-                    spec.model_observation == provenant_records::ModelObservation::Rollout
-                })
-            {
-                if let Err(error) =
-                    write_native_codex_selector(&paths.provider_state, &scratch_name, root, &route)
-                {
-                    reasons.push(setup_skip(&label, error));
-                    continue;
-                }
-            } else if let Err(error) =
-                write_native_session_location(&paths.provider_state, root, &route)
-            {
-                reasons.push(setup_skip(&label, error));
-                continue;
-            }
-        }
         if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
             spec.login_observation == provenant_records::LoginObservation::ExecutableOnly
         }) && availability.iter().any(|record| {
@@ -4487,6 +4468,15 @@ pub(super) fn prepare_candidates(
             (false, _) => None,
         };
         apply_sandbox_mode(task, sandbox.clone(), &mut spec.env, &mut provider);
+        // Publish the route/root binding only when this candidate is ready to
+        // return as the applied launch. A refused fallback candidate must not
+        // leave terminal settlement observing a different native account.
+        if let Some(root) = native_root.as_deref()
+            && let Err(error) = write_native_session_location(&paths.provider_state, root, &route)
+        {
+            reasons.push(setup_skip(&label, error));
+            continue;
+        }
         return Ok(run::PreparedLaunch {
             limits,
             continuation_expectation,
