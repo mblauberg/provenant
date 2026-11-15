@@ -841,6 +841,10 @@ mod checkout_tests {
     // This module is also included by a harness-free integration target.
     use super::*;
 
+    fn create_private_state(path: &Path) {
+        provenant_os::fixture::private_state_dir(path).unwrap();
+    }
+
     #[test]
     fn checkout_transfers_remote_tracking_commit_ahead_of_local_branch() {
         let temp = tempfile::tempdir().unwrap();
@@ -895,7 +899,7 @@ mod checkout_tests {
             .unwrap();
         assert_ne!(pinned, local.trim());
         let state = temp.path().join("state");
-        fs::create_dir(&state).unwrap();
+        create_private_state(&state);
         let workspace = workspace_relative(&state, &project).unwrap().unwrap();
         let primary = verify_base(&state, &project, &workspace).unwrap();
         assert_eq!(primary.commit, pinned);
@@ -969,7 +973,7 @@ mod checkout_tests {
         .unwrap();
 
         let state = temp.path().join("state");
-        fs::create_dir(&state).unwrap();
+        create_private_state(&state);
         let workspace = PathBuf::new();
         let error = verify_base(&state, &project, &workspace)
             .err()
@@ -1030,7 +1034,7 @@ mod checkout_tests {
             .unwrap();
 
         let state = temp.path().join("state");
-        fs::create_dir(&state).unwrap();
+        create_private_state(&state);
         let result = refresh_identity_with_probe(&state, &project, |probe| {
             let pin = fs::read_to_string(probe.join("rust-toolchain.toml"))?;
             assert_eq!(pin, include_str!("../rust-toolchain.toml"));
