@@ -498,7 +498,7 @@ fn model_adapters_follow_declared_prompt_transport_without_exposing_tokens()
                 prepared
                     .env
                     .iter()
-                    .all(|(key, _)| key != &secret.descriptor_env)
+                    .all(|(key, _)| key.as_os_str() != secret.descriptor_env.as_str())
             );
         }
     }

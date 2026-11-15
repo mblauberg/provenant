@@ -1995,8 +1995,8 @@ mod cargo_setup_tests {
             .err()
             .ok_or("leaf symlink refusal missing")?;
         assert!(matches!(
-            failure,
-            RunError::OperationIo { path: Some(path), .. } if path == reflog
+            failure.downcast_ref::<RunError>(),
+            Some(RunError::OperationIo { path: Some(path), .. }) if path == &reflog
         ));
         assert_eq!(std::fs::read(&target)?, b"untouched");
 
@@ -2009,8 +2009,8 @@ mod cargo_setup_tests {
             .err()
             .ok_or("parent symlink refusal missing")?;
         assert!(matches!(
-            failure,
-            RunError::OperationIo { path: Some(path), .. } if path == parent
+            failure.downcast_ref::<RunError>(),
+            Some(RunError::OperationIo { path: Some(path), .. }) if path == parent
         ));
         assert_eq!(std::fs::read(&target)?, b"untouched");
         Ok(())
@@ -3283,7 +3283,7 @@ impl WriterLaunch {
             "read writer uncommitted changes",
             Some(self.worktree.path()),
         ))?;
-        Ok(uncommitted_reason(&paths).map(UncommittedWork::render))
+        Ok(uncommitted_reason(&paths).map(|work| work.render()))
     }
 }
 

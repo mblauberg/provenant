@@ -382,7 +382,7 @@ fn natural_exit_beats_pipe_drain_expiry(root: &Path, env: &[(OsString, OsString)
     worker
         .join()
         .map_err(|_| io::Error::other("drain worker panicked"))?;
-    let outcome = result?;
+    let outcome = result??;
     assert_eq!(outcome.termination, Termination::Exit(0));
     assert!(!outcome.timed_out);
     assert!(outcome.drain_truncated);

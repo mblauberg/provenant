@@ -20,7 +20,7 @@ fn write_grants_wire_bound_and_git_digest_are_preserved() -> TestResult {
         scope: PathScope::Subtree,
     };
     let max_grant_bytes = provenant_records::run::MAX_WRITE_GRANT_BYTES as usize;
-    let one_grant_bytes = provenant_records::CanonicalV1::bytes(std::slice::from_ref(&grant))?
+    let one_grant_bytes = provenant_records::CanonicalV1::bytes(&[&grant])?
         .as_bytes()
         .len();
     let grant_count = max_grant_bytes / one_grant_bytes.saturating_add(1) - 1;

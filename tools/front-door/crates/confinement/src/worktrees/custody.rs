@@ -377,18 +377,26 @@ fn dirty_paths_summary_bytes(paths: &[&[u8]]) -> DirtyPathsSummary {
     // List whole names only, within the count and byte budgets, so the
     // omission count is never cut off. The first name is always listed,
     // shortened only if it alone exceeds the budget.
+    // Reserve room for the widest omission suffix so the whole text, suffix
+    // included, stays within the byte budget.
+    let reserve = if unique.len() > 1 {
+        format!(" and {} more", unique.len()).len()
+    } else {
+        0
+    };
+    let budget = DIRTY_SUMMARY_BYTES.saturating_sub(reserve);
     let mut summary = String::new();
     let mut listed = 0;
     for name in unique.iter().take(DIRTY_PATHS_LISTED) {
         let separator = if listed == 0 { "" } else { ", " };
-        if listed > 0 && summary.len() + separator.len() + name.len() > DIRTY_SUMMARY_BYTES {
+        if listed > 0 && summary.len() + separator.len() + name.len() > budget {
             break;
         }
         summary.push_str(separator);
         summary.push_str(name);
         listed += 1;
     }
-    summary.truncate(summary.floor_char_boundary(DIRTY_SUMMARY_BYTES));
+    summary.truncate(summary.floor_char_boundary(budget));
     let more = unique.len() - listed;
     if more > 0 {
         summary.push_str(&format!(" and {more} more"));

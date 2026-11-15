@@ -2613,7 +2613,7 @@ pub(super) fn host_output_limit(class: HostOutputClass) -> usize {
         .expect("every host output class has one declared limit")
 }
 
-fn host_output_class(commit_log: bool, args: &[&str]) -> HostOutputClass {
+pub(super) fn host_output_class(commit_log: bool, args: &[&str]) -> HostOutputClass {
     if commit_log {
         HostOutputClass::CommitLog
     } else if args.contains(&"--show-origin") {

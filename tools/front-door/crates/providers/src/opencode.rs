@@ -1513,7 +1513,7 @@ mod tests {
                 .to_string_lossy(),
         )
         .unwrap();
-        let native = OPENCODE_NATIVE_PERMISSIONS;
+        let native = crate::launch::OPENCODE_NATIVE_PERMISSIONS;
         assert_eq!(
             config["permission"][native.default_key],
             native.default_value
@@ -1728,13 +1728,24 @@ mod tests {
                     .all(|grant| !path.starts_with(&grant.path))
             );
         }
+        let denied = [
+            home_text.clone(),
+            host_text.clone(),
+            home_library.clone(),
+            state_library.clone(),
+            scratch_library.clone(),
+            worktree_library.clone(),
+            credential_library.clone(),
+            executable.clone(),
+            directory.clone(),
+        ];
         let dependency_fixtures = [
             DependencyFixture {
-                path: first,
+                path: first.clone(),
                 coverage: Coverage::Library,
             },
             DependencyFixture {
-                path: second,
+                path: second.clone(),
                 coverage: Coverage::Library,
             },
             DependencyFixture {
@@ -1742,7 +1753,7 @@ mod tests {
                 coverage: Coverage::Library,
             },
             DependencyFixture {
-                path: hidden,
+                path: hidden.clone(),
                 coverage: Coverage::Library,
             },
             DependencyFixture {

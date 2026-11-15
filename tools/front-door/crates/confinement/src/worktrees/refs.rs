@@ -474,7 +474,7 @@ impl RefLedger {
             let Ok(bytes) = read_bounded(&self.directory, &name, MAX_STATE_RECORD) else {
                 continue;
             };
-            let Ok(record) = provenant_records::decode::<RefRecord>(
+            let Ok(record) = provenant_records::decode::<RefRecord, _>(
                 bytes.as_slice(),
                 provenant_records::Limits {
                     max_bytes: MAX_STATE_RECORD,

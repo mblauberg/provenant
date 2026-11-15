@@ -119,6 +119,7 @@ fn bisect(
         let mid = (low + high) / 2;
         let step = &steps[mid - 1];
         let prefix = Candidate {
+            extra: Default::default(),
             base: receipt.base.clone(),
             steps: steps[..mid].to_vec(),
             commit: step.commit.clone(),

@@ -648,6 +648,7 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
     let private = linked.repo().private_git_dir().to_owned();
     let common = linked.repo().common_git_dir().to_owned();
     assert_ne!(private, common);
+    let grants = WorktreeWriteGrants::derive(&linked, &selected_ref);
     assert_eq!(grants.worktree.path, linked.path());
     assert_eq!(grants.private_git_dir.path, private);
     assert_eq!(grants.common_git_dir.path, common);

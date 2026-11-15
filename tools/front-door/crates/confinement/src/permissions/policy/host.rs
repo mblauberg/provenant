@@ -1009,6 +1009,7 @@ mod tests {
             &root.join("scratch"),
             &mut summary,
         )?;
+        let mut warnings = Vec::new();
         summary.report(&mut warnings);
         assert!(
             warnings.is_empty(),

@@ -175,7 +175,7 @@ fn prepare(
     argv.extend(
         crate::launch::CURSOR_NATIVE_ARGUMENTS
             .iter()
-            .map(OsString::from),
+            .map(std::ffi::OsString::from),
     );
     if session == Session::Resume {
         let continuation = input.continuation.ok_or_else(|| {

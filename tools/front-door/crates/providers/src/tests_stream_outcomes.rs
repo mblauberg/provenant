@@ -1383,7 +1383,7 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
             "{adapter} {access:?}"
         );
         assert!(
-            spec.tool_exec_roots.contains(&crate::launch::subtree(repo)),
+            spec.tool_exec_roots.contains(&crate::launch::subtree(Path::new("/fixture/repo"))),
             "{adapter} {access:?}: repository execution grant missing"
         );
     }

@@ -340,7 +340,7 @@ fn delivery_restart_recovers_pending_retryable_and_uncertain_receipts()
                     .root
                     .join("remote.git/refs/heads/published/lane")
                     .exists(),
-                "{mode}: nothing is delivered while the lock is busy"
+                "{mode:?}: nothing is delivered while the lock is busy"
             );
             drop(held);
         }

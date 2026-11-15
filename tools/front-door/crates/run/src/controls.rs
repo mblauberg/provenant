@@ -310,6 +310,8 @@ const ORPHAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
 mod reboot_tests {
     use super::*;
 
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     #[test]
     fn missing_terminal_attempt_directory_does_not_abort_reconcile()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -963,9 +965,9 @@ mod reboot_tests {
         )?;
         store.claim(id, &clock, &call)?.ok_or("not admitted")?;
         let path = context.state_root.as_path().join(format!("attempts/{id}"));
-        let evidence = path.join(id.to_string());
-        std::fs::create_dir_all(&evidence)?;
-        let reservation = evidence.join("reservation.json");
+        let evidence_dir = path.join(id.to_string());
+        std::fs::create_dir_all(&evidence_dir)?;
+        let reservation = evidence_dir.join("reservation.json");
         let cause = match evidence {
             RebootEvidence::CorruptReservation => {
                 std::fs::write(&reservation, b"corrupt reservation")?;
@@ -1186,6 +1188,7 @@ mod lineage_tests {
                 let attempt = store.attempt_dir(prior, false)?;
                 let snapshot = attempt.current_path()?.join("writer-owned.json");
                 let unobserved = crate::db::bytes(&crate::writer::WriterOwnership {
+                    extra: Default::default(),
                     schema_version: 1,
                     lane_owned: true,
                     owner: None,

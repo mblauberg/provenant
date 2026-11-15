@@ -1430,7 +1430,7 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
     }
     assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
     assert_eq!(std::fs::read_to_string(history.join("session"))?, "history");
-    if !removed {
+    if worktree_state != WorktreeState::Removed {
         assert_eq!(
             std::fs::read_to_string(worktree.join("unfinished.rs"))?,
             "keep my work"

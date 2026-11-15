@@ -562,7 +562,7 @@ mod usage_limit_tests {
     fn usage_limits_hold_the_declared_scope_until_the_named_reset() {
         let now = at("2026-11-10T12:00:00+00:00[UTC]");
         enum Expected {
-            Limited(Option<&'static str>, Option<i64>),
+            Limited(Option<&'static str>, Option<u64>),
             NoLimit,
         }
         let cases = [

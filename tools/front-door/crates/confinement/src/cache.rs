@@ -16,8 +16,10 @@ use thiserror::Error;
 
 pub(crate) const CARGO_CACHE_OWNER: &str = ".provenant-worktree-owner";
 pub(crate) const CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v2\n";
-pub(crate) const CARGO_CACHE_OWNER_VERSION: &[u8] =
-    &CARGO_CACHE_OWNER_PREFIX[..CARGO_CACHE_OWNER_PREFIX.len() - 1];
+pub(crate) const CARGO_CACHE_OWNER_VERSION: &[u8] = match CARGO_CACHE_OWNER_PREFIX.split_last() {
+    Some((_, version)) => version,
+    None => CARGO_CACHE_OWNER_PREFIX,
+};
 const MAX_CACHE_SWEEP_DEPTH: usize = 32;
 const MAX_CACHE_DIRECTORY_ENTRIES: usize = 100_000;
 

@@ -1746,7 +1746,8 @@ mod tests {
         let attempt = &seeded.4;
         let tail_bytes = usize::try_from(LOG_TAIL)?;
         let mut capture = vec![1; tail_bytes * 3];
-        capture[capture.len() - tail_bytes..].fill(2);
+        let tail_start = capture.len() - tail_bytes;
+        capture[tail_start..].fill(2);
         fs::write(attempt.join("stdout.log"), &capture)?;
         fs::write(attempt.join("stderr.log"), "small capture")?;
         fs::write(attempt.join("result.md"), "result evidence")?;

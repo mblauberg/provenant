@@ -1233,7 +1233,7 @@ pub(crate) fn retention_event(
         &resolved.roots,
         &resolved.home,
         &resolved.project,
-        Duration::ZERO,
+        MUTATION_TIMEOUT,
         &workers,
         &facts,
         |context, cancel| {
@@ -2040,7 +2040,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 roots,
                 home,
                 &project.path,
-                Duration::ZERO,
+                MUTATION_TIMEOUT,
                 workers,
                 facts,
                 |context, _| {

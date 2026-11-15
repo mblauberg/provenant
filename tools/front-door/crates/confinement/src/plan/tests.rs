@@ -54,6 +54,7 @@ fn required_credential_grant_refusal_names_the_declared_source() {
         .expect("Gemini home is declared");
     let refused = declaration.path.join("skills");
     let declaration_source = declaration.source.clone();
+    let declaration_root = declaration.path.clone();
     fs::create_dir_all(&refused).unwrap();
     let mut input = request(&root);
     input.agy_state = None;
@@ -71,7 +72,7 @@ fn required_credential_grant_refusal_names_the_declared_source() {
             path,
             root,
             declaration_source: source,
-        }) if path == refused && root == declaration.path && source == declaration_source
+        }) if path == refused && root == declaration_root && source == declaration_source
     ));
 }
 

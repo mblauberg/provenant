@@ -70,7 +70,7 @@ pub fn latest(state: &Path, provider: &str) -> Option<UpdateRecord> {
 fn latest_stored(state: &Path, provider: &str) -> Option<StoredUpdateRecord> {
     let dir = Directory::open_anchor(&state.join("provider-updates")).ok()?;
     let read = |name: &std::ffi::OsStr| -> Option<StoredUpdateRecord> {
-        decode_stored(&dir.read_stable(name, STORED_RECORD_BYTES as usize).ok()?)
+        decode_stored(&dir.read_stable(name, STORED_RECORD_BYTES).ok()?)
     };
     let result = read(&record_name(provider));
     let attempt = read(&attempt_name(provider));
@@ -182,7 +182,7 @@ fn stored_worker(state: &Path) -> Option<StoredWorkerRecord> {
     decode_stored(
         &dir.read_stable(
             std::ffi::OsStr::new(WORKER_RECORD),
-            STORED_RECORD_BYTES as usize,
+            STORED_RECORD_BYTES,
         )
         .ok()?,
     )

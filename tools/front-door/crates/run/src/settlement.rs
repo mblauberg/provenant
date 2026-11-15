@@ -1533,7 +1533,7 @@ mod tests {
                 [(
                     _,
                     Reconciled::Uncertain {
-                        reason: UncertainReason::ReconcileFailed { .. }
+                        reason: crate::UncertainReason::ReconcileFailed { .. }
                     }
                 )]
             ));

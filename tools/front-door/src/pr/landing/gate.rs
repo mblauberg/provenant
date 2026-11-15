@@ -541,8 +541,11 @@ mod tests {
             (None, None),
         ];
         for (observed, expected) in cases {
-            let mut evidence =
-                LandingFixture::evidence("c", observed.unwrap_or(GateResult::Passed), None);
+            let mut evidence = LandingFixture::evidence(
+                "c",
+                observed.clone().unwrap_or(GateResult::Passed),
+                None,
+            );
             if observed.is_none() {
                 evidence.checks.clear();
             }

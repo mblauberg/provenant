@@ -114,7 +114,7 @@ impl LandingFixture {
             checks: vec![CheckEvidence {
                 name: "ci-status".into(),
                 issuer: issuer.map(str::to_owned),
-                result,
+                result: result.clone(),
             }],
             issuer: None,
             coverage: Vec::new(),

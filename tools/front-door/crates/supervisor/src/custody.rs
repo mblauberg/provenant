@@ -112,16 +112,14 @@ pub enum AdmissionError {
     )]
     Clock,
     #[error(
-        "invalid host build settings: check {}",
-        .setting_names().join(", ")
+        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds, cargo_build_jobs, cargo_debug"
     )]
     BuildSettings,
     #[error("guardian process identity unavailable; retry when process observation is available")]
     GuardianIdentity,
     /// Numeric host observations are safe to publish as the lane's refusal.
     #[error(
-        "insufficient disk space: {free} bytes available, {setting} {floor} bytes (source: {source_label}); run `provenant gc --apply`",
-        setting = .setting_names()[0],
+        "insufficient disk space: {free} bytes available, gc.critical_free {floor} bytes (source: {source_label}); run `provenant gc --apply`",
         source_label = .origin.description()
     )]
     Disk {
@@ -129,7 +127,7 @@ pub enum AdmissionError {
         floor: u64,
         origin: provenant_records::diagnostic::SettingSource,
     },
-    #[error("memory pressure is {level:?}; {setting} is {threshold_label} (source: {source_label}); wait for host memory pressure to fall", setting = .setting_names()[0], threshold_label = .threshold.name(), source_label = .origin.description())]
+    #[error("memory pressure is {level:?}; domains.fabric.lanes.memory_pressure_threshold is {threshold_label} (source: {source_label}); wait for host memory pressure to fall", threshold_label = .threshold.name(), source_label = .origin.description())]
     MemoryPressure {
         level: provenant_records::diagnostic::PressureLevel,
         threshold: provenant_records::diagnostic::PressureThreshold,
@@ -2259,6 +2257,7 @@ impl Recovery {
                 git_inode,
                 branch: recorded,
                 base,
+                ..
             } if root.device == *worktree_device
                 && root.inode == *worktree_inode
                 && git.device == *git_device

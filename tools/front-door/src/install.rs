@@ -777,9 +777,13 @@ fn read_install_receipt(
         provenant_records::Limits::CONFIG.max_bytes,
     ) {
         Ok(bytes) => {
-            provenant_records::decode_v1(bytes.as_slice(), provenant_records::Limits::CONFIG)
-                .map(Some)
-                .map_err(InstallError::ReceiptDecode)
+            let receipt: provenant_records::InstallReceipt =
+                provenant_records::decode(bytes.as_slice(), provenant_records::Limits::CONFIG)
+                    .map_err(InstallError::ReceiptDecode)?;
+            if receipt.schema_version != provenant_records::INSTALL_RECEIPT_SCHEMA_VERSION {
+                return Err(InstallError::Manifest("unsupported receipt schema version"));
+            }
+            Ok(Some(receipt))
         }
         Err(error) if error.is_not_found() => Ok(None),
         Err(error) => Err(InstallError::Fs(error)),

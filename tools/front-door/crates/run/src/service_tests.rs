@@ -81,6 +81,7 @@ fn peer_wait_views_keep_terminal_and_show_custody_until_released() -> TestResult
         &attempt,
         "merge-restored.json",
         &crate::db::bytes(&crate::writer::MergeRestored {
+            extra: Default::default(),
             schema_version: 1,
             scope: RunStore::scope(&terminal),
         })?,
@@ -686,10 +687,12 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
         let second = Service::new(&store)
             .dispatch(replay, temp.path(), &call)
             .unwrap_err();
-        let code = |error: &RunError| match error {
-            RunError::RecordedRefusal(diagnostic) => Some(diagnostic.code.as_str()),
-            _ => None,
-        };
+        fn code(error: &RunError) -> Option<&str> {
+            match error {
+                RunError::RecordedRefusal(diagnostic) => Some(diagnostic.code.as_str()),
+                _ => None,
+            }
+        }
         assert_eq!(code(&first), code(&second));
         assert_eq!(code(&second), Some("UNSUPPORTED"));
         assert!(matches!(

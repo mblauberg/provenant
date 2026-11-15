@@ -575,7 +575,7 @@ fn refresh_with_clock_and_lock_observer(
             LockMode::Exclusive,
             wait,
             &CancelToken::new(),
-            &clock,
+            clock,
         )
         .map_err(|_| ProviderError::CredentialUnavailable)?;
     match read() {

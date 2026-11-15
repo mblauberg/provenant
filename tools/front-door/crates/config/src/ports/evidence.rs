@@ -283,6 +283,9 @@ pub fn port_command_receipts(
                 continue;
             }
         };
+        if owner_entry.as_os_str() == OsStr::new(RECEIPT_LOCK) {
+            continue;
+        }
         let owner = match owner_entry.to_str() {
             Some(owner) if known.contains(&owner) => owner,
             _ => {

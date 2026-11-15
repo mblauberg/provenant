@@ -115,6 +115,7 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
     };
 
     store.finish(id, &dir, &observed, &fake, &call)?;
+    let record = store.record(id, &call)?;
     assert!(matches!(
         record.state,
         AttemptState::Terminal {
