@@ -1742,6 +1742,11 @@ mod tests {
         Ok(())
     }
 
+    /// Settlement seals its own result; the fixture adds exit evidence after it.
+    fn add_log_evidence(attempt: &std::path::Path) -> std::io::Result<()> {
+        fs::write(attempt.join("process-exit.json"), "exit evidence")
+    }
+
     fn logs_fixture() -> std::result::Result<(Seeded, Vec<u8>), Box<dyn std::error::Error>> {
         let seeded = seeded()?;
         let attempt = &seeded.4;
@@ -1751,17 +1756,17 @@ mod tests {
         capture[tail_start..].fill(2);
         fs::write(attempt.join("stdout.log"), &capture)?;
         fs::write(attempt.join("stderr.log"), "small capture")?;
-        fs::write(attempt.join("result.md"), "result evidence")?;
-        fs::write(attempt.join("process-exit.json"), "exit evidence")?;
         Ok((seeded, capture))
     }
 
     #[test]
     fn gc_logs_follow_declared_age_and_preview_preserves_source() -> TestResult {
-        let ((_, context, store, input, attempt), capture) = logs_fixture()?;
+        let ((_temp, context, store, input, attempt), capture) = logs_fixture()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         withdraw(&store, &input, &call)?;
+        add_log_evidence(&attempt)?;
+        let result = fs::read(attempt.join("result.md"))?;
         let logs_age = logs_retention_age();
         assert!(
             sweep(&store, &context, 7, logs_age - 1, false, &call)?
@@ -1789,10 +1794,7 @@ mod tests {
             fs::read(attempt.join("stdout.log.tail"))?,
             vec![2; LOG_TAIL as usize]
         );
-        assert_eq!(
-            fs::read_to_string(attempt.join("result.md"))?,
-            "result evidence"
-        );
+        assert_eq!(fs::read(attempt.join("result.md"))?, result);
         assert_eq!(
             fs::read_to_string(attempt.join("process-exit.json"))?,
             "exit evidence"
@@ -1802,10 +1804,11 @@ mod tests {
 
     #[test]
     fn gc_logs_wait_for_custody_release_and_keep_other_capture() -> TestResult {
-        let ((_, context, store, input, attempt), _) = logs_fixture()?;
+        let ((_temp, context, store, input, attempt), _) = logs_fixture()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         withdraw(&store, &input, &call)?;
+        let result = fs::read(attempt.join("result.md"))?;
         let directory = Directory::open_anchor(&attempt)?;
         let lease = directory.lock(
             OsStr::new("writer.lock"),
@@ -1828,10 +1831,7 @@ mod tests {
             fs::read_to_string(attempt.join("stderr.log"))?,
             "small capture"
         );
-        assert_eq!(
-            fs::read_to_string(attempt.join("result.md"))?,
-            "result evidence"
-        );
+        assert_eq!(fs::read(attempt.join("result.md"))?, result);
         Ok(())
     }
 
@@ -2308,10 +2308,14 @@ mod tests {
         sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
         assert!(!attempt.join("tmp").exists());
         assert!(!original_store.temporary_retained(id, &call)?);
-        // The public record API restores receipts projected from the journal.
+        // The public record API projects receipts from the journal; GC leaves
+        // every other field of the terminal record as settlement wrote it.
+        let mut restored = original_store.record(id, &call)?;
+        assert!(restored.settlement_receipts.is_some());
+        restored.settlement_receipts = None;
         let mut stored = terminal;
         stored.settlement_receipts = None;
-        assert_eq!(original_store.record(id, &call)?, stored);
+        assert_eq!(restored, stored);
         Ok(())
     }
 
@@ -2334,7 +2338,7 @@ mod tests {
         assert!(candidate.join("auth.json").exists());
         assert!(!attempt.join(EXPIRED).exists());
         assert!(!attempt.join("provider-history").exists());
-        let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(!candidate.join("auth.json").exists());
         assert!(!candidate.join("claude-config/.credentials.json").exists());
@@ -2664,7 +2668,17 @@ mod tests {
         fs::DirBuilder::new().mode(0o700).create(&forged)?;
         fs::write(forged.join("keep"), "keep")?;
         let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
-        assert!(report.errors.iter().any(|issue| issue.path == forged));
+        // The refusal is reported against the provider state it was found in,
+        // naming the forged entry.
+        let forged_name = forged.file_name().and_then(OsStr::to_str).ok_or("name")?;
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|issue| issue.reason.contains(forged_name)),
+            "{:?}",
+            report.errors
+        );
         assert!(forged.join("keep").exists());
         Ok(())
     }
