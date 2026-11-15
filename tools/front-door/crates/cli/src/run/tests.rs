@@ -218,6 +218,7 @@ pub(super) fn clean_exit() -> ExitObservation {
     }
 }
 
+// Spec: docs/specs/fabric.md#session-ready-steering
 #[test]
 fn confirmed_intentional_stop_trims_only_the_final_incomplete_record()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -248,7 +249,11 @@ fn confirmed_intentional_stop_trims_only_the_final_incomplete_record()
         Some(run::TerminalCause::IdentityMismatch)
     );
 
-    let wrong_model = br#"{"event":"init","conversation_id":"s1","init":{"model":"other-model"}}"#;
+    let wrong_model = concat!(
+        r#"{"event":"init","conversation_id":"s1","init":{"model":"other-model"}}"#,
+        "\n"
+    )
+    .as_bytes();
     let mut conflict_exit = exit;
     conflict_exit.provider_identity_conflict = true;
     conflict_exit.provider_identity_eof_fragment = false;
