@@ -82,27 +82,17 @@ fn retained_import_refusal_carries_custody_and_recovery_targets() {
     .expect_err("retained import must refuse");
     assert_eq!(failure.kind.code(), "WRITER_IMPORT_RETAINED");
     let diagnostic = failure.projection.expect("diagnostic");
-    let custody = diagnostic
-        .extra
-        .get("custody")
-        .expect("typed custody fields");
+    let custody = diagnostic.custody.as_ref().expect("typed custody fields");
+    assert_eq!(custody.scope, fence.scope);
     assert_eq!(
-        custody["scope"],
-        serde_json::to_value(fence.scope).expect("scope")
+        custody.fence.as_deref(),
+        Some(fence.fence.to_string_lossy().as_ref())
     );
-    assert_eq!(custody["fence"], fence.fence.to_string_lossy().as_ref());
-    assert_eq!(
-        custody["lane"],
-        serde_json::to_value(&fence.lane).expect("lane")
-    );
-    assert_eq!(custody["reconcile"], fence.reconcile());
-    assert_eq!(custody["abandon"], fence.abandon());
-    assert!(
-        diagnostic
-            .next
-            .iter()
-            .any(|next| { next.contains(&fence.reconcile()) && next.contains(&fence.abandon()) })
-    );
+    assert_eq!(custody.lane, fence.lane);
+    assert_eq!(custody.reconcile, fence.reconcile());
+    assert_eq!(custody.abandon, fence.abandon());
+    let next = diagnostic.next.as_deref().expect("recovery targets");
+    assert!(next.contains(&fence.reconcile()) && next.contains(&fence.abandon()));
 }
 
 #[test]
