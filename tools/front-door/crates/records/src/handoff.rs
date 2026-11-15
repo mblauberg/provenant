@@ -514,7 +514,7 @@ impl HandoffCapture {
         }
     }
 
-    pub fn finish(mut self) -> HandoffResult {
+    pub fn finish(self) -> HandoffResult {
         self.finish_report().handoff
     }
 
@@ -676,22 +676,22 @@ mod tests {
         let stopped = Handoff::from_result(STOP).unwrap();
         let result = format!("{STOP}\n\nVERDICT: PASS\n");
         let parsed = Handoff::from_result_report(&result);
-        assert_eq!(parsed.handoff, stopped);
+        assert_eq!(parsed.handoff, Ok(stopped.clone()));
         assert!(parsed.trailing_verdict_tolerated);
-        assert_eq!(Handoff::from_result(&result), stopped);
+        assert_eq!(Handoff::from_result(&result), Ok(stopped.clone()));
         for size in [1, 7, 8192] {
             let mut capture = HandoffCapture::default();
             for chunk in result.as_bytes().chunks(size) {
                 capture.push(chunk);
             }
             let streamed = capture.finish_report();
-            assert_eq!(streamed.handoff, stopped);
+            assert_eq!(streamed.handoff, Ok(stopped.clone()));
             assert!(streamed.trailing_verdict_tolerated);
         }
 
         let (multi_turn, ends) = turns(&[(STOP, false), ("VERDICT: PASS", false)]);
         let parsed = Handoff::from_turns_report(&multi_turn, &ends);
-        assert_eq!(parsed.handoff, stopped);
+        assert_eq!(parsed.handoff, Ok(stopped.clone()));
         assert!(parsed.trailing_verdict_tolerated);
 
         let (extra_turn, ends) = turns(&[
