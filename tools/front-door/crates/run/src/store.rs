@@ -1944,10 +1944,12 @@ impl RunStore {
         let disposition = self.steer_successor_disposition(
             child.attempt_id,
             child,
-            child.session.as_deref(),
-            sealed_route_digest.as_deref(),
-            identity_conflict,
-            evidence_incomplete,
+            crate::controls::SteerSuccessorProof {
+                session: child.session.as_deref(),
+                route_digest: sealed_route_digest.as_deref(),
+                identity_conflict,
+                evidence_incomplete,
+            },
             call,
         )?;
         if disposition

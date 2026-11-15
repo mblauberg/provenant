@@ -1922,7 +1922,7 @@ fn host_graph_output(
         .nodes
         .iter()
         .find(|node| Some(node.id.as_str()) == resolved.node.as_deref())
-        .ok_or_else(|| FacadeError::StateCorrupt)?;
+        .ok_or(FacadeError::StateCorrupt)?;
     if !progress.children.is_empty() {
         return composite_graph_output(command, &resolved.graph, progress);
     }
@@ -2019,7 +2019,7 @@ fn composite_graph_output(
                 String::from_utf8_lossy(selected_bytes).into_owned(),
             ),
         };
-    let state = serde_json::to_value(&progress.state)?
+    let state = serde_json::to_value(progress.state)?
         .as_str()
         .unwrap_or("unknown")
         .to_owned();

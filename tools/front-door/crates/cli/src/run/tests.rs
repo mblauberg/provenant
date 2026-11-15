@@ -281,8 +281,10 @@ fn resumed_provider_requires_matching_observed_session() -> Result<(), Box<dyn s
             &[],
             &clean_exit(),
             Path::new("/nonexistent"),
-            false,
-            Some("retained-session"),
+            DecodeOptions {
+                host_settlement: false,
+                expected_session: Some("retained-session"),
+            },
         )
     };
     let matching = concat!(

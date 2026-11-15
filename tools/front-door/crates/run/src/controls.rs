@@ -53,6 +53,13 @@ fn provider_session_ready_row(
     })
 }
 
+pub(crate) struct SteerSuccessorProof<'a> {
+    pub session: Option<&'a str>,
+    pub route_digest: Option<&'a str>,
+    pub identity_conflict: bool,
+    pub evidence_incomplete: bool,
+}
+
 #[derive(PartialEq, Eq)]
 struct SteerContinuationOutcome {
     state: String,
@@ -2568,10 +2575,12 @@ impl RunStore {
         let disposition = self.steer_successor_disposition(
             successor,
             &child,
-            ready.session.as_deref(),
-            Some(&ready.route_digest),
-            identity_conflict,
-            false,
+            SteerSuccessorProof {
+                session: ready.session.as_deref(),
+                route_digest: Some(&ready.route_digest),
+                identity_conflict,
+                evidence_incomplete: false,
+            },
             call,
         )?;
         if let Some(disposition) = disposition {
@@ -2584,12 +2593,15 @@ impl RunStore {
         &self,
         successor: AttemptId,
         child: &AttemptRecord,
-        session: Option<&str>,
-        route_digest: Option<&str>,
-        identity_conflict: bool,
-        evidence_incomplete: bool,
+        proof: SteerSuccessorProof<'_>,
         call: &Request<'_>,
     ) -> Result<Option<SteerContinuationDisposition>> {
+        let SteerSuccessorProof {
+            session,
+            route_digest,
+            identity_conflict,
+            evidence_incomplete,
+        } = proof;
         let Some(parent_id) = self.steer_parent_for_successor(successor, call)? else {
             return Ok(None);
         };
@@ -2641,12 +2653,8 @@ impl RunStore {
                 || parent_route_digest.as_deref() != Some(expected_route.as_str())
                 || child_route_digest.as_deref() != Some(expected_route.as_str())
                 || route_digest != Some(expected_route.as_str())
+                || session.is_some_and(|session| session != expected_session)
             {
-                (
-                    "not_continued",
-                    Some(provenant_records::run::SteeringCause::SessionMismatch),
-                )
-            } else if session.is_some_and(|session| session != expected_session) {
                 (
                     "not_continued",
                     Some(provenant_records::run::SteeringCause::SessionMismatch),
