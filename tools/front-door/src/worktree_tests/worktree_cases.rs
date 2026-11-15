@@ -528,6 +528,7 @@ pub(super) fn remove_resolves_directory_names_and_remote_integration_refs() -> R
     rig.assert_v1_root_untouched()
 }
 
+// Spec: docs/specs/supervisor.md#one-writer-removal-never-forces
 pub(super) fn remove_by_name_follows_the_branch_merge_state() -> Result {
     let rig = repository()?;
     let merged = branch_commit(&rig, "merged")?;
@@ -537,10 +538,7 @@ pub(super) fn remove_by_name_follows_the_branch_merge_state() -> Result {
     let dirty_head = git(&rig, &["rev-parse", "dirty"])?;
     fs::write(dirty.join("precious"), "uncommitted work")?;
 
-    let refused = command(
-        &rig,
-        &["worktree", "remove", "dirty", "--discard", "--json"],
-    )?;
+    let refused = command(&rig, &["worktree", "remove", "dirty", "--json"])?;
     assert_eq!(code(&refused), 1);
     assert_eq!(json(&refused)?["status"], "refused");
     assert!(has_branch(&rig, "dirty")?);
@@ -565,13 +563,23 @@ pub(super) fn remove_by_name_follows_the_branch_merge_state() -> Result {
     assert!(!unmerged.exists());
     assert!(has_branch(&rig, "unmerged")?);
 
-    fs::remove_file(dirty.join("precious"))?;
     let discarded = ok(
         &rig,
         &["worktree", "remove", "dirty", "--discard", "--json"],
     )?;
     assert_eq!(discarded["data"]["discarded"][0]["branch"], "dirty");
     assert_eq!(discarded["data"]["discarded"][0]["head"], dirty_head);
+    let archive = discarded["data"]["archives"]
+        .as_array()
+        .and_then(|archives| archives.iter().find(|archive| archive["tip"] == dirty_head))
+        .and_then(|archive| archive["path"].as_str())
+        .ok_or("discard must preserve the dirty work in an archive")?;
+    let untracked = fs::read(Path::new(archive).join("untracked.tar"))?;
+    assert!(
+        untracked
+            .windows(b"uncommitted work".len())
+            .any(|bytes| bytes == b"uncommitted work")
+    );
     assert!(!dirty.exists());
     assert!(!has_branch(&rig, "dirty")?);
     rig.assert_v1_root_untouched()

@@ -452,6 +452,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    // Spec: docs/specs/state.md#strict-bounded-records
     fn stored_shapes_preserve_newer_fields_through_the_bounded_decoder()
     -> Result<(), Box<dyn std::error::Error>> {
         round_trip_with_future_field(&receipt("c1", false))?;
@@ -544,24 +545,10 @@ pub(crate) mod tests {
             &mut payload["candidate"]["steps"][0]["pr"]["approval_evidence"][0],
             "future-approval-field",
         );
-        add_future_field(
-            &mut payload["gate_definition"],
-            "future-gate-definition-field",
-        );
+        // Closed gate and port declarations discard unknown fields; only the
+        // records with explicit extension maps promise to preserve them.
         add_future_field(&mut payload["gate_evidence"], "future-evidence-field");
-        add_future_field(
-            &mut payload["gate_evidence"]["checks"][0],
-            "future-check-evidence-field",
-        );
         add_future_field(&mut payload["policy"], "future-policy-field");
-        add_future_field(
-            &mut payload["policy"]["publication_port"],
-            "future-publication-port-field",
-        );
-        add_future_field(
-            &mut payload["policy"]["publication_port"]["backend"],
-            "future-publication-backend-field",
-        );
         let policy_fields = payload["policy"]["fields"]
             .as_object_mut()
             .expect("policy fields are a map");

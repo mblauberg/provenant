@@ -1357,9 +1357,9 @@ fn remote_default(
 /// The landing target GC fetched from the repository's own remote, as
 /// `refs/remotes/<remote>/<branch>` and its tip.
 pub(crate) fn fetched_target(fetched: &(String, GitOid)) -> Option<LandingTarget> {
-    fetched.0.strip_prefix("refs/remotes/")?.split_once('/')?;
+    let tracking = fetched.0.strip_prefix("refs/remotes/")?;
     Some(LandingTarget {
-        reference: Some(GitRefName::new(&fetched.0).ok()?),
+        reference: Some(GitRefName::remote_tracking(tracking).ok()?),
         tip: fetched.1,
     })
 }
@@ -2297,7 +2297,7 @@ mod tests {
                 .find(|outcome| outcome.artefact == Artefact::RemoteBranch)
                 .unwrap();
             assert_eq!(outcome.outcome, ArtefactState::Retained);
-            assert_eq!(outcome.reason.as_deref(), Some("not_subsumed"));
+            assert_eq!(outcome.head, Some(fixture.unlanded));
             assert_eq!(
                 remote_tip(
                     context,
@@ -2360,14 +2360,26 @@ mod tests {
     }
 
     #[test]
+    // Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
     fn fetched_target_names_the_remote_default_branch() {
         let tip = GitOid::parse(&"cd".repeat(20)).unwrap();
-        let target = fetched_target(&("refs/remotes/upstream/main".into(), tip)).unwrap();
-        assert_eq!(
-            target.reference.as_ref().map(|r| r.as_str()),
-            Some("refs/remotes/upstream/main")
-        );
-        assert_eq!(target.tip, tip);
-        assert!(fetched_target(&("refs/heads/main".into(), tip)).is_none());
+        for reference in [
+            "refs/remotes/upstream/main",
+            "refs/remotes/origin/release/2",
+        ] {
+            let target = fetched_target(&(reference.into(), tip)).unwrap();
+            assert_eq!(
+                target.reference.as_ref().map(|r| r.as_str()),
+                Some(reference)
+            );
+            assert_eq!(target.tip, tip);
+        }
+        for reference in [
+            "refs/heads/main",
+            "refs/remotes/origin",
+            "refs/remotes/origin/../main",
+        ] {
+            assert!(fetched_target(&(reference.into(), tip)).is_none());
+        }
     }
 }

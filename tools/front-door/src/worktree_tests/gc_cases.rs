@@ -315,14 +315,9 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
     // is skipped, and the next oldest goes until the cap is met.
     let preview = ok(&rig, &["gc", "--dry-run", "--json"])?;
     let dirs = &preview["data"]["build_dirs"];
-    // Preview deliberately avoids surveying the Cargo profile trees.
-    assert!(names(&dirs["removed"]).is_empty(), "{dirs}");
-    assert!(
-        preview["data"]["notice"]
-            .as_str()
-            .ok_or("preview notice")?
-            .contains("build-profile surveys deferred")
-    );
+    // Preview surveys the same candidates without removing them.
+    assert_eq!(names(&dirs["removed"]), ["debug", "fast"], "{dirs}");
+    assert_eq!(names(&dirs["busy"]), ["release"], "{dirs}");
     assert!(stale.join("deps/payload").is_file() && fresh.is_dir());
     let applied = ok(&rig, &["gc", "--apply", "--json"])?;
     let dirs = &applied["data"]["build_dirs"];
@@ -777,12 +772,6 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
             .ok_or("refs")?
             .is_empty()
     );
-    assert!(
-        dry["data"]["notice"]
-            .as_str()
-            .ok_or("preview notice")?
-            .contains("upstream refresh")
-    );
     // Alert failure must not block reclamation, including on a full disk.
     fs::write(
         rig.state.join("config.toml"),
@@ -942,8 +931,13 @@ pub(super) fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_a
     );
     fs::write(path.join("dirty"), "keep")?;
     ok(&rig, &["gc", "--apply", "--json"])?;
-    assert!(path.join("old/target").is_dir());
+    assert_eq!(fs::read(path.join("dirty"))?, b"keep");
+    assert!(path.is_dir());
+    assert!(!path.join("old/target").exists());
     fs::remove_file(path.join("dirty"))?;
+    fs::create_dir_all(path.join("old/target"))?;
+    fs::write(path.join("old/target/artifact.lock"), "regenerate")?;
+    age_gc_output(&path.join("old/target"))?;
     // Unreadable sealed lane state protects the worktree.
     let request = rig
         .state

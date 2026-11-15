@@ -836,13 +836,19 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
             .open(dir.join("gh-calls"))?,
         "{call}"
     )?;
-    let normalised = call
-        .replace("api --include ", "api ")
-        .replace(" -H X-GitHub-Api-Version:2026-03-10", "")
-        .replace(
-            "api -H Accept:application/vnd.github+json -H X-GitHub-Api-Version:2022-11-28 ",
-            "api ",
-        );
+    // Route on the operation, independently of HTTP transport metadata.
+    let mut operation = Vec::new();
+    let mut arguments = args.iter();
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--include" => {}
+            "-H" => {
+                arguments.next().ok_or("missing HTTP header")?;
+            }
+            _ => operation.push(argument.as_str()),
+        }
+    }
+    let normalised = operation.join(" ");
     match normalised.as_str() {
         "api repos/{owner}/{repo}" => {
             io::stdout().write_all(br#"{"default_branch":"main","html_url":"https://github.com/owner/repo","full_name":"owner/repo","permissions":{"push":true}}"#)?;
@@ -976,13 +982,15 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
         }
         // The CI observer reads through `gh api --include`, page by page.
         value
-            if value.starts_with("api repos/owner/repo/commits/")
+            if (value.starts_with("api repos/owner/repo/commits/")
+                || value.starts_with("api repos/{owner}/{repo}/commits/"))
                 && value.ends_with("/statuses?per_page=100&page=1") =>
         {
             io::stdout().write_all(b"HTTP/2.0 200 OK\r\n\r\n[]")?;
         }
         value
-            if value.starts_with("api repos/owner/repo/commits/")
+            if (value.starts_with("api repos/owner/repo/commits/")
+                || value.starts_with("api repos/{owner}/{repo}/commits/"))
                 && value.ends_with("/check-runs?per_page=100&filter=latest&page=1") =>
         {
             if dir.join("checks-fail").exists() {

@@ -143,6 +143,12 @@ fn dispatch(rig: &TestRig, mode: &str) -> Result<PathBuf> {
         .ok_or("production binary path is only available to integration targets")?;
     let output = rig.execute_os(Path::new(executable), &args, None)?;
     let mut stderr = String::from_utf8_lossy(&output.stderr.bytes).into_owned();
+    assert_eq!(
+        code(&output),
+        0,
+        "launch failed: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&output.stdout.bytes)
+    );
     // The launch names a graph; waiting settles it and status names its attempt.
     let mut wait = prefix.clone();
     wait.extend(
