@@ -160,6 +160,15 @@ fn lane_rows_validate_with_and_without_optional_members() {
         serde_json::to_value(&refused).unwrap()["steering"]["cause"],
         "session_mismatch"
     );
+    let mut incomplete = full.clone();
+    incomplete.steering.as_mut().unwrap().state = crate::run::SteeringState::NotContinued;
+    incomplete.steering.as_mut().unwrap().cause =
+        Some(crate::run::SteeringCause::SessionProofIncomplete);
+    accepted(&schema, &incomplete);
+    assert_eq!(
+        serde_json::to_value(incomplete).unwrap()["steering"]["cause"],
+        "session_proof_incomplete"
+    );
     for cause in [
         crate::run::TerminalCause::Steered,
         crate::run::TerminalCause::EmptyWriterResult,

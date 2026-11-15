@@ -27,7 +27,14 @@ provenant_sqlite::Schema {
             minor: 3,
             kind: provenant_sqlite::StepKind::Table {
                 name: "steer_continuations",
-                sql: "CREATE TABLE IF NOT EXISTS steer_continuations (attempt TEXT PRIMARY KEY REFERENCES attempts(id), state TEXT NOT NULL CHECK(state IN ('resumed','not_continued')), cause TEXT CHECK(cause IN ('session_unavailable','session_mismatch','terminal_stop','continuation_refused')), successor TEXT REFERENCES attempts(id), CHECK((state='resumed' AND cause IS NULL AND successor IS NOT NULL) OR (state='not_continued' AND cause IS NOT NULL AND successor IS NULL))) STRICT",
+                sql: "CREATE TABLE IF NOT EXISTS steer_continuations (attempt TEXT PRIMARY KEY REFERENCES attempts(id), state TEXT NOT NULL CHECK(state IN ('admitted','resumed','not_continued')), cause TEXT CHECK(cause IN ('session_unavailable','session_mismatch','session_proof_incomplete','terminal_stop','continuation_refused')), successor TEXT, live_ack INTEGER NOT NULL DEFAULT 0 CHECK(live_ack IN (0,1)), terminal_final INTEGER NOT NULL DEFAULT 0 CHECK(terminal_final IN (0,1)), CHECK((state='admitted' AND cause IS NULL AND successor IS NOT NULL AND live_ack=0 AND terminal_final=0) OR (state='resumed' AND cause IS NULL AND successor IS NOT NULL AND (live_ack=1 OR terminal_final=1)) OR (state='not_continued' AND cause IS NOT NULL AND (successor IS NOT NULL OR terminal_final=1)))) STRICT",
+            },
+        },
+        provenant_sqlite::Step {
+            minor: 3,
+            kind: provenant_sqlite::StepKind::Table {
+                name: "continuation_expectations",
+                sql: "CREATE TABLE IF NOT EXISTS continuation_expectations (attempt TEXT PRIMARY KEY REFERENCES attempts(id), session TEXT NOT NULL CHECK(length(session)>0 AND length(session)<=4096), route_digest TEXT NOT NULL CHECK(length(route_digest)=64)) STRICT",
             },
         },
     ],

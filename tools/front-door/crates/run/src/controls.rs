@@ -58,6 +58,15 @@ struct SteerContinuationOutcome {
     state: String,
     cause: Option<String>,
     successor: Option<String>,
+    live_ack: bool,
+    terminal_final: bool,
+}
+
+pub(crate) struct SteerContinuationDisposition {
+    pub parent: AttemptId,
+    pub successor: AttemptId,
+    pub state: &'static str,
+    pub cause: Option<provenant_records::run::SteeringCause>,
 }
 
 #[derive(Default)]
@@ -176,13 +185,16 @@ fn past_runtime_deadline(record: &AttemptRecord, call: &Request<'_>) -> bool {
         .is_ok_and(|now| overdue_at(record, now))
 }
 
-fn record_steer_outcome(
+pub(crate) fn record_steer_outcome(
     tx: &rusqlite::Connection,
     id: AttemptId,
     state: &str,
     cause: Option<provenant_records::run::SteeringCause>,
     successor: Option<AttemptId>,
 ) -> Result<()> {
+    if !matches!(state, "resumed" | "not_continued") || (state == "resumed") != cause.is_none() {
+        return Err(RunError::Validation("steer final outcome shape"));
+    }
     let has_intent: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM steer_intents WHERE attempt=?1)",
         [id.to_string()],
@@ -195,13 +207,15 @@ fn record_steer_outcome(
     let successor = successor.map(|successor| successor.to_string());
     let existing: Option<SteerContinuationOutcome> = tx
         .query_row(
-            "SELECT state,cause,successor FROM steer_continuations WHERE attempt=?1",
+            "SELECT state,cause,successor,live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
             [id.to_string()],
             |row| {
                 Ok(SteerContinuationOutcome {
                     state: row.get(0)?,
                     cause: row.get(1)?,
                     successor: row.get(2)?,
+                    live_ack: row.get::<_, i64>(3)? != 0,
+                    terminal_final: row.get::<_, i64>(4)? != 0,
                 })
             },
         )
@@ -210,22 +224,211 @@ fn record_steer_outcome(
         state: state.to_owned(),
         cause: cause.map(str::to_owned),
         successor: successor.clone(),
+        live_ack: false,
+        terminal_final: true,
     };
-    if let Some(existing) = existing {
-        if existing != expected {
-            return Err(RunError::Conflict);
+    match existing {
+        Some(existing)
+            if existing.terminal_final
+                && existing.state == expected.state
+                && existing.cause == expected.cause
+                && existing.successor == expected.successor => {}
+        Some(existing)
+            if !existing.terminal_final
+                && existing.successor.as_deref() == successor.as_deref() =>
+        {
+            tx.execute(
+                "UPDATE steer_continuations SET state=?1,cause=?2,terminal_final=1 WHERE attempt=?3 AND terminal_final=0",
+                params![state, cause, id.to_string()],
+            )?;
         }
-    } else {
-        tx.execute(
-            "INSERT INTO steer_continuations(attempt,state,cause,successor) VALUES (?1,?2,?3,?4)",
-            params![id.to_string(), state, cause, successor],
-        )?;
+        Some(_) => return Err(RunError::Conflict),
+        None => {
+            tx.execute(
+                "INSERT INTO steer_continuations(attempt,state,cause,successor,live_ack,terminal_final) VALUES (?1,?2,?3,?4,0,1)",
+                params![id.to_string(), state, cause, successor],
+            )?;
+        }
     }
     tx.execute(
         "UPDATE steer_intents SET resolved=1 WHERE attempt=?1 AND resolved=0",
         [id.to_string()],
     )?;
     Ok(())
+}
+
+pub(crate) fn record_steer_disposition(
+    tx: &rusqlite::Connection,
+    disposition: &SteerContinuationDisposition,
+) -> Result<()> {
+    let successor = disposition.successor.to_string();
+    let existing: Option<SteerContinuationOutcome> = tx
+        .query_row(
+            "SELECT state,cause,successor,live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
+            [disposition.parent.to_string()],
+            |row| {
+                Ok(SteerContinuationOutcome {
+                    state: row.get(0)?,
+                    cause: row.get(1)?,
+                    successor: row.get(2)?,
+                    live_ack: row.get::<_, i64>(3)? != 0,
+                    terminal_final: row.get::<_, i64>(4)? != 0,
+                })
+            },
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        if existing.terminal_final {
+            let cause = disposition
+                .cause
+                .map(provenant_records::run::SteeringCause::as_str);
+            if existing.state == disposition.state
+                && existing.cause.as_deref() == cause
+                && existing.successor.as_deref() == Some(successor.as_str())
+            {
+                return Ok(());
+            }
+            return Err(RunError::Conflict);
+        }
+        if existing.successor.as_deref() != Some(successor.as_str()) {
+            return Err(RunError::Conflict);
+        }
+    }
+    record_steer_outcome(
+        tx,
+        disposition.parent,
+        disposition.state,
+        disposition.cause,
+        Some(disposition.successor),
+    )
+}
+
+/// Publish the live acknowledgement promptly without treating it as the
+/// immutable terminal disposition. A later final record may revise the state.
+fn record_steer_live_disposition(
+    tx: &rusqlite::Connection,
+    disposition: &SteerContinuationDisposition,
+) -> Result<()> {
+    if !matches!(disposition.state, "resumed" | "not_continued")
+        || (disposition.state == "resumed") != disposition.cause.is_none()
+    {
+        return Err(RunError::Validation("live steer evidence shape"));
+    }
+    let has_intent: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM steer_intents WHERE attempt=?1)",
+        [disposition.parent.to_string()],
+        |row| row.get(0),
+    )?;
+    if !has_intent {
+        return Err(RunError::NotFound);
+    }
+    let successor = disposition.successor.to_string();
+    let existing: Option<SteerContinuationOutcome> = tx
+        .query_row(
+            "SELECT state,cause,successor,live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
+            [disposition.parent.to_string()],
+            |row| {
+                Ok(SteerContinuationOutcome {
+                    state: row.get(0)?,
+                    cause: row.get(1)?,
+                    successor: row.get(2)?,
+                    live_ack: row.get::<_, i64>(3)? != 0,
+                    terminal_final: row.get::<_, i64>(4)? != 0,
+                })
+            },
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        if existing.successor.as_deref() != Some(successor.as_str()) {
+            return Err(RunError::Conflict);
+        }
+        if existing.terminal_final {
+            return Ok(());
+        }
+        if existing.state == "not_continued" {
+            return Ok(());
+        }
+        let live_ack = existing.live_ack || disposition.state == "resumed";
+        tx.execute(
+            "UPDATE steer_continuations SET state=?1,cause=?2,live_ack=?3 WHERE attempt=?4 AND terminal_final=0",
+            params![
+                disposition.state,
+                disposition.cause.map(provenant_records::run::SteeringCause::as_str),
+                if live_ack { 1_i64 } else { 0_i64 },
+                disposition.parent.to_string()
+            ],
+        )?;
+    } else {
+        tx.execute(
+            "INSERT INTO steer_continuations(attempt,state,cause,successor,live_ack,terminal_final) VALUES (?1,?2,?3,?4,?5,0)",
+            params![
+                disposition.parent.to_string(),
+                disposition.state,
+                disposition.cause.map(provenant_records::run::SteeringCause::as_str),
+                successor,
+                if disposition.state == "resumed" {
+                    1_i64
+                } else {
+                    0_i64
+                }
+            ],
+        )?;
+    }
+    tx.execute(
+        "UPDATE steer_intents SET resolved=1 WHERE attempt=?1 AND resolved=0",
+        [disposition.parent.to_string()],
+    )?;
+    Ok(())
+}
+
+fn record_steer_admission(
+    tx: &rusqlite::Connection,
+    id: AttemptId,
+    successor: AttemptId,
+) -> Result<()> {
+    let has_intent: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM steer_intents WHERE attempt=?1)",
+        [id.to_string()],
+        |row| row.get(0),
+    )?;
+    if !has_intent {
+        return Err(RunError::NotFound);
+    }
+    let successor = successor.to_string();
+    let existing: Option<SteerContinuationOutcome> = tx
+        .query_row(
+            "SELECT state,cause,successor,live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
+            [id.to_string()],
+            |row| {
+                Ok(SteerContinuationOutcome {
+                    state: row.get(0)?,
+                    cause: row.get(1)?,
+                    successor: row.get(2)?,
+                    live_ack: row.get::<_, i64>(3)? != 0,
+                    terminal_final: row.get::<_, i64>(4)? != 0,
+                })
+            },
+        )
+        .optional()?;
+    match existing {
+        Some(existing) if existing.successor.as_deref() == Some(successor.as_str()) => {
+            if existing.state == "admitted"
+                || matches!(existing.state.as_str(), "resumed" | "not_continued")
+            {
+                Ok(())
+            } else {
+                Err(RunError::Validation("steer admission state"))
+            }
+        }
+        Some(_) => Err(RunError::Conflict),
+        None => {
+            tx.execute(
+                "INSERT INTO steer_continuations(attempt,state,cause,successor,live_ack,terminal_final) VALUES (?1,'admitted',NULL,?2,0,0)",
+                params![id.to_string(), successor],
+            )?;
+            Ok(())
+        }
+    }
 }
 
 /// Whether a running attempt is past its runtime deadline plus the grace.
@@ -2136,6 +2339,9 @@ impl RunStore {
             )?;
             Ok((true, pending))
         })?;
+        if ready {
+            self.persist_live_steer_successor_evidence(id, call)?;
+        }
         if ready && pending {
             self.request_steer_stop_if_ready(id, call)?;
         }
@@ -2173,7 +2379,7 @@ impl RunStore {
         {
             return Ok(false);
         }
-        self.write(call, |tx| {
+        let recorded = self.write(call, |tx| {
             let raw: Vec<u8> = tx
                 .query_row(
                     "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
@@ -2217,7 +2423,11 @@ impl RunStore {
                 ],
             )?;
             Ok(true)
-        })
+        })?;
+        if recorded {
+            self.persist_live_steer_successor_evidence(id, call)?;
+        }
+        Ok(recorded)
     }
 
     pub(crate) fn steer_session_ready(
@@ -2249,6 +2459,231 @@ impl RunStore {
             conflict: saved.identity_conflict != 0,
             terminal_confirmed: saved.terminal_confirmed != 0,
         }))
+    }
+
+    /// Read the sealed session expectation for a resumed provider invocation.
+    /// The expected identity is private Run state and is valid only when it
+    /// still matches both the child's applied route and its predecessor.
+    pub fn continuation_expectation(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<Option<crate::ContinuationExpectation>> {
+        let record = self.record(id, call)?;
+        let saved: Option<(String, String)> = self
+            .db
+            .query_row(
+                "SELECT session,route_digest FROM continuation_expectations WHERE attempt=?1",
+                [id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((session, digest)) = saved else {
+            if record.retry_of.is_some() && record.continuation.as_deref() != Some("fresh") {
+                return Err(RunError::Validation(
+                    "same-session continuation expectation missing",
+                ));
+            }
+            return Ok(None);
+        };
+        if record.retry_of.is_none() || record.continuation.is_some() {
+            return Err(RunError::Validation(
+                "unexpected continuation session expectation",
+            ));
+        }
+        let applied = record.applied_route.as_ref().ok_or(RunError::Validation(
+            "continuation expectation route missing",
+        ))?;
+        if crate::controls::steer_route_digest(applied)? != digest {
+            return Err(RunError::Validation(
+                "continuation expectation route mismatch",
+            ));
+        }
+        let parent_id = record.retry_of.ok_or(RunError::Validation(
+            "continuation expectation parent missing",
+        ))?;
+        let parent = self.record(parent_id, call)?;
+        let parent_session = parent.session.as_deref().ok_or(RunError::Validation(
+            "continuation expectation session missing",
+        ))?;
+        let parent_route = parent.applied_route.as_ref().ok_or(RunError::Validation(
+            "continuation expectation parent route missing",
+        ))?;
+        if parent_session != session || crate::controls::steer_route_digest(parent_route)? != digest
+        {
+            return Err(RunError::Validation(
+                "continuation expectation lineage mismatch",
+            ));
+        }
+        Ok(Some(crate::ContinuationExpectation { session }))
+    }
+
+    pub(crate) fn steer_parent_for_successor(
+        &self,
+        successor: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<Option<AttemptId>> {
+        call.check()?;
+        let link: Option<(Option<String>, String)> = self
+            .db
+            .query_row(
+                "SELECT continues,operation FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
+                params![successor.to_string(), self.context.project_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((Some(parent), operation)) = link else {
+            return Ok(None);
+        };
+        let parent = AttemptId::parse(&parent)
+            .map_err(|_| RunError::Validation("steer parent attempt ID"))?;
+        if operation != format!("graph-steer-{parent}") {
+            return Ok(None);
+        }
+        let has_intent: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM steer_intents WHERE attempt=?1)",
+            [parent.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(has_intent.then_some(parent))
+    }
+
+    fn persist_live_steer_successor_evidence(
+        &self,
+        successor: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let Some(ready) = self.steer_session_ready(successor, call)? else {
+            return Ok(());
+        };
+        let child = self.record(successor, call)?;
+        let child_route_digest = child
+            .applied_route
+            .as_ref()
+            .map(crate::controls::steer_route_digest)
+            .transpose()?;
+        let identity_conflict = ready.conflict
+            || ready.generation != child.generation
+            || child_route_digest.as_deref() != Some(ready.route_digest.as_str());
+        let disposition = self.steer_successor_disposition(
+            successor,
+            &child,
+            ready.session.as_deref(),
+            Some(&ready.route_digest),
+            identity_conflict,
+            false,
+            call,
+        )?;
+        if let Some(disposition) = disposition {
+            self.persist_live_steer_successor_disposition(&disposition, call)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn steer_successor_disposition(
+        &self,
+        successor: AttemptId,
+        child: &AttemptRecord,
+        session: Option<&str>,
+        route_digest: Option<&str>,
+        identity_conflict: bool,
+        evidence_incomplete: bool,
+        call: &Request<'_>,
+    ) -> Result<Option<SteerContinuationDisposition>> {
+        let Some(parent_id) = self.steer_parent_for_successor(successor, call)? else {
+            return Ok(None);
+        };
+        if child.attempt_id != successor || child.retry_of != Some(parent_id) {
+            return Err(RunError::Validation("steer successor lineage"));
+        }
+        let parent = self.record(parent_id, call)?;
+        let expected: Option<(String, String)> = self
+            .db
+            .query_row(
+                "SELECT session,route_digest FROM continuation_expectations WHERE attempt=?1",
+                [successor.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let parent_route_digest = parent
+            .applied_route
+            .as_ref()
+            .map(crate::controls::steer_route_digest)
+            .transpose()?;
+        let child_route_digest = child
+            .applied_route
+            .as_ref()
+            .map(crate::controls::steer_route_digest)
+            .transpose()?;
+        let route_is_missing =
+            parent_route_digest.is_none() || child_route_digest.is_none() || route_digest.is_none();
+
+        let (state, cause) = if identity_conflict {
+            (
+                "not_continued",
+                Some(provenant_records::run::SteeringCause::SessionMismatch),
+            )
+        } else if let Some((expected_session, expected_route)) = expected {
+            let Some(parent_session) = parent.session.as_deref() else {
+                return Ok(Some(SteerContinuationDisposition {
+                    parent: parent_id,
+                    successor,
+                    state: "not_continued",
+                    cause: Some(provenant_records::run::SteeringCause::SessionUnavailable),
+                }));
+            };
+            if route_is_missing {
+                (
+                    "not_continued",
+                    Some(provenant_records::run::SteeringCause::SessionProofIncomplete),
+                )
+            } else if expected_session != parent_session
+                || parent_route_digest.as_deref() != Some(expected_route.as_str())
+                || child_route_digest.as_deref() != Some(expected_route.as_str())
+                || route_digest != Some(expected_route.as_str())
+            {
+                (
+                    "not_continued",
+                    Some(provenant_records::run::SteeringCause::SessionMismatch),
+                )
+            } else if session.is_some_and(|session| session != expected_session) {
+                (
+                    "not_continued",
+                    Some(provenant_records::run::SteeringCause::SessionMismatch),
+                )
+            } else if evidence_incomplete {
+                (
+                    "not_continued",
+                    Some(provenant_records::run::SteeringCause::SessionProofIncomplete),
+                )
+            } else if session.is_none() {
+                (
+                    "not_continued",
+                    Some(provenant_records::run::SteeringCause::SessionUnavailable),
+                )
+            } else {
+                ("resumed", None)
+            }
+        } else {
+            (
+                "not_continued",
+                Some(provenant_records::run::SteeringCause::SessionProofIncomplete),
+            )
+        };
+        Ok(Some(SteerContinuationDisposition {
+            parent: parent_id,
+            successor,
+            state,
+            cause,
+        }))
+    }
+
+    fn persist_live_steer_successor_disposition(
+        &self,
+        disposition: &SteerContinuationDisposition,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        self.write(call, |tx| record_steer_live_disposition(tx, disposition))
     }
 
     pub(crate) fn confirm_steer_terminal_process(
@@ -2376,8 +2811,9 @@ impl RunStore {
             .collect())
     }
 
-    /// Project the ledger without exposing its steering text. Only the typed
-    /// launcher receipt and terminal refusal receipt settle the queued state.
+    /// Project the ledger without exposing its steering text. A launcher
+    /// receipt records a queued successor; only validated session evidence or
+    /// a terminal disposition resolves it.
     pub(crate) fn steering_status(
         &self,
         id: AttemptId,
@@ -2408,13 +2844,15 @@ impl RunStore {
         let outcome: Option<SteerContinuationOutcome> = self
             .db
             .query_row(
-                "SELECT state,cause,successor FROM steer_continuations WHERE attempt=?1",
+                "SELECT state,cause,successor,live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
                 [id.to_string()],
                 |row| {
                     Ok(SteerContinuationOutcome {
                         state: row.get(0)?,
                         cause: row.get(1)?,
                         successor: row.get(2)?,
+                        live_ack: row.get::<_, i64>(3)? != 0,
+                        terminal_final: row.get::<_, i64>(4)? != 0,
                     })
                 },
             )
@@ -2425,12 +2863,28 @@ impl RunStore {
                 None,
                 pending_successor,
             ),
+            (true, Some(outcome)) if outcome.state == "admitted" => {
+                let Some(successor) = outcome.successor else {
+                    return Err(RunError::Validation("admitted steer successor"));
+                };
+                if outcome.cause.is_some() || outcome.live_ack || outcome.terminal_final {
+                    return Err(RunError::Validation("admitted steer cause"));
+                }
+                (
+                    provenant_records::run::SteeringState::Queued,
+                    None,
+                    Some(
+                        AttemptId::parse(&successor)
+                            .map_err(|_| RunError::Validation("steer successor ID"))?,
+                    ),
+                )
+            }
             (true, Some(_)) => return Err(RunError::Validation("pending steer outcome")),
             (false, Some(outcome)) if outcome.state == "resumed" => {
                 let Some(successor) = outcome.successor else {
                     return Err(RunError::Validation("resumed steer successor"));
                 };
-                if outcome.cause.is_some() {
+                if outcome.cause.is_some() || (!outcome.live_ack && !outcome.terminal_final) {
                     return Err(RunError::Validation("resumed steer cause"));
                 }
                 (
@@ -2443,9 +2897,6 @@ impl RunStore {
                 )
             }
             (false, Some(outcome)) if outcome.state == "not_continued" => {
-                if outcome.successor.is_some() {
-                    return Err(RunError::Validation("refused steer successor"));
-                }
                 let cause = outcome
                     .cause
                     .as_deref()
@@ -2454,7 +2905,13 @@ impl RunStore {
                 (
                     provenant_records::run::SteeringState::NotContinued,
                     Some(cause),
-                    None,
+                    outcome
+                        .successor
+                        .map(|successor| {
+                            AttemptId::parse(&successor)
+                                .map_err(|_| RunError::Validation("steer successor ID"))
+                        })
+                        .transpose()?,
                 )
             }
             (false, Some(_)) => return Err(RunError::Validation("steer outcome state")),
@@ -2474,8 +2931,8 @@ impl RunStore {
         }))
     }
 
-    /// Record an accepted continuation only after the launcher confirms that
-    /// this exact same-session successor was admitted.
+    /// Record launcher admission separately from a validated session
+    /// acknowledgement. Admission alone leaves the intent queued.
     fn record_steer_admitted(
         &self,
         id: AttemptId,
@@ -2492,13 +2949,7 @@ impl RunStore {
             if !admitted {
                 return Err(RunError::Validation("steer successor admission"));
             }
-            record_steer_outcome(
-                tx,
-                id,
-                "resumed",
-                None,
-                Some(successor),
-            )
+            record_steer_admission(tx, id, successor)
         })
     }
 
@@ -2521,14 +2972,17 @@ impl RunStore {
             return Ok(());
         }
         match receipt {
-            Started::Launched(_) => self.record_steer_admitted(id, successor, call),
+            Started::Launched(_) => {
+                self.record_steer_admitted(id, successor, call)?;
+                self.persist_live_steer_successor_evidence(successor, call)
+            }
             Started::Refused { .. } => self.record_steer_refused(id, successor, call),
             Started::Skipped { .. } | Started::Unknown { .. } | Started::Blocked { .. } => Ok(()),
         }
     }
 
-    /// Retain the private accepted text while recording a safe terminal
-    /// refusal. The outcome and resolution commit together for replay safety.
+    /// Retain the private accepted text while recording a safe final cause.
+    /// The outcome and resolution commit together for replay safety.
     pub fn record_steer_not_continued(
         &self,
         id: AttemptId,
@@ -2556,7 +3010,7 @@ impl RunStore {
                     |row| row.get(0),
                 )
                 .optional()?;
-            if let Some(successor) = successor {
+            if let Some(successor) = successor.as_deref() {
                 let raw: Vec<u8> = tx.query_row(
                     "SELECT record FROM attempts WHERE id=?1 AND project=?2 AND refused=0",
                     params![successor, self.context.project_id.to_string()],
@@ -2569,7 +3023,13 @@ impl RunStore {
                     return Err(RunError::Conflict);
                 }
             }
-            record_steer_outcome(tx, id, "not_continued", Some(cause), None)
+            let successor = successor
+                .map(|successor| {
+                    AttemptId::parse(&successor)
+                        .map_err(|_| RunError::Validation("steer successor ID"))
+                })
+                .transpose()?;
+            record_steer_outcome(tx, id, "not_continued", Some(cause), successor)
         })
     }
 
@@ -4934,6 +5394,8 @@ mod tests {
     // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
     fn steer_replays_are_idempotent_and_natural_settlement_adopts_all_intents() -> TestResult {
+        use provenant_supervisor::census::ProcessObservation;
+
         let temp = tempfile::tempdir()?;
         let clock = crate::tests::clock();
         let cancel = provenant_core::CancelToken::new();
@@ -5093,6 +5555,69 @@ mod tests {
         )?;
         assert_eq!(child_count, 1, "transient launch receipts reuse one child");
         store.record_steer_launch_result(id, child, &[Started::Launched(child)], &call)?;
+        let admitted_status = store
+            .record(id, &call)?
+            .steering
+            .ok_or("admitted steering status")?;
+        assert_eq!(
+            admitted_status.state,
+            provenant_records::run::SteeringState::Queued,
+            "launch admission does not prove that the provider resumed its session"
+        );
+        assert_eq!(admitted_status.successor, Some(child));
+        assert_eq!(admitted_status.cause, None);
+
+        let route = crate::tests::route();
+        let queued_child = store.record(child, &call)?;
+        let starting =
+            store.mark_starting(&queued_child, &route, &[], &Default::default(), None, &call)?;
+        let expectation = crate::ContinuationExpectation {
+            session: "fixture-session".into(),
+        };
+        let starting = store.record_starting_launch(
+            &starting,
+            &route,
+            Some(&expectation),
+            &[],
+            &Default::default(),
+            None,
+            0,
+            &Default::default(),
+            &call,
+        )?;
+        assert_eq!(starting.applied_route.as_ref(), Some(&route));
+        let saved_expectation = store
+            .continuation_expectation(child, &call)?
+            .ok_or("continuation expectation missing")?;
+        assert_eq!(saved_expectation.session, "fixture-session");
+        let child_running = store
+            .claim(child, &clock, &call)?
+            .ok_or("child not admitted")?;
+        let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+            ProcessObservation::Present(fact) if !fact.zombie => {
+                provenant_os::capture::CaptureSourceIdentity {
+                    attempt: child.to_string(),
+                    generation: RunStore::scope(&child_running).generation,
+                    boot: fact.identity.boot,
+                    pid: fact.identity.pid,
+                    native_start: fact.identity.native_start,
+                }
+            }
+            observation => {
+                return Err(format!("test process identity unavailable: {observation:?}").into());
+            }
+        };
+        let applied = child_running
+            .applied_route
+            .as_ref()
+            .ok_or("child applied route")?;
+        assert!(store.record_provider_session_ready(
+            child,
+            applied,
+            "fixture-session",
+            &source,
+            &call,
+        )?);
         let resumed_status = store
             .record(id, &call)?
             .steering
@@ -5103,6 +5628,353 @@ mod tests {
         );
         assert_eq!(resumed_status.successor, Some(child));
         assert_eq!(resumed_status.cause, None);
+        let retained = store.steer_ledger(id, &call)?;
+        assert_eq!(retained.len(), 2);
+        assert!(retained.iter().all(|(_, resolved)| *resolved));
+
+        let mut child_exit = crate::tests::exit();
+        child_exit.scope = RunStore::scope(&child_running);
+        crate::dispatch_tests::seal_exit(&store, &child_exit)?;
+        let mut child_publication = crate::tests::publication();
+        child_publication.session = Some("fixture-session".into());
+        store.publish_terminal(
+            child,
+            child_running.revision,
+            &child_publication,
+            &child_exit,
+            &call,
+        )?;
+        let final_status = store
+            .record(id, &call)?
+            .steering
+            .ok_or("final resumed steering status")?;
+        assert_eq!(
+            final_status.state,
+            provenant_records::run::SteeringState::Resumed
+        );
+        let (live_ack, terminal_final): (i64, i64) = store.db.query_row(
+            "SELECT live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
+            [id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!((live_ack, terminal_final), (1, 1));
+
+        store.db.execute(
+            "DELETE FROM provider_session_ready WHERE attempt=?1",
+            [child.to_string()],
+        )?;
+        store.db.execute(
+            "DELETE FROM continuation_expectations WHERE attempt=?1",
+            [child.to_string()],
+        )?;
+        assert!(
+            store.continuation_expectation(child, &call).is_err(),
+            "a resumed child cannot be decoded as fresh after its expectation is lost"
+        );
+        assert_eq!(
+            store.record(id, &call)?.steering.unwrap().state,
+            provenant_records::run::SteeringState::Resumed,
+            "the saved disposition does not depend on retained child proof rows"
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn terminal_proof_revises_live_resume_without_losing_acknowledgement() -> TestResult {
+        use provenant_supervisor::census::ProcessObservation;
+
+        #[derive(Clone, Copy)]
+        enum Case {
+            Refused,
+            MissingSession,
+            MismatchedSession,
+            LiveThenTerminalMismatch,
+            LiveThenTerminalIncomplete,
+            AccountMismatch,
+        }
+        for case in [
+            Case::Refused,
+            Case::MissingSession,
+            Case::MismatchedSession,
+            Case::LiveThenTerminalMismatch,
+            Case::LiveThenTerminalIncomplete,
+            Case::AccountMismatch,
+        ] {
+            let temp = tempfile::tempdir()?;
+            let clock = crate::tests::clock();
+            let cancel = provenant_core::CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let context = crate::tests::context(temp.path())?;
+            let store = RunStore::open(&context, &call)?;
+            let run = crate::tests::input();
+            let parent = run.attempt_id;
+            let mut route = crate::tests::route();
+            route.account_key = Some("fixture-account".into());
+            store.create(&run, &call)?;
+            store.mark_starting(
+                &store.record(parent, &call)?,
+                &route,
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let parent_running = store
+                .claim(parent, &clock, &call)?
+                .ok_or("parent not admitted")?;
+            store.steer(
+                parent,
+                OperationId::parse("steer-proof-boundary")?,
+                "Continue from the bound provider session.",
+                &call,
+            )?;
+            let mut parent_exit = crate::tests::exit();
+            parent_exit.scope = RunStore::scope(&parent_running);
+            crate::dispatch_tests::seal_exit(&store, &parent_exit)?;
+            let mut parent_publication = crate::tests::publication();
+            parent_publication.session = Some("fixture-session".into());
+            parent_publication.resolved_route = Some(route.clone());
+            parent_publication.applied_route = Some(route.clone());
+            parent_publication.observed_route = Some(route.clone());
+            store.publish_terminal(
+                parent,
+                parent_running.revision,
+                &parent_publication,
+                &parent_exit,
+                &call,
+            )?;
+            let child = store
+                .prepare_steer_continuation(parent, &call)?
+                .ok_or("steer successor missing")?;
+
+            if matches!(case, Case::Refused) {
+                let queued = store.record(child, &call)?;
+                store.withdraw(
+                    child,
+                    queued.state.clone(),
+                    Outcome::Rejected,
+                    "fixture preparation refusal",
+                    WallTime::from_micros(300).unwrap(),
+                    &call,
+                )?;
+                store.record_steer_launch_result(
+                    parent,
+                    child,
+                    &[Started::Refused {
+                        attempt: child,
+                        reason: "fixture preparation refusal".into(),
+                        kind: RefusalKind::Preparation,
+                    }],
+                    &call,
+                )?;
+                let status = store
+                    .record(parent, &call)?
+                    .steering
+                    .ok_or("refused steering status")?;
+                assert_eq!(
+                    status.state,
+                    provenant_records::run::SteeringState::NotContinued
+                );
+                assert_eq!(status.successor, Some(child));
+                assert_eq!(
+                    status.cause,
+                    Some(provenant_records::run::SteeringCause::ContinuationRefused)
+                );
+            } else {
+                let child_route = if matches!(case, Case::AccountMismatch) {
+                    let mut changed = route.clone();
+                    changed.account_key = Some("other-account".into());
+                    changed
+                } else {
+                    route.clone()
+                };
+                let starting = store.mark_starting(
+                    &store.record(child, &call)?,
+                    &child_route,
+                    &[],
+                    &Default::default(),
+                    None,
+                    &call,
+                )?;
+                let expectation = crate::ContinuationExpectation {
+                    session: "fixture-session".into(),
+                };
+                let launch = store.record_starting_launch(
+                    &starting,
+                    &child_route,
+                    Some(&expectation),
+                    &[],
+                    &Default::default(),
+                    None,
+                    0,
+                    &Default::default(),
+                    &call,
+                );
+                if matches!(case, Case::AccountMismatch) {
+                    assert!(matches!(launch, Err(RunError::SteerSessionMismatch)));
+                    let status = store
+                        .record(parent, &call)?
+                        .steering
+                        .ok_or("account-mismatch steering status")?;
+                    assert_eq!(status.state, provenant_records::run::SteeringState::Queued);
+                    assert_eq!(status.successor, Some(child));
+                    assert_eq!(status.cause, None);
+                    assert!(store.continuation_expectation(child, &call).is_err());
+                    continue;
+                }
+                let starting = launch?;
+                let child_running = store
+                    .claim(child, &clock, &call)?
+                    .ok_or("child not admitted")?;
+                store.record_steer_launch_result(
+                    parent,
+                    child,
+                    &[Started::Launched(child)],
+                    &call,
+                )?;
+                assert_eq!(
+                    store.record(parent, &call)?.steering.unwrap().state,
+                    provenant_records::run::SteeringState::Queued
+                );
+                let source = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+                    ProcessObservation::Present(fact) if !fact.zombie => {
+                        provenant_os::capture::CaptureSourceIdentity {
+                            attempt: child.to_string(),
+                            generation: RunStore::scope(&child_running).generation,
+                            boot: fact.identity.boot,
+                            pid: fact.identity.pid,
+                            native_start: fact.identity.native_start,
+                        }
+                    }
+                    observation => {
+                        return Err(
+                            format!("test process identity unavailable: {observation:?}").into(),
+                        );
+                    }
+                };
+                let applied = child_running
+                    .applied_route
+                    .as_ref()
+                    .ok_or("child applied route")?;
+                let live_ack = matches!(
+                    case,
+                    Case::LiveThenTerminalMismatch | Case::LiveThenTerminalIncomplete
+                );
+                if live_ack {
+                    assert!(store.record_provider_session_ready(
+                        child,
+                        applied,
+                        "fixture-session",
+                        &source,
+                        &call,
+                    )?);
+                    assert_eq!(
+                        store.record(parent, &call)?.steering.unwrap().state,
+                        provenant_records::run::SteeringState::Resumed,
+                        "a verified live session acknowledgement is reported promptly"
+                    );
+                    let (saved_live_ack, saved_terminal_final): (i64, i64) = store.db.query_row(
+                        "SELECT live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
+                        [parent.to_string()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?;
+                    assert_eq!((saved_live_ack, saved_terminal_final), (1, 0));
+                }
+                let mut exit = crate::tests::exit();
+                exit.scope = RunStore::scope(&child_running);
+                let mut publication = crate::tests::publication();
+                publication.resolved_route = Some(child_route.clone());
+                publication.applied_route = Some(child_route.clone());
+                publication.observed_route = Some(child_route.clone());
+                let (expected_state, expected_cause) = match case {
+                    Case::MissingSession => {
+                        exit.stop_reason = Some(StopReason::Steered);
+                        exit.cancel_delivered_before_exit = Some(true);
+                        exit.provider_identity_eof_fragment = true;
+                        publication.outcome = Outcome::Cancelled;
+                        publication.terminal_cause = Some(TerminalCause::Steered);
+                        publication.result = "continued attempt stopped before session proof";
+                        publication.session = None;
+                        (
+                            provenant_records::run::SteeringState::NotContinued,
+                            provenant_records::run::SteeringCause::SessionProofIncomplete,
+                        )
+                    }
+                    Case::MismatchedSession => {
+                        exit.provider_identity_conflict = true;
+                        publication.outcome = Outcome::Failed;
+                        publication.terminal_cause = Some(TerminalCause::IdentityMismatch);
+                        publication.result = "provider session did not match its continuation";
+                        publication.complete = false;
+                        publication.session = Some("different-session".into());
+                        (
+                            provenant_records::run::SteeringState::NotContinued,
+                            provenant_records::run::SteeringCause::SessionMismatch,
+                        )
+                    }
+                    Case::LiveThenTerminalMismatch => {
+                        exit.provider_identity_conflict = true;
+                        publication.outcome = Outcome::Failed;
+                        publication.terminal_cause = Some(TerminalCause::IdentityMismatch);
+                        publication.result = "terminal session contradicted live acknowledgement";
+                        publication.complete = false;
+                        publication.session = Some("different-session".into());
+                        (
+                            provenant_records::run::SteeringState::NotContinued,
+                            provenant_records::run::SteeringCause::SessionMismatch,
+                        )
+                    }
+                    Case::LiveThenTerminalIncomplete => {
+                        exit.provider_identity_evidence_incomplete = true;
+                        publication.outcome = Outcome::Unsettled;
+                        publication.reason =
+                            Some("terminal provider evidence was incomplete".into());
+                        publication.result = "terminal provider evidence was incomplete";
+                        publication.complete = false;
+                        publication.session = None;
+                        (
+                            provenant_records::run::SteeringState::NotContinued,
+                            provenant_records::run::SteeringCause::SessionProofIncomplete,
+                        )
+                    }
+                    Case::AccountMismatch => unreachable!(),
+                    Case::Refused => unreachable!(),
+                };
+                crate::dispatch_tests::seal_exit(&store, &exit)?;
+                store.publish_terminal(
+                    child,
+                    child_running.revision,
+                    &publication,
+                    &exit,
+                    &call,
+                )?;
+                let status = store
+                    .record(parent, &call)?
+                    .steering
+                    .ok_or("terminal steering status")?;
+                assert_eq!(status.state, expected_state);
+                assert_eq!(status.successor, Some(child));
+                assert_eq!(status.cause, Some(expected_cause));
+                let (saved_live_ack, saved_terminal_final): (i64, i64) = store.db.query_row(
+                    "SELECT live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
+                    [parent.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                assert_eq!(saved_live_ack, if live_ack { 1_i64 } else { 0_i64 });
+                assert_eq!(saved_terminal_final, 1);
+                assert_eq!(store.prepare_steer_continuation(parent, &call)?, None);
+                assert!(
+                    store
+                        .steer_ledger(parent, &call)?
+                        .iter()
+                        .any(|(intent, resolved)| intent.text
+                            == "Continue from the bound provider session."
+                            && *resolved)
+                );
+                assert!(starting.applied_route.is_some());
+            }
+        }
         Ok(())
     }
 

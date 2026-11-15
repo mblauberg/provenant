@@ -1886,6 +1886,79 @@ impl RunStore {
         )
     }
 
+    fn terminal_steer_disposition(
+        &self,
+        child: &AttemptRecord,
+        call: &Request<'_>,
+    ) -> Result<Option<crate::controls::SteerContinuationDisposition>> {
+        let Some(parent) = self.steer_parent_for_successor(child.attempt_id, call)? else {
+            return Ok(None);
+        };
+        if child.provider_launched != Some(true) {
+            return Ok(Some(crate::controls::SteerContinuationDisposition {
+                parent,
+                successor: child.attempt_id,
+                state: "not_continued",
+                cause: Some(provenant_records::run::SteeringCause::ContinuationRefused),
+            }));
+        }
+
+        let exit = child
+            .exit_evidence
+            .as_ref()
+            .and_then(|evidence| self.artifact_bytes(evidence, RECORD_LIMIT).ok())
+            .and_then(|raw| decode::<SealedExit>(&raw).ok());
+        let live = self.steer_session_ready(child.attempt_id, call)?;
+        let sealed_route_digest = child
+            .applied_route
+            .as_ref()
+            .map(crate::controls::steer_route_digest)
+            .transpose()?;
+        let terminal_unsettled = matches!(
+            child.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Unsettled,
+                ..
+            }
+        );
+
+        let live_conflict = live.as_ref().is_some_and(|ready| {
+            ready.conflict
+                || ready.generation != child.generation
+                || sealed_route_digest.as_deref() != Some(ready.route_digest.as_str())
+                || ready.session.as_deref().is_some_and(|session| {
+                    child
+                        .session
+                        .as_deref()
+                        .is_some_and(|terminal| terminal != session)
+                })
+        });
+        let identity_conflict = live_conflict
+            || exit
+                .as_ref()
+                .is_some_and(|exit| exit.provider_identity_conflict);
+        let evidence_incomplete = terminal_unsettled
+            || exit.as_ref().is_none_or(|exit| {
+                exit.provider_identity_evidence_incomplete || exit.provider_identity_eof_fragment
+            });
+        let disposition = self.steer_successor_disposition(
+            child.attempt_id,
+            child,
+            child.session.as_deref(),
+            sealed_route_digest.as_deref(),
+            identity_conflict,
+            evidence_incomplete,
+            call,
+        )?;
+        if disposition
+            .as_ref()
+            .is_some_and(|disposition| disposition.parent != parent)
+        {
+            return Err(RunError::Validation("steer successor parent changed"));
+        }
+        Ok(disposition)
+    }
+
     fn commit_terminal_record(
         &self,
         old: &AttemptRecord,
@@ -1922,12 +1995,20 @@ impl RunStore {
             receipts.cancellation = Some(CancellationDisposition::DeliveryEffective);
         }
         self.write(call, |tx| {
+            // Read the last live identity row under the same immediate
+            // transaction that commits the terminal disposition. A readiness
+            // or conflict event can otherwise race between classification and
+            // the attempt's terminal update.
+            let steer_disposition = self.terminal_steer_disposition(next, call)?;
             let changed = tx.execute("UPDATE attempts SET revision=?1,terminal=1,tmp_retained=1,record=?2 WHERE id=?3 AND revision=?4 AND terminal=0", params![sql_int(next.revision)?, crate::db::attempt_bytes(next)?, id.to_string(), sql_int(old.revision)?])?;
             if changed != 1 { return Err(RunError::Conflict); }
             if next.schema_version >= 2 {
                 tx.execute("INSERT INTO settlement_receipts(attempt,generation,record) VALUES (?1,?2,?3)", params![id.to_string(), sql_int(next.generation)?, bytes(&receipts)?])?;
             }
             tx.execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
+            if let Some(disposition) = &steer_disposition {
+                crate::controls::record_steer_disposition(tx, disposition)?;
+            }
             Self::insert_reaction(tx, &reaction)?;
             insert_event(tx, next)?;
             #[cfg(test)]
@@ -2071,6 +2152,9 @@ struct SealedExit {
     stop_reason: Option<provenant_supervisor::machine::StopReason>,
     #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     cancel_delivered_before_exit: Option<bool>,
+    provider_identity_conflict: bool,
+    provider_identity_evidence_incomplete: bool,
+    provider_identity_eof_fragment: bool,
     terminal_observed: bool,
     unresolved_cleanup: bool,
     settlement_evidence: provenant_supervisor::custody::SettlementEvidence,
@@ -2121,6 +2205,10 @@ fn sealed_exit(
         || stored.never_spawned != exit.never_spawned
         || stored.stop_reason != exit.stop_reason
         || stored.cancel_delivered_before_exit != exit.cancel_delivered_before_exit
+        || stored.provider_identity_conflict != exit.provider_identity_conflict
+        || stored.provider_identity_evidence_incomplete
+            != exit.provider_identity_evidence_incomplete
+        || stored.provider_identity_eof_fragment != exit.provider_identity_eof_fragment
         || stored.terminal_observed != exit.terminal_observed
         || stored.unresolved_cleanup
         || stored.settlement_evidence != exit.settlement_evidence
