@@ -3041,7 +3041,7 @@ mod panel_tests {
                 "source": {"type": "commit", "commit": docs_subject}
             }]
         }))?;
-        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
             "schema_version": 2,
             "graph_id": "relay-review-unresolved",
             "plan_digest": "fixture",
