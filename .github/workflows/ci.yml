@@ -344,11 +344,6 @@ jobs:
           python3 ../../scripts/check-nextest-filters --test-list "$RUNNER_TEMP/linux-test-list.json"
           filter="$(../../scripts/flaky-quarantine --test-list "$RUNNER_TEMP/linux-test-list.json")"
           printf 'filter=%s\n' "$filter" >> "$GITHUB_OUTPUT"
-      # Example tests are not part of nextest's default target inventory.
-      - name: Run provider recording example test
-        if: steps.affected.outputs.run_provider_example == 'true'
-        working-directory: tools/front-door
-        run: cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result
       - name: Upload Linux test archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

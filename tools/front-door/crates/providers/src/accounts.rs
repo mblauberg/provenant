@@ -671,33 +671,104 @@ mod config_tests {
     }
 
     #[test]
-    fn optional_account_metadata_warns_without_losing_registration() {
-        for extra in [
-            "display_name=''\norder=0\nplans=[{name='plan',price=-1,currency='USD',effective_from='2026-01-01'}]",
-            "display_name=42\norder='first'\nplans=false",
-        ] {
-            let text = format!("{ENTRY}priority=2\nhidden=true\n{extra}");
+    fn unknown_account_config_keys_warn_with_source_and_keep_known_fields() {
+        let cases = [
+            (
+                "accounts settings",
+                ENTRY.replace(
+                    "schema_version=1\n",
+                    "schema_version=1\n[domains.accounts]\nfuture_setting=true\n",
+                ),
+            ),
+            ("registration", format!("{ENTRY}future_registration=true\n")),
+            (
+                "shared settings",
+                format!("{ENTRY}[domains.accounts.shared_settings]\nfuture_setting=true\n"),
+            ),
+            (
+                "limits",
+                format!("{ENTRY}limits={{monthly_usd=42.0,future_limit=true}}\n"),
+            ),
+        ];
+        for (shape, text) in cases {
             let config =
                 provenant_config::load_with_domains(&roots(), Some(text.as_bytes()), &SECTIONS)
                     .unwrap();
-            let entry = &config.domains.accounts.entries["work"];
-            assert_eq!(entry.key, "work-key");
-            assert_eq!(entry.priority, Some(2));
-            assert!(entry.hidden);
-            assert!(entry.display_name.is_none());
-            assert!(entry.order.is_none());
-            assert!(entry.plans.is_empty());
-            assert_eq!(config.warnings.len(), 3, "{:?}", config.warnings);
-            assert!(matches!(
-                config.origins["domains.accounts.entries.work.priority"],
-                Origin::User { .. }
-            ));
-            assert!(
-                config
-                    .origins
-                    .get("domains.accounts.entries.work.display_name")
-                    .is_none_or(|origin| matches!(origin, Origin::Compiled { .. }))
+            assert_eq!(
+                config.domains.accounts.entries["work"].key, "work-key",
+                "{shape}"
             );
+            let unknown: Vec<_> = config
+                .warnings
+                .iter()
+                .filter(|warning| warning.rule == "unknown_key")
+                .collect();
+            assert_eq!(unknown.len(), 1, "{shape}");
+            assert!(unknown[0].line > 0, "{shape} warning has a source");
+        }
+    }
+
+    #[test]
+    fn malformed_optional_metadata_warns_and_preserves_registration() {
+        let cases = [
+            ("display_name", "display_name=''", "work"),
+            ("display_name", "display_name=42", "work"),
+            ("display_name", "display_name={}", "work"),
+            ("order", "order=0", "work"),
+            ("order", "order='first'", "work"),
+            (
+                "plans",
+                "plans=[{name='plan',price=-1,currency='USD',effective_from='2026-01-01'}]",
+                "work",
+            ),
+            ("plans", "plans=false", "work"),
+            ("limits", "limits=42", "work"),
+            ("priority", "priority=[]", "work"),
+            ("display_name", "display_name=''", "'work.alias'"),
+        ];
+        for (field, invalid, account_id) in cases {
+            let entry_path = format!("entries.{account_id}");
+            let mut text = ENTRY.replace("entries.work", &entry_path);
+            text.push_str("priority=2\nhidden=true\n");
+            text.push_str(invalid);
+            text.push('\n');
+            if account_id == "'work.alias'" {
+                text.push_str(
+                    "[domains.accounts.entries.home]\nadapter='codex'\nlabel='home'\nkey='home-key'\ndirectory='/fixture/codex-home'\n",
+                );
+            }
+            let config =
+                provenant_config::load_with_domains(&roots(), Some(text.as_bytes()), &SECTIONS)
+                    .unwrap();
+            let account_key = account_id.trim_matches('\'');
+            let entry = &config.domains.accounts.entries[account_key];
+            assert_eq!(entry.key, "work-key", "{field}");
+            assert_eq!(entry.priority, Some(2), "{field}");
+            assert!(entry.hidden, "{field}");
+            assert!(
+                config.warnings.iter().any(|warning| warning.line > 0),
+                "invalid {field} should report its source"
+            );
+            if field == "display_name" {
+                assert!(entry.display_name.is_none(), "{field}");
+            }
+            if field == "order" {
+                assert!(entry.order.is_none(), "{field}");
+            }
+            if field == "plans" {
+                assert!(entry.plans.is_empty(), "{field}");
+            }
+            if field == "limits" {
+                assert!(entry.limits.is_none(), "{field}");
+            }
+            if account_id == "'work.alias'" {
+                assert_eq!(config.domains.accounts.entries["home"].key, "home-key");
+            }
+            let priority_origin = format!("domains.accounts.entries.{account_key}.priority");
+            assert!(matches!(
+                config.origins.get(&priority_origin),
+                Some(Origin::User { .. })
+            ));
         }
     }
 
@@ -789,34 +860,6 @@ mod config_tests {
                 config.origins["domains.accounts.entries.work.plans.1.name"],
                 Origin::User { .. }
             ));
-        }
-    }
-
-    #[test]
-    fn invalid_metadata_on_a_dotted_account_id_keeps_every_registration() {
-        let text = format!(
-            "{}display_name=''\n[domains.accounts.entries.home]\nadapter='codex'\nlabel='home'\nkey='home-key'\ndirectory='/fixture/codex-home'\n",
-            ENTRY.replace("entries.work", "entries.'work.alias'")
-        );
-        let config =
-            provenant_config::load_with_domains(&roots(), Some(text.as_bytes()), &SECTIONS)
-                .unwrap();
-        let entries = &config.domains.accounts.entries;
-        assert_eq!(entries["work.alias"].key, "work-key");
-        assert!(entries["work.alias"].display_name.is_none());
-        assert_eq!(entries["home"].key, "home-key");
-        assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
-    }
-
-    #[test]
-    fn optional_metadata_wrong_container_types_keep_identity() {
-        for field in ["limits=42", "priority=[]", "display_name={}"] {
-            let text = format!("{ENTRY}{field}");
-            let config =
-                provenant_config::load_with_domains(&roots(), Some(text.as_bytes()), &SECTIONS)
-                    .unwrap();
-            assert_eq!(config.domains.accounts.entries["work"].key, "work-key");
-            assert_eq!(config.warnings.len(), 1);
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Worktree Git write grants bound into writer authority.
 
 use super::*;
-use crate::cache::{CARGO_CACHE_OWNER, CARGO_CACHE_OWNER_PREFIX, verify_cache_metadata};
+use crate::cache::{CARGO_CACHE_OWNER, CacheOwner, encode_cache_owner, verify_cache_metadata};
 use crate::repo::{GitRefName, VerifiedWorktree};
 use provenant_os::fs::{Directory, PublishMode};
 use sha2::{Digest, Sha256};
@@ -108,11 +108,11 @@ pub fn prepare_writer_directories(
                 verify_cache_metadata(&directory.metadata().map_err(PermissionError::Filesystem)?)?;
             }
             if traversed == authority.cargo_cache.path {
-                let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
                 let identity = worktree.identity();
-                marker.extend_from_slice(&identity.device.to_le_bytes());
-                marker.extend_from_slice(&identity.inode.to_le_bytes());
-                marker.extend_from_slice(worktree.path().as_os_str().as_encoded_bytes());
+                let marker = encode_cache_owner(&CacheOwner {
+                    path: worktree.path().to_path_buf(),
+                    identity: (identity.device, identity.inode),
+                });
                 directory
                     .atomic_write(
                         OsStr::new(CARGO_CACHE_OWNER),

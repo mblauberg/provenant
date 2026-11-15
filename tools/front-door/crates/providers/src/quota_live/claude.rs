@@ -443,61 +443,63 @@ pub(crate) fn capture_source(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn timed_out_keychain_read_is_transient() {
+    fn transient_credential_failures_are_typed_across_probe_boundaries() {
         use super::*;
-        let out = ExecOutcome {
-            termination: Termination::Exit(44),
+        enum Probe {
+            Keychain,
+            AuthStatus,
+        }
+        let outcome = |termination, timed_out, cancelled| ExecOutcome {
+            termination,
             stdout: Default::default(),
             stderr: Default::default(),
-            timed_out: true,
+            timed_out,
             drain_truncated: false,
             overflow_stopped: false,
-            cancelled: false,
+            cancelled,
             elapsed_micros: 0,
         };
-        assert_eq!(keychain_output(out), Err(ProbeFailure::Network));
-        let missing = ExecOutcome {
-            termination: Termination::Exit(44),
-            stdout: Default::default(),
-            stderr: Default::default(),
-            timed_out: false,
-            drain_truncated: false,
-            overflow_stopped: false,
-            cancelled: false,
-            elapsed_micros: 0,
-        };
-        assert_eq!(keychain_output(missing), Err(ProbeFailure::Auth));
-        let cancelled = ExecOutcome {
-            termination: Termination::Exit(44),
-            stdout: Default::default(),
-            stderr: Default::default(),
-            timed_out: false,
-            drain_truncated: false,
-            overflow_stopped: false,
-            cancelled: true,
-            elapsed_micros: 0,
-        };
-        assert_eq!(keychain_output(cancelled), Err(ProbeFailure::Network));
-    }
-
-    #[test]
-    fn timed_out_auth_status_is_transient() {
-        use super::*;
-        let out = ExecOutcome {
-            termination: Termination::Exit(0),
-            stdout: Default::default(),
-            stderr: Default::default(),
-            timed_out: true,
-            drain_truncated: false,
-            overflow_stopped: false,
-            cancelled: false,
-            elapsed_micros: 0,
-        };
-        assert_eq!(status_fingerprint(Ok(out)), Err(ProbeFailure::Network));
-        assert_eq!(
-            status_fingerprint(Err(ProbeFailure::Malformed)),
-            Err(ProbeFailure::Network)
-        );
+        let cases = [
+            (
+                "keychain timeout",
+                Probe::Keychain,
+                Ok(outcome(Termination::Exit(44), true, false)),
+                Err(ProbeFailure::Network),
+            ),
+            (
+                "keychain missing",
+                Probe::Keychain,
+                Ok(outcome(Termination::Exit(44), false, false)),
+                Err(ProbeFailure::Auth),
+            ),
+            (
+                "keychain cancellation",
+                Probe::Keychain,
+                Ok(outcome(Termination::Exit(44), false, true)),
+                Err(ProbeFailure::Network),
+            ),
+            (
+                "auth status timeout",
+                Probe::AuthStatus,
+                Ok(outcome(Termination::Exit(0), true, false)),
+                Err(ProbeFailure::Network),
+            ),
+            (
+                "auth status probe failure",
+                Probe::AuthStatus,
+                Err(ProbeFailure::Malformed),
+                Err(ProbeFailure::Network),
+            ),
+        ];
+        for (probe_name, probe, output, expected) in cases {
+            let actual = match probe {
+                Probe::Keychain => {
+                    keychain_output(output.expect("keychain returns an outcome")).map(|_| ())
+                }
+                Probe::AuthStatus => status_fingerprint(output).map(|_| ()),
+            };
+            assert_eq!(actual, expected, "{probe_name}");
+        }
     }
 
     #[test]
@@ -510,26 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_status_output_is_not_a_network_failure() {
-        use super::*;
-        let out = ExecOutcome {
-            termination: Termination::Exit(0),
-            stdout: provenant_os::exec::CapturedStream {
-                bytes: b"invalid".to_vec(),
-                ..Default::default()
-            },
-            stderr: Default::default(),
-            timed_out: false,
-            drain_truncated: false,
-            overflow_stopped: false,
-            cancelled: false,
-            elapsed_micros: 0,
-        };
-        assert_eq!(status_fingerprint(Ok(out)), Err(ProbeFailure::Malformed));
-    }
-
-    #[test]
-    fn signed_out_status_is_classified() {
+    fn auth_status_and_credential_failures_keep_their_classification() {
         use super::*;
         let outcome = |json: &[u8], code, timed_out| ExecOutcome {
             termination: Termination::Exit(code),
@@ -544,42 +527,55 @@ mod tests {
             cancelled: false,
             elapsed_micros: 0,
         };
-        for code in [0, 1] {
+        let cases = [
+            (
+                "malformed status",
+                outcome(b"invalid", 0, false),
+                Err(ProbeFailure::Malformed),
+            ),
+            (
+                "signed out with either exit code",
+                outcome(br#"{"loggedIn":false}"#, 0, false),
+                Err(ProbeFailure::Auth),
+            ),
+            (
+                "missing status fields",
+                outcome(br#"{}"#, 1, false),
+                Err(ProbeFailure::Network),
+            ),
+            (
+                "malformed status at nonzero exit",
+                outcome(b"invalid", 1, false),
+                Err(ProbeFailure::Malformed),
+            ),
+            (
+                "timeout takes precedence over a signed-out payload",
+                outcome(br#"{"loggedIn":false}"#, 1, true),
+                Err(ProbeFailure::Network),
+            ),
+        ];
+        for (probe_name, output, expected) in cases {
             assert_eq!(
-                status_fingerprint(Ok(outcome(br#"{"loggedIn":false}"#, code, false))),
-                Err(ProbeFailure::Auth)
+                status_fingerprint(Ok(output)).map(|_| ()),
+                expected,
+                "{probe_name}"
             );
         }
-        assert_eq!(
-            status_fingerprint(Ok(outcome(br#"{}"#, 1, false))),
-            Err(ProbeFailure::Network)
-        );
-        assert_eq!(
-            status_fingerprint(Ok(outcome(b"invalid", 1, false))),
-            Err(ProbeFailure::Malformed)
-        );
-        assert_eq!(
-            status_fingerprint(Ok(outcome(br#"{"loggedIn":false}"#, 1, true))),
-            Err(ProbeFailure::Network)
-        );
-        assert_eq!(
-            credential_open_error(std::io::ErrorKind::NotFound.into()),
-            ProbeFailure::Auth
-        );
-        assert_eq!(
-            credential_open_error(std::io::ErrorKind::PermissionDenied.into()),
-            ProbeFailure::Network
-        );
+        for (kind, expected) in [
+            (std::io::ErrorKind::NotFound, ProbeFailure::Auth),
+            (std::io::ErrorKind::PermissionDenied, ProbeFailure::Network),
+        ] {
+            assert_eq!(credential_open_error(kind.into()), expected);
+        }
     }
 
     #[test]
     fn quota_refresh_renews_near_expiry_file_credentials() {
         use super::*;
-        struct Renew<'a>(&'a Path, std::sync::atomic::AtomicUsize);
+        struct Renew<'a>(&'a Path);
         impl Executor for Renew<'_> {
             fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
                 assert_eq!(options.argv[0], OsStr::new("/fake/claude"));
-                self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 std::fs::write(
                     self.0,
                     br#"{"claudeAiOauth":{"accessToken":"fake-renewed","expiresAt":5000000}}"#,
@@ -604,7 +600,7 @@ mod tests {
             br#"{"claudeAiOauth":{"accessToken":"fake-expiring","expiresAt":1001000}}"#,
         )
         .unwrap();
-        let executor = Renew(&path, Default::default());
+        let executor = Renew(&path);
         let login = crate::claude::Login {
             executable: Path::new("/fake/claude"),
             home: temp.path(),
@@ -612,16 +608,20 @@ mod tests {
             config_dir: temp.path(),
         };
         refresh(&executor, &login, &|| 1000000, 1060000, 60_000, false).unwrap();
-        assert_eq!(executor.1.load(std::sync::atomic::Ordering::Relaxed), 1);
-        assert!(
-            std::fs::read_to_string(path)
-                .unwrap()
-                .contains("fake-renewed")
+        let renewed = parse_credentials(&std::fs::read(&path).unwrap()).unwrap();
+        let oauth = renewed.get("claudeAiOauth").expect("renewed OAuth record");
+        assert_eq!(
+            oauth.get("accessToken").and_then(Value::as_str),
+            Some("fake-renewed")
+        );
+        assert_eq!(
+            oauth.get("expiresAt").and_then(Value::as_i64),
+            Some(5_000_000)
         );
     }
 
     #[test]
-    fn refresh_reports_a_transient_failure_without_provider_output() {
+    fn refresh_failures_map_to_transient_or_deferred_outcomes() {
         use super::*;
         struct Busy;
         impl Executor for Busy {
@@ -629,22 +629,53 @@ mod tests {
                 Err(ExecError::Busy)
             }
         }
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            temp.path().join(".credentials.json"),
-            br#"{"claudeAiOauth":{"accessToken":"fake-expiring","expiresAt":1000}}"#,
-        )
-        .unwrap();
-        let login = crate::claude::Login {
-            executable: Path::new("/fake/claude"),
-            home: Path::new("/fake/home"),
-            user: OsStr::new("fake"),
-            config_dir: temp.path(),
-        };
-        assert_eq!(
-            refresh(&Busy, &login, &|| 1000, 100000, 60_000, false),
-            Err(ProbeFailure::Network)
-        );
+        struct Rejected;
+        impl Executor for Rejected {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(1),
+                    stdout: Default::default(),
+                    stderr: provenant_os::exec::CapturedStream {
+                        bytes: b"authentication_failed".to_vec(),
+                        ..Default::default()
+                    },
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+        let busy = Busy;
+        let rejected = Rejected;
+        let cases: [(&str, &dyn Executor, ProbeFailure); 2] = [
+            ("busy probe", &busy, ProbeFailure::Network),
+            (
+                "provider rejection without signed-out proof",
+                &rejected,
+                ProbeFailure::RefreshDeferred,
+            ),
+        ];
+        for (probe, executor, expected) in cases {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(
+                temp.path().join(".credentials.json"),
+                br#"{"claudeAiOauth":{"accessToken":"fake-expiring","expiresAt":1000}}"#,
+            )
+            .unwrap();
+            let login = crate::claude::Login {
+                executable: Path::new("/fake/claude"),
+                home: temp.path(),
+                user: OsStr::new("fake"),
+                config_dir: temp.path(),
+            };
+            assert_eq!(
+                refresh(executor, &login, &|| 1000, 100000, 60_000, false),
+                Err(expected),
+                "{probe}"
+            );
+        }
     }
 
     #[test]
@@ -703,45 +734,6 @@ mod tests {
             Ok(())
         );
         assert_eq!(executor.calls.load(Ordering::Relaxed), 2);
-    }
-
-    #[test]
-    fn rejected_refresh_stays_pending_without_signed_out_observation() {
-        use super::*;
-        struct Reject;
-        impl Executor for Reject {
-            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
-                Ok(ExecOutcome {
-                    termination: Termination::Exit(1),
-                    stdout: Default::default(),
-                    stderr: provenant_os::exec::CapturedStream {
-                        bytes: b"authentication_failed".to_vec(),
-                        ..Default::default()
-                    },
-                    timed_out: false,
-                    drain_truncated: false,
-                    overflow_stopped: false,
-                    cancelled: false,
-                    elapsed_micros: 0,
-                })
-            }
-        }
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            temp.path().join(".credentials.json"),
-            br#"{"claudeAiOauth":{"accessToken":"fake","expiresAt":1000}}"#,
-        )
-        .unwrap();
-        let login = crate::claude::Login {
-            executable: Path::new("/fake/claude"),
-            home: temp.path(),
-            user: OsStr::new("fake"),
-            config_dir: temp.path(),
-        };
-        assert_eq!(
-            refresh(&Reject, &login, &|| 1000, 100000, 60_000, false),
-            Err(ProbeFailure::RefreshDeferred)
-        );
     }
 
     #[test]

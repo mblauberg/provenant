@@ -166,26 +166,27 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    fn plan(state: &Path, blocks: u32) -> Plan {
+    fn plan(state: &Path, base: u32, size: u32, blocks: u32) -> Plan {
         Plan {
             state: state.to_owned(),
-            base: 30000,
-            size: 16,
+            base,
+            size,
             blocks,
             blocks_origin: None,
         }
     }
 
     #[test]
-    fn concurrent_leases_are_disjoint_and_release_on_drop() {
+    fn leases_are_disjoint_and_release_on_drop() {
         let temp = tempfile::tempdir().unwrap();
-        let plan = plan(temp.path(), 3);
+        let plan = plan(temp.path(), 18_000, 37, 3);
         let first = plan.try_acquire().unwrap().unwrap();
         let second = plan.try_acquire().unwrap().unwrap();
         let third = plan.try_acquire().unwrap().unwrap();
         let mut starts = [first.base, second.base, third.base];
         starts.sort_unstable();
-        assert_eq!(starts, [30000, 30016, 30032]);
+        let expected = std::array::from_fn(|index| plan.base + index as u32 * plan.size);
+        assert_eq!(starts, expected);
         assert!(plan.try_acquire().unwrap().is_none());
         let freed = second.base;
         drop(second);
@@ -195,7 +196,7 @@ mod tests {
             again.environment(),
             [
                 (LANE_PORT_BASE, freed.to_string()),
-                (LANE_PORT_COUNT, "16".into())
+                (LANE_PORT_COUNT, plan.size.to_string())
             ]
         );
         drop((first, third));
@@ -204,31 +205,33 @@ mod tests {
     #[test]
     fn leases_from_different_plans_never_share_a_port() {
         let temp = tempfile::tempdir().unwrap();
-        let old = plan(temp.path(), 2);
+        let old = plan(temp.path(), 31_000, 32, 2);
         let held = old.try_acquire().unwrap().unwrap();
-        assert_eq!(held.base, 30000);
-        // Base moved down one block: its block 1 is the held 30000-30015.
+        assert_eq!(held.base, old.base);
+        // The second block in the moved plan overlaps the held first block.
         let moved = Plan {
-            base: 29984,
-            ..plan(temp.path(), 2)
+            base: old.base - old.size,
+            ..old.clone()
         };
         let next = moved.try_acquire().unwrap().unwrap();
-        assert_eq!((next.base, next.size), (29984, 16));
+        assert_eq!((next.base, next.size), (moved.base, moved.size));
         assert!(moved.try_acquire().unwrap().is_none());
-        // A half-block shift overlaps both held blocks.
+        // A half-block shift overlaps the held range.
+        let shifted_base = old.base + old.size / 2;
         let shifted = Plan {
-            base: 30008,
-            ..plan(temp.path(), 1)
+            base: shifted_base,
+            blocks: 1,
+            ..old.clone()
         };
         assert!(shifted.try_acquire().unwrap().is_none());
         drop(held);
-        assert_eq!(shifted.try_acquire().unwrap().unwrap().base, 30008);
+        assert_eq!(shifted.try_acquire().unwrap().unwrap().base, shifted_base);
     }
 
     #[test]
     fn a_plan_outside_the_port_space_is_refused() {
         let temp = tempfile::tempdir().unwrap();
-        let mut plan = plan(temp.path(), 4);
+        let mut plan = plan(temp.path(), 40_000, 100, 4);
         plan.base = 65500;
         assert!(plan.try_acquire().is_err());
         plan.base = 80;

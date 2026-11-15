@@ -27,7 +27,7 @@ pub use context::{
     with_context_using_workers_and_facts,
 };
 pub use custody::*;
-pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, doctor};
+pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, WorktreeRepairKind, doctor};
 pub use gc::{
     CandidateReport, CollectionMode, ForgeObservation, OutputEntry, RetirementFeeds,
     WorktreeGcPolicy, WorktreeGcReport, acknowledge_foreign_preview, branch_candidate, collect,
@@ -185,6 +185,35 @@ impl From<provenant_config::ConfigError> for WorktreeError {
     }
 }
 
+/// Declared alternatives for admitting a checkout whose HEAD is detached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetachedWorktreeRemedy {
+    CreateBranch,
+    ReadOnly,
+}
+impl DetachedWorktreeRemedy {
+    pub const ALL: &'static [Self] = &[Self::CreateBranch, Self::ReadOnly];
+
+    fn instruction(self) -> &'static str {
+        match self {
+            Self::CreateBranch => "git switch -c BRANCH",
+            Self::ReadOnly => "remove --worktree and pass --mode read-only",
+        }
+    }
+}
+struct DetachedWorktreeRemedies;
+impl std::fmt::Display for DetachedWorktreeRemedies {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, remedy) in DetachedWorktreeRemedy::ALL.iter().enumerate() {
+            if index != 0 {
+                formatter.write_str(" or ")?;
+            }
+            formatter.write_str(remedy.instruction())?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum WorktreeError {
     #[error(transparent)]
@@ -201,9 +230,7 @@ pub enum WorktreeError {
     DetachedPrimary,
     #[error("detached HEAD at {head} is not merged into the integration branch")]
     DetachedUnmerged { head: GitOid },
-    #[error(
-        "detached HEAD at {head}; git switch -c BRANCH or remove --worktree and pass --mode read-only"
-    )]
+    #[error("detached HEAD at {head}; {}", DetachedWorktreeRemedies)]
     DetachedWorktree { head: GitOid },
     #[error("worktree writer is busy{}", .holder.as_ref().map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
     WriterBusy { holder: Option<AttemptId> },
@@ -389,6 +416,14 @@ impl WorktreeError {
                 | Self::UnknownOccupancy { .. }
                 | Self::GitEntryHeld { .. }
         )
+    }
+
+    /// Typed alternatives for the detached-checkout admission refusal.
+    pub fn detached_remedies(&self) -> &'static [DetachedWorktreeRemedy] {
+        match self {
+            Self::DetachedWorktree { .. } => DetachedWorktreeRemedy::ALL,
+            _ => &[],
+        }
     }
 
     /// The operator's next step for a refusal that has one.
@@ -856,7 +891,7 @@ impl std::fmt::Display for TaintCause {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UncertaintyReason {
     CensusUnavailable,
     UnstableProcessIdentity,
@@ -866,6 +901,19 @@ pub enum UncertaintyReason {
     ListingIncomplete,
     PolicyRejected,
     RootUnreadable,
+}
+
+impl UncertaintyReason {
+    pub const ALL: &'static [Self] = &[
+        Self::CensusUnavailable,
+        Self::UnstableProcessIdentity,
+        Self::CwdUnreadable,
+        Self::OccupancyIncomplete,
+        Self::PathUnplaceable,
+        Self::ListingIncomplete,
+        Self::PolicyRejected,
+        Self::RootUnreadable,
+    ];
 }
 
 impl std::fmt::Display for UncertaintyReason {
@@ -897,6 +945,31 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detached_worktree_refusal_carries_the_head_and_declared_remedies() {
+        let head = "1".repeat(40).parse::<GitOid>().unwrap();
+        let error = WorktreeError::DetachedWorktree { head };
+        assert!(
+            matches!(&error, WorktreeError::DetachedWorktree { head: actual } if *actual == head)
+        );
+        let mut branch = false;
+        let mut read_only = false;
+        for remedy in error.detached_remedies() {
+            match remedy {
+                DetachedWorktreeRemedy::CreateBranch => {
+                    assert!(!branch, "duplicate branch remedy");
+                    branch = true;
+                }
+                DetachedWorktreeRemedy::ReadOnly => {
+                    assert!(!read_only, "duplicate read-only remedy");
+                    read_only = true;
+                }
+            }
+        }
+        assert!(branch && read_only);
+        assert!(WorktreeError::InvalidRequest.detached_remedies().is_empty());
+    }
 
     #[test]
     fn admission_causes_keep_transient_observation_distinct_from_custody() {
@@ -1011,11 +1084,14 @@ mod worktree_layout_tests {
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir(project.path().join(".provenant")).unwrap();
         let mut ports = provenant_config::PortTable::builtin();
-        ports.worktree_layout.roots = vec![
-            PathBuf::from(".worktrees"),
-            PathBuf::from(".claude/worktrees"),
-        ];
-        ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
+        let root = ports.worktree_layout.roots[0].clone();
+        let branch_token = ports
+            .worktree_layout
+            .default
+            .file_name()
+            .unwrap()
+            .to_owned();
+        ports.worktree_layout.default = root.join(branch_token);
         std::fs::write(
             project.path().join(provenant_config::PORTS_CONFIG),
             serde_json::to_vec(&ports).unwrap(),
@@ -1024,24 +1100,15 @@ mod worktree_layout_tests {
 
         assert_eq!(
             managed_writer_relative_path(project.path(), project.path(), "feature/topic").unwrap(),
-            PathBuf::from(".claude/worktrees/feature-topic"),
+            root.join("feature-topic"),
         );
         assert_eq!(
-            managed_writer_branch(
-                project.path(),
-                project.path(),
-                Path::new(".worktrees/other")
-            )
-            .unwrap(),
+            managed_writer_branch(project.path(), project.path(), &root.join("other")).unwrap(),
             Some("other".to_owned()),
         );
         assert_eq!(
-            managed_writer_branch(
-                project.path(),
-                project.path(),
-                Path::new(".claude/worktrees/feature-topic"),
-            )
-            .unwrap(),
+            managed_writer_branch(project.path(), project.path(), &root.join("feature-topic"),)
+                .unwrap(),
             Some("feature-topic".to_owned()),
         );
     }
@@ -1051,10 +1118,7 @@ mod worktree_layout_tests {
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir(project.path().join(".git")).unwrap();
         std::fs::create_dir(project.path().join(".provenant")).unwrap();
-        let mut ports = provenant_config::PortTable::builtin();
-        ports.worktree_layout.roots =
-            vec![PathBuf::from("trees"), PathBuf::from(".claude/worktrees")];
-        ports.worktree_layout.default = PathBuf::from("trees/topic-<branch>/checkout");
+        let ports = provenant_config::PortTable::builtin();
         std::fs::write(
             project.path().join(provenant_config::PORTS_CONFIG),
             serde_json::to_vec(&ports).unwrap(),
@@ -1063,10 +1127,12 @@ mod worktree_layout_tests {
 
         assert_eq!(
             allocation_directories(&project.path().join(".git"), project.path()).unwrap(),
-            vec![
-                project.path().join("trees"),
-                project.path().join(".claude/worktrees"),
-            ],
+            ports
+                .worktree_layout
+                .roots
+                .iter()
+                .map(|root| project.path().join(root))
+                .collect::<Vec<_>>(),
         );
     }
 }

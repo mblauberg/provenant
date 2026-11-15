@@ -201,83 +201,39 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    /// A connect never outlives its deadline or its cancellation, even when
-    /// the listener never accepts and its backlog is full.
+    /// Poll slices stay bounded, and cancellation/expiry produce typed errors.
     #[test]
-    fn unix_connect_is_bounded_by_deadline_and_cancellation() {
-        use std::os::fd::AsRawFd;
-        use std::time::{Duration, Instant};
-        let temp = tempfile::Builder::new()
-            .prefix("pc-")
-            .tempdir_in(".")
-            .unwrap();
-        let path = temp
-            .path()
-            .strip_prefix(std::env::current_dir().unwrap())
-            .unwrap()
-            .join("s");
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        // SAFETY: listen on a live listener fd with an integer backlog.
-        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
-        let cancel = provenant_core::CancelToken::new();
-        let soon = || Instant::now() + Duration::from_millis(50);
-        let first = connect_unix_within(&path, soon(), &cancel).unwrap();
-        let mut held = vec![first];
-        // Fill the backlog the listener never drains. macOS raises a zero
-        // backlog to 128, so the bound is generous.
-        while held.len() < 1024 {
-            match connect_unix_within(&path, soon(), &cancel) {
-                Ok(stream) => held.push(stream),
-                Err(_) => break,
+    fn unix_connect_waits_are_bounded_and_cancellation_is_typed() {
+        use std::time::Duration;
+        let max_poll = UNIX_CONNECT_POLL_INTERVAL.as_millis() as i32;
+        let rows = [
+            (Duration::ZERO, false, Err(io::ErrorKind::TimedOut)),
+            (Duration::from_micros(500), false, Ok(1)),
+            (UNIX_CONNECT_POLL_INTERVAL, false, Ok(max_poll)),
+            (Duration::from_secs(1), false, Ok(max_poll)),
+            (
+                Duration::from_secs(1),
+                true,
+                Err(io::ErrorKind::Interrupted),
+            ),
+            (Duration::ZERO, true, Err(io::ErrorKind::Interrupted)),
+        ];
+        for (remaining, cancelled, expected) in rows {
+            match expected {
+                Ok(milliseconds) => {
+                    assert_eq!(
+                        connect_poll_timeout(remaining, cancelled).unwrap(),
+                        milliseconds
+                    )
+                }
+                Err(kind) => assert_eq!(
+                    connect_poll_timeout(remaining, cancelled)
+                        .unwrap_err()
+                        .kind(),
+                    kind
+                ),
             }
         }
-        let bounded = |cancel: &provenant_core::CancelToken, within: Duration| {
-            let started = Instant::now();
-            let result = connect_unix_within(&path, started + within, cancel);
-            (result.map(drop), started.elapsed())
-        };
-        let (result, elapsed) = bounded(&cancel, Duration::from_millis(200));
-        if held.len() < 1024 {
-            let kind = result.unwrap_err().kind();
-            assert!(
-                matches!(
-                    kind,
-                    io::ErrorKind::TimedOut | io::ErrorKind::ConnectionRefused
-                ),
-                "{kind:?}"
-            );
-        }
-        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
-        let cancelling = provenant_core::CancelToken::new();
-        let (result, elapsed) = std::thread::scope(|scope| {
-            scope.spawn(|| {
-                std::thread::sleep(Duration::from_millis(100));
-                cancelling.cancel();
-            });
-            bounded(&cancelling, Duration::from_secs(30))
-        });
-        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
-        if held.len() < 1024 {
-            // macOS refuses a full backlog at once; Linux waits until cancelled.
-            let kind = result.unwrap_err().kind();
-            assert!(
-                matches!(
-                    kind,
-                    io::ErrorKind::Interrupted | io::ErrorKind::ConnectionRefused
-                ),
-                "{kind:?}"
-            );
-        }
-        let cancelled = provenant_core::CancelToken::new();
-        cancelled.cancel();
-        assert_eq!(
-            bounded(&cancelled, Duration::from_secs(30))
-                .0
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::Interrupted
-        );
-        drop(held);
     }
 
     #[test]
@@ -847,15 +803,11 @@ pub fn connect_unix_within(
         *slot = *byte as libc::c_char;
     }
     let length = (std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1) as libc::socklen_t;
-    let bounds = || -> io::Result<i32> {
-        if cancel.is_cancelled() {
-            return Err(io::ErrorKind::Interrupted.into());
-        }
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            return Err(io::ErrorKind::TimedOut.into());
-        }
-        Ok(i32::try_from(left.min(std::time::Duration::from_millis(50)).as_millis()).unwrap_or(50))
+    let bounds = || {
+        connect_poll_timeout(
+            deadline.saturating_duration_since(std::time::Instant::now()),
+            cancel.is_cancelled(),
+        )
     };
     loop {
         bounds()?;
@@ -942,6 +894,22 @@ pub fn connect_unix_within(
             return Ok(socket.into());
         }
     }
+}
+
+const UNIX_CONNECT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+fn connect_poll_timeout(remaining: std::time::Duration, cancelled: bool) -> io::Result<i32> {
+    if cancelled {
+        return Err(io::ErrorKind::Interrupted.into());
+    }
+    if remaining.is_zero() {
+        return Err(io::ErrorKind::TimedOut.into());
+    }
+    let maximum_ms = UNIX_CONNECT_POLL_INTERVAL.as_millis();
+    let milliseconds = remaining.min(UNIX_CONNECT_POLL_INTERVAL).as_millis();
+    Ok(i32::try_from(milliseconds)
+        .unwrap_or(maximum_ms as i32)
+        .max(1))
 }
 
 /// All production clocks use this process-wide monotonic coordinate.

@@ -18,6 +18,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 provenant-test-support = { path = "../test-support", features = ["fixture"] }
+provenant-config = { path = "../config" }
 provenant-supervisor = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }
 

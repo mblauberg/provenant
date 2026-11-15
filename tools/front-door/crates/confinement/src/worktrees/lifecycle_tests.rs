@@ -22,8 +22,6 @@ use crate::utility::{GitMutation, execute_git_mutation};
 
 use provenant_core::Clock;
 
-use provenant_os::clock::SystemClock;
-
 use provenant_os::fs::Directory;
 
 use std::error::Error;
@@ -111,7 +109,7 @@ pub(super) struct TestContext<'a> {
     pub(super) roots: provenant_core::Roots,
     pub(super) project_state: Directory,
     pub(super) workers: FreeWorkers,
-    pub(super) clock: SystemClock,
+    pub(super) clock: provenant_core::TestClock,
     pub(super) lock_budget: WaitBudget,
     pub(super) utility_budget: UtilityBudget,
     pub(super) mutation_budget: UtilityBudget,
@@ -147,7 +145,10 @@ impl<'a> TestContext<'a> {
             b"{}",
         )?;
 
-        let clock = SystemClock;
+        let clock = provenant_core::TestClock::new(
+            provenant_core::WallTime::from_unix_seconds(1_700_000_000)?,
+            provenant_core::MonoTime::from_micros(0),
+        );
         let lock_budget = WaitBudget::cli(clock.mono_now(), 5)?;
         Ok(Self {
             fixture,
@@ -187,13 +188,13 @@ pub(super) struct HostRetirementFixture {
     store: provenant_fabric_store::HostStore,
     project: provenant_core::ProjectId,
     actor: provenant_core::ActorId,
-    clock: SystemClock,
+    clock: provenant_core::TestClock,
     cancel: CancelToken,
 }
 
 impl HostRetirementFixture {
     pub(super) fn new(test: &TestContext<'_>) -> Result<Self, Box<dyn Error>> {
-        let clock = SystemClock;
+        let clock = test.clock.clone();
         let cancel = CancelToken::new();
         let request = provenant_fabric_store::Request {
             clock: &clock,
@@ -1108,20 +1109,18 @@ impl WorkerObserver for LockProbeWorkers<'_> {
     }
 }
 
-/// Free until the `unknown_from`th call (1-based), then unobservable.
+/// Mutable census evidence for testing a freshness boundary.
 struct FlippingWorkers {
-    calls: std::sync::atomic::AtomicUsize,
-    unknown_from: usize,
+    unknown: std::sync::atomic::AtomicBool,
 }
 
 impl WorkerObserver for FlippingWorkers {
     fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
-        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         roots
             .iter()
             .cloned()
             .map(|root| {
-                let state = if call >= self.unknown_from {
+                let state = if self.unknown.load(std::sync::atomic::Ordering::SeqCst) {
                     Occupancy::census_unknown(root.clone(), "fixture census unavailable")
                 } else {
                     Occupancy::Available
@@ -1136,12 +1135,7 @@ impl WorkerObserver for FlippingWorkers {
         let details = states
             .iter()
             .filter(|(_, state)| !state.is_available())
-            .map(|(root, _)| {
-                (
-                    root.clone(),
-                    "process 968: cwd unreadable; policy_condition=approved daemon directory required; configure confinement.census_ignore_unreadable; path=\"/Library/Developer/CoreSimulator/Resources/bin/simdiskimaged\", team_id=platform".into(),
-                )
-            })
+            .map(|(root, _)| (root.clone(), "fixture census unavailable".into()))
             .collect();
         (states, details)
     }
@@ -1182,11 +1176,24 @@ fn creation_uses_a_nested_project_worktree_layout() -> Result<(), Box<dyn Error>
     let fixture = Fixture::new()?;
     fs::create_dir_all(fixture.root.join(".provenant"))?;
     let mut ports = provenant_config::PortTable::builtin();
-    ports.worktree_layout.roots = vec![
-        PathBuf::from(".worktrees"),
-        PathBuf::from(".claude/worktrees"),
-    ];
-    ports.worktree_layout.default = PathBuf::from(".claude/worktrees/<branch>");
+    let root = ports
+        .worktree_layout
+        .roots
+        .first()
+        .cloned()
+        .ok_or("built-in worktree root is declared")?;
+    let branch_template = ports
+        .worktree_layout
+        .default
+        .file_name()
+        .ok_or("built-in worktree branch template is declared")?
+        .to_owned();
+    let nested_root = root.join("nested");
+    ports.worktree_layout.roots.push(nested_root.clone());
+    ports.worktree_layout.default = nested_root.join(branch_template);
+    let expected_path = fixture
+        .root
+        .join(ports.managed_writer_path("custom-layout")?);
     fs::write(
         fixture.root.join(provenant_config::PORTS_CONFIG),
         serde_json::to_vec(&ports)?,
@@ -1202,10 +1209,7 @@ fn creation_uses_a_nested_project_worktree_layout() -> Result<(), Box<dyn Error>
         },
         &cancel(),
     )?;
-    assert_eq!(
-        created.path,
-        fixture.root.join(".claude/worktrees/custom-layout"),
-    );
+    assert_eq!(created.path, expected_path,);
     assert!(created.path.join(".git").exists());
     Ok(())
 }

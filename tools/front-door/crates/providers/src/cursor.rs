@@ -172,7 +172,11 @@ fn prepare(
     ];
     // Cursor's native approval mode can block a headless lane. The outer
     // profile decides which paths the agent can change.
-    argv.push("--force".into());
+    argv.extend(
+        crate::launch::CURSOR_NATIVE_ARGUMENTS
+            .iter()
+            .map(OsString::from),
+    );
     if session == Session::Resume {
         let continuation = input.continuation.ok_or_else(|| {
             input.boundary_error(

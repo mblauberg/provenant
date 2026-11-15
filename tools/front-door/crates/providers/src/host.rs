@@ -183,13 +183,10 @@ impl HostProbeDir {
         Err(fs::FsError::Io {
             operation: PROBE_DIR_OPERATION,
             path: host_root.to_owned(),
-            source: std::io::Error::other(format!(
-                "{TRIES} tries; last: {}",
-                last.map_or_else(
-                    || "no attempt recorded".to_owned(),
-                    |error| error.to_string()
-                ),
-            )),
+            source: last.map_or_else(
+                || std::io::Error::other("no retry cause recorded"),
+                std::io::Error::other,
+            ),
         })
     }
 
@@ -543,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_retries_name_the_root_and_last_cause() {
+    fn exhausted_probe_retries_return_the_typed_operation_and_root() {
         let host_root = tempfile::tempdir().unwrap();
         let root = Directory::open_anchor(host_root.path()).unwrap();
         let held = std::cell::RefCell::new(Vec::new());
@@ -558,15 +555,19 @@ mod tests {
             },
             &|_| {},
         );
-        let error = result.err().unwrap().to_string();
-        let attempts = held.borrow().len();
-        assert!((2..=32).contains(&attempts));
-        assert!(
-            error.contains(host_root.path().to_str().unwrap()),
-            "{error}"
-        );
-        assert!(error.contains(&format!("{attempts} tries")), "{error}");
-        assert!(error.contains("lock acquisition timed out"), "{error}");
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("the held probe locks must exhaust retries"),
+        };
+        assert!(matches!(
+            error,
+            fs::FsError::Io { operation, ref path, ref source }
+                if operation == PROBE_DIR_OPERATION && path == host_root.path()
+                    && source.get_ref().is_some_and(|cause| matches!(
+                        cause.downcast_ref::<fs::FsError>(),
+                        Some(fs::FsError::LockTimeout { .. })
+                    ))
+        ));
     }
 
     #[test]

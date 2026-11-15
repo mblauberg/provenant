@@ -169,6 +169,11 @@ pub(super) fn worktree_grants_fixture() -> WorktreeWriteGrants {
 #[cfg(target_os = "macos")]
 #[test]
 fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn std::error::Error>> {
+    use super::render::{
+        RuleAction, has_rule_atoms, rule_facts, rule_index, rule_index_with_targets,
+        rule_index_without_strings,
+    };
+
     let (mut plan, profile) = write_grants_fixture();
     let scratch = "/fixture/attempts/own/tmp/candidate-0";
     plan.scratch.path = scratch.into();
@@ -205,8 +210,9 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
             Path::new("/fixture/home"),
         )?)?;
         // Ordinary database IPC is ambient and has no grant flags.
-        assert!(rendered.contains("(allow default)"));
-        assert!(!rendered.contains("(deny ipc-sysv-"));
+        assert!(rule_index(&rendered, RuleAction::Allow, "default", None).is_some());
+        assert!(rule_index(&rendered, RuleAction::Deny, "ipc-sysv-shm", None).is_none());
+        assert!(rule_index(&rendered, RuleAction::Deny, "ipc-sysv-sem", None).is_none());
         let mut database = ProviderProfile {
             spec: profile.spec.clone(),
             observations: BTreeMap::new(),
@@ -220,35 +226,75 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
             writer.then_some(&git),
             Path::new("/fixture/home"),
         )?)?;
-        assert!(opted_in.contains("(allow ipc-sysv-shm)\n(allow ipc-sysv-sem)\n"));
-        assert!(!rendered.contains("SYS_shmget") && !rendered.contains("SYS_msgget"));
+        assert!(rule_index(&opted_in, RuleAction::Allow, "ipc-sysv-shm", None).is_some());
+        assert!(rule_index(&opted_in, RuleAction::Allow, "ipc-sysv-sem", None).is_some());
         assert_eq!(
-            rendered.lines().any(|line| line == "(allow process-exec)"),
+            rule_index_without_strings(&rendered, RuleAction::Allow, "process-exec").is_some(),
             writer
         );
-        assert!(rendered.contains(&format!("(allow file-read* (subpath \"{scratch}\"))")));
+        assert!(rule_index(&rendered, RuleAction::Allow, "file-read*", Some(scratch)).is_some());
         for operation in ["file-read*", "file-write*", "process-exec"] {
-            let denial = format!(
-                "(deny {operation} (require-all (subpath \"/fixture/attempts\") (require-not (subpath \"{scratch}\")) (require-not (subpath \"{private_state}\"))))"
-            );
             assert!(
-                rendered.contains(&denial),
-                "attempt-private state denial: {denial}"
+                rule_index_with_targets(
+                    &rendered,
+                    RuleAction::Deny,
+                    operation,
+                    &["/fixture/attempts", scratch, private_state],
+                )
+                .is_some()
             );
         }
-        assert!(rendered.contains("(deny signal)"));
-        let signals: Vec<_> = rendered
-            .lines()
-            .filter(|line| line.starts_with("(allow signal"))
-            .collect();
-        assert_eq!(signals, ["(allow signal (target same-sandbox))"]);
-        assert!(rendered.contains("(deny sysctl-read (sysctl-name-prefix \"kern.procargs\"))"));
-        assert!(!rendered.contains("(sysctl-name-prefix \"kern.proc.\")"));
-        assert!(rendered.contains("(allow process-info*)"));
-        assert!(!rendered.contains("(deny process-info*)"));
-        assert!(rendered.contains("(deny process-info-setcontrol process-info-dirtycontrol)"));
-        assert!(rendered.contains(
-            "(allow process-info-setcontrol process-info-dirtycontrol (target same-sandbox))"
+        assert!(rule_index(&rendered, RuleAction::Deny, "signal", None).is_some());
+        assert!(has_rule_atoms(
+            &rendered,
+            RuleAction::Allow,
+            "signal",
+            &["same-sandbox"]
+        ));
+        assert!(
+            rule_facts(&rendered)
+                .iter()
+                .filter(|rule| {
+                    rule.action == RuleAction::Allow
+                        && rule.operations.iter().any(|name| name == "signal")
+                })
+                .all(|rule| rule.atoms.iter().any(|atom| atom == "same-sandbox"))
+        );
+        assert!(
+            rule_index(
+                &rendered,
+                RuleAction::Deny,
+                "sysctl-read",
+                Some("kern.procargs")
+            )
+            .is_some()
+        );
+        assert!(
+            rule_index(
+                &rendered,
+                RuleAction::Deny,
+                "sysctl-read",
+                Some("kern.proc.")
+            )
+            .is_none()
+        );
+        assert!(rule_index(&rendered, RuleAction::Allow, "process-info*", None).is_some());
+        assert!(rule_index(&rendered, RuleAction::Deny, "process-info*", None).is_none());
+        assert!(rule_index(&rendered, RuleAction::Deny, "process-info-setcontrol", None).is_some());
+        assert!(
+            rule_index(
+                &rendered,
+                RuleAction::Allow,
+                "process-info-setcontrol",
+                None
+            )
+            .is_some()
+        );
+        assert!(has_rule_atoms(
+            &rendered,
+            RuleAction::Allow,
+            "process-info-setcontrol",
+            &["process-info-dirtycontrol", "same-sandbox"]
         ));
     }
     Ok(())
@@ -602,6 +648,10 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
     let private = linked.repo().private_git_dir().to_owned();
     let common = linked.repo().common_git_dir().to_owned();
     assert_ne!(private, common);
+    assert_eq!(grants.worktree.path, linked.path());
+    assert_eq!(grants.private_git_dir.path, private);
+    assert_eq!(grants.common_git_dir.path, common);
+    assert!(grants.iter().all(|grant| grant.scope == PathScope::Subtree));
 
     let home = provenant_os::fs::canonicalize(&fixture.home)?;
     let credentials = provenant_core::CredentialRoots::for_home(&home);
@@ -669,39 +719,14 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         &anchors,
         &provenant_core::CredentialRoots::for_home(anchors.home),
     )?;
-    let mut source = String::new();
-    push_worktree_rule(&mut source, &verified_grants)?;
-    assert!(source.contains("(require-not (subpath "));
-    for directory in [&common, &private] {
-        assert!(source.contains(&format!(
-            "(deny file-write* (subpath \"{}\"))",
-            directory.display()
-        )));
-    }
-    let git_writes: Vec<_> = source
-        .lines()
-        .filter(|line| line.starts_with("(allow file-write* (literal "))
-        .collect();
-    assert!(git_writes.is_empty());
-    for relative in [
-        "config",
-        "config.lock",
-        "packed-refs",
-        "refs/heads/main",
-        "refs/remotes",
-        "refs/remotes/origin/s3/authority",
-        "refs/remotes/origin/s3/authority.lock",
-        "refs/remotes/upstream",
-        "logs/refs/remotes",
-        "logs/refs/remotes/origin/s3/authority",
-        "logs/refs/remotes/origin/s3/authority.lock",
-        "hooks",
-    ] {
-        assert!(
-            !source.contains(&format!("\"{}\"", common.join(relative).display())),
-            "{relative}"
-        );
-    }
+    assert_eq!(verified_grants.worktree.path, linked.path());
+    assert_eq!(verified_grants.private_git_dir.path, private);
+    assert_eq!(verified_grants.common_git_dir.path, common);
+    assert!(
+        verified_grants
+            .iter()
+            .all(|grant| grant.scope == PathScope::Subtree)
+    );
 
     let other_ref = GitRefName::branch("s3/other")?;
     let mismatched = Anchors {

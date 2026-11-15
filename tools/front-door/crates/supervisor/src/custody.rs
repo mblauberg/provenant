@@ -1,12 +1,14 @@
 //! Guardian channels and persistent writer reservations. A PID is never a handle.
-use crate::census::{ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver};
+use crate::census::{
+    CensusError, ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver,
+};
 use crate::machine::StopReason;
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, GitOid, WaitBudget};
 use provenant_os::{
     exec::{CapturedStream, Termination},
     fs::{Directory, FsError, LockGuard, LockMode, Metadata, Publication, PublishMode},
 };
-use provenant_records::{Limits, decode_v1};
+use provenant_records::{ExtraFields, Limits, decode};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
@@ -26,6 +28,18 @@ pub struct ImportFence {
     pub scope: Scope,
     pub lane: provenant_records::WorkKey,
     pub run_attempt: PathBuf,
+}
+
+/// Storage decoder for Run's durable import marker. The public handoff record
+/// stays constructible by Run while this DTO retains fields added by later minors.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredImportFence {
+    schema_version: u64,
+    scope: Scope,
+    lane: provenant_records::WorkKey,
+    run_attempt: PathBuf,
+    #[serde(flatten)]
+    extra: ExtraFields,
 }
 
 /// A recovery target, carried intact from custody admission to the CLI.
@@ -83,6 +97,10 @@ pub enum CustodyError {
     #[error(transparent)]
     Filesystem(#[from] FsError),
 }
+
+#[derive(Debug, Error)]
+#[error("boot identity unavailable")]
+struct BootIdentityUnavailable(#[source] CensusError);
 /// Why admission could not judge a lane start. The guardian publishes these
 /// refusals, so each message is fixed text that cannot expose a path.
 #[derive(Debug, Error)]
@@ -94,14 +112,16 @@ pub enum AdmissionError {
     )]
     Clock,
     #[error(
-        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds, cargo_build_jobs and cargo_debug"
+        "invalid host build settings: check {}",
+        .setting_names().join(", ")
     )]
     BuildSettings,
     #[error("guardian process identity unavailable; retry when process observation is available")]
     GuardianIdentity,
     /// Numeric host observations are safe to publish as the lane's refusal.
     #[error(
-        "insufficient disk space: {free} bytes available, gc.critical_free {floor} bytes (source: {source_label}); run `provenant gc --apply`",
+        "insufficient disk space: {free} bytes available, {setting} {floor} bytes (source: {source_label}); run `provenant gc --apply`",
+        setting = .setting_names()[0],
         source_label = .origin.description()
     )]
     Disk {
@@ -109,7 +129,7 @@ pub enum AdmissionError {
         floor: u64,
         origin: provenant_records::diagnostic::SettingSource,
     },
-    #[error("memory pressure is {level:?}; domains.fabric.lanes.memory_pressure_threshold is {threshold_label} (source: {source_label}); wait for host memory pressure to fall", threshold_label = .threshold.name(), source_label = .origin.description())]
+    #[error("memory pressure is {level:?}; {setting} is {threshold_label} (source: {source_label}); wait for host memory pressure to fall", setting = .setting_names()[0], threshold_label = .threshold.name(), source_label = .origin.description())]
     MemoryPressure {
         level: provenant_records::diagnostic::PressureLevel,
         threshold: provenant_records::diagnostic::PressureThreshold,
@@ -131,6 +151,24 @@ pub enum AdmissionError {
     },
 }
 impl AdmissionError {
+    /// Configuration keys associated with this refusal, derived from its
+    /// typed cause and the declaration that supplied the limit.
+    pub fn setting_names(&self) -> Vec<&'static str> {
+        match self {
+            Self::Clock | Self::GuardianIdentity | Self::Processes { .. } => Vec::new(),
+            Self::BuildSettings => vec![
+                "domains.fabric.lanes.max_concurrent_builds",
+                "cargo_build_jobs",
+                "cargo_debug",
+            ],
+            Self::Disk { .. } => vec!["gc.critical_free"],
+            Self::MemoryPressure { .. } => {
+                vec!["domains.fabric.lanes.memory_pressure_threshold"]
+            }
+            Self::LaneCap { kind, .. } => vec![kind.setting()],
+        }
+    }
+
     /// Closed host resource facts retained by both custody handoff and guardian
     /// admission. Operational failures carry no freely formatted safe detail.
     pub fn resource_fact(&self) -> Option<provenant_records::diagnostic::ResourceFact> {
@@ -209,13 +247,20 @@ pub(crate) enum StoredWriterBinding {
         git_inode: u64,
         branch: String,
         base: GitOid,
+        #[serde(flatten)]
+        extra: ExtraFields,
     },
-    ReadOnly,
+    ReadOnly {
+        #[serde(flatten)]
+        extra: ExtraFields,
+    },
 }
 impl WriterBinding {
     /// The binding of a read-only attempt, which holds no worktree.
     pub fn read_only() -> Self {
-        Self(StoredWriterBinding::ReadOnly)
+        Self(StoredWriterBinding::ReadOnly {
+            extra: ExtraFields::default(),
+        })
     }
     pub fn from_verified(
         worktree: &Directory,
@@ -232,6 +277,7 @@ impl WriterBinding {
             git_inode: git.inode,
             branch: branch.into(),
             base,
+            extra: ExtraFields::default(),
         };
         // The confinement owner also verifies Git ref semantics. Here reject
         // control bytes and unbounded input at the storage edge.
@@ -255,7 +301,7 @@ impl StoredWriterBinding {
                     ..
                 },
             ) => a_device == b_device && a_inode == b_inode,
-            (Self::ReadOnly, Self::ReadOnly) => true,
+            (Self::ReadOnly { .. }, Self::ReadOnly { .. }) => true,
             _ => false,
         }
     }
@@ -269,17 +315,29 @@ impl StoredWriterBinding {
         }
         Ok(())
     }
+
+    /// Handoff messages are authority-bearing input and must not smuggle
+    /// extension data through the permissive persisted-record shape.
+    pub(crate) fn has_extensions(&self) -> bool {
+        match self {
+            Self::Worktree { extra, .. } | Self::ReadOnly { extra } => !extra.is_empty(),
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OwnershipJournal {
     schema_version: u64,
     scope: Scope,
     binding: StoredWriterBinding,
+    #[serde(flatten)]
+    extra: ExtraFields,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SettlementJournal {
     schema_version: u64,
     scope: Scope,
+    #[serde(flatten)]
+    extra: ExtraFields,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Reservation {
@@ -299,7 +357,7 @@ pub(crate) struct Reservation {
     pub census_incomplete: bool,
     pub omitted_descendants: u64,
     #[serde(flatten)]
-    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
+    pub extra: ExtraFields,
 }
 impl Reservation {
     pub(crate) fn validate(&self) -> Result<()> {
@@ -460,7 +518,9 @@ pub fn acquire_reader(
     acquire_writer(
         attempt,
         scope,
-        WriterBinding(StoredWriterBinding::ReadOnly),
+        WriterBinding(StoredWriterBinding::ReadOnly {
+            extra: ExtraFields::default(),
+        }),
         budget,
         cancel,
         clock,
@@ -587,6 +647,7 @@ pub(crate) fn acquire_writer_with_observer(
                 schema_version: 1,
                 scope,
                 binding: reservation.binding.clone(),
+                extra: ExtraFields::default(),
             },
             PublishMode::Replace,
         )?)?;
@@ -629,11 +690,12 @@ pub fn retained_import_decision(
     {
         return Err(CustodyError::InvalidRecord);
     }
-    let marker: ImportFence = match read_record(evidence, "import-retained.json", RECORD_LIMIT) {
-        Ok(record) => record,
-        Err(CustodyError::Filesystem(error)) if error.is_not_found() => return Ok(None),
-        Err(error) => return Err(error),
-    };
+    let marker: StoredImportFence =
+        match read_record(evidence, "import-retained.json", RECORD_LIMIT) {
+            Ok(record) => record,
+            Err(CustodyError::Filesystem(error)) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error),
+        };
     if marker.schema_version != 1 || marker.scope != expected {
         return Err(CustodyError::InvalidRecord);
     }
@@ -811,7 +873,7 @@ pub(crate) fn read_record<T: serde::de::DeserializeOwned>(
     limit: u64,
 ) -> Result<T> {
     let bytes = dir.read_bounded(OsStr::new(name), limit)?;
-    decode_v1(
+    decode(
         bytes.as_slice(),
         Limits {
             max_bytes: limit,
@@ -1183,6 +1245,8 @@ pub(crate) struct CancelRequest {
     pub request_id: provenant_core::OperationId,
     pub requester: ActorId,
     pub reason: StopReason,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopReceipt {
@@ -1219,6 +1283,7 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
         .map_err(|_| CustodyError::InvalidRecord)?,
         requester: handle.requester,
         reason,
+        extra: ExtraFields::default(),
     };
     match write_record(
         &handle.directory,
@@ -1327,6 +1392,8 @@ pub struct ProcessExit {
     pub launch_refusal: Option<provenant_records::diagnostic::ResourceFact>,
     pub warnings: Vec<String>,
     pub omitted_warnings: u64,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 impl ProcessExit {
     /// Construct the guardian's pre-spawn admission evidence in one owner so
@@ -1369,6 +1436,7 @@ impl ProcessExit {
             launch_refusal: None,
             warnings,
             omitted_warnings: 0,
+            extra: ExtraFields::default(),
         }
     }
 
@@ -1427,6 +1495,8 @@ pub struct CaptureTotals {
     pub decoder_lost_frames: u64,
     pub lost_bytes: u64,
     pub read_failed: bool,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 impl From<&CapturedStream> for CaptureTotals {
     fn from(value: &CapturedStream) -> Self {
@@ -1437,12 +1507,16 @@ impl From<&CapturedStream> for CaptureTotals {
             decoder_lost_frames: value.decoder_lost_frames,
             lost_bytes: value.sink_lost_bytes,
             read_failed: value.read_failed,
+            extra: ExtraFields::default(),
         }
     }
 }
 // Current storage DTO permits future additive fields.
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredExit {
+    schema_version: u64,
+    #[serde(default)]
+    priority: Option<i32>,
     scope: Scope,
     termination: Option<Termination>,
     never_spawned: bool,
@@ -1461,9 +1535,13 @@ struct StoredExit {
     terminal_observed: bool,
     unresolved_cleanup: bool,
     unresolved_pids: Vec<i64>,
+    #[serde(default)]
+    unresolved_identities: Vec<ProcessIdentity>,
     settlement_evidence: SettlementEvidence,
     stdout: CaptureTotals,
     stderr: CaptureTotals,
+    #[serde(flatten)]
+    extra: ExtraFields,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct ExitObservation {
@@ -1499,13 +1577,18 @@ pub enum PublicationState {
     Durable,
     VisibleDurabilityUnconfirmed,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredObservation {
+    schema_version: u64,
     scope: Scope,
     guardian: Option<ProcessIdentity>,
     #[serde(default)]
     provider: Option<ProcessIdentity>,
     publication_pending: bool,
+    #[serde(default)]
+    priority: Option<i32>,
+    #[serde(flatten)]
+    extra: ExtraFields,
 }
 
 /// A reboot after both identities were recorded proves the entire old process
@@ -1522,7 +1605,8 @@ pub fn checkpoint_before_reboot(
     let (Some(guardian), Some(provider)) = (record.guardian, record.provider) else {
         return false;
     };
-    record.scope == scope
+    record.schema_version == 1
+        && record.scope == scope
         && !record.publication_pending
         && guardian.validate().is_ok()
         && provider.validate().is_ok()
@@ -1553,7 +1637,8 @@ pub fn holder_gone(directory: &Directory, scope: Scope, observer: &dyn ProcessOb
         ProcessObservation::Present(fact) => fact.identity != *identity || fact.zombie,
         ProcessObservation::Unknown(_) => false,
     };
-    record.scope == scope
+    record.schema_version == 1
+        && record.scope == scope
         && !record.publication_pending
         && gone(&guardian)
         && record.provider.as_ref().is_none_or(gone)
@@ -1586,7 +1671,7 @@ pub fn observe(
             return Err(CustodyError::Cancelled);
         }
         match read_record::<StoredExit>(&handle.directory, "process-exit.json", EXIT_LIMIT) {
-            Ok(record) if record.scope == handle.scope => {
+            Ok(record) if record.schema_version == 1 && record.scope == handle.scope => {
                 let publication = if handle.directory.sync().is_ok() {
                     PublicationState::Durable
                 } else {
@@ -1639,7 +1724,7 @@ fn observe_checkpoint(
     else {
         return Ok(Observation::Unknown);
     };
-    if observation.scope != scope {
+    if observation.schema_version != 1 || observation.scope != scope {
         return Ok(Observation::Unknown);
     }
     if observation.publication_pending {
@@ -2054,7 +2139,10 @@ impl Recovery {
         if self.observe() != RecoveryState::Absent {
             return Err(CustodyError::Fenced);
         }
-        if matches!(self.reservation.binding, StoredWriterBinding::ReadOnly) {
+        if matches!(
+            self.reservation.binding,
+            StoredWriterBinding::ReadOnly { .. }
+        ) {
             drop(self.lease.take());
         }
         Ok(())
@@ -2113,9 +2201,10 @@ impl Recovery {
             return Ok(None);
         }
         let boot = observer.boot_identity().map_err(|error| {
-            CustodyError::Io(io::Error::other(format!(
-                "boot identity unavailable: {error}"
-            )))
+            CustodyError::Io(io::Error::new(
+                io::ErrorKind::Other,
+                BootIdentityUnavailable(error),
+            ))
         })?;
         if boot == self.reservation.boot {
             return Ok(None);
@@ -2242,12 +2331,16 @@ struct ReleaseReceipt {
     scope: Scope,
     terminal_digest: provenant_records::FileDigest,
     quarantine_digest: provenant_records::FileDigest,
+    #[serde(flatten)]
+    extra: ExtraFields,
 }
 #[derive(Serialize, Deserialize)]
 struct SettlementArtifact {
     schema_version: u64,
     scope: Scope,
     kind: SettlementKind,
+    #[serde(flatten)]
+    extra: ExtraFields,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2301,7 +2394,7 @@ pub(crate) fn verify_release(
         let mut file = directory.open_read(OsStr::new(name))?;
         let bytes = file.read_bounded(RECORD_LIMIT)?;
         let artifact: SettlementArtifact =
-            decode_v1(bytes.as_slice(), Limits::CONFIG).map_err(|_| CustodyError::InvalidRecord)?;
+            decode(bytes.as_slice(), Limits::CONFIG).map_err(|_| CustodyError::InvalidRecord)?;
         if artifact.schema_version != 1
             || artifact.scope != scope
             || expected_terminal != matches!(artifact.kind, SettlementKind::CanonicalTerminal)
@@ -2340,6 +2433,7 @@ pub fn publish_release(attempt: &Directory, scope: Scope) -> Result<()> {
         schema_version: 1,
         scope,
         kind: SettlementKind::CanonicalTerminal,
+        extra: ExtraFields::default(),
     })?;
     match attempt.mkdir(OsStr::new("quarantine"), 0o700) {
         Ok(()) => attempt.sync()?,
@@ -2350,7 +2444,7 @@ pub fn publish_release(attempt: &Directory, scope: Scope) -> Result<()> {
     seal(attempt, "terminal-commit.json", &terminal)?;
     let manifest = quarantine.read_bounded(OsStr::new("manifest.json"), RECORD_LIMIT)?;
     let header: SettlementArtifact =
-        decode_v1(manifest.as_slice(), Limits::CONFIG).map_err(|_| CustodyError::InvalidRecord)?;
+        decode(manifest.as_slice(), Limits::CONFIG).map_err(|_| CustodyError::InvalidRecord)?;
     if header.schema_version != 1
         || header.scope != scope
         || !matches!(header.kind, SettlementKind::QuarantineManifest)
@@ -2362,6 +2456,7 @@ pub fn publish_release(attempt: &Directory, scope: Scope) -> Result<()> {
         scope,
         terminal_digest: provenant_records::CanonicalV1::file_digest(&terminal),
         quarantine_digest: provenant_records::CanonicalV1::file_digest(&manifest),
+        extra: ExtraFields::default(),
     })?;
     seal(attempt, "release.json", &release)
 }
@@ -2373,6 +2468,7 @@ pub(crate) fn clear_reservation(directory: &Directory, scope: Scope) -> Result<(
         &SettlementJournal {
             schema_version: 1,
             scope,
+            extra: ExtraFields::default(),
         },
         PublishMode::Replace,
     )?)?;
@@ -2402,6 +2498,7 @@ impl Recovery {
                 schema_version: 1,
                 scope: self.scope(),
                 binding: self.reservation.binding.clone(),
+                extra: ExtraFields::default(),
             },
             PublishMode::Replace,
         )?)?;
@@ -2453,11 +2550,12 @@ impl Recovery {
 pub fn reattach(directory: Directory, scope: Scope) -> Result<CustodyHandle> {
     #[derive(Deserialize)]
     struct Summary {
+        schema_version: u64,
         scope: Scope,
         requester: ActorId,
     }
     let summary: Summary = read_record(&directory, "launch.json", RECORD_LIMIT)?;
-    if summary.scope != scope || scope.generation == 0 {
+    if summary.schema_version != 1 || summary.scope != scope || scope.generation == 0 {
         return Err(CustodyError::InvalidRecord);
     }
     Ok(CustodyHandle {

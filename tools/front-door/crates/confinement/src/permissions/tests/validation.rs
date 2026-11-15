@@ -18,10 +18,9 @@ use std::time::Duration;
 
 #[test]
 fn git_control_link_refusal_names_the_file_and_the_recovery() {
-    let error = PermissionError::GitControlHardLinked("/repo/.git/config".into());
-    let message = error.to_string();
-    assert!(message.contains("/repo/.git/config"));
-    assert!(message.contains("samefile"));
+    let path = Path::new("/repo/.git/config");
+    let error = PermissionError::GitControlHardLinked(path.to_owned());
+    assert!(matches!(error, PermissionError::GitControlHardLinked(ref refused) if refused == path));
 }
 
 #[cfg(target_os = "macos")]
@@ -189,10 +188,10 @@ fn invalid_path_error_names_the_refused_path() {
         "/opt/homebrew/bin/../Cellar/opencode-v2/2.0.32",
     ] {
         let error = validate_absolute(Path::new(path)).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            format!("path is not a permitted absolute, normalised path: {path:?}")
-        );
+        assert!(matches!(
+            error,
+            PermissionError::InvalidPath(ref refused) if refused == Path::new(path)
+        ));
     }
 }
 
@@ -291,7 +290,7 @@ fn profile_family_limits_follow_configured_grant_limit() {
             limit: 64
         }
     ));
-    assert!(error.to_string().contains("domains.run.grant_limit"));
+    assert_eq!(error.setting_key(), Some(GRANT_LIMIT_SETTING_KEY));
     assert!(
         validate_profile_spec_with_home(
             &spec,

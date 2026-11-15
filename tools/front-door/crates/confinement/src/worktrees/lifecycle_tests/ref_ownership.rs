@@ -310,95 +310,98 @@ fn detached_private_head_uses_the_shared_generation_and_endpoint_identity()
 }
 
 #[test]
-fn cooperating_writers_share_one_ledger_per_repository() -> Result<(), Box<dyn Error>> {
+fn attempt_and_operation_replays_share_generation_rules() -> Result<(), Box<dyn Error>> {
+    #[derive(Clone)]
+    enum Owner {
+        Attempt(AttemptId),
+        Operation(provenant_core::OperationId),
+    }
+    impl Owner {
+        fn attempt_id(&self) -> Option<AttemptId> {
+            match self {
+                Self::Attempt(id) => Some(id.clone()),
+                Self::Operation(_) => None,
+            }
+        }
+
+        fn operation_id(&self) -> Option<provenant_core::OperationId> {
+            match self {
+                Self::Attempt(_) => None,
+                Self::Operation(id) => Some(id.clone()),
+            }
+        }
+    }
+
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
-    let endpoint = RefEndpoint::Remote {
-        remote: "upstream".into(),
-        push_url: "https://example.invalid/repo.git".into(),
-    };
-    let reference = GitRefName::branch("lane/pushed")?;
-    // A second writer opens the same ledger from the state root alone.
-    let other = RefLedger::open(fixture._temp.path(), test.binding.project_id())?;
-    let observation = RefObservation {
-        endpoint: endpoint.clone(),
-        reference: reference.clone(),
-        origin: RefOrigin::Created,
-        tip: fixture.head()?,
-        recorded_at: test.clock.wall_now()?,
-        attempt_id: Some(AttemptId::from_bytes([9; 16])),
-        operation_id: None,
-    };
-    let first = other.record(observation.clone(), &test.clock, &cancel())?;
-    // A replay by the same owner remains the same generation even if the
-    // branch is now observed as existing rather than created.
-    let mut replay_observation = observation.clone();
-    replay_observation.origin = RefOrigin::Adopted;
-    replay_observation.recorded_at = test.clock.wall_now()?;
-    let replay = other.record(replay_observation, &test.clock, &cancel())?;
-    assert_eq!(replay, first);
-    // A distinct owner adopting that exact tip starts a new generation.
-    let mut new_owner = observation.clone();
-    new_owner.origin = RefOrigin::Adopted;
-    new_owner.attempt_id = Some(AttemptId::from_bytes([10; 16]));
-    let adopted = other.record(new_owner.clone(), &test.clock, &cancel())?;
-    assert!(adopted.generation > first.generation);
-    assert_eq!(adopted.origin, RefOrigin::Adopted);
-    // The ledger remains shared by both writers.
-    let seen = RefLedger::for_context(&context)?
-        .load(&endpoint, &reference)?
-        .ok_or("record not shared")?;
-    assert_eq!(seen, adopted);
-    // A new observation under the same attempt remains idempotent.
-    let replay = other.record(new_owner.clone(), &test.clock, &cancel())?;
-    assert_eq!(replay, adopted);
-    assert_eq!(seen.endpoint, endpoint);
-    // The local ref of the same name is a different, unobserved ref.
-    assert!(ledger_record(&context, "lane/pushed")?.is_none());
-    Ok(())
-}
-
-#[test]
-fn operation_replay_preserves_generation_but_a_new_operation_advances_it()
--> Result<(), Box<dyn Error>> {
-    let fixture = Fixture::new()?;
-    let test = TestContext::new(&fixture)?;
-    let ledger = RefLedger::for_context(&test.context())?;
-    let reference = GitRefName::branch("lane/operation")?;
     let tip = fixture.head()?;
-    let observation = |origin, operation_id| RefObservation {
-        endpoint: RefEndpoint::Local,
-        reference: reference.clone(),
-        origin,
-        tip,
-        recorded_at: test.clock.wall_now().expect("wall clock"),
-        attempt_id: None,
-        operation_id: Some(operation_id),
-    };
-    let first_operation = provenant_core::OperationId::parse("create-lane")?;
-    let first = ledger.record(
-        observation(RefOrigin::Created, first_operation.clone()),
-        &test.clock,
-        &cancel(),
-    )?;
-    let replay = ledger.record(
-        observation(RefOrigin::Adopted, first_operation),
-        &test.clock,
-        &cancel(),
-    )?;
-    assert_eq!(replay, first);
-
-    let next = ledger.record(
-        observation(
-            RefOrigin::Adopted,
-            provenant_core::OperationId::parse("adopt-lane")?,
+    let cases = [
+        (
+            RefEndpoint::Remote {
+                remote: "upstream".into(),
+                push_url: "https://example.invalid/repo.git".into(),
+            },
+            GitRefName::branch("lane/pushed")?,
+            Owner::Attempt(AttemptId::from_bytes([9; 16])),
+            Owner::Attempt(AttemptId::from_bytes([10; 16])),
+            true,
         ),
-        &test.clock,
-        &cancel(),
-    )?;
-    assert!(next.generation > first.generation);
-    assert_eq!(next.origin, RefOrigin::Adopted);
+        (
+            RefEndpoint::Local,
+            GitRefName::branch("lane/operation")?,
+            Owner::Operation(provenant_core::OperationId::parse("create-lane")?),
+            Owner::Operation(provenant_core::OperationId::parse("adopt-lane")?),
+            false,
+        ),
+    ];
+    let other = RefLedger::open(fixture._temp.path(), test.binding.project_id())?;
+    for (endpoint, reference, first_owner, next_owner, remote) in cases {
+        let observation = |owner: &Owner, origin, recorded_at| RefObservation {
+            endpoint: endpoint.clone(),
+            reference: reference.clone(),
+            origin,
+            tip,
+            recorded_at,
+            attempt_id: owner.attempt_id(),
+            operation_id: owner.operation_id(),
+        };
+        let first = other.record(
+            observation(&first_owner, RefOrigin::Created, test.clock.wall_now()?),
+            &test.clock,
+            &cancel(),
+        )?;
+        let replay = other.record(
+            observation(&first_owner, RefOrigin::Adopted, test.clock.wall_now()?),
+            &test.clock,
+            &cancel(),
+        )?;
+        assert_eq!(replay, first);
+
+        let next = other.record(
+            observation(&next_owner, RefOrigin::Adopted, test.clock.wall_now()?),
+            &test.clock,
+            &cancel(),
+        )?;
+        assert!(next.generation > first.generation);
+        assert_eq!(next.origin, RefOrigin::Adopted);
+        assert_eq!(
+            other.record(
+                observation(&next_owner, RefOrigin::Adopted, test.clock.wall_now()?),
+                &test.clock,
+                &cancel(),
+            )?,
+            next
+        );
+
+        let seen = RefLedger::for_context(&context)?
+            .load(&endpoint, &reference)?
+            .ok_or("record not shared")?;
+        assert_eq!(seen, next);
+        if remote {
+            assert!(ledger_record(&context, "lane/pushed")?.is_none());
+        }
+    }
     Ok(())
 }
 
@@ -452,7 +455,7 @@ fn adopted_owner_without_a_ref_link_stays_unobserved() -> Result<(), Box<dyn Err
         "branch": "human/adopted",
         "base": "1111111111111111111111111111111111111111",
         "host": provenant_core::HostId::from_bytes([1; 16]),
-        "created_at": SystemClock.wall_now()?,
+        "created_at": provenant_core::WallTime::from_unix_seconds(1_700_000_000)?,
         "origin": "adopted",
     }))?;
     assert!(owner.reference.is_none());

@@ -21,6 +21,26 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+#[derive(Debug)]
+struct ReconcileHint {
+    attempt: provenant_core::AttemptId,
+    source: provenant_os::fs::FsError,
+}
+impl std::fmt::Display for ReconcileHint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "settlement recovery failed; run `provenant reconcile {}`: {}",
+            self.attempt, self.source
+        )
+    }
+}
+impl std::error::Error for ReconcileHint {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 fn census_fallback_notice(fallback: bool, recorded: &mut bool) -> Option<&'static str> {
     if fallback && !*recorded {
         *recorded = true;
@@ -37,6 +57,8 @@ const FULL_CENSUS_INTERVAL_MS: u64 = 5_000;
 const EVENT_DRAIN_BACKOFF_MS: u64 = 10;
 const JOURNAL_RETRY_INTERVAL_MS: u64 = 100;
 const TRACKING_INTERVAL_MS: u64 = 1_000;
+const CANCEL_WATCH_POLL_MS: u64 = 1_000;
+const CANCEL_FALLBACK_POLL_MS: u64 = 100;
 
 fn tracking_publication_due(now: u64, last_attempt: Option<u64>, failed: bool) -> bool {
     last_attempt.is_none_or(|last| {
@@ -95,7 +117,11 @@ fn census_watch_pids<'a>(
 // Directory notifications wake cancellation promptly. The periodic read also
 // covers in-place writes to an existing cancel file and lost notifications.
 fn cancel_poll_interval(watched: bool) -> u64 {
-    if watched { 1_000 } else { 100 }
+    if watched {
+        CANCEL_WATCH_POLL_MS
+    } else {
+        CANCEL_FALLBACK_POLL_MS
+    }
 }
 
 /// Clone failure must leave the driver's writer lease available for recovery.
@@ -105,11 +131,11 @@ fn settlement_recovery(
     lock_directory: provenant_os::fs::Result<Directory>,
     reservation: &Reservation,
 ) -> Result<Recovery> {
-    let lock_directory = lock_directory.map_err(|error| {
-        CustodyError::Io(io::Error::other(format!(
-            "cannot clone writer lock directory for settlement of attempt {}; run `provenant reconcile`: {error}",
-            reservation.scope.attempt
-        )))
+    let lock_directory = lock_directory.map_err(|source| {
+        CustodyError::Io(io::Error::other(ReconcileHint {
+            attempt: reservation.scope.attempt,
+            source,
+        }))
     })?;
     Ok(Recovery {
         directory,
@@ -479,7 +505,8 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         serde_json::to_value(&message.binding).map_err(|_| CustodyError::InvalidRecord)?;
     let reservation_binding =
         serde_json::to_value(&reservation.binding).map_err(|_| CustodyError::InvalidRecord)?;
-    if reservation.scope != message.scope
+    if message.binding.has_extensions()
+        || reservation.scope != message.scope
         || reservation.guardian.is_some()
         || message_binding != reservation_binding
     {
@@ -1755,6 +1782,7 @@ impl Driver<'_> {
                 decoder_lost_frames: capture.decoder_lost_frames,
                 lost_bytes: capture.sink_lost_bytes,
                 read_failed: capture.read_failed,
+                extra: Default::default(),
             };
             if self
                 .attempt
@@ -1864,6 +1892,7 @@ impl Driver<'_> {
             stderr: totals.next().unwrap_or_default(),
             warnings: warnings.clone(),
             omitted_warnings,
+            extra: Default::default(),
         };
         let published = self.publish_until_durable(&record, &mut state)?;
         // When the attempt directory is provably removed there is nowhere to

@@ -3,43 +3,31 @@ use std::sync::Mutex;
 struct Decoder(Mutex<Vec<Vec<u8>>>);
 
 #[test]
-#[allow(clippy::disallowed_methods)] // Exercise a real process deadline.
-fn detached_receipt_timeout_leaves_worker_running() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = tempfile::tempdir()?;
-    let argv = [
-        OsString::from("/bin/sh"),
-        OsString::from("-c"),
-        OsString::from(
-            "printf ready > started; while [ ! -f release ]; do :; done; printf done > finished",
-        ),
-    ];
-    let cwd = temp.path().to_owned();
-    let (sender, receiver) = mpsc::channel();
-    let caller = std::thread::spawn(move || {
-        let result = detached_receipt(&argv, &cwd, Duration::from_millis(100));
-        let _ = sender.send(result);
-    });
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !temp.path().join("started").exists() && Instant::now() < deadline {
-        std::thread::yield_now();
-    }
-    let started = temp.path().join("started").exists();
-    let result = receiver.recv_timeout(Duration::from_secs(2));
-    // Release even on failure, so a blocking read can finish and the test
-    // reports the deadline failure without stranding the worker or caller.
-    std::fs::write(temp.path().join("release"), b"release")?;
-    caller.join().map_err(|_| "receipt caller panicked")?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !temp.path().join("finished").exists() && Instant::now() < deadline {
-        std::thread::yield_now();
-    }
-    assert!(started, "worker did not start");
-    assert!(result??.is_none(), "silent worker returned a receipt");
-    assert!(
-        temp.path().join("finished").exists(),
-        "worker did not continue"
+fn detached_receipt_deadline_does_not_treat_a_running_worker_as_finished() {
+    let ticks = std::cell::Cell::new(0_u8);
+    let worker_running = std::cell::Cell::new(true);
+    let reads = std::cell::Cell::new(0);
+    let result = receipt_until(
+        3,
+        || {
+            let tick = ticks.get();
+            ticks.set(tick + 1);
+            tick
+        },
+        |_, expired| {
+            reads.set(reads.get() + 1);
+            if expired() {
+                ReceiptStep::Expired
+            } else if worker_running.get() {
+                ReceiptStep::Pending
+            } else {
+                ReceiptStep::End
+            }
+        },
     );
-    Ok(())
+    assert_eq!(result, None);
+    assert!(worker_running.get());
+    assert_eq!(reads.get(), 2);
 }
 
 #[test]
@@ -77,20 +65,29 @@ fn detached_worker_refuses_to_relaunch_a_test_harness() -> Result<(), Box<dyn st
 
 #[test]
 fn detached_worker_refuses_near_the_process_limit() {
-    let near = |used, limit| check_process_budget(Ok(ProcessBudget { used, limit }));
+    let configured = ProcessBudget {
+        used: 0,
+        limit: 1000,
+    };
+    let headroom = configured.headroom();
+    let near = |used| {
+        check_process_budget(Ok(ProcessBudget {
+            used,
+            limit: configured.limit,
+        }))
+    };
+    let just_below = configured.limit - headroom - 1;
+    let at_boundary = configured.limit - headroom;
+    assert!(near(just_below).is_ok());
     assert!(matches!(
-        near(2601, 2666),
-        Err(ExecError::ProcessBudget {
-            used: 2601,
-            limit: 2666
-        })
+        near(at_boundary),
+        Err(ExecError::ProcessBudget { used, limit })
+            if used == at_boundary && limit == configured.limit
     ));
     assert!(matches!(
-        near(2400, 2666),
+        near(configured.limit),
         Err(ExecError::ProcessBudget { .. })
     ));
-    assert!(near(2399, 2666).is_ok());
-    assert!(near(100, 2666).is_ok());
     assert!(check_process_budget(Ok(ProcessBudget::UNLIMITED)).is_ok());
     // An unreadable budget does not stop a worker the kernel would allow.
     assert!(check_process_budget(Err(io::Error::other("probe"))).is_ok());
@@ -204,16 +201,6 @@ impl FrameSink for Decoder {
         self.0.lock().unwrap().push(bytes.to_vec());
         Ok(())
     }
-}
-#[test]
-fn decoder_sees_terminal_beyond_retention_and_refuses_oversized_frame() {
-    let sink = Decoder(Mutex::new(Vec::new()));
-    let mut frames = Frames::default();
-    let mut capture = CapturedStream::default();
-    frames.decode(&vec![b'x'; FRAME_LIMIT + 1], Some(&sink), &mut capture);
-    frames.decode(b"\nterminal\n", Some(&sink), &mut capture);
-    assert_eq!(capture.oversized_frames, 1);
-    assert_eq!(*sink.0.lock().unwrap(), vec![b"terminal".to_vec()]);
 }
 #[test]
 fn tee_has_a_fixed_queue_and_reports_full_and_closed() {

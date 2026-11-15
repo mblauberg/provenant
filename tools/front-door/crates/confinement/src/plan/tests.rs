@@ -62,9 +62,17 @@ fn required_credential_grant_refusal_names_the_declared_source() {
         path: refused.clone(),
         scope: PathScope::Subtree,
     }];
-    let message = ConfinedPlan::new(input).err().unwrap().to_string();
-    assert!(message.contains(".gemini/skills"), "{message}");
-    assert!(message.contains(&declaration_source), "{message}");
+    let error = ConfinedPlan::new(input)
+        .err()
+        .expect("credential grant refused");
+    assert!(matches!(
+        error,
+        PlanError::Permission(PermissionError::CredentialStore {
+            path,
+            root,
+            declaration_source: source,
+        }) if path == refused && root == declaration.path && source == declaration_source
+    ));
 }
 
 #[test]

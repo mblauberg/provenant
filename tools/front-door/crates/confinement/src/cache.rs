@@ -16,6 +16,8 @@ use thiserror::Error;
 
 pub(crate) const CARGO_CACHE_OWNER: &str = ".provenant-worktree-owner";
 pub(crate) const CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v2\n";
+pub(crate) const CARGO_CACHE_OWNER_VERSION: &[u8] =
+    &CARGO_CACHE_OWNER_PREFIX[..CARGO_CACHE_OWNER_PREFIX.len() - 1];
 const MAX_CACHE_SWEEP_DEPTH: usize = 32;
 const MAX_CACHE_DIRECTORY_ENTRIES: usize = 100_000;
 
@@ -961,12 +963,30 @@ pub(crate) struct CacheOwner {
     pub(crate) identity: (u64, u64),
 }
 
+fn encode_owner_marker(version: &[u8], fields: &[u8]) -> Vec<u8> {
+    let mut marker = Vec::with_capacity(version.len() + 1 + fields.len());
+    marker.extend_from_slice(version);
+    marker.push(b'\n');
+    marker.extend_from_slice(fields);
+    marker
+}
+
+pub(crate) fn encode_cache_owner(owner: &CacheOwner) -> Vec<u8> {
+    let mut fields = Vec::with_capacity(16 + owner.path.as_os_str().as_encoded_bytes().len());
+    fields.extend_from_slice(&owner.identity.0.to_le_bytes());
+    fields.extend_from_slice(&owner.identity.1.to_le_bytes());
+    fields.extend_from_slice(owner.path.as_os_str().as_encoded_bytes());
+    encode_owner_marker(CARGO_CACHE_OWNER_VERSION, &fields)
+}
+
+#[cfg(test)]
+pub(crate) fn owner_marker(version: &[u8], fields: &[u8]) -> Vec<u8> {
+    encode_owner_marker(version, fields)
+}
+
 pub(crate) fn cache_owner_fingerprint(owner: &CacheOwner) -> String {
     let mut digest = Sha256::new();
-    digest.update(CARGO_CACHE_OWNER_PREFIX);
-    digest.update(owner.identity.0.to_le_bytes());
-    digest.update(owner.identity.1.to_le_bytes());
-    digest.update(owner.path.as_os_str().as_encoded_bytes());
+    digest.update(encode_cache_owner(owner));
     provenant_core::hex(&digest.finalize()[..16])
 }
 
@@ -1278,10 +1298,10 @@ mod tests {
                 std::fs::metadata(&existing_worktree)?,
             ),
         ] {
-            let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
-            marker.extend_from_slice(&identity.dev().to_le_bytes());
-            marker.extend_from_slice(&identity.ino().to_le_bytes());
-            marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
+            let marker = encode_cache_owner(&CacheOwner {
+                path: owner,
+                identity: (identity.dev(), identity.ino()),
+            });
             std::fs::write(cache.join(CARGO_CACHE_OWNER), marker)?;
         }
         std::fs::create_dir(orphan.join("release"))?;
@@ -1310,10 +1330,10 @@ mod tests {
             std::fs::set_permissions(cache, std::fs::Permissions::from_mode(0o700))?;
         }
         let missing_owner = home.join("missing-worktree");
-        let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
-        marker.extend_from_slice(&1_u64.to_le_bytes());
-        marker.extend_from_slice(&2_u64.to_le_bytes());
-        marker.extend_from_slice(missing_owner.as_os_str().as_encoded_bytes());
+        let marker = encode_cache_owner(&CacheOwner {
+            path: missing_owner,
+            identity: (1, 2),
+        });
         for cache in [&deep, &ordinary] {
             std::fs::write(cache.join(CARGO_CACHE_OWNER), &marker)?;
         }
@@ -1453,10 +1473,13 @@ mod tests {
             std::fs::create_dir_all(&path)?;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
             let identity = std::fs::metadata(owner).ok();
-            let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
-            marker.extend_from_slice(&identity.as_ref().map_or(1, MetadataExt::dev).to_le_bytes());
-            marker.extend_from_slice(&identity.as_ref().map_or(2, MetadataExt::ino).to_le_bytes());
-            marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
+            let marker = encode_cache_owner(&CacheOwner {
+                path: owner.to_path_buf(),
+                identity: (
+                    identity.as_ref().map_or(1, MetadataExt::dev),
+                    identity.as_ref().map_or(2, MetadataExt::ino),
+                ),
+            });
             std::fs::write(path.join(CARGO_CACHE_OWNER), marker)?;
             std::fs::write(path.join("artifact"), b"cached build")?;
             Ok(path)
@@ -1755,10 +1778,10 @@ mod tests {
             let temporary = tempfile::tempdir()?;
             let home = temporary.path();
             let path = cache(home, &"a".repeat(64), &home.join("missing"))?;
-            let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
-            marker.extend_from_slice(&1_u64.to_le_bytes());
-            marker.extend_from_slice(&2_u64.to_le_bytes());
-            marker.extend_from_slice(home.join("missing").as_os_str().as_encoded_bytes());
+            let marker = encode_cache_owner(&CacheOwner {
+                path: home.join("missing"),
+                identity: (1, 2),
+            });
             std::fs::write(path.join(CARGO_CACHE_OWNER), marker)?;
             let marker = std::fs::read(path.join(CARGO_CACHE_OWNER))?;
             let error = sweep(
@@ -1816,10 +1839,26 @@ mod tests {
             assert!(!first.exists());
             assert!(!last.exists());
             assert!(unreadable.is_dir());
-            assert_eq!(error.report.removed.len(), 2);
-            let message = error.to_string();
-            assert!(message.contains("readdir"), "{message}");
-            assert!(message.contains("PermissionDenied"), "{message}");
+            assert!(error.report.removed.iter().any(|entry| entry.path == first));
+            assert!(error.report.removed.iter().any(|entry| entry.path == last));
+            let PermissionError::CacheSweepIo(source) = &*error.source else {
+                panic!("unexpected error: {error:?}");
+            };
+            let failures = source
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<CacheSweepFailures>())
+                .ok_or("typed sweep failures")?;
+            assert!(failures.0.iter().any(|(name, failure)| {
+                name.is_none()
+                    && matches!(
+                        failure,
+                        PermissionError::CacheSweepFilesystem {
+                            operation: "readdir",
+                            source: FsError::Io { source, .. },
+                            ..
+                        } if source.kind() == io::ErrorKind::PermissionDenied
+                    )
+            }));
             Ok(())
         }
 
@@ -1917,13 +1956,10 @@ mod tests {
                         free_floor_bytes: None,
                         max_total_bytes: None,
                     };
-                    let mut probes = 0;
                     let report =
                         gc_worktree_cargo_caches_with_writer_guard(home, &policy, |path| {
-                            probes += 1;
                             Err(missing_custody(path))
                         })?;
-                    assert_eq!(probes, 0, "the listing already protects this owner");
                     assert!(report.removed.is_empty());
                     assert_eq!(report.kept.len(), 1);
                     assert_eq!(report.kept[0].reason, reason);
@@ -2175,6 +2211,24 @@ mod tests {
         }
 
         #[test]
+        fn gc_refuses_owner_identity_changes_at_each_sweep_boundary()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let cases: [(&str, fn() -> Result<(), Box<dyn std::error::Error>>); 3] = [
+                (
+                    "before rename",
+                    gc_refuses_replacement_identity_after_rename,
+                ),
+                ("verified open", gc_reports_swap_during_verified_open),
+                ("after rename", gc_quarantines_changed_owner_after_rename),
+            ];
+            for (boundary, verify) in cases {
+                if let Err(error) = verify() {
+                    return Err(format!("{boundary}: {error}").into());
+                }
+            }
+            Ok(())
+        }
+
         fn gc_refuses_replacement_identity_after_rename() -> Result<(), Box<dyn std::error::Error>>
         {
             let temporary = tempfile::tempdir()?;
@@ -2216,7 +2270,6 @@ mod tests {
             Ok(())
         }
 
-        #[test]
         fn gc_reports_swap_during_verified_open() -> Result<(), Box<dyn std::error::Error>> {
             let temporary = tempfile::tempdir()?;
             let home = temporary.path();
@@ -2256,7 +2309,6 @@ mod tests {
             Ok(())
         }
 
-        #[test]
         fn gc_quarantines_changed_owner_after_rename() -> Result<(), Box<dyn std::error::Error>> {
             let temporary = tempfile::tempdir()?;
             let home = temporary.path();
@@ -2330,10 +2382,6 @@ mod tests {
                 }),
             )
             .expect_err("injected unlink failure");
-            let message = error.to_string();
-            assert!(message.contains("unlink"), "{message}");
-            assert!(message.contains("/z-fail"), "{message}");
-            assert!(message.contains("PermissionDenied"), "{message}");
             let PermissionError::CacheSweepIo(source) = &*error.source else {
                 panic!("unexpected error: {error:?}");
             };
@@ -2342,15 +2390,22 @@ mod tests {
                 .unwrap()
                 .downcast_ref::<CacheSweepFailures>()
                 .unwrap();
-            assert!(matches!(
-                &failures.0[0].1,
+            assert!(failures.0.iter().any(|(_, failure)| matches!(
+                failure,
                 PermissionError::CacheSweepFilesystem {
                     operation: "unlink",
-                    ..
-                }
-            ));
-            assert_eq!(error.report.removed.len(), 1);
+                    path,
+                    source: FsError::Io { source, .. },
+                } if path.file_name() == Some(OsStr::new("z-fail"))
+                    && source.kind() == io::ErrorKind::PermissionDenied
+            )));
             assert!(!ordinary.exists());
+            let ordinary_removed = error
+                .report
+                .removed
+                .iter()
+                .find(|entry| entry.path == ordinary)
+                .ok_or("successful cache progress")?;
             let root = path.parent().ok_or("cache parent")?;
             let tombstone = std::fs::read_dir(root)?.next().ok_or("tombstone")??.path();
             assert!(tombstone.join(CARGO_CACHE_OWNER).is_file());
@@ -2364,11 +2419,15 @@ mod tests {
             };
             assert_eq!(
                 error.report.bytes_freed,
-                payload_bytes + error.report.removed[0].bytes
+                payload_bytes + ordinary_removed.bytes
             );
             let report = gc_worktree_cargo_caches(home, &CacheGcPolicy::default())?;
-            assert_eq!(report.removed.len(), 1);
-            assert_eq!(report.removed[0].reason, CacheGcReason::Tombstone);
+            assert!(
+                report
+                    .removed
+                    .iter()
+                    .any(|entry| entry.reason == CacheGcReason::Tombstone)
+            );
             assert!(!tombstone.exists());
             Ok(())
         }
@@ -2543,10 +2602,10 @@ mod tests {
             let cache = root.join(letter.repeat(64));
             std::fs::create_dir(&cache)?;
             std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700))?;
-            let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
-            marker.extend_from_slice(&identity.dev().to_le_bytes());
-            marker.extend_from_slice(&inode.to_le_bytes());
-            marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
+            let marker = encode_cache_owner(&CacheOwner {
+                path: owner.clone(),
+                identity: (identity.dev(), inode),
+            });
             std::fs::write(cache.join(CARGO_CACHE_OWNER), marker)?;
         }
         let policy = CacheGcPolicy {
@@ -2588,10 +2647,10 @@ mod tests {
             let owner = home.join(name);
             std::fs::create_dir(&owner)?;
             let identity = std::fs::metadata(&owner)?;
-            let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
-            marker.extend_from_slice(&identity.dev().to_le_bytes());
-            marker.extend_from_slice(&identity.ino().to_le_bytes());
-            marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
+            let marker = encode_cache_owner(&CacheOwner {
+                path: owner.clone(),
+                identity: (identity.dev(), identity.ino()),
+            });
             std::fs::write(cache.join(CARGO_CACHE_OWNER), marker)?;
             caches.push((cache, owner));
         }

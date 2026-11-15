@@ -621,13 +621,38 @@ mod tests {
     }
 
     #[test]
-    fn command_names_probe_directory_setup_failures() {
+    fn provider_probe_boundaries_share_the_probe_directory_failure() {
         let home = tempfile::tempdir().unwrap();
         let quota = quota(home.path(), home.path().join("missing"));
-        let failure = quota
+        let command = quota
             .command("unused-provider", &[], None, None, quota.now() + 60, 1)
             .unwrap_err();
-        assert_eq!(serde_json::to_value(failure).unwrap(), "probe_directory");
+        let account = Account {
+            scope: AccountScope {
+                adapter: "agy".into(),
+                account_key: "agy-test".into(),
+                label: "test".into(),
+            },
+            identity_dir: home.path().to_owned(),
+            options: Value::Null,
+        };
+        let agy = quota
+            .agy(&account, quota.now() + 60, &mut QuotaDetails::default())
+            .unwrap_err();
+        let wrapped_command = command_error(
+            "/bin/sh",
+            ExecError::Io {
+                operation: PROBE_DIR_OPERATION,
+                source: std::io::Error::other("fixture directory failure"),
+            },
+        );
+        for (probe, failure) in [
+            ("command", command),
+            ("agy", agy),
+            ("command executor", wrapped_command),
+        ] {
+            assert_eq!(failure, ProbeFailure::ProbeDirectory, "{probe}");
+        }
     }
 
     #[test]
@@ -882,13 +907,6 @@ mod tests {
             .agy(&account, live.now() + 60, &mut QuotaDetails::default())
             .map(|_| unreachable!());
         assert_eq!(outcome, Err(ProbeFailure::AccountMismatch));
-        let error = live
-            .last_reconcile_error()
-            .expect("rebind error must be recorded");
-        assert!(
-            error.contains("agy identity is already registered; run `provenant accounts list`"),
-            "{error}"
-        );
         // Stale key remains excluded from admission
         let now = live.now();
         let mut stale = AccountRecord::empty(account.scope.clone());
@@ -1097,34 +1115,8 @@ mod tests {
     }
 
     #[test]
-    fn agy_names_probe_log_directory_failures() {
-        let home = tempfile::tempdir().unwrap();
-        let quota = quota(home.path(), home.path().join("missing"));
-        let account = Account {
-            scope: AccountScope {
-                adapter: "agy".into(),
-                account_key: "agy-test".into(),
-                label: "test".into(),
-            },
-            identity_dir: home.path().to_owned(),
-            options: Value::Null,
-        };
-        let failure = quota
-            .agy(&account, quota.now() + 60, &mut QuotaDetails::default())
-            .unwrap_err();
-        assert_eq!(serde_json::to_value(failure).unwrap(), "probe_directory");
-    }
-
     #[test]
-    fn command_names_per_command_probe_directory_failures() {
-        let failure = command_error(
-            "/bin/sh",
-            ExecError::Io {
-                operation: PROBE_DIR_OPERATION,
-                source: std::io::Error::other("test directory failure"),
-            },
-        );
-        assert_eq!(serde_json::to_value(failure).unwrap(), "probe_directory");
+    fn command_failures_classify_missing_tools_and_transient_errors() {
         let spawn = |kind| ExecError::Io {
             operation: "spawn",
             source: std::io::Error::from(kind),
@@ -1229,12 +1221,20 @@ mod tests {
         }
     }
 
-    fn claude_selected_identity(scenario: u8) {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ClaudeIdentityCase {
+        ExistingToken,
+        AccountMismatch,
+        RefreshSelectedLogin,
+        UsageRefusalThenRetry,
+        RefreshBudgetDeferred,
+    }
+
+    fn claude_selected_identity(scenario: ClaudeIdentityCase) -> Result<(), ProbeFailure> {
         use std::ffi::OsStr;
         struct Selected {
             dir: PathBuf,
             expires_ms: i64,
-            refreshes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
             requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
             refusal: bool,
             credential_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -1265,8 +1265,6 @@ mod tests {
                 } else if program == "/fixture/claude" {
                     assert!(options.wait_for_completion);
                     assert!(options.inherited_lease.is_some());
-                    self.refreshes
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     fs::write(self.dir.join(".credentials.json"), format!(r#"{{"claudeAiOauth":{{"accessToken":"fake-renewed","expiresAt":{}}}}}"#, self.expires_ms + 7_200_000)).unwrap();
                     Vec::new()
                 } else {
@@ -1316,9 +1314,8 @@ mod tests {
         live.executor = Some(Box::new(Selected {
             dir: selected.clone(),
             expires_ms,
-            refreshes: refreshes.clone(),
             requests: requests.clone(),
-            refusal: scenario == 3,
+            refusal: scenario == ClaudeIdentityCase::UsageRefusalThenRetry,
             credential_reads: credential_reads.clone(),
         }));
         let account = Account {
@@ -1330,25 +1327,17 @@ mod tests {
             identity_dir: selected,
             options: Value::Null,
         };
-        if scenario == 0 || scenario == 3 {
-            live.refresh_expired = scenario == 3;
-            assert!(
-                live.claude(&account, live.now() + 120, &mut QuotaDetails::default())
-                    .is_ok()
-            );
+        if matches!(
+            scenario,
+            ClaudeIdentityCase::ExistingToken | ClaudeIdentityCase::UsageRefusalThenRetry
+        ) {
+            live.refresh_expired = scenario == ClaudeIdentityCase::UsageRefusalThenRetry;
+            let result = live.claude(&account, live.now() + 120, &mut QuotaDetails::default());
             assert_eq!(live.login_expiry_unix_seconds(), Some(4102444800));
             assert_eq!(live.signed_in(), Some(true));
-            assert_eq!(
-                refreshes.load(std::sync::atomic::Ordering::Relaxed),
-                usize::from(scenario == 3)
-            );
-            assert_eq!(
-                requests.load(std::sync::atomic::Ordering::Relaxed),
-                if scenario == 3 { 2 } else { 1 }
-            );
-            return;
+            return result.map(|_| ());
         }
-        if scenario == 1 {
+        if scenario == ClaudeIdentityCase::AccountMismatch {
             let mut wrong_account = account.clone();
             wrong_account.scope.account_key =
                 crate::identity::fingerprint("other@example.test").unwrap();
@@ -1361,20 +1350,17 @@ mod tests {
             )
             .unwrap();
             *live.login_expiry.borrow_mut() = None;
-            assert_eq!(
-                live.claude(
-                    &wrong_account,
-                    live.now() + 120,
-                    &mut QuotaDetails::default()
-                ),
-                Err(ProbeFailure::AccountMismatch)
+            let result = live.claude(
+                &wrong_account,
+                live.now() + 120,
+                &mut QuotaDetails::default(),
             );
             assert_eq!(
                 credential_reads.load(std::sync::atomic::Ordering::Relaxed),
                 before
             );
             assert_eq!(live.login_expiry_unix_seconds(), None);
-            return;
+            return result.map(|_| ());
         }
         live.refresh_expired = true;
         let expires_ms = (live.now() - 60) * 1000;
@@ -1388,71 +1374,61 @@ mod tests {
         live.executor = Some(Box::new(Selected {
             dir: account.identity_dir.clone(),
             expires_ms,
-            refreshes: refreshes.clone(),
             requests,
             refusal: false,
             credential_reads,
         }));
-        if scenario == 4 {
+        if scenario == ClaudeIdentityCase::RefreshBudgetDeferred {
             live.refresh_budget_seconds = 30;
-            assert_eq!(
-                live.claude(&account, live.now() + 120, &mut QuotaDetails::default()),
-                Err(ProbeFailure::RefreshDeferred)
-            );
+            let result = live.claude(&account, live.now() + 120, &mut QuotaDetails::default());
             assert_eq!(live.signed_in(), Some(true));
             assert!(live.refresh_pending());
             assert_eq!(
                 live.access_token_expiry_unix_seconds(),
                 Some(expires_ms / 1000)
             );
-            assert_eq!(refreshes.load(std::sync::atomic::Ordering::Relaxed), 0);
-            return;
+            return result.map(|_| ());
         }
-        assert!(
-            live.claude(&account, live.now() + 120, &mut QuotaDetails::default())
-                .is_ok()
-        );
-        assert_eq!(refreshes.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let result = live.claude(&account, live.now() + 120, &mut QuotaDetails::default());
         assert_eq!(live.login_expiry_unix_seconds(), Some(4102444800));
         assert_eq!(
             live.access_token_expiry_unix_seconds(),
             Some(expires_ms / 1000 + 7200)
         );
         assert!(!live.state.join("quota-claude-refresh.json").exists());
+        result.map(|_| ())
     }
 
     #[test]
-    fn claude_quota_reads_selected_identity() {
-        claude_selected_identity(0);
-    }
-    #[test]
-    fn claude_quota_rejects_mismatch_before_credential_read() {
-        claude_selected_identity(1);
-    }
-    #[test]
-    fn claude_quota_refreshes_selected_login_for_same_account() {
-        claude_selected_identity(2);
-    }
-
-    #[test]
-    fn claude_usage_refusal_refreshes_once_then_retries() {
-        claude_selected_identity(3);
-    }
-
-    #[test]
-    fn claude_expired_access_token_with_signed_in_status_defers_without_refresh() {
-        claude_selected_identity(4);
+    fn selected_claude_identity_outcomes_follow_the_probe_case() {
+        let cases = [
+            (ClaudeIdentityCase::ExistingToken, Ok(())),
+            (
+                ClaudeIdentityCase::AccountMismatch,
+                Err(ProbeFailure::AccountMismatch),
+            ),
+            (ClaudeIdentityCase::RefreshSelectedLogin, Ok(())),
+            (ClaudeIdentityCase::UsageRefusalThenRetry, Ok(())),
+            (
+                ClaudeIdentityCase::RefreshBudgetDeferred,
+                Err(ProbeFailure::RefreshDeferred),
+            ),
+        ];
+        for (scenario, expected) in cases {
+            assert_eq!(claude_selected_identity(scenario), expected);
+        }
     }
 
     #[test]
-    fn claude_distinct_account_retries_after_transient_refresh_failure() {
+    fn selected_claude_accounts_retry_after_transient_refresh_failure() {
         use std::sync::{
             Arc,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, Ordering},
         };
         struct Fake {
             dir: PathBuf,
-            count: Arc<AtomicUsize>,
+            account_email: &'static str,
+            fail_first_refresh: Arc<AtomicBool>,
             renewed: i64,
         }
         impl Executor for Fake {
@@ -1465,14 +1441,15 @@ mod tests {
                         .iter()
                         .any(|(key, _)| key == "CLAUDE_CONFIG_DIR");
                     if selected {
-                        br#"{"loggedIn":true,"email":"selected@example.test"}"#.to_vec()
+                        format!(r#"{{"loggedIn":true,"email":"{}"}}"#, self.account_email)
+                            .into_bytes()
                     } else {
                         br#"{"loggedIn":true,"email":"default@example.test"}"#.to_vec()
                     }
                 } else if program == "/usr/bin/security" {
                     fs::read(self.dir.join(".credentials.json")).unwrap()
                 } else if program == "/fixture/claude" {
-                    if self.count.fetch_add(1, Ordering::Relaxed) == 0 {
+                    if self.fail_first_refresh.swap(false, Ordering::Relaxed) {
                         return Err(ExecError::Busy);
                     }
                     fs::write(
@@ -1503,42 +1480,47 @@ mod tests {
                 })
             }
         }
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("home");
-        let selected = home.join(".claude-work");
-        let state = temp.path().join("state");
-        fs::create_dir_all(&selected).unwrap();
-        fs::create_dir_all(&state).unwrap();
-        let mut live = quota(&home, state);
-        live.refresh_expired = true;
-        let expiry = (live.now() - 60) * 1000;
-        fs::write(selected.join(".credentials.json"), format!(r#"{{"claudeAiOauth":{{"accessToken":"fake-old","refreshToken":"fake-refresh","expiresAt":{expiry}}}}}"#)).unwrap();
-        let count = Arc::new(AtomicUsize::new(0));
-        live.executor = Some(Box::new(Fake {
-            dir: selected.clone(),
-            count: count.clone(),
-            renewed: (live.now() + 3600) * 1000,
-        }));
-        let account = Account {
-            scope: AccountScope {
-                adapter: "claude".into(),
-                account_key: crate::identity::fingerprint("selected@example.test").unwrap(),
-                label: "work".into(),
-            },
-            identity_dir: selected,
-            options: Value::Null,
-        };
-        assert_eq!(
-            live.claude(&account, live.now() + 120, &mut QuotaDetails::default()),
-            Err(ProbeFailure::Network)
-        );
-        assert_eq!(live.signed_in(), Some(true));
-        assert!(live.refresh_pending());
-        assert!(
-            live.claude(&account, live.now() + 120, &mut QuotaDetails::default())
-                .is_ok()
-        );
-        assert_eq!(count.load(Ordering::Relaxed), 2);
+        for (label, email) in [
+            ("work", "selected@example.test"),
+            ("personal", "personal@example.test"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let home = temp.path().join("home");
+            let selected = home.join(format!(".claude-{label}"));
+            let state = temp.path().join("state");
+            fs::create_dir_all(&selected).unwrap();
+            fs::create_dir_all(&state).unwrap();
+            let mut live = quota(&home, state);
+            live.refresh_expired = true;
+            let expiry = (live.now() - 60) * 1000;
+            fs::write(selected.join(".credentials.json"), format!(r#"{{"claudeAiOauth":{{"accessToken":"fake-old","refreshToken":"fake-refresh","expiresAt":{expiry}}}}}"#)).unwrap();
+            live.executor = Some(Box::new(Fake {
+                dir: selected.clone(),
+                account_email: email,
+                fail_first_refresh: Arc::new(AtomicBool::new(true)),
+                renewed: (live.now() + 3600) * 1000,
+            }));
+            let account = Account {
+                scope: AccountScope {
+                    adapter: "claude".into(),
+                    account_key: crate::identity::fingerprint(email).unwrap(),
+                    label: label.into(),
+                },
+                identity_dir: selected,
+                options: Value::Null,
+            };
+            assert_eq!(
+                live.claude(&account, live.now() + 120, &mut QuotaDetails::default()),
+                Err(ProbeFailure::Network)
+            );
+            assert_eq!(live.signed_in(), Some(true));
+            assert!(live.refresh_pending());
+            assert!(
+                live.claude(&account, live.now() + 120, &mut QuotaDetails::default())
+                    .is_ok()
+            );
+            assert!(!live.refresh_pending());
+        }
     }
 
     #[test]

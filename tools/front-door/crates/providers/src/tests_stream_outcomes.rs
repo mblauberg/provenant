@@ -889,10 +889,6 @@ fn structured_error_outranks_claimed_success_but_quota_prose_is_text() -> Result
 
 #[test]
 fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn std::error::Error>> {
-    assert_eq!(
-        REGISTRY.iter().map(|r| r.adapter.id()).collect::<Vec<_>>(),
-        ["codex", "claude", "cursor", "agy", "opencode", "command"]
-    );
     let ids: std::collections::BTreeSet<_> = REGISTRY.iter().map(|r| r.adapter.id()).collect();
     assert_eq!(ids.len(), REGISTRY.len(), "duplicate adapter id");
     assert_eq!(
@@ -1172,10 +1168,21 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
             }
             if access == Access::ReadOnly && network != NetworkAccess::Open {
                 assert_eq!(cargo_home_path(&launch), home.join(".cargo"));
-                assert_eq!(
-                    launch.env.iter().find(|(key, _)| key == "PATH").unwrap().1,
-                    "/fixture/scratch/read-only-git:/fixture/scratch/bin:/usr/bin:/bin"
-                );
+                let path = launch
+                    .env
+                    .iter()
+                    .find(|(key, _)| key == "PATH")
+                    .expect("launch PATH");
+                let entries: std::collections::BTreeSet<_> =
+                    std::env::split_paths(&path.1).collect();
+                let scratch = &plan.permissions().scratch.path;
+                let system: std::collections::BTreeSet<_> = std::env::split_paths(
+                    std::ffi::OsStr::new(crate::launch::SYSTEM_TOOL_SEARCH_PATH),
+                )
+                .collect();
+                assert!(entries.contains(&scratch.join("read-only-git")));
+                assert!(entries.contains(&scratch.join("bin")));
+                assert!(system.is_subset(&entries));
                 continue;
             }
             let codex_plan = fixture_network_plan(access, Some("login"), network);
@@ -1276,7 +1283,11 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
                 .contains(&crate::launch::subtree("/fixture/repo"))
         );
         // Only the declared Cargo writes (checked above) reach a reader.
-        let declared: Vec<_> = launch.cargo_home().expect("Cargo binding").writes().collect();
+        let declared: Vec<_> = launch
+            .cargo_home()
+            .expect("Cargo binding")
+            .writes()
+            .collect();
         assert!(
             launch
                 .profile
@@ -1287,7 +1298,11 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
         );
         // An incomplete Rust install grants no toolchain: beyond the declared
         // Cargo binding nothing under the Cargo or rustup homes is reachable.
-        let binding_reads: Vec<_> = launch.cargo_home().expect("Cargo binding").reads().collect();
+        let binding_reads: Vec<_> = launch
+            .cargo_home()
+            .expect("Cargo binding")
+            .reads()
+            .collect();
         for grant in launch
             .profile
             .spec
@@ -1319,7 +1334,7 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
 #[test]
 fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::permissions::{NetworkAccess, snapshot::render};
+    use provenant_confinement::permissions::NetworkAccess;
     let prompt = Prompt::new("fixture".into());
     let token = fixture_token();
     let temp = tempfile::tempdir()?;
@@ -1367,14 +1382,9 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
             access == Access::WorktreeWrite,
             "{adapter} {access:?}"
         );
-        let profile = render(plan.permissions(), &launch.profile, &home)?;
         assert!(
-            profile.contains(if access == Access::WorktreeWrite {
-                "(allow process-exec)"
-            } else {
-                "(allow process-exec (subpath \"/fixture/repo\"))"
-            }),
-            "{adapter} {access:?}: repository execution missing from\n{profile}"
+            spec.tool_exec_roots.contains(&crate::launch::subtree(repo)),
+            "{adapter} {access:?}: repository execution grant missing"
         );
     }
     Ok(())

@@ -20,6 +20,19 @@ pub fn private_state_dir(path: &Path) -> io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
 }
 
+/// Build the libtest name for the current module and a child test.
+///
+/// Re-exec fixtures pass this to `--exact`; spelling a module path by hand
+/// lets a module rename silently turn a child run into a zero-test success.
+pub fn exact_test_path(module: &str, test: &str) -> String {
+    let module = module.split_once("::").map_or("", |(_, path)| path);
+    if module.is_empty() {
+        test.to_owned()
+    } else {
+        format!("{module}::{test}")
+    }
+}
+
 /// Create a temporary directory beneath the canonical environment temporary root.
 ///
 /// `create` makes the directory inside the root it is given, so callers keep
@@ -77,80 +90,23 @@ mod tests {
     use super::*;
 
     #[test]
-    #[allow(clippy::disallowed_methods)]
-    fn git_fixture_ignores_lane_environment_and_path_wrapper()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use std::{fs, os::unix::fs::PermissionsExt, process::Command};
-
-        fn run(dir: &Path, args: &[&str]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-            let output = git_command().current_dir(dir).args(args).output()?;
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            Ok(output.stdout)
+    fn exact_test_path_matches_libtest_names_for_library_and_integration_crates() {
+        let cases = [
+            (
+                "provenant_os::fixture::tests",
+                "git_fixture_ignores_lane_environment",
+                "fixture::tests::git_fixture_ignores_lane_environment",
+            ),
+            ("provider_auth_setup", "child_reexec", "child_reexec"),
+            (
+                "provider_auth_setup::tests",
+                "child_reexec",
+                "tests::child_reexec",
+            ),
+        ];
+        for (module, test, expected) in cases {
+            assert_eq!(exact_test_path(module, test), expected);
         }
-        fn initialise(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-            run(dir, &["init", "-q"])?;
-            run(dir, &["commit", "--allow-empty", "-qm", "fixture"])?;
-            Ok(())
-        }
-
-        if let Some(root) = std::env::var_os("PROVENANT_FIXTURE_GIT_CHILD") {
-            let fixture = Path::new(&root).join("fixture");
-            fs::create_dir(&fixture)?;
-            initialise(&fixture)?;
-            assert!(fixture.join(".git/HEAD").is_file());
-            return Ok(());
-        }
-
-        let temp = tempfile::tempdir()?;
-        let lane = temp.path().join("lane");
-        let shim = temp.path().join("shim");
-        fs::create_dir(&lane)?;
-        fs::create_dir(&shim)?;
-        initialise(&lane)?;
-        let head = run(&lane, &["rev-parse", "HEAD"])?;
-        let refs = run(
-            &lane,
-            &["for-each-ref", "--format=%(refname) %(objectname)"],
-        )?;
-        let index = fs::read(lane.join(".git/index"))?;
-        let config = fs::read(lane.join(".git/config"))?;
-        fs::write(shim.join("git"), "#!/bin/sh\nexit 99\n")?;
-        fs::set_permissions(shim.join("git"), fs::Permissions::from_mode(0o700))?;
-        let status = Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "fixture::tests::git_fixture_ignores_lane_environment_and_path_wrapper",
-            ])
-            .env("PROVENANT_FIXTURE_GIT_CHILD", temp.path())
-            .env("PATH", &shim)
-            .env("GIT_DIR", lane.join(".git"))
-            .env("GIT_WORK_TREE", &lane)
-            .env("GIT_COMMON_DIR", lane.join(".git"))
-            .env("GIT_INDEX_FILE", lane.join(".git/index"))
-            .env("GIT_OBJECT_DIRECTORY", lane.join(".git/objects"))
-            .env(
-                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                lane.join(".git/objects"),
-            )
-            .env("GIT_NAMESPACE", "poison")
-            .env("GIT_CEILING_DIRECTORIES", temp.path())
-            .status()?;
-        assert!(status.success());
-        assert_eq!(head, run(&lane, &["rev-parse", "HEAD"])?);
-        assert_eq!(
-            refs,
-            run(
-                &lane,
-                &["for-each-ref", "--format=%(refname) %(objectname)"]
-            )?
-        );
-        assert_eq!(index, fs::read(lane.join(".git/index"))?);
-        assert_eq!(config, fs::read(lane.join(".git/config"))?);
-        Ok(())
     }
 
     #[test]

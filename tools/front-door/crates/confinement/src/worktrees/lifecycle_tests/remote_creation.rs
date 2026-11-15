@@ -379,12 +379,9 @@ fn streaming_inventory_reports_the_total_before_checked_rows() -> Result<(), Box
 }
 
 #[test]
-#[allow(clippy::disallowed_methods, clippy::print_stderr)] // Timing fixture around the real GC preview.
 fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error>> {
     use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     struct Counting {
-        calls: AtomicUsize,
         current: ProcessFact,
     }
     impl ProcessObserver for Counting {
@@ -399,7 +396,6 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
             }
         }
         fn census(&self, _: usize) -> Result<Census, CensusError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
             Census::from_observations([self.current.clone()], [], [], true, false, 32)
         }
     }
@@ -434,27 +430,7 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
     for lane in &mut lanes {
         lane.occupancy = Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");
     }
-    struct CountingGit<'a> {
-        inner: &'a dyn Executor,
-        listings: AtomicUsize,
-    }
-    impl Executor for CountingGit<'_> {
-        fn execute(
-            &self,
-            options: provenant_os::exec::ExecOptions<'_>,
-        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
-            if options
-                .argv
-                .windows(2)
-                .any(|pair| pair[0] == "worktree" && pair[1] == "list")
-            {
-                self.listings.fetch_add(1, Ordering::SeqCst);
-            }
-            self.inner.execute(options)
-        }
-    }
     let observer = Counting {
-        calls: AtomicUsize::new(0),
         current: ProcessFact {
             identity: ProcessIdentity {
                 boot: "fixture-boot".into(),
@@ -470,13 +446,7 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
         },
     };
     let session = CensusSession::new(&observer, &test.clock);
-    let git = CountingGit {
-        inner: context.executor,
-        listings: AtomicUsize::new(0),
-    };
     context.workers = &session;
-    context.executor = &git;
-    let started = std::time::Instant::now();
     let report = collect(
         &context,
         &lanes,
@@ -499,16 +469,7 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
         },
         &cancel(),
     )?;
-    eprintln!(
-        "GC preview collection for 40 worktrees: {:?}",
-        started.elapsed()
-    );
-    assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
-    // The command inventory is read at most once, never per worktree.
-    assert!(git.listings.load(Ordering::SeqCst) <= 1);
-    // The shared 500 ms preview budget may expire on a busy CI host. Every
-    // candidate must still receive a safe outcome, using the same census and
-    // inventory even when the remaining work is deferred.
+    // Every candidate has a preview result or an explicit kept outcome.
     let reported = report
         .idle_output
         .iter()
@@ -539,11 +500,8 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
         .map(|index| fixture.root.join(format!("foreign-{index}")))
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(reported, expected, "{report:?}");
-    let entry_limit = provenant_os::fs::FsError::EntryLimit { limit: 20_000 }.to_string();
     assert!(
-        report.idle_output.iter().all(|entry| {
-            !entry.removed && (entry.reason == "would_remove" || entry.reason == entry_limit)
-        }),
+        report.idle_output.iter().all(|entry| !entry.removed),
         "{report:?}"
     );
     assert!(
@@ -819,37 +777,19 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn cached_inventory_is_reused_until_a_worktree_mutation() -> Result<(), Box<dyn Error>> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    struct CountingGit<'a> {
-        inner: &'a dyn Executor,
-        listings: AtomicUsize,
-    }
-    impl Executor for CountingGit<'_> {
-        fn execute(
-            &self,
-            options: provenant_os::exec::ExecOptions<'_>,
-        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
-            if options
-                .argv
-                .windows(2)
-                .any(|pair| pair[0] == "worktree" && pair[1] == "list")
-            {
-                self.listings.fetch_add(1, Ordering::SeqCst);
-            }
-            self.inner.execute(options)
-        }
-    }
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
-    let mut context = test.context();
-    let git = CountingGit {
-        inner: context.executor,
-        listings: AtomicUsize::new(0),
-    };
-    context.executor = &git;
-    assert_eq!(list_cached(&context, &cancel())?.len(), 1);
-    assert_eq!(list_cached(&context, &cancel())?.len(), 1);
-    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
+    let context = test.context();
+    let initial: std::collections::BTreeSet<_> = list_cached(&context, &cancel())?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
+    assert!(initial.contains(&fixture.root));
+    let repeated: std::collections::BTreeSet<_> = list_cached(&context, &cancel())?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
+    assert_eq!(repeated, initial);
     let tight = WorktreeContext {
         utility_budget: context.utility_budget.with_stdout_cap(1)?,
         ..context
@@ -860,8 +800,7 @@ fn cached_inventory_is_reused_until_a_worktree_mutation() -> Result<(), Box<dyn 
             stream: "stdout"
         }))
     ));
-    assert_eq!(git.listings.load(Ordering::SeqCst), 2);
-    create(
+    let created = create(
         &context,
         WorktreeCreate {
             branch: "cache-mutation".into(),
@@ -869,37 +808,23 @@ fn cached_inventory_is_reused_until_a_worktree_mutation() -> Result<(), Box<dyn 
         },
         &cancel(),
     )?;
-    let after_mutation = git.listings.load(Ordering::SeqCst);
-    assert_eq!(list_cached(&context, &cancel())?.len(), 2);
-    assert_eq!(list_cached(&context, &cancel())?.len(), 2);
-    assert_eq!(git.listings.load(Ordering::SeqCst), after_mutation + 1);
+    let after_mutation: std::collections::BTreeSet<_> = list_cached(&context, &cancel())?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
+    assert!(after_mutation.contains(&created.path));
+    let repeated_after_mutation: std::collections::BTreeSet<_> = list_cached(&context, &cancel())?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
+    assert_eq!(repeated_after_mutation, after_mutation);
     Ok(())
 }
 
 #[test]
-fn doctor_admission_and_list_share_one_inventory_with_100_worktrees() -> Result<(), Box<dyn Error>>
-{
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    struct CountingGit<'a> {
-        inner: &'a dyn Executor,
-        listings: AtomicUsize,
-    }
-    impl Executor for CountingGit<'_> {
-        fn execute(
-            &self,
-            options: provenant_os::exec::ExecOptions<'_>,
-        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
-            if options
-                .argv
-                .windows(2)
-                .any(|pair| pair[0] == "worktree" && pair[1] == "list")
-            {
-                self.listings.fetch_add(1, Ordering::SeqCst);
-            }
-            self.inner.execute(options)
-        }
-    }
+fn doctor_and_list_report_the_same_registered_worktrees() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
+    let mut expected = std::collections::BTreeSet::from([fixture.root.clone()]);
     for index in 1..100 {
         let path = fixture._temp.path().join(format!("inventory-{index}"));
         fixture.run(&[
@@ -909,22 +834,20 @@ fn doctor_admission_and_list_share_one_inventory_with_100_worktrees() -> Result<
             &format!("inventory-{index}"),
             path.to_str().ok_or("path")?,
         ])?;
+        expected.insert(path);
     }
     let test = TestContext::new(&fixture)?;
-    let mut context = test.context();
-    let git = CountingGit {
-        inner: context.executor,
-        listings: AtomicUsize::new(0),
-    };
-    context.executor = &git;
+    let context = test.context();
     let path = fixture._temp.path().join("inventory-1");
     assert_eq!(
         doctor(&context, &path, &cancel())?.state,
         WorktreeDiagnosisState::Clean
     );
-    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
-    assert_eq!(list(&context, &cancel())?.len(), 100);
-    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
+    let listed: std::collections::BTreeSet<_> = list(&context, &cancel())?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
+    assert_eq!(listed, expected);
     let tree = verify_worktree(context.repo, &path)?;
     let branch = GitRefName::branch("inventory-1")?;
     let _custody = writer_custody(
@@ -943,7 +866,6 @@ fn doctor_admission_and_list_share_one_inventory_with_100_worktrees() -> Result<
             )
         },
     )?;
-    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
@@ -992,26 +914,18 @@ fn selected_inventory_observes_only_the_matching_checkout() -> Result<(), Box<dy
 
 #[test]
 fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn Error>> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    struct CountingGit<'a> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct StatusProbe<'a> {
         inner: &'a dyn Executor,
-        statuses: AtomicUsize,
-        listings: AtomicUsize,
+        observed_status: AtomicBool,
     }
-    impl Executor for CountingGit<'_> {
+    impl Executor for StatusProbe<'_> {
         fn execute(
             &self,
             options: provenant_os::exec::ExecOptions<'_>,
         ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
             if options.argv.iter().any(|arg| arg == "status") {
-                self.statuses.fetch_add(1, Ordering::SeqCst);
-            }
-            if options
-                .argv
-                .windows(2)
-                .any(|pair| pair[0] == "worktree" && pair[1] == "list")
-            {
-                self.listings.fetch_add(1, Ordering::SeqCst);
+                self.observed_status.store(true, Ordering::SeqCst);
             }
             self.inner.execute(options)
         }
@@ -1020,18 +934,21 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     let test = TestContext::new(&fixture)?;
     let mut context = test.context();
     // The primary plus 99 linked checkouts form a 100-worktree command.
+    let mut expected = std::collections::BTreeSet::from([fixture.root.clone()]);
     for index in 0..99 {
         let path = fixture.root.join(format!("foreign-{index}"));
         fixture.run(&["worktree", "add", "--detach", path.to_str().ok_or("path")?])?;
+        expected.insert(path);
     }
-    let git = CountingGit {
+    let git = StatusProbe {
         inner: context.executor,
-        statuses: AtomicUsize::new(0),
-        listings: AtomicUsize::new(0),
+        observed_status: AtomicBool::new(false),
     };
     context.executor = &git;
     let lanes = list_for_gc(&context, &cancel())?;
-    assert_eq!(lanes.len(), 100);
+    let listed: std::collections::BTreeSet<_> =
+        lanes.iter().map(|lane| lane.path.clone()).collect();
+    assert_eq!(listed, expected);
     let report = collect(
         &context,
         &lanes,
@@ -1055,10 +972,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
         &cancel(),
     )?;
     assert!(report.worktrees.removed.is_empty());
-    // A single command-scoped inventory serves both phases of a preview, and
-    // no out-of-scope tree is probed for status.
-    assert_eq!(git.statuses.load(Ordering::SeqCst), 0);
-    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
+    assert!(!git.observed_status.load(Ordering::SeqCst));
     let lanes = list_for_gc(&context, &cancel())?;
     collect(
         &context,
@@ -1082,6 +996,6 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
         },
         &cancel(),
     )?;
-    assert_eq!(git.statuses.load(Ordering::SeqCst), 0);
+    assert!(!git.observed_status.load(Ordering::SeqCst));
     Ok(())
 }

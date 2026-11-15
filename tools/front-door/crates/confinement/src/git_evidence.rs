@@ -111,8 +111,7 @@ impl<'a> Git<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct IndexFingerprint {
     pub device: u64,
     pub inode: u64,

@@ -195,7 +195,8 @@ impl Driver<'_> {
     ) -> Option<machine::StopReason> {
         match read_record::<CancelRequest>(&self.attempt, "cancel.json", RECORD_LIMIT) {
             Ok(request)
-                if request.scope == self.reservation.scope
+                if request.schema_version == 1
+                    && request.scope == self.reservation.scope
                     && request.requester == self.requester
                     && provenant_core::OperationId::parse(request.request_id.as_str()).is_ok() =>
             {

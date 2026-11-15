@@ -17,6 +17,7 @@ use thiserror::Error;
 pub const DEFAULT_CAPTURE_LIMIT: usize = 8 * 1024 * 1024;
 pub const MAX_CAPTURE_LIMIT: usize = 64 * 1024 * 1024;
 pub const FRAME_LIMIT: usize = 64 * 1024;
+const DETACHED_RECEIPT_LIMIT: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum Termination {
@@ -342,37 +343,63 @@ pub fn detached_receipt(
     )
     .map_err(io_error("spawn detached worker"))?;
     let mut output = child.stdout.take().ok_or(ExecError::EmptyArgv)?;
-    let mut receipt = Vec::new();
-    loop {
-        if Instant::now() >= deadline {
-            return Ok(None);
-        }
+    Ok(receipt_until(deadline, Instant::now, |buffer, expired| {
         match child.ready(Some(&output), None, None) {
             Ok(true) => {}
-            Ok(false) => continue,
-            Err(_) => return Ok(Some(receipt)),
+            Ok(false) => return ReceiptStep::Pending,
+            Err(_) => return ReceiptStep::End,
         }
-        if Instant::now() >= deadline {
-            return Ok(None);
+        if expired() {
+            return ReceiptStep::Expired;
         }
-        let mut buf = [0_u8; 4096];
-        match output.read(&mut buf) {
-            Ok(0) => return Ok(Some(receipt)),
-            Ok(n) => {
-                receipt.extend_from_slice(&buf[..n]);
-                if receipt.len() > 1024 * 1024 {
-                    return Ok(Some(receipt));
-                }
-                if receipt.last() == Some(&b'\n') {
-                    return Ok(Some(receipt));
-                }
-            }
+        match output.read(buffer) {
+            Ok(0) => ReceiptStep::End,
+            Ok(count) => ReceiptStep::Bytes(count),
             Err(error)
                 if matches!(
                     error.kind(),
                     io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                ) => {}
-            Err(_) => return Ok(Some(receipt)),
+                ) =>
+            {
+                ReceiptStep::Retry
+            }
+            Err(_) => ReceiptStep::End,
+        }
+    }))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReceiptStep {
+    Pending,
+    Bytes(usize),
+    End,
+    Expired,
+    Retry,
+}
+
+fn receipt_until<T: Copy + Ord>(
+    deadline: T,
+    mut now: impl FnMut() -> T,
+    mut next: impl FnMut(&mut [u8], &mut dyn FnMut() -> bool) -> ReceiptStep,
+) -> Option<Vec<u8>> {
+    let mut receipt = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        if now() >= deadline {
+            return None;
+        }
+        let mut expired = || now() >= deadline;
+        let step = next(&mut buffer, &mut expired);
+        match step {
+            ReceiptStep::Pending | ReceiptStep::Retry => continue,
+            ReceiptStep::End => return Some(receipt),
+            ReceiptStep::Expired => return None,
+            ReceiptStep::Bytes(count) => {
+                receipt.extend_from_slice(&buffer[..count]);
+                if receipt.len() > DETACHED_RECEIPT_LIMIT || receipt.last() == Some(&b'\n') {
+                    return Some(receipt);
+                }
+            }
         }
     }
 }

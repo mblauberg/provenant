@@ -12,6 +12,7 @@ use std::time::Duration;
 #[cfg(target_os = "macos")]
 #[test]
 fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::Error>> {
+    use super::render::{RuleAction, rule_facts, rule_index, rule_index_without_strings};
     use crate::repo::{GitRefName, verify_worktree};
     use crate::utility::{GitMutation, execute_git_mutation};
     use std::os::unix::fs::symlink;
@@ -366,11 +367,18 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     }
     let compiled = backend.compile(&plan, &profile, &anchors)?;
     let sbpl = String::from_utf8(compiled.profile)?;
-    assert!(!sbpl.contains("hardlink-probe"));
-    for alias in &aliases {
-        assert!(!sbpl.contains(&alias.display().to_string()));
-    }
-    assert!(sbpl.contains("file-write-unlink"));
+    let rules = rule_facts(&sbpl);
+    assert!(rules.iter().all(|rule| {
+        rule.strings.iter().all(|value| {
+            value != "hardlink-probe"
+                && aliases
+                    .iter()
+                    .all(|alias| value != alias.to_string_lossy().as_ref())
+        })
+    }));
+    assert!(rule_index(&sbpl, RuleAction::Deny, "file-link", None).is_some());
+    assert!(rule_index(&sbpl, RuleAction::Allow, "sysctl-read", None).is_some());
+    assert!(rule_index_without_strings(&sbpl, RuleAction::Allow, "process-exec").is_some());
     std::fs::remove_file(alias)?;
     // A second name for a Git control file is the one link that refuses.
     // (Repository revalidation already refuses a second name for `config`.)
@@ -385,11 +393,8 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     ));
     std::fs::remove_file(hook_alias)?;
     std::fs::remove_file(hook)?;
-    assert!(sbpl.contains("(deny file-link)"));
-    assert!(sbpl.contains("(allow sysctl-read)"));
-    // Writers may execute binaries they build in any readable write root.
-    // The native build-script and scratch probes below exercise this rule.
-    assert!(sbpl.lines().any(|line| line == "(allow process-exec)"));
+    // The native probes below exercise the compiled policy's link, execution
+    // and process-inspection boundaries through the sandbox itself.
     // A read-only lane over the same grants, for the agent socket probe.
     let read_only_plan = PlanPermissions {
         credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(

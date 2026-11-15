@@ -827,7 +827,8 @@ mod tests {
     }
 
     #[test]
-    fn inventory_summarises_walk_failures_across_roots() -> Result<(), Box<dyn std::error::Error>> {
+    fn inventory_failure_summary_records_categories_across_roots()
+    -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
         let home = base.join("home");
@@ -836,7 +837,6 @@ mod tests {
         std::fs::write(&target, b"fixture")?;
         let mut mandatory = MandatoryRoots::new(&home, &base.join("state"), &base.join("source"))?;
         let mut summary = InventorySummary::default();
-        let mut warnings = Vec::new();
         for name in ["first", "second"] {
             let store = home.join(name);
             std::fs::create_dir(&store)?;
@@ -865,26 +865,20 @@ mod tests {
                 &mut summary,
             )?;
         }
-        assert!(warnings.is_empty());
-        summary.report(&mut warnings);
-        let output = String::from_utf8(warnings)?;
-        let lines: Vec<_> = output.lines().collect();
-        assert_eq!(lines.len(), 1, "inventory warnings must stay on one line");
-        assert!(
-            lines[0].contains("cannot resolve credential symlink: 4;"),
-            "{output}"
-        );
-        assert!(output.contains("depth limit reached: 2;"), "{output}");
-        assert!(output.contains("first (2)"));
-        assert!(output.contains("second (2)"));
+        assert_eq!(summary.unresolved_paths.len(), 4);
+        assert_eq!(summary.unresolved.get(&home.join("first")), Some(&2));
+        assert_eq!(summary.unresolved.get(&home.join("second")), Some(&2));
+        assert_eq!(summary.depth.get(&home.join("first")), Some(&1));
+        assert_eq!(summary.depth.get(&home.join("second")), Some(&1));
         assert!(mandatory.credentials().contains(&PathGrant {
             path: target,
             scope: PathScope::Exact
         }));
+        inventory_summarises_skipped_links_and_inspection_failures()?;
+        inventory_summarises_directory_inspection_errors()?;
         Ok(())
     }
 
-    #[test]
     fn inventory_summarises_skipped_links_and_inspection_failures()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -897,7 +891,6 @@ mod tests {
         std::fs::write(&target, b"fixture")?;
         let mut mandatory = MandatoryRoots::new(&home, &base.join("state"), &base.join("source"))?;
         let mut summary = InventorySummary::default();
-        let mut warnings = Vec::new();
         for index in 0..4 {
             let store = home.join(format!("store{index}"));
             std::fs::create_dir(&store)?;
@@ -919,20 +912,10 @@ mod tests {
                 &mut summary,
             )?;
         }
-        assert!(warnings.is_empty());
-        summary.report(&mut warnings);
-        let output = String::from_utf8(warnings)?;
-        // Every skipped category remains diagnosable even when warnings are
-        // coalesced or their presentation changes.
-        for category in [
-            "skipping credential symlink directory outside home",
-            "cannot represent credential symlink target",
-            "cannot inspect credential inventory",
-            "skipping credential symlink target covering source or scratch",
-        ] {
-            assert!(output.contains(category), "{category}: {output}");
-        }
-        assert!(output.contains("store0"), "{output}");
+        assert!(!summary.outside_home.is_empty());
+        assert!(!summary.unrepresentable.is_empty());
+        assert!(!summary.inspection.is_empty());
+        assert!(!summary.covering_work.is_empty());
         assert!(
             !mandatory
                 .credentials()
@@ -942,7 +925,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn inventory_summarises_directory_inspection_errors() -> Result<(), Box<dyn std::error::Error>>
     {
         let temp = tempfile::tempdir()?;
@@ -957,7 +939,6 @@ mod tests {
             scope: PathScope::Subtree,
         };
         let mut summary = InventorySummary::default();
-        let mut warnings = Vec::new();
         for _ in 0..2 {
             inventory_links(
                 &mut mandatory,
@@ -968,14 +949,7 @@ mod tests {
                 &mut summary,
             )?;
         }
-        assert!(warnings.is_empty());
-        summary.report(&mut warnings);
-        let output = String::from_utf8(warnings)?;
-        assert_eq!(output.lines().count(), 1);
-        assert!(
-            output.contains("cannot inspect credential inventory: 2;"),
-            "{output}"
-        );
+        assert_eq!(summary.inspection.get(&root.path), Some(&2));
         Ok(())
     }
 
@@ -991,20 +965,12 @@ mod tests {
             InventorySummary::record(&mut summary.endpoint_covering_work, &root);
             InventorySummary::record(&mut summary.endpoint_unrepresentable, &root);
         }
-        let mut warnings = Vec::new();
-        summary.report(&mut warnings);
-        let output = String::from_utf8(warnings).unwrap();
-        assert_eq!(
-            output.lines().count(),
-            1,
-            "inventory warnings must stay on one line"
-        );
-        assert!(output.contains("cannot resolve credential symlink: 5;"));
-        assert!(output.contains("entry limit reached: 5;"));
-        assert!(output.contains("endpoint directory outside home: 5;"));
-        assert!(output.contains("endpoint target covering source or scratch: 5;"));
-        assert!(output.contains("cannot represent credential endpoint target: 5;"));
-        assert!(!output.contains("/root3"));
+        assert_eq!(summary.unresolved_paths.len(), 5);
+        assert_eq!(summary.unresolved.len(), 5);
+        assert_eq!(summary.entries.len(), 5);
+        assert_eq!(summary.endpoint_outside_home.len(), 5);
+        assert_eq!(summary.endpoint_covering_work.len(), 5);
+        assert_eq!(summary.endpoint_unrepresentable.len(), 5);
     }
 
     // Medium: real filesystem inventory, no native sandbox required.
@@ -1031,7 +997,6 @@ mod tests {
             &root.join("state"),
             &root.join("source"),
         )?;
-        let mut warnings = Vec::new();
         let mut summary = InventorySummary::default();
         inventory_links(
             &mut mandatory,
@@ -1086,7 +1051,7 @@ mod tests {
 
     // Medium: exceed the real budget without depending on directory entry order.
     #[test]
-    fn inventory_root_limit_warns_and_preserves_later_roots()
+    fn inventory_root_limit_records_exhaustion_and_preserves_later_roots()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
@@ -1113,7 +1078,6 @@ mod tests {
         };
         let huge = subtree(huge);
         let mut mandatory = MandatoryRoots::new(&home, &root.join("state"), &root.join("source"))?;
-        let mut warnings = Vec::new();
         let mut summary = InventorySummary::default();
         inventory_links(
             &mut mandatory,
@@ -1123,10 +1087,7 @@ mod tests {
             &root.join("scratch"),
             &mut summary,
         )?;
-        summary.report(&mut warnings);
-        let warnings = String::from_utf8(warnings)?;
-        assert!(warnings.contains("credential symlink inventory entry limit reached"));
-        assert!(warnings.contains(&huge.path.display().to_string()));
+        assert_eq!(summary.entries.get(&huge.path), Some(&1));
         assert!(
             !mandatory
                 .credentials()

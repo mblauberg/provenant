@@ -880,37 +880,6 @@ fn delete_ref_compare_and_swap_preserves_a_moved_ref() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn detached_worktree_names_the_head_and_both_fixes() -> Result<(), Box<dyn std::error::Error>> {
-    let head = GitOid::parse("0123456789abcdef0123456789abcdef01234567")?;
-    let message = WorktreeError::DetachedWorktree { head }.to_string();
-    for part in [
-        "0123456789abcdef0123456789abcdef01234567",
-        "git switch -c",
-        "--mode read-only",
-    ] {
-        assert!(message.contains(part), "{message}");
-    }
-    Ok(())
-}
-
-#[test]
-fn writer_busy_names_the_holder_only_when_known() {
-    let holder = AttemptId::from_bytes([7; 16]);
-    let known = WorktreeError::WriterBusy {
-        holder: Some(holder),
-    }
-    .to_string();
-    assert!(
-        known.starts_with("worktree writer is busy, held by attempt "),
-        "{known}"
-    );
-    assert_eq!(
-        WorktreeError::WriterBusy { holder: None }.to_string(),
-        "worktree writer is busy"
-    );
-}
-
-#[test]
 fn explicit_discard_publishes_recoverable_data_before_removing_work() -> Result<(), Box<dyn Error>>
 {
     let fixture = Fixture::new()?;
@@ -1123,19 +1092,33 @@ fn first_foreign_pass_previews_then_subsumed_detached_tree_can_go() -> Result<()
 
 #[test]
 fn retirement_preserves_work_and_unknown_feeds_keep_the_candidate() -> Result<(), Box<dyn Error>> {
-    for class in ["managed", "foreign"] {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Class {
+        Managed,
+        Foreign,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Feed {
+        Clear,
+        CustodyUnknown,
+        ForgeUnknown,
+        RunUnknown,
+        CensusUnknown,
+        MovedAfterClose,
+    }
+    for class in [Class::Managed, Class::Foreign] {
         for feed in [
-            "clear",
-            "custody",
-            "forge",
-            "run",
-            "census",
-            "moved_after_close",
+            Feed::Clear,
+            Feed::CustodyUnknown,
+            Feed::ForgeUnknown,
+            Feed::RunUnknown,
+            Feed::CensusUnknown,
+            Feed::MovedAfterClose,
         ] {
             let fixture = Fixture::new()?;
             let host = TestContext::new(&fixture)?;
             let mut context = host.context();
-            let created = if class == "managed" {
+            let created = if class == Class::Managed {
                 create(
                     &context,
                     WorktreeCreate {
@@ -1160,10 +1143,10 @@ fn retirement_preserves_work_and_unknown_feeds_keep_the_candidate() -> Result<()
             run_in_worktree(&fixture, &created, &["add", "unique"])?;
             run_in_worktree(&fixture, &created, &["commit", "-m", "unsubsumed work"])?;
             let owner = CollectorRetirementFixture::new(
-                feed != "custody",
-                if feed == "forge" {
+                feed != Feed::CustodyUnknown,
+                if feed == Feed::ForgeUnknown {
                     ForgeObservation::Unknown("offline fixture".into())
-                } else if feed == "moved_after_close" {
+                } else if feed == Feed::MovedAfterClose {
                     ForgeObservation::Closed {
                         head: fixture.head()?,
                     }
@@ -1172,14 +1155,14 @@ fn retirement_preserves_work_and_unknown_feeds_keep_the_candidate() -> Result<()
                 },
             );
             let unknown = UnknownWorkers;
-            if feed == "census" {
+            if feed == Feed::CensusUnknown {
                 context.workers = &unknown;
             }
             let policy = WorktreeGcPolicy {
                 upstream: None,
                 upstream_reference: None,
                 terminal: &|_| true,
-                no_live_lanes: &|_| feed != "run",
+                no_live_lanes: &|_| feed != Feed::RunUnknown,
                 regenerable: &[],
                 keep: &[],
                 written_before_ns: i128::MAX,
@@ -1194,9 +1177,9 @@ fn retirement_preserves_work_and_unknown_feeds_keep_the_candidate() -> Result<()
             };
             let _ = collect(&context, &list(&context, &cancel())?, &policy, &cancel())?;
             assert!(branch_exists(&fixture, "idle-work"));
-            assert_eq!(created.exists(), feed != "clear");
+            assert_eq!(created.exists(), feed != Feed::Clear);
             let records = owner.records.borrow();
-            if feed == "clear" {
+            if feed == Feed::Clear {
                 assert_eq!(records.len(), 1);
                 assert!(records[0].outcomes.iter().all(|outcome| matches!(
                     &outcome.state,

@@ -92,6 +92,7 @@ fn ensure_inner(
 mod tests {
     use super::*;
     use crate::test_support::Fixture;
+    use provenant_core::{DurationMicros, MonoTime, TestClock, UtcMicros};
     use provenant_os::clock::SystemClock;
 
     #[test]
@@ -162,26 +163,23 @@ mod tests {
     #[test]
     fn scratch_ensure_respects_the_callers_lock_budget() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = Fixture::new()?;
-        ensure(&fixture.repo, &SystemClock, &CancelToken::new())?;
+        let clock = TestClock::new(UtcMicros::from_unix_seconds(0)?, MonoTime::from_micros(0));
+        ensure(&fixture.repo, &clock, &CancelToken::new())?;
         let info = Directory::open_anchor(&fixture.repo.common_git_dir().join("info"))?;
         let held = info.lock(
             OsStr::new("provenant-exclude.lock"),
             LockMode::Exclusive,
-            WaitBudget::nonblocking(SystemClock.mono_now()),
+            WaitBudget::nonblocking(clock.mono_now()),
             &CancelToken::new(),
-            &SystemClock,
+            &clock,
         )?;
-        let budget = WaitBudget::up_to(
-            SystemClock.mono_now(),
-            provenant_core::DurationMicros::from_micros(100_000),
-        );
-        // Wall-clock bound on the real lock wait, not the injected clock.
-        #[allow(clippy::disallowed_methods)]
-        let started = std::time::Instant::now();
-        assert!(
-            ensure_with_budget(&fixture.repo, &SystemClock, &CancelToken::new(), budget).is_err()
-        );
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let budget = WaitBudget::up_to(clock.mono_now(), DurationMicros::ZERO);
+        let error = ensure_with_budget(&fixture.repo, &clock, &CancelToken::new(), budget)
+            .expect_err("an expired caller budget must refuse the held lock");
+        assert!(matches!(
+            error,
+            WorktreeError::Filesystem(provenant_os::fs::FsError::LockTimeout { .. })
+        ));
         drop(held);
         Ok(())
     }
@@ -210,8 +208,10 @@ mod tests {
         std::fs::create_dir(&elsewhere)?;
         std::os::unix::fs::symlink(&elsewhere, &scratch)?;
         let error = ensure(&fixture.repo, &SystemClock, &CancelToken::new()).unwrap_err();
-        assert!(error.to_string().contains(".provenant/scratch"));
-        assert!(error.to_string().to_ascii_lowercase().contains("symlink"));
+        assert!(matches!(
+            error,
+            WorktreeError::Filesystem(provenant_os::fs::FsError::Symlink { .. })
+        ));
         Ok(())
     }
 

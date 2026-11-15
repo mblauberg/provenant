@@ -5,6 +5,7 @@ use provenant_os::{
     clock::SystemClock,
     fs::{Directory, FileHandle, FileKind, PublishMode},
 };
+use provenant_records::{ExtraFields, Limits, decode};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -110,8 +111,9 @@ fn observe_refresh<T>(mut observe: impl FnMut() -> ObservationResult<T>) -> Opti
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProcessMemory {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub pid: u32,
     pub ppid: u32,
     pub pgid: u32,
@@ -119,8 +121,9 @@ pub struct ProcessMemory {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Sample {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub schema_version: u32,
     pub root_pid: u32,
     pub sampled_at: WallTime,
@@ -137,8 +140,9 @@ pub(crate) struct SwapUsage {
 /// Private on-disk envelope. Native identities and the boot clock fence stale
 /// files and PID reuse; the CLI exposes only `Sample`.
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Snapshot {
+    #[serde(flatten)]
+    extra: ExtraFields,
     sample: Sample,
     starts: BTreeMap<u32, u64>,
     boot: String,
@@ -231,7 +235,9 @@ fn observe(
         .map_err(|_| ObservationError::Unavailable)?;
     let pid = u32::try_from(root.pid).map_err(|_| ObservationError::Unavailable)?;
     let snapshot = Snapshot {
+        extra: ExtraFields::default(),
         sample: Sample {
+            extra: ExtraFields::default(),
             schema_version: SAMPLE_SCHEMA_VERSION,
             root_pid: pid,
             sampled_at,
@@ -373,7 +379,14 @@ pub fn read(path: &Path, root_pid: u32) -> Result<Sample> {
         return Err(Unavailable);
     }
     let bytes = file.read_bounded(MAX_BYTES).map_err(|_| Unavailable)?;
-    let snapshot: Snapshot = serde_json::from_slice(&bytes).map_err(|_| Unavailable)?;
+    let snapshot: Snapshot = decode(
+        bytes.as_slice(),
+        Limits {
+            max_bytes: MAX_BYTES,
+            ..Limits::CONFIG
+        },
+    )
+    .map_err(|_| Unavailable)?;
     let clock = SystemClock::new();
     let now = clock.host_monotonic_micros().map_err(|_| Unavailable)?;
     let boot = clock.boot_identity().map_err(|_| Unavailable)?;
@@ -465,12 +478,14 @@ mod tests {
     #[test]
     fn declared_sample_fields_are_the_serialised_sample() {
         let sample = Sample {
+            extra: ExtraFields::default(),
             schema_version: SAMPLE_SCHEMA_VERSION,
             root_pid: 1,
             sampled_at: WallTime::from_micros(0).unwrap(),
             swap_used_bytes: None,
             swap_total_bytes: None,
             processes: vec![ProcessMemory {
+                extra: ExtraFields::default(),
                 pid: 1,
                 ppid: 0,
                 pgid: 1,
@@ -485,6 +500,72 @@ mod tests {
             |fields: &[&str]| -> BTreeSet<String> { fields.iter().map(|f| (*f).into()).collect() };
         assert_eq!(keys(&value), declared(SAMPLE_FIELDS));
         assert_eq!(keys(&value["processes"][0]), declared(PROCESS_FIELDS));
+    }
+
+    #[test]
+    fn stored_process_tree_shapes_preserve_unknown_fields_through_bounded_decode() {
+        fn add_forward_field(value: &mut serde_json::Value, marker: &str) {
+            value.as_object_mut().unwrap().insert(
+                format!("future_field_{marker}"),
+                serde_json::Value::String(marker.to_owned()),
+            );
+        }
+        fn contains_value(value: &serde_json::Value, expected: &serde_json::Value) -> bool {
+            value == expected
+                || value.as_array().is_some_and(|values| {
+                    values.iter().any(|value| contains_value(value, expected))
+                })
+                || value.as_object().is_some_and(|fields| {
+                    fields.values().any(|value| contains_value(value, expected))
+                })
+        }
+        fn contains_marker(extra: &ExtraFields, marker: &str) -> bool {
+            extra.values().any(|value| value.as_str() == Some(marker))
+        }
+
+        let mut payload = serde_json::to_value(snapshot()).unwrap();
+        add_forward_field(&mut payload, "snapshot");
+        let sample = payload.as_object_mut().unwrap().get_mut("sample").unwrap();
+        add_forward_field(sample, "sample");
+        let first_process = sample
+            .as_object_mut()
+            .unwrap()
+            .get_mut("processes")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .first_mut()
+            .unwrap();
+        add_forward_field(first_process, "process");
+
+        let limits = Limits {
+            max_bytes: MAX_BYTES,
+            ..Limits::CONFIG
+        };
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let decoded: Snapshot = decode(bytes.as_slice(), limits).unwrap();
+        assert!(contains_marker(&decoded.extra, "snapshot"));
+        assert!(contains_marker(&decoded.sample.extra, "sample"));
+        assert!(contains_marker(
+            &decoded.sample.processes[0].extra,
+            "process"
+        ));
+
+        let encoded = serde_json::to_value(decoded).unwrap();
+        for marker in ["snapshot", "sample", "process"] {
+            assert!(contains_value(
+                &encoded,
+                &serde_json::Value::String(marker.to_owned())
+            ));
+        }
+        let reencoded = serde_json::to_vec(&encoded).unwrap();
+        let round_trip: Snapshot = decode(reencoded.as_slice(), limits).unwrap();
+        assert!(contains_marker(&round_trip.extra, "snapshot"));
+        assert!(contains_marker(&round_trip.sample.extra, "sample"));
+        assert!(contains_marker(
+            &round_trip.sample.processes[0].extra,
+            "process"
+        ));
     }
 
     struct FixtureSource {
@@ -513,6 +594,7 @@ mod tests {
             }
             Ok(NativeProcess {
                 memory: ProcessMemory {
+                    extra: ExtraFields::default(),
                     pid,
                     ppid: if pid == 10 { 1 } else { 10 },
                     pgid: 10,
@@ -650,7 +732,9 @@ mod tests {
 
     fn snapshot() -> Snapshot {
         Snapshot {
+            extra: ExtraFields::default(),
             sample: Sample {
+                extra: ExtraFields::default(),
                 schema_version: SAMPLE_SCHEMA_VERSION,
                 root_pid: 10,
                 sampled_at: WallTime::from_micros(1_000_000).unwrap(),
@@ -659,6 +743,7 @@ mod tests {
                 processes: [(10, 1), (11, 10), (12, 11), (13, 10)]
                     .into_iter()
                     .map(|(pid, ppid)| ProcessMemory {
+                        extra: ExtraFields::default(),
                         pid,
                         ppid,
                         pgid: 10,

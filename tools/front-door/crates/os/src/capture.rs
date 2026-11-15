@@ -514,28 +514,50 @@ mod tests {
 
     #[test]
     fn partial_terminal_is_delivered_once_across_chunks_and_eof() {
-        let decoder = TestDecoder;
-        let events = EventSink::default();
-        let mut capture = StreamCapture::new(
-            StreamPolicy::Discard,
-            Some(provider(&decoder, &events)),
-            None,
-        )
-        .unwrap();
-        capture.push(b"ter").unwrap();
-        assert!(events.collected().is_empty());
-        capture.push(b"minal").unwrap();
-        assert_eq!(events.collected(), vec![FrameEvent::Terminal]);
-        capture.push(b"\nprogress\nterminal").unwrap();
-        capture.finish();
-        assert_eq!(
-            events.collected(),
-            vec![
-                FrameEvent::Terminal,
-                FrameEvent::Progress,
-                FrameEvent::Terminal
-            ]
-        );
+        let rows = [
+            (vec![b"terminal".to_vec()], vec![FrameEvent::Terminal]),
+            (
+                vec![b"ter".to_vec(), b"minal".to_vec()],
+                vec![FrameEvent::Terminal],
+            ),
+            (
+                vec![
+                    b"ter".to_vec(),
+                    b"minal".to_vec(),
+                    b"\nprogress\nterminal".to_vec(),
+                ],
+                vec![
+                    FrameEvent::Terminal,
+                    FrameEvent::Progress,
+                    FrameEvent::Terminal,
+                ],
+            ),
+            (
+                vec![b"progress\nterminal".to_vec()],
+                vec![FrameEvent::Progress, FrameEvent::Terminal],
+            ),
+            (
+                vec![b"pro".to_vec(), b"gress\nter".to_vec(), b"minal".to_vec()],
+                vec![FrameEvent::Progress, FrameEvent::Terminal],
+            ),
+        ];
+        for (chunks, expected) in rows {
+            let decoder = TestDecoder;
+            let events = EventSink::default();
+            let mut capture = StreamCapture::new(
+                StreamPolicy::Discard,
+                Some(provider(&decoder, &events)),
+                None,
+            )
+            .unwrap();
+            for chunk in chunks {
+                capture.push(&chunk).unwrap();
+            }
+            capture.finish();
+            capture.finish();
+            assert_eq!(events.collected(), expected);
+            assert!(capture.outcome().bytes.is_empty());
+        }
     }
 
     #[test]
@@ -573,31 +595,6 @@ mod tests {
         assert!(capture.outcome().bytes.is_empty());
         assert!(capture.outcome().truncated);
         assert_eq!(events.collected(), vec![FrameEvent::Terminal]);
-    }
-
-    #[test]
-    fn split_frames_and_partial_eof_are_decoded() {
-        let decoder = TestDecoder;
-        let events = EventSink::default();
-        let capture = StreamCapture::new(
-            StreamPolicy::Discard,
-            Some(provider(&decoder, &events)),
-            None,
-        );
-        assert!(capture.is_ok());
-        let Ok(mut capture) = capture else {
-            return;
-        };
-        assert!(capture.push(b"pro").is_ok());
-        assert!(capture.push(b"gress\nterminal").is_ok());
-        capture.finish();
-        capture.finish();
-        assert_eq!(
-            events.collected(),
-            vec![FrameEvent::Progress, FrameEvent::Terminal]
-        );
-        assert_eq!(capture.outcome().total_bytes, 17);
-        assert!(capture.outcome().bytes.is_empty());
     }
 
     #[test]

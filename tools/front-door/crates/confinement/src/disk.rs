@@ -300,7 +300,10 @@ pub fn worktrees(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::CARGO_CACHE_OWNER_PREFIX;
+    use crate::cache::{
+        CARGO_CACHE_OWNER_PREFIX, CARGO_CACHE_OWNER_VERSION, CacheOwner, encode_cache_owner,
+        owner_marker,
+    };
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     #[test]
@@ -323,23 +326,31 @@ mod tests {
         }
         let error = lane_available_bytes_with(state, home, cwd, |path| {
             if path == cwd {
-                Err(std::io::Error::other("volume unavailable"))
+                Err(std::io::Error::other(std::io::Error::from(
+                    std::io::ErrorKind::PermissionDenied,
+                )))
             } else {
                 Ok(100)
             }
         })
         .err()
         .ok_or("missing sample error")?;
-        assert_eq!(error.to_string(), "volume unavailable");
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(
+            error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .is_some_and(|source| source.kind() == std::io::ErrorKind::PermissionDenied)
+        );
         Ok(())
     }
 
     fn marker(path: &Path, owner: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let metadata = std::fs::metadata(owner)?;
-        let mut bytes = CARGO_CACHE_OWNER_PREFIX.to_vec();
-        bytes.extend_from_slice(&metadata.dev().to_le_bytes());
-        bytes.extend_from_slice(&metadata.ino().to_le_bytes());
-        bytes.extend_from_slice(owner.as_os_str().as_encoded_bytes());
+        let bytes = encode_cache_owner(&CacheOwner {
+            path: owner.to_path_buf(),
+            identity: (metadata.dev(), metadata.ino()),
+        });
         std::fs::write(path.join(CARGO_CACHE_OWNER), bytes)?;
         Ok(())
     }
@@ -449,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn lane_classification_refuses_unmarked_and_obsolete_markers()
+    fn lane_classification_refuses_unmarked_and_invalid_markers()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = tempfile::tempdir()?;
         let cache = fixture.path().join("a".repeat(64));
@@ -461,41 +472,6 @@ mod tests {
             classify_lane_cache(&directory, relative, &policy, 0)?.0,
             "unmarked"
         );
-        std::fs::write(
-            cache.join(CARGO_CACHE_OWNER),
-            b"provenant-lane-cargo-owner-v1\n",
-        )?;
-        assert_eq!(
-            classify_lane_cache(&directory, relative, &policy, 0)?.0,
-            "refused"
-        );
-        let owner = fixture.path().join("owner");
-        std::fs::write(
-            cache.join(CARGO_CACHE_OWNER),
-            [
-                b"provenant-lane-cargo-owner-v1\n",
-                owner.as_os_str().as_encoded_bytes(),
-            ]
-            .concat(),
-        )?;
-        assert_eq!(
-            classify_lane_cache(&directory, relative, &policy, 0)?,
-            ("refused", None)
-        );
-        std::fs::create_dir(&owner)?;
-        assert_eq!(
-            classify_lane_cache(&directory, relative, &policy, 0)?,
-            ("refused", None)
-        );
-        let policy = CacheGcPolicy {
-            project_owners: [owner.clone()].into(),
-            idle_before_ns: Some(100),
-            ..policy
-        };
-        assert_eq!(
-            classify_lane_cache(&directory, relative, &policy, 0)?,
-            ("refused", None)
-        );
         std::fs::write(cache.join(CARGO_CACHE_OWNER), b"invalid marker")?;
         assert_eq!(
             classify_lane_cache(&directory, relative, &policy, 0)?.0,
@@ -505,6 +481,54 @@ mod tests {
             classify_lane_cache(&directory, Path::new("unknown"), &policy, 0)?.0,
             "unmarked"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn owner_marker_versions_round_trip_through_the_bounded_decoder()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = tempfile::tempdir()?;
+        let owner_path = fixture.path().join("owner");
+        std::fs::create_dir(&owner_path)?;
+        let metadata = std::fs::metadata(&owner_path)?;
+        let owner = CacheOwner {
+            path: owner_path,
+            identity: (metadata.dev(), metadata.ino()),
+        };
+        let encoded = encode_cache_owner(&owner);
+        let fields = encoded
+            .get(CARGO_CACHE_OWNER_PREFIX.len()..)
+            .ok_or("encoded marker prefix")?
+            .to_vec();
+        let mut unknown_version = CARGO_CACHE_OWNER_VERSION.to_vec();
+        if let Some(version_byte) = unknown_version.last_mut() {
+            *version_byte = version_byte.wrapping_add(1);
+        }
+        let cases = [
+            ("current", encoded, Some(owner)),
+            (
+                "unknown version",
+                owner_marker(&unknown_version, &fields),
+                None,
+            ),
+            (
+                "truncated fields",
+                owner_marker(CARGO_CACHE_OWNER_VERSION, &fields[..16]),
+                None,
+            ),
+        ];
+
+        let cache = fixture.path().join("cache");
+        std::fs::create_dir(&cache)?;
+        let directory = Directory::open_anchor(&cache)?;
+        for (case, bytes, expected) in cases {
+            std::fs::write(cache.join(CARGO_CACHE_OWNER), bytes)?;
+            assert_eq!(
+                read_cache_owner(&directory, Path::new("."))?,
+                expected,
+                "{case}"
+            );
+        }
         Ok(())
     }
 

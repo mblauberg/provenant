@@ -24,7 +24,6 @@ const MAX_LEDGER_ENTRIES: usize = MAX_LEDGER_RECORDS + 2;
 
 /// The durable ownership record for one ref generation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RefRecord {
     pub schema_version: u64,
     /// Project binding of the repository's Git common directory.
@@ -42,14 +41,17 @@ pub struct RefRecord {
     pub attempt_id: Option<AttemptId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<OperationId>,
+    #[serde(flatten, default)]
+    pub extra: provenant_records::ExtraFields,
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct GenerationSequence {
     schema_version: u64,
     repository: ProjectId,
     last_generation: u64,
+    #[serde(flatten, default)]
+    extra: provenant_records::ExtraFields,
 }
 
 impl RefRecord {
@@ -126,7 +128,10 @@ impl RefLedger {
         })
     }
 
-    fn generation_high_water(&self, current: Option<&RefRecord>) -> Result<u64, WorktreeError> {
+    fn generation_high_water(
+        &self,
+        current: Option<&RefRecord>,
+    ) -> Result<GenerationSequence, WorktreeError> {
         let bytes = match read_bounded(
             &self.directory,
             OsStr::new(GENERATION_SEQUENCE),
@@ -140,12 +145,23 @@ impl RefLedger {
                 }) {
                     return Err(WorktreeError::InvalidOutput);
                 }
-                return Ok(0);
+                return Ok(GenerationSequence {
+                    schema_version: 1,
+                    repository: self.repository,
+                    last_generation: 0,
+                    extra: Default::default(),
+                });
             }
             Err(error) => return Err(error.into()),
         };
-        let sequence: GenerationSequence =
-            serde_json::from_slice(&bytes).map_err(|_| WorktreeError::InvalidOutput)?;
+        let sequence: GenerationSequence = provenant_records::decode(
+            bytes.as_slice(),
+            provenant_records::Limits {
+                max_bytes: MAX_STATE_RECORD,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| WorktreeError::InvalidOutput)?;
         if sequence.schema_version != 1
             || sequence.repository != self.repository
             || sequence.last_generation == 0
@@ -153,14 +169,19 @@ impl RefLedger {
         {
             return Err(WorktreeError::InvalidOutput);
         }
-        Ok(sequence.last_generation)
+        Ok(sequence)
     }
 
-    fn write_generation_high_water(&self, last_generation: u64) -> Result<(), WorktreeError> {
+    fn write_generation_high_water(
+        &self,
+        last_generation: u64,
+        extra: provenant_records::ExtraFields,
+    ) -> Result<(), WorktreeError> {
         let sequence = GenerationSequence {
             schema_version: 1,
             repository: self.repository,
             last_generation,
+            extra,
         };
         self.directory
             .atomic_write(
@@ -206,8 +227,14 @@ impl RefLedger {
             Err(error) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let record: RefRecord =
-            serde_json::from_slice(&bytes).map_err(|_| WorktreeError::InvalidOutput)?;
+        let record: RefRecord = provenant_records::decode(
+            bytes.as_slice(),
+            provenant_records::Limits {
+                max_bytes: MAX_STATE_RECORD,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| WorktreeError::InvalidOutput)?;
         if record.repository != self.repository
             || &record.endpoint != endpoint
             || record.reference != reference
@@ -321,7 +348,8 @@ impl RefLedger {
         validate_reference(&endpoint, &reference)?;
         let _lock = self.lock(clock, cancel)?;
         let current = self.load_identity(&endpoint, &reference)?;
-        let last_generation = self.generation_high_water(current.as_ref())?;
+        let sequence = self.generation_high_water(current.as_ref())?;
+        let last_generation = sequence.last_generation;
         if let Some(current) = current.as_ref() {
             let replay_matches = match mode {
                 RecordMode::Register => {
@@ -356,7 +384,7 @@ impl RefLedger {
             .ok_or(WorktreeError::InvalidRequest)?;
         // Publish the high-water mark first. A failed record write may leave a
         // gap, but forgetting a RefRecord can never make its token reusable.
-        self.write_generation_high_water(generation)?;
+        self.write_generation_high_water(generation, sequence.extra)?;
         let record = RefRecord {
             schema_version: 1,
             repository: self.repository,
@@ -368,6 +396,9 @@ impl RefLedger {
             recorded_at,
             attempt_id,
             operation_id,
+            extra: current
+                .as_ref()
+                .map_or_else(Default::default, |record| record.extra.clone()),
         };
         let name = record_name(&record.endpoint, &record.reference)?;
         self.directory
@@ -443,7 +474,13 @@ impl RefLedger {
             let Ok(bytes) = read_bounded(&self.directory, &name, MAX_STATE_RECORD) else {
                 continue;
             };
-            let Ok(record) = serde_json::from_slice::<RefRecord>(&bytes) else {
+            let Ok(record) = provenant_records::decode::<RefRecord>(
+                bytes.as_slice(),
+                provenant_records::Limits {
+                    max_bytes: MAX_STATE_RECORD,
+                    ..Default::default()
+                },
+            ) else {
                 continue;
             };
             if record.repository != self.repository
@@ -613,4 +650,67 @@ pub(super) fn record_local_branch(
         context.clock,
         cancel,
     )
+}
+
+#[cfg(test)]
+mod stored_shape_tests {
+    use super::*;
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
+
+    fn decode_limits() -> provenant_records::Limits {
+        provenant_records::Limits {
+            max_bytes: MAX_STATE_RECORD,
+            ..Default::default()
+        }
+    }
+
+    fn round_trip_unknown<T>(mut payload: serde_json::Value)
+    where
+        T: DeserializeOwned + Serialize,
+    {
+        let future = serde_json::json!({"newer_writer": {"enabled": true}});
+        payload
+            .as_object_mut()
+            .expect("stored record object")
+            .insert("future_member".into(), future.clone());
+        let bytes = provenant_records::encode(&payload).expect("encode test payload");
+        let decoded: T = provenant_records::decode(bytes.as_slice(), decode_limits())
+            .expect("decode bounded stored record");
+        let rewritten = provenant_records::encode(&decoded).expect("encode typed record");
+        let value: serde_json::Value =
+            provenant_records::decode(rewritten.as_slice(), decode_limits())
+                .expect("decode rewritten record");
+        assert_eq!(value, payload);
+        assert_eq!(value["future_member"], future);
+    }
+
+    #[test]
+    fn ref_record_round_trips_unknown_fields_through_the_bounded_decoder() {
+        let record = RefRecord {
+            schema_version: 1,
+            repository: ProjectId::parse("01abcdef2345678901abcdef23456789").unwrap(),
+            endpoint: RefEndpoint::Local,
+            reference: "refs/heads/topic".into(),
+            generation: 1,
+            origin: RefOrigin::Created,
+            tip: GitOid::parse(&"ab".repeat(20)).unwrap(),
+            recorded_at: WallTime::from_unix_seconds(0).unwrap(),
+            attempt_id: None,
+            operation_id: None,
+            extra: Default::default(),
+        };
+        round_trip_unknown::<RefRecord>(serde_json::to_value(record).unwrap());
+    }
+
+    #[test]
+    fn generation_sequence_round_trips_unknown_fields_through_the_bounded_decoder() {
+        let sequence = GenerationSequence {
+            schema_version: 1,
+            repository: ProjectId::parse("01abcdef2345678901abcdef23456789").unwrap(),
+            last_generation: 1,
+            extra: Default::default(),
+        };
+        round_trip_unknown::<GenerationSequence>(serde_json::to_value(sequence).unwrap());
+    }
 }

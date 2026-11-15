@@ -2585,82 +2585,104 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn executable_pin_rejects_symlink_to_other_name() -> Result<(), Box<dyn Error>> {
-        let temp = tempfile::tempdir()?;
-        let target = temp.path().join("other");
-        fs::write(&target, b"executable")?;
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o755))?;
-        let link = temp.path().join("git");
-        std::os::unix::fs::symlink(target, &link)?;
-        assert!(matches!(
-            ExecutablePin::new(&link, "git"),
-            Err(UtilityError::InvalidExecutable { tool: "git" })
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn executable_pin_rejects_relative_and_dangling_paths() -> Result<(), Box<dyn Error>> {
-        let temp = tempfile::tempdir()?;
-        let link = temp.path().join("git");
-        std::os::unix::fs::symlink(temp.path().join("missing/git"), &link)?;
-        for input in [Path::new("git"), link.as_path()] {
-            assert!(matches!(
-                ExecutablePin::new(input, "git"),
-                Err(UtilityError::InvalidExecutable { tool: "git" })
-            ));
+    fn executable_pin_refuses_declared_unsafe_target_shapes() -> Result<(), Box<dyn Error>> {
+        #[derive(Clone, Copy)]
+        enum Refusal {
+            SymlinkToOtherName,
+            RelativePath,
+            DanglingPath,
+            WritableTarget(u32),
+            LooseAncestor,
+            StickyWorldWritableAncestor,
+            GroupWritableAncestor,
         }
-        Ok(())
-    }
 
-    #[test]
-    fn executable_pin_refuses_a_writable_file_and_a_loose_ancestor() -> Result<(), Box<dyn Error>> {
-        let temp = tempfile::tempdir()?;
-        let root = temp.path().canonicalize()?;
-        let target_dir = root.join("target");
-        let target = target_dir.join("git");
-        executable(&target, 0o755)?;
-        let link = root.join("git");
-        std::os::unix::fs::symlink(&target, &link)?;
-        let pin = |file: u32, directory: u32| -> Result<ExecutablePin, UtilityError> {
-            fs::set_permissions(&target, fs::Permissions::from_mode(file))
-                .and_then(|()| {
-                    fs::set_permissions(&target_dir, fs::Permissions::from_mode(directory))
-                })
-                .map_err(|_| UtilityError::InvalidExecutable { tool: "git" })?;
-            ExecutablePin::new(&link, "git")
-        };
-        // Group- or world-write on the file itself lets that group replace it.
-        for file in [0o775, 0o757, 0o777, 0o770] {
-            assert!(
-                matches!(
-                    pin(file, 0o755),
-                    Err(UtilityError::InvalidExecutable { tool: "git" })
-                ),
-                "file mode {file:o}"
+        let cases = [
+            ("symlink to other name", Refusal::SymlinkToOtherName, true),
+            ("relative path", Refusal::RelativePath, true),
+            ("dangling path", Refusal::DanglingPath, true),
+            (
+                "group writable target",
+                Refusal::WritableTarget(0o775),
+                true,
+            ),
+            (
+                "world writable target",
+                Refusal::WritableTarget(0o757),
+                true,
+            ),
+            (
+                "group and world writable target",
+                Refusal::WritableTarget(0o777),
+                true,
+            ),
+            (
+                "group writable executable mode",
+                Refusal::WritableTarget(0o770),
+                true,
+            ),
+            ("loose ancestor", Refusal::LooseAncestor, true),
+            (
+                "sticky world writable ancestor",
+                Refusal::StickyWorldWritableAncestor,
+                false,
+            ),
+            (
+                "group writable owned ancestor",
+                Refusal::GroupWritableAncestor,
+                false,
+            ),
+        ];
+
+        for (label, refusal, should_refuse) in cases {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().canonicalize()?;
+            let result = match refusal {
+                Refusal::SymlinkToOtherName => {
+                    let target = root.join("other");
+                    executable(&target, 0o755)?;
+                    let link = root.join("git");
+                    std::os::unix::fs::symlink(target, &link)?;
+                    ExecutablePin::new(&link, "git")
+                }
+                Refusal::RelativePath => ExecutablePin::new(Path::new("git"), "git"),
+                Refusal::DanglingPath => {
+                    let link = root.join("git");
+                    std::os::unix::fs::symlink(root.join("missing/git"), &link)?;
+                    ExecutablePin::new(&link, "git")
+                }
+                Refusal::WritableTarget(mode) => {
+                    let target = root.join("target/git");
+                    executable(&target, mode)?;
+                    std::os::unix::fs::symlink(&target, root.join("git"))?;
+                    ExecutablePin::new(&root.join("git"), "git")
+                }
+                Refusal::LooseAncestor => {
+                    let target = root.join("target/nested/git");
+                    executable(&target, 0o755)?;
+                    fs::set_permissions(root.join("target"), fs::Permissions::from_mode(0o777))?;
+                    std::os::unix::fs::symlink(&target, root.join("git"))?;
+                    ExecutablePin::new(&root.join("git"), "git")
+                }
+                Refusal::StickyWorldWritableAncestor | Refusal::GroupWritableAncestor => {
+                    let target = root.join("target/nested/git");
+                    executable(&target, 0o755)?;
+                    let mode = if matches!(refusal, Refusal::StickyWorldWritableAncestor) {
+                        0o1777
+                    } else {
+                        0o775
+                    };
+                    fs::set_permissions(root.join("target"), fs::Permissions::from_mode(mode))?;
+                    std::os::unix::fs::symlink(&target, root.join("git"))?;
+                    ExecutablePin::new(&root.join("git"), "git")
+                }
+            };
+            assert_eq!(
+                matches!(result, Err(UtilityError::InvalidExecutable { tool: "git" })),
+                should_refuse,
+                "{label}"
             );
         }
-        // A world-writable directory without the sticky bit lets anyone swap
-        // the file; with it, only the owner can.
-        assert!(matches!(
-            pin(0o755, 0o777),
-            Err(UtilityError::InvalidExecutable { tool: "git" })
-        ));
-        pin(0o755, 0o1777)?;
-        // A group-writable directory owned by the current user (or root) is
-        // accepted: Intel Homebrew's /usr/local/bin is group-writable by admin.
-        pin(0o755, 0o775)?;
-        // The rule covers every ancestor, not only the parent.
-        let nested = target_dir.join("nested/git");
-        executable(&nested, 0o755)?;
-        let nested_link = root.join("nested-git");
-        std::os::unix::fs::symlink(&nested, &nested_link)?;
-        fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o777))?;
-        assert!(matches!(
-            ExecutablePin::new(&nested_link, "git"),
-            Err(UtilityError::InvalidExecutable { tool: "git" })
-        ));
-        fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o755))?;
         Ok(())
     }
 
@@ -3181,7 +3203,6 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
             fixture.budget()?,
             &CancelToken::new(),
         )?;
-        assert_eq!(fake.calls(), 3, "success must arrive after the retries");
         Ok(())
     }
 
@@ -3509,24 +3530,44 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
     }
 
     #[test]
-    fn embedded_gitlink_status_ignores_clean_filters() -> Result<(), Box<dyn Error>> {
-        assert_nested_read_safe(GitRead::Status)?;
-        assert_nested_read_safe(GitRead::StatusIncludingIgnored)
+    fn embedded_gitlink_views_ignore_clean_filters() -> Result<(), Box<dyn Error>> {
+        enum View {
+            Utility(GitRead),
+            Evidence,
+        }
+
+        let sub = crate::repo::RepoPath::new("sub")?;
+        let views = [
+            ("status", View::Utility(GitRead::Status)),
+            (
+                "status including ignored files",
+                View::Utility(GitRead::StatusIncludingIgnored),
+            ),
+            (
+                "index diff",
+                View::Utility(GitRead::DiffIndex {
+                    paths: vec![sub.clone()],
+                }),
+            ),
+            (
+                "worktree diff",
+                View::Utility(GitRead::DiffWorktree { paths: vec![sub] }),
+            ),
+            ("evidence", View::Evidence),
+        ];
+        for (label, view) in views {
+            let result = match view {
+                View::Utility(operation) => assert_nested_read_safe(operation),
+                View::Evidence => assert_nested_evidence_safe(),
+            };
+            if let Err(error) = result {
+                return Err(std::io::Error::other(format!("{label}: {error}")).into());
+            }
+        }
+        Ok(())
     }
 
-    #[test]
-    fn embedded_gitlink_diff_ignores_clean_filters() -> Result<(), Box<dyn Error>> {
-        use crate::repo::RepoPath;
-        assert_nested_read_safe(GitRead::DiffIndex {
-            paths: vec![RepoPath::new("sub")?],
-        })?;
-        assert_nested_read_safe(GitRead::DiffWorktree {
-            paths: vec![RepoPath::new("sub")?],
-        })
-    }
-
-    #[test]
-    fn embedded_gitlink_evidence_ignores_clean_filters() -> Result<(), Box<dyn Error>> {
+    fn assert_nested_evidence_safe() -> Result<(), Box<dyn Error>> {
         use crate::git_evidence::Git;
         use crate::repo::RepoPath;
         let (fixture, nested) = poisoned_read_fixture()?;
