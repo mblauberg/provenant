@@ -1397,8 +1397,17 @@ pub struct ProcessExit {
     pub termination: Option<Termination>,
     pub never_spawned: bool,
     pub stop_reason: Option<StopReason>,
-    /// Whether cancellation was delivered before exit; null means ordering was not observed.
+    /// Whether cancellation or a steering interrupt was delivered before exit;
+    /// null means ordering was not observed.
     pub cancel_delivered_before_exit: Option<bool>,
+    /// The live provider stream contradicted its admitted identity, sealed by
+    /// the guardian independently of the bounded retained stdout tail.
+    #[serde(default)]
+    pub provider_identity_conflict: bool,
+    /// Live provider identity evidence was incomplete because frames were
+    /// dropped, oversized, undecodable, unreadable, or drain-truncated.
+    #[serde(default)]
+    pub provider_identity_evidence_incomplete: bool,
     pub delivered_signals: Vec<i64>,
     pub reaped: Vec<ProcessIdentity>,
     pub omitted_reaped: u64,
@@ -1447,6 +1456,8 @@ impl ProcessExit {
             never_spawned: true,
             stop_reason,
             cancel_delivered_before_exit: Some(false),
+            provider_identity_conflict: false,
+            provider_identity_evidence_incomplete: false,
             delivered_signals: vec![],
             reaped: vec![],
             omitted_reaped: 0,
@@ -1477,6 +1488,8 @@ impl ProcessExit {
             never_spawned: self.never_spawned,
             stop_reason: self.stop_reason,
             cancel_delivered_before_exit: self.cancel_delivered_before_exit,
+            provider_identity_conflict: self.provider_identity_conflict,
+            provider_identity_evidence_incomplete: self.provider_identity_evidence_incomplete,
             delivered_signals: self.delivered_signals.clone(),
             reaped: self.reaped.clone(),
             omitted_reaped: self.omitted_reaped,
@@ -1551,6 +1564,10 @@ struct StoredExit {
     stop_reason: Option<StopReason>,
     #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     cancel_delivered_before_exit: Option<bool>,
+    #[serde(default)]
+    provider_identity_conflict: bool,
+    #[serde(default)]
+    provider_identity_evidence_incomplete: bool,
     delivered_signals: Vec<i64>,
     reaped: Vec<ProcessIdentity>,
     omitted_reaped: u64,
@@ -1580,6 +1597,8 @@ pub struct ExitObservation {
     pub stop_reason: Option<StopReason>,
     /// None means this current observation could not establish delivery ordering.
     pub cancel_delivered_before_exit: Option<bool>,
+    pub provider_identity_conflict: bool,
+    pub provider_identity_evidence_incomplete: bool,
     pub delivered_signals: Vec<i64>,
     pub reaped: Vec<ProcessIdentity>,
     pub omitted_reaped: u64,
@@ -1712,6 +1731,9 @@ pub fn observe(
                     never_spawned: record.never_spawned,
                     stop_reason: record.stop_reason,
                     cancel_delivered_before_exit: record.cancel_delivered_before_exit,
+                    provider_identity_conflict: record.provider_identity_conflict,
+                    provider_identity_evidence_incomplete: record
+                        .provider_identity_evidence_incomplete,
                     delivered_signals: record.delivered_signals,
                     reaped: record.reaped,
                     omitted_reaped: record.omitted_reaped,

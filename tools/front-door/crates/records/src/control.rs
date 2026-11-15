@@ -25,8 +25,7 @@ pub enum ControlSupport {
     LiveInjection,
     /// Left in Fabric mail for the session to read.
     MailOnly,
-    /// Save input for the next provider turn and interrupt once its live session is verified.
-    #[serde(rename = "continuation")]
+    /// Saved for the next provider turn; it cannot inject at a live tool boundary.
     ContinuationOnly,
     Unsupported,
 }

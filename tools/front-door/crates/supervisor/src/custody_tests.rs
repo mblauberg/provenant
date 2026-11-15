@@ -381,6 +381,8 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
     };
     let exit = ProcessExit {
         cancel_delivered_before_exit: None,
+        provider_identity_conflict: true,
+        provider_identity_evidence_incomplete: false,
         priority: None,
         schema_version: 1,
         scope: scope(),
@@ -419,6 +421,8 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
     assert!(bytes.len() as u64 <= EXIT_LIMIT);
     assert_eq!(bytes, exit.bounded_bytes()?);
     let stored: serde_json::Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(stored["provider_identity_conflict"], true);
+    assert_eq!(stored["provider_identity_evidence_incomplete"], false);
     for (list, omitted, expected) in [
         ("reaped", "omitted_reaped", 18),
         ("spared", "omitted_spared", 19),
@@ -888,6 +892,73 @@ fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
             .join("reservation.json")
             .is_file()
     );
+    Ok(())
+}
+
+#[test]
+fn guardian_publishes_typed_steered_stop_and_delivery_ordering() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let writer_path = root.path().join("writer");
+    std::fs::create_dir(&writer_path)?;
+    let attempt_path = root.path().join(scope().attempt.to_string());
+    std::fs::create_dir(&attempt_path)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut writer = crate::fixture::acquire_writer(
+        Directory::open_anchor(&writer_path)?,
+        scope(),
+        WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
+        &cancel,
+        &clock,
+    )?;
+    let publication = PublicationReservation::prepare(
+        Directory::open_anchor(&attempt_path)?,
+        WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
+        &cancel,
+        &clock,
+    )?;
+    let handle = launch(
+        OwnedLaunch {
+            command: ProviderCommand {
+                policy: Default::default(),
+                profile_file: None,
+                priority: 0,
+                lane_ports: None,
+                resolved_route: "fixture/provider".into(),
+                permission_plan_digest: Digest::from_bytes([0; 32]),
+                key: crate::custody::fixture_key(3),
+                requester: ActorId::from_bytes([4; 16]),
+                protected_commands: vec![],
+                config_environment: vec![],
+                argv: vec!["/bin/sleep".into(), "30".into()],
+                environment: crate::fixture::environment(root.path()),
+                cwd: root.path().into(),
+                stdin: vec![],
+                secret_input: None,
+                holder_context: Vec::new(),
+            },
+            lease: &mut writer,
+            handshake: WaitBudget::cli(clock.mono_now(), 5)
+                .map_err(|_| CustodyError::InvalidRecord)?,
+            cancel: &cancel,
+            clock: &clock,
+        },
+        CapturePlan::default(),
+        publication,
+    )?;
+    assert_eq!(stop(&handle, StopReason::Steered)?, StopReceipt::Requested);
+    let Observation::Exited(exit) = observe(
+        &handle,
+        WaitBudget::cli(clock.mono_now(), 20).map_err(|_| CustodyError::InvalidRecord)?,
+        &cancel,
+        &clock,
+    )?
+    else {
+        return Err("guardian did not publish the steered exit".into());
+    };
+    assert_eq!(exit.stop_reason, Some(StopReason::Steered));
+    assert_eq!(exit.cancel_delivered_before_exit, Some(true));
+    assert!(exit.delivered_signals.contains(&libc::SIGTERM.into()));
     Ok(())
 }
 

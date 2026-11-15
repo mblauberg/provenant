@@ -664,6 +664,20 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
         ),
         Err(ProviderError::IdentityMismatch)
     ));
+
+    let mut state = claude::Claude.stream(None)?;
+    state.expect_model("expected-model");
+    claude::Claude.observe(
+        &mut state,
+        br#"{"type":"assistant","message":{"role":"assistant","model":"other-model","content":[{"type":"text","text":"answer"}]},"session_id":"s","parent_tool_use_id":null}"#,
+    )?;
+    assert!(matches!(
+        claude::Claude.observe(
+            &mut state,
+            br#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"result":"answer"}"#,
+        ),
+        Err(ProviderError::IdentityMismatch)
+    ));
     Ok(())
 }
 
@@ -1240,7 +1254,8 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
             "{adapter} {access:?}"
         );
         assert!(
-            spec.tool_exec_roots.contains(&crate::launch::subtree(Path::new("/fixture/repo"))),
+            spec.tool_exec_roots
+                .contains(&crate::launch::subtree(Path::new("/fixture/repo"))),
             "{adapter} {access:?}: repository execution grant missing"
         );
     }

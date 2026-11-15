@@ -2829,6 +2829,8 @@ fn persisted_attempt_with(
         omitted_reaped: 0,
         spared: vec![],
         cancel_delivered_before_exit: None,
+        provider_identity_conflict: false,
+        provider_identity_evidence_incomplete: false,
         omitted_spared: 0,
         warnings: vec![],
         omitted_warnings: 0,
