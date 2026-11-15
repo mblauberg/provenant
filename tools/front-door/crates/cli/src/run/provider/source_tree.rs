@@ -75,7 +75,7 @@ pub(super) enum SourceCause {
     Cancelled,
     Refused(&'static str),
     Failed(&'static str),
-    ProjectBindingDirectory(provenant_records::diagnostic::Diagnostic),
+    ProjectBindingDirectory(Box<provenant_records::diagnostic::Diagnostic>),
 }
 
 impl std::fmt::Display for SourceCause {
@@ -708,6 +708,7 @@ pub(super) fn snapshot_source(
                     &error,
                     provenant_records::diagnostic::Destination::Local,
                 )
+                .map(Box::new)
                 .map(SourceCause::ProjectBindingDirectory)
                 .unwrap_or(SourceCause::Failed("project binding unreadable"));
             SourceViewError::new(Step::Repository, cause)
@@ -905,7 +906,7 @@ mod tests {
             .unwrap();
         let view_error = SourceViewError::new(
             SourceStep::Repository,
-            SourceCause::ProjectBindingDirectory(diagnostic),
+            SourceCause::ProjectBindingDirectory(Box::new(diagnostic)),
         );
         let rendered = view_error.to_string();
         assert!(rendered.contains("/private/project-state"));

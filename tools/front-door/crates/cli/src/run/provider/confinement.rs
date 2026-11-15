@@ -1160,8 +1160,8 @@ pub(super) enum ReadOnlyPlanError {
     MissingBinding,
     #[error("pinned source requires a Git repository")]
     PinnedSourceRequiresGit,
-    #[error("{}", read_only_diagnostic_text(.0))]
-    ProjectBindingDirectory(provenant_records::diagnostic::Diagnostic),
+    #[error("{}", read_only_diagnostic_text(.0.as_ref()))]
+    ProjectBindingDirectory(Box<provenant_records::diagnostic::Diagnostic>),
     #[error("{0}")]
     Other(String),
 }
@@ -1197,7 +1197,7 @@ impl From<provenant_config::ConfigError> for ReadOnlyPlanError {
             );
         diagnostic.map_or_else(
             || Self::Other(error.to_string()),
-            Self::ProjectBindingDirectory,
+            |diagnostic| Self::ProjectBindingDirectory(Box::new(diagnostic)),
         )
     }
 }
