@@ -1698,6 +1698,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     assert!(captured.harness_version.is_none());
     let trace = provenant_records::Trace {
         extra: record.trace.extra.clone(),
+        telemetry_context: record.trace.telemetry_context.clone(),
         host: None,
         project: Some(context.project_id),
         attempt: Some(id),
