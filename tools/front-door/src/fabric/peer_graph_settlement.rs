@@ -854,6 +854,7 @@ fn graph_hint_requires_a_matching_attempt() -> Result<(), Box<dyn std::error::Er
     journal.bind(provenant_fabric_runtime::graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: fixture.rig.project.clone(),
@@ -974,7 +975,7 @@ fn settlement_advances_only_matching_graph_and_retains_writer()
         journal.bind(graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: fixture.rig.project.clone(),
@@ -1123,7 +1124,7 @@ fn settlement_and_tick_read_no_terminal_graphs_at_scale() -> Result<(), Box<dyn 
         journal.bind(graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: fixture.rig.project.clone(),
@@ -1287,7 +1288,7 @@ fn an_attempt_keyed_to_another_graph_is_refused_not_adopted()
     journal.bind(graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: fixture.rig.project.clone(),

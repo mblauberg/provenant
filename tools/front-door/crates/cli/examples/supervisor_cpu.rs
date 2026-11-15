@@ -130,7 +130,7 @@ fn capture(root: &Path, churn: bool) -> Result {
     journal.bind(GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: project,

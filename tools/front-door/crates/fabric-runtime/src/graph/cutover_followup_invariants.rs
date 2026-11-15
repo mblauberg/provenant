@@ -463,7 +463,7 @@ fn a_cancel_after_checkpoint_reload_closes_every_linked_inbox_request() {
             .bind(GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases: None,
                 directory: inputs.checkout.clone(),

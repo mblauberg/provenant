@@ -996,12 +996,8 @@ impl Factory {
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
                     peer_origin_context: None,
                     peer_submission_digest: None,
-                    extra: [(
-                        "requester_path".into(),
-                        serde_json::json!(self.requester_lane_path()),
-                    )]
-                    .into_iter()
-                    .collect(),
+                    requester_path: Some(self.requester_lane_path()),
+                    extra: Default::default(),
                     bases: GraphBaseBinding::new(review_base, integration_base),
                     directory: self.cwd.clone(),
                     document: document.clone(),

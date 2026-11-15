@@ -1710,7 +1710,7 @@ mod provisioning_tests {
         journal.bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: project.clone(),
@@ -2053,7 +2053,7 @@ mod provisioning_tests {
             journal.bind(GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases: Some(bases),
                 directory: project.clone(),
@@ -2154,6 +2154,7 @@ mod provisioning_tests {
                     peer_origin_context: None,
                     peer_submission_digest: None,
 
+                    requester_path: None,
                     extra: Default::default(),
                     bases: None,
                     directory: project.clone(),
@@ -2253,7 +2254,7 @@ mod provisioning_tests {
             journal.bind(GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases: None,
                 directory: project.clone(),
@@ -2340,7 +2341,7 @@ mod provisioning_tests {
         journal.bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: project.clone(),

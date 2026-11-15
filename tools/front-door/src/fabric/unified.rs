@@ -2999,7 +2999,7 @@ mod tests {
         journal.bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: rig.project.clone(),
@@ -3204,7 +3204,7 @@ mod tests {
             journal.bind(GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases: None,
                 directory: base.clone(),

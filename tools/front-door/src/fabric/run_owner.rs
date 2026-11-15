@@ -1,6 +1,24 @@
 use super::*;
 use provenant_fabric_runtime::runs::SubmissionReceipt;
 
+/// Restore the requester's lane environment when a supervisor advances a graph.
+pub(super) fn restore_graph_lane_path(
+    factory: &Factory,
+    graph_id: &str,
+    host_launch: &mut provenant_run::HostLaunchContext,
+) -> Result<(), FacadeError> {
+    let execution = provenant_fabric_runtime::graph::FileJournal::execution(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph_id,
+    )
+    .map_err(graph_journal_error)?;
+    if let Some(path) = execution.and_then(|execution| execution.requester_path) {
+        host_launch.lane_path = Some(path);
+    }
+    Ok(())
+}
+
 struct SubmissionPolicy<'a> {
     facts: &'a provenant_confinement::worktrees::RepoFacts,
     access: provenant_records::run::LaneAccess,
@@ -1147,20 +1165,7 @@ impl BinaryRunOwner<'_> {
             .as_ref()
             .and_then(|context| context.graph_id.as_deref())
         {
-            let execution = provenant_fabric_runtime::graph::FileJournal::execution(
-                &self.factory.context.roots.state,
-                self.factory.context.identity.project,
-                graph_id,
-            )
-            .map_err(graph_journal_error)?;
-            if let Some(value) = execution
-                .as_ref()
-                .and_then(|execution| execution.extra.get("requester_path"))
-            {
-                host_launch.lane_path = Some(
-                    serde_json::from_value(value.clone()).map_err(|_| FacadeError::StateCorrupt)?,
-                );
-            }
+            restore_graph_lane_path(self.factory, graph_id, &mut host_launch)?;
         }
         host_launch.graph_directory = Some(self.factory.cwd.clone());
         host_launch.cwd = launch_directory.clone();

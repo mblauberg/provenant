@@ -1181,12 +1181,8 @@ pub(crate) fn peer_submit_graph(
             directory: factory.cwd.clone(),
             peer_origin_context: Some(origin.clone()),
             peer_submission_digest: Some(submission_digest),
-            extra: [(
-                "requester_path".into(),
-                serde_json::json!(factory.requester_lane_path()),
-            )]
-            .into_iter()
-            .collect(),
+            requester_path: Some(factory.requester_lane_path()),
+            extra: Default::default(),
             document: document.clone(),
         })
         .map_err(|_| FacadeError::Conflict)?;

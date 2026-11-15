@@ -634,7 +634,7 @@ fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: b
     let execution = GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: checkpoint.bases,
         directory: format!("/{}", "\u{1}".repeat(4095)).into(),
@@ -891,7 +891,7 @@ fn a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit() {
         .bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: inputs.checkout.clone(),
@@ -987,7 +987,7 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
             .bind(GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases: None,
                 directory: inputs.checkout.clone(),
@@ -1092,7 +1092,7 @@ fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
             let execution = GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases: checkpoint.bases,
                 directory: "/fixture".into(),
@@ -1165,7 +1165,7 @@ fn disposition_checkpoint_fits_its_reduced_bound() {
     let execution = GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: checkpoint.bases,
         directory: format!("/{}", "\u{1}".repeat(4095)).into(),

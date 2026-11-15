@@ -373,9 +373,7 @@ impl FileJournal {
     /// Update host-only launch input while the graph journal lock is held.
     pub fn set_requester_path(&mut self, path: Vec<u8>) -> Result<(), JournalError> {
         let execution = self.execution.as_mut().ok_or(JournalError::BadEnvelope)?;
-        execution
-            .extra
-            .insert("requester_path".into(), serde_json::json!(path));
+        execution.requester_path = Some(path);
         Ok(())
     }
 

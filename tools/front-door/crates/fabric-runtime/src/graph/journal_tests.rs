@@ -28,7 +28,7 @@ fn stored_fixture() -> StoredCheckpoint {
     let execution = GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: inputs.checkout.clone(),
@@ -370,7 +370,7 @@ fn manual_resume_publishes_marker_before_reopened_checkpoint() {
         .bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: inputs.checkout.clone(),
@@ -1172,7 +1172,7 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
             .bind(GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases: None,
                 directory,
@@ -1203,7 +1203,7 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_keeps_directory() {
         .bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: inputs.home.clone(),
@@ -1248,7 +1248,7 @@ fn schema_two_document_with_optional_fields_absent_reloads() {
             .bind(GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases: None,
                 directory: inputs.checkout.clone(),
@@ -1295,7 +1295,7 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
     let execution = GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: Some(bases),
         directory: inputs.checkout.clone(),
@@ -1464,7 +1464,7 @@ fn bound_attempt_manifest_survives_file_journal_reopen_and_reattachment() {
     let execution = GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: inputs.checkout.clone(),
@@ -1582,7 +1582,7 @@ fn implicit_writer_binding_reattaches_without_resolving_the_moved_head() {
     let execution = GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: inputs.checkout.clone(),
@@ -1785,6 +1785,7 @@ mod launch_recovery {
                     peer_origin_context: None,
                     peer_submission_digest: None,
 
+                    requester_path: None,
                     extra: Default::default(),
                     bases: None,
                     directory: inputs.checkout.clone(),

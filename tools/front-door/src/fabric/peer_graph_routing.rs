@@ -75,7 +75,7 @@ fn failed_settlement_does_not_advance_unrelated_graphs() -> Result<(), Box<dyn s
         journal.bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: fixture.rig.project.clone(),
@@ -273,7 +273,7 @@ fn graph_owner_fails_node_when_result_integrity_is_lost() -> Result<(), Box<dyn 
         journal.bind(graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: fixture.rig.project.clone(),
@@ -374,7 +374,7 @@ fn graph_owner_fails_node_when_result_integrity_is_lost() -> Result<(), Box<dyn 
     journal.bind(graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: fixture.rig.project.clone(),
@@ -460,7 +460,7 @@ fn graph_owner_fails_node_when_result_integrity_is_lost() -> Result<(), Box<dyn 
     journal.bind(graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: fixture.rig.project.clone(),
@@ -592,7 +592,7 @@ fn exact_route_in_an_excluded_family_is_refused_before_launch()
     journal.bind(graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: fixture.rig.project.clone(),
@@ -843,7 +843,7 @@ fn production_owner_panel_uses_distinct_families_and_synthesises()
     journal.bind(graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: fixture.rig.project.clone(),

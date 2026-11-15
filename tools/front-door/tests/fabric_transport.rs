@@ -2309,6 +2309,7 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
             ..Default::default()
         }),
         peer_submission_digest: None,
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),
@@ -2352,7 +2353,7 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     journal.bind(GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),

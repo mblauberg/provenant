@@ -571,7 +571,7 @@ fn launched_reader_stop_restart_replays_file_checkpoint_without_new_work() {
         .bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: inputs.checkout.clone(),

@@ -93,7 +93,7 @@ fn missing_graph_worktree_warns_once_and_scheduled_gc_completes() -> Result {
         journal.bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: if id == "missing" {
@@ -274,7 +274,7 @@ fn deadline_free_graph_tick_launches_waiting_fake_provider() -> Result {
     journal.bind(GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: rig.project.clone(),

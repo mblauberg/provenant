@@ -201,7 +201,7 @@ fn resumed_lane_settlement_ignores_terminal_graph() -> Result<(), Box<dyn std::e
     journal.bind(graph::GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         bases: None,
         directory: fixture.rig.project.clone(),
         document,

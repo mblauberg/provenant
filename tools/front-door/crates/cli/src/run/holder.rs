@@ -776,7 +776,7 @@ mod tests {
         journal.bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: temp.path().to_path_buf(),

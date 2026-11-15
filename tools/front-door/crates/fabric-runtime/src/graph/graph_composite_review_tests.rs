@@ -535,7 +535,7 @@ fn status_and_replay_agree_on_persisted_partial_composite() {
         .bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: inputs.checkout.clone(),

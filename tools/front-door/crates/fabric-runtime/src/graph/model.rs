@@ -193,6 +193,9 @@ pub struct GraphExecution {
     pub peer_origin_context: Option<provenant_records::run::WorkContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_submission_digest: Option<provenant_core::Digest>,
+    /// Requester PATH retained for native lane launches after handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_path: Option<Vec<u8>>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     /// One stored authority for graph-wide bases; checkpoint and output

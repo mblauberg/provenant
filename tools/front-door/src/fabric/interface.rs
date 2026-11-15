@@ -3292,6 +3292,78 @@ mod tests {
         })
     }
 
+    // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
+    #[test]
+    fn graph_advance_uses_requester_path_after_submission_and_retry() -> Result {
+        use std::os::unix::ffi::OsStrExt;
+        let rig = TestRig::new()?;
+        let mut factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
+        ))?;
+        let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(fixture["checkpoint"].clone())?;
+        let document: GraphDocument =
+            serde_json::from_value(fixture["execution"]["document"].clone())?;
+        let p = rig.home.join("requester-p");
+        let q = rig.home.join("requester-q");
+        std::fs::create_dir_all(&p)?;
+        std::fs::create_dir_all(&q)?;
+        let p = std::fs::canonicalize(p)?.as_os_str().as_bytes().to_vec();
+        let q = std::fs::canonicalize(q)?.as_os_str().as_bytes().to_vec();
+        let mut journal = FileJournal::open(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            &document.graph_id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+            requester_path: Some(p.clone()),
+            extra: Default::default(),
+            bases: None,
+            directory: factory.cwd.clone(),
+            document: document.clone(),
+        })?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let mut supervisor = super::super::settlement::recovery_launch(
+            factory.context.roots.state.as_path(),
+            &factory.cwd,
+        )?;
+        supervisor.lane_path = Some(b"/usr/bin".to_vec());
+        super::super::run_owner::restore_graph_lane_path(
+            &factory,
+            &document.graph_id,
+            &mut supervisor,
+        )?;
+        assert_eq!(supervisor.lane_path.as_deref(), Some(p.as_slice()));
+
+        let mut requester = supervisor.clone();
+        requester.lane_path = Some(q.clone());
+        factory.host_launch = Some(requester);
+        // The subsequent resume may refuse for unrelated fixture reasons; the
+        // retry request must have persisted its PATH before that advance.
+        let _ = factory.graph_document(
+            json!({"op":"retry", "id":document.graph_id}),
+            budget,
+            &cancel,
+        );
+        supervisor.lane_path = Some(b"/usr/bin".to_vec());
+        super::super::run_owner::restore_graph_lane_path(
+            &factory,
+            &document.graph_id,
+            &mut supervisor,
+        )?;
+        assert_eq!(supervisor.lane_path.as_deref(), Some(q.as_slice()));
+        Ok(())
+    }
+
     #[test]
     fn refused_retry_leaves_the_persisted_graph_readable_and_unchanged() -> Result {
         let rig = TestRig::new()?;
@@ -3324,6 +3396,7 @@ mod tests {
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: PathBuf::from("/legacy/project"),
@@ -3384,6 +3457,7 @@ mod tests {
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: PathBuf::from("/legacy/project"),
@@ -3752,7 +3826,7 @@ mod tests {
             journal.bind(GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases: None,
                 directory: factory.cwd.clone(),
@@ -4381,7 +4455,7 @@ mod tests {
         let execution = GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: factory.cwd.clone(),
@@ -4840,7 +4914,7 @@ mod tests {
             journal.bind(GraphExecution {
                 peer_origin_context: None,
                 peer_submission_digest: None,
-
+                requester_path: None,
                 extra: Default::default(),
                 bases,
                 directory: rig.project.clone(),
@@ -5574,6 +5648,7 @@ mod tests {
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: factory.cwd.clone(),
@@ -5653,6 +5728,7 @@ mod tests {
         journal.bind(provenant_fabric_runtime::graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: factory.cwd.clone(),

@@ -4017,7 +4017,7 @@ mod journal_error_tests {
         journal.bind(graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             bases: bound,
             directory: factory.cwd.clone(),
             extra: Default::default(),

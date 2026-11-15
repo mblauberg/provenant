@@ -763,7 +763,7 @@ fn keyed(
     journal.bind(GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
-
+        requester_path: None,
         extra: Default::default(),
         bases: None,
         directory: edge.cwd.to_path_buf(),

@@ -803,7 +803,7 @@ mod graph_writer_admission_tests {
         journal.bind(graph::GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: rig.project.clone(),
@@ -2458,7 +2458,7 @@ mod result_tests {
         journal.bind(GraphExecution {
             peer_origin_context: None,
             peer_submission_digest: None,
-
+            requester_path: None,
             extra: Default::default(),
             bases: None,
             directory: rig.project.clone(),
