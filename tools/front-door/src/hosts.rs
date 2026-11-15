@@ -577,27 +577,9 @@ fn discard_remote_repairs(report: &mut Report) {
     }
 }
 /// Lane worktrees of the selected checkout that an ignore file declared by an
-/// installed adapter hides from that adapter. Outside a checkout there is
-/// nothing to check; the parent checkout is the one holding the common Git
-/// directory, whose ignore files a provider applies to nested worktrees.
-fn ignore_file_warnings(globals: &Globals, state: &Path) -> Vec<String> {
-    let Ok(checkout) = roots::selected_project(globals.project.as_deref(), true) else {
-        return Vec::new();
-    };
-    let common = match provenant_os::git::repository_path(
-        &checkout,
-        provenant_os::git::RepositoryPath::CommonDir,
-    ) {
-        Ok(common) => common,
-        Err(error) => {
-            return vec![format!(
-                "warning: provider ignore files unchecked: Git common directory unavailable: {error}"
-            )];
-        }
-    };
-    let Some(parent) = common.parent() else {
-        return Vec::new();
-    };
+/// installed adapter hides from that adapter. The verified primary checkout
+/// owns its ignore files even when Git stores the common directory elsewhere.
+fn ignore_file_warnings(globals: &Globals, roots: &provenant_core::Roots) -> Vec<String> {
     let installed: Vec<_> = provenant_records::ADAPTER_SPECS
         .iter()
         .filter(|spec| !spec.ignore_files.is_empty() && executable(spec.binary).is_some())
@@ -605,17 +587,37 @@ fn ignore_file_warnings(globals: &Globals, state: &Path) -> Vec<String> {
     if installed.is_empty() {
         return Vec::new();
     }
-    provenant_cli::ignore_files::layout_warnings(parent, state, installed.iter().copied())
+    let Ok(checkout) = roots::selected_project(globals.project.as_deref(), true) else {
+        return Vec::new();
+    };
+    let layout = match roots::project_layout_read_only(roots, &checkout) {
+        Ok(layout) => layout,
+        Err(error) => {
+            return vec![format!(
+                "warning: provider ignore files unchecked: verified project layout unavailable: {error}"
+            )];
+        }
+    };
+    let Some(owner) = layout.project() else {
+        return vec![
+            "warning: provider ignore files unchecked: primary checkout layout could not be verified"
+                .into(),
+        ];
+    };
+    provenant_cli::ignore_files::layout_warnings(
+        owner,
+        roots.state.as_path(),
+        installed.iter().copied(),
+    )
 }
 fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, DoctorError> {
     let Some(name) = host else {
         let resolved = roots::resolve(globals, roots::Workspace::Home, roots::Product::Optional)
             .map_err(DoctorError::local)?;
         let mut report = local(&resolved.home, &resolved.roots).map_err(DoctorError::local)?;
-        report.warnings.extend(ignore_file_warnings(
-            globals,
-            resolved.roots.state.as_path(),
-        ));
+        report
+            .warnings
+            .extend(ignore_file_warnings(globals, &resolved.roots));
         return Ok(report);
     };
     let resolved = roots::resolve(globals, roots::Workspace::Project, roots::Product::Required)

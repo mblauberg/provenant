@@ -174,15 +174,14 @@ fn inspect_context(
 ) -> Result<Vec<Tree>, crate::worktrees::Error> {
     let context = &worktrees::WorktreeContext { facts, ..*context };
     let observations = worktrees::list(context, cancel)?;
-    let common = context.repo.common_git_dir();
-    let primary = common
-        .file_name()
-        .is_some_and(|name| name == ".git")
-        .then(|| common.parent())
-        .flatten();
     let mut trees = Vec::with_capacity(observations.len());
     for observation in observations {
         let info = observation;
+        // `list` resolves the primary against the context's verified project
+        // root and verifies linked worktrees separately. Do not pass the
+        // primary back through `verify_worktree`, which admits linked writers
+        // only and correctly refuses the primary checkout.
+        let primary = info.primary;
         let branch = info.branch.as_deref().map(short_branch);
         let (upstream, pushed) = match branch.as_deref() {
             Some(branch) => {
@@ -224,7 +223,7 @@ fn inspect_context(
             _ => None,
         };
         trees.push(Tree {
-            primary: primary == Some(path.as_path()),
+            primary,
             path,
             branch,
             head: info.head.to_string(),
@@ -1474,13 +1473,24 @@ mod tests {
         let home = temp.path().join("home");
         let state = temp.path().join("state");
         let project = temp.path().join("project");
+        let git_dir = temp.path().join("project-metadata");
         std::fs::create_dir_all(&home)?;
         std::fs::create_dir_all(&state)?;
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
         std::fs::create_dir_all(&project)?;
-        provenant_os::fixture::run_git(&project, &["init", "-q"])?;
-        provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+        provenant_os::fixture::run_git(
+            &project,
+            &[
+                "init",
+                "-q",
+                "--separate-git-dir",
+                git_dir.to_str().ok_or("non-UTF-8 fixture path")?,
+            ],
+        )?;
+        std::fs::write(project.join("tracked.txt"), "base\n")?;
+        provenant_os::fixture::run_git(&project, &["add", "tracked.txt"])?;
+        provenant_os::fixture::run_git(&project, &["commit", "-qm", "base"])?;
         let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
         inputs.state_dir = Some(state);
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
@@ -1520,6 +1530,7 @@ mod tests {
             &project,
             &["update-ref", "refs/remotes/origin/wip-custody", &tree.head],
         )?;
+        std::fs::write(project.join("tracked.txt"), "dirty primary\n")?;
         let inspected = crate::worktrees::with_context(
             &roots,
             &home,
@@ -1528,10 +1539,25 @@ mod tests {
             &Free,
             |context, cancel| inspect_context(context, &facts, cancel),
         )?;
+        let primary = inspected
+            .iter()
+            .find(|row| row.path == project)
+            .ok_or("missing primary checkout")?;
+        assert!(
+            primary.primary,
+            "the external metadata dir cannot hide primary identity"
+        );
+        assert!(primary.dirty);
+        assert!(
+            unsafe_wip(primary),
+            "handoff WIP never treats the primary as a branch"
+        );
         let row = inspected
             .iter()
             .find(|row| row.path == tree.path)
             .ok_or("missing lane")?;
+        assert!(!row.primary, "a linked writer is not the primary checkout");
+        assert!(!unsafe_wip(row));
         assert_eq!(row.upstream.as_deref(), Some(tree.head.as_str()));
         assert!(row.pushed);
         let observed = crate::worktrees::with_context(
