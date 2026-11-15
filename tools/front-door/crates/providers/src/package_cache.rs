@@ -22,6 +22,10 @@ struct ProjectSettings {
     npm_cache: bool,
     pnpm_cache: bool,
     pnpm_store: bool,
+    legacy_pnpm_cache: bool,
+    legacy_pnpm_store: bool,
+    modern_pnpm_cache: bool,
+    modern_pnpm_store: bool,
 }
 
 /// Repair native cache defaults without changing provider HOME/XDG state or
@@ -52,6 +56,11 @@ pub(crate) fn bind_native(
             return;
         }
     };
+    if (project.legacy_pnpm_cache && !project.modern_pnpm_cache)
+        || (project.legacy_pnpm_store && !project.modern_pnpm_store)
+    {
+        warn_legacy_project_pnpm();
+    }
 
     if home_changed
         && !project.npm_cache
@@ -117,12 +126,16 @@ fn project_settings(cwd: &Path, home: &Path) -> Result<ProjectSettings, ()> {
         }
         if let Some(contents) = read_optional(&current.join(".npmrc"))? {
             settings.npm_cache |= ini_has_key(&contents, "cache");
-            settings.pnpm_cache |= ini_has_key(&contents, "cache-dir");
-            settings.pnpm_store |= ini_has_key(&contents, "store-dir");
+            settings.legacy_pnpm_cache |= ini_has_key(&contents, "cache-dir");
+            settings.legacy_pnpm_store |= ini_has_key(&contents, "store-dir");
+            settings.pnpm_cache |= settings.legacy_pnpm_cache;
+            settings.pnpm_store |= settings.legacy_pnpm_store;
         }
         if let Some(contents) = read_optional(&current.join("pnpm-workspace.yaml"))? {
-            settings.pnpm_cache |= yaml_has_key(&contents, "cacheDir");
-            settings.pnpm_store |= yaml_has_key(&contents, "storeDir");
+            settings.modern_pnpm_cache |= yaml_has_key(&contents, "cacheDir");
+            settings.modern_pnpm_store |= yaml_has_key(&contents, "storeDir");
+            settings.pnpm_cache |= settings.modern_pnpm_cache;
+            settings.pnpm_store |= settings.modern_pnpm_store;
         }
         if current.join(".git").exists() {
             break;
@@ -497,6 +510,14 @@ fn warn_unsupported() {
     );
 }
 
+fn warn_legacy_project_pnpm() {
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "warning: project .npmrc contains legacy pnpm cache settings; shared cache binding was skipped because support varies by pnpm version. A version that ignores these keys may use private HOME/XDG caches. Use cacheDir/storeDir in pnpm-workspace.yaml or supported global config.yaml for portable shared paths"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,6 +754,19 @@ mod tests {
                 .iter()
                 .all(|(_, value)| value != "project-secret")
         );
+
+        std::fs::remove_file(project.join("pnpm-workspace.yaml"))
+            .expect("remove modern project pnpm config");
+        std::fs::write(
+            project.join(".npmrc"),
+            "cache=${HOME}/project-cache\ncache-dir=/legacy/project-cache\nstore-dir=/legacy/project-store\n",
+        )
+        .expect("legacy project pnpm config");
+        let mut legacy_project_env = project_env.clone();
+        bind_native(&home, &project, &host_var, &mut legacy_project_env);
+        for key in ["pnpm_config_cache_dir", "pnpm_config_store_dir"] {
+            assert!(var(&legacy_project_env, key).is_none(), "{key}");
+        }
 
         let mut explicit = vec![
             ("HOME".into(), account.into_os_string()),
