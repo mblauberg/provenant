@@ -1,5 +1,18 @@
 use super::*;
 
+/// Scratch that outlives its settlement, as after a crash or a failed removal:
+/// settlement deletes unreserved scratch itself, so reconcile's removal work
+/// starts from this state.
+fn strand_temporary(
+    store: &RunStore,
+    id: AttemptId,
+    call: &Request<'_>,
+) -> std::result::Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let temporary = store.temporary_path(id, call)?;
+    store.set_temporary_retained(id, true, call)?;
+    Ok(temporary)
+}
+
 #[test]
 fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> TestResult {
     let temp = tempfile::tempdir()?;
@@ -119,9 +132,6 @@ fn reconcile_unreadable_reservation_only_retains_existing_temporary_data() -> Te
         store.create(&run, &call)?;
         let terminal = run.attempt_id;
         let temporary = store.temporary_path(terminal, &call)?;
-        if has_temporary {
-            std::fs::write(temporary.join("keep.lock"), "keep")?;
-        }
         store.withdraw(
             terminal,
             AttemptState::Queued {
@@ -132,7 +142,10 @@ fn reconcile_unreadable_reservation_only_retains_existing_temporary_data() -> Te
             WallTime::from_micros(150)?,
             &call,
         )?;
-        if !has_temporary {
+        if has_temporary {
+            strand_temporary(&store, terminal, &call)?;
+            std::fs::write(temporary.join("keep.lock"), "keep")?;
+        } else {
             // A crash after removal can leave the cleanup hint uncleared.
             store.set_temporary_retained(terminal, true, &call)?;
         }
@@ -174,17 +187,16 @@ fn reconcile_retries_terminal_temporary_removal() -> TestResult {
     let run = input();
     let id = run.attempt_id;
     store.create(&run, &call)?;
-    let temporary = store.temporary_path(id, &call)?;
-    // Settlement protects lock names while custody may still be retained.
-    // Reconcile must dispose of these build artefacts once custody clears.
-    let incremental = temporary.join("candidate-0/target/debug/incremental/x");
-    std::fs::create_dir_all(&incremental)?;
-    std::fs::write(incremental.join("s-1.lock"), "discard")?;
     let observed = exit();
     seal_exit(&store, &observed)?;
     store.publish_terminal(id, 1, &super::tests::publication(), &observed, &call)?;
     assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
-    assert!(temporary.is_dir());
+    // Settlement's own removal did not finish. Reconcile must dispose of
+    // these lock-named build artefacts once custody is clear.
+    let temporary = strand_temporary(&store, id, &call)?;
+    let incremental = temporary.join("candidate-0/target/debug/incremental/x");
+    std::fs::create_dir_all(&incremental)?;
+    std::fs::write(incremental.join("s-1.lock"), "discard")?;
 
     assert_eq!(store.open_attempts(10, &call)?, vec![run.attempt_id]);
     assert_eq!(
@@ -215,8 +227,6 @@ fn reconcile_preserves_protected_locks_outside_temporary() -> TestResult {
     let run = input();
     let id = run.attempt_id;
     store.create(&run, &call)?;
-    let temporary = store.temporary_path(id, &call)?;
-    std::fs::write(temporary.join("writer.lock"), "disposable payload")?;
     store.withdraw(
         id,
         AttemptState::Queued {
@@ -227,6 +237,8 @@ fn reconcile_preserves_protected_locks_outside_temporary() -> TestResult {
         WallTime::from_micros(150)?,
         &call,
     )?;
+    let temporary = strand_temporary(&store, id, &call)?;
+    std::fs::write(temporary.join("writer.lock"), "disposable payload")?;
     let attempt = store.attempt_dir(id, false)?;
     let run_dir = store.attempt_dir(run.attempt_id, false)?;
     drop(attempt.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?);
@@ -302,6 +314,11 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
                 &cancel,
                 &clock,
             )?);
+        }
+        if reserved {
+            // Settlement already removed the scratch; stand in for data that
+            // survived it behind the retained reservation.
+            strand_temporary(&store, id, &call)?;
         }
         std::fs::write(temporary.join("keep.lock"), "keep")?;
         let found = store.reconcile_with_observer(
@@ -502,8 +519,6 @@ fn reconcile_temporary_removal_never_follows_symlinks() -> TestResult {
         let run = input();
         let id = run.attempt_id;
         store.create(&run, &call)?;
-        let temporary = store.temporary_path(id, &call)?;
-        std::fs::write(temporary.join("keep.lock"), "keep")?;
         store.withdraw(
             id,
             AttemptState::Queued {
@@ -514,6 +529,8 @@ fn reconcile_temporary_removal_never_follows_symlinks() -> TestResult {
             WallTime::from_micros(150)?,
             &call,
         )?;
+        let temporary = strand_temporary(&store, id, &call)?;
+        std::fs::write(temporary.join("keep.lock"), "keep")?;
         let outside = temp.path().join("outside");
         std::fs::create_dir(&outside)?;
         std::fs::write(outside.join("keep"), "keep")?;
@@ -553,8 +570,6 @@ fn reconcile_removes_owner_only_temporary_and_retains_shared_modes() -> TestResu
         let run = input();
         let id = run.attempt_id;
         store.create(&run, &call)?;
-        let temporary = store.temporary_path(id, &call)?;
-        std::fs::write(temporary.join("keep.lock"), "keep")?;
         store.withdraw(
             id,
             AttemptState::Queued {
@@ -565,6 +580,8 @@ fn reconcile_removes_owner_only_temporary_and_retains_shared_modes() -> TestResu
             WallTime::from_micros(150)?,
             &call,
         )?;
+        let temporary = strand_temporary(&store, id, &call)?;
+        std::fs::write(temporary.join("keep.lock"), "keep")?;
         let nested = temporary.join("candidate-0/target");
         std::fs::create_dir_all(&nested)?;
         std::fs::write(nested.join("s-1.lock"), "keep")?;

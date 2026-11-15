@@ -257,7 +257,7 @@ mod tests {
         let state = context.state_root.as_path();
         let attempt = state.join(format!("attempts/{}", input.attempt_id));
         for part in ["tmp", "scratch", "provider-state", "quarantine"] {
-            fs::create_dir(attempt.join(part))?;
+            fs::create_dir_all(attempt.join(part))?;
             fs::write(attempt.join(part).join("keep"), part)?;
         }
         for name in ["stdout.log", "stderr.log"] {
@@ -320,7 +320,7 @@ mod tests {
             WallTime::from_micros(150)?,
             &call,
         )?;
-        fs::create_dir(attempt.join("tmp"))?;
+        fs::create_dir_all(attempt.join("tmp"))?;
         fs::write(attempt.join("tmp/keep"), "leak")?;
         let before = snapshot(state)?;
         let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("missing store")?;
