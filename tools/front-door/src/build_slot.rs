@@ -36,8 +36,8 @@ use std::{
 // subcommands the host lets this lane run) come from the host, written into
 // the shim script from settings and never from a lane's arguments.
 use provenant_core::consumer_env::{
-    BUILD_DISK_LIMITS, BUILD_SLOT, BUILD_SLOT_STATE, BUILD_SLOTS, CARGO_SOURCE_WRITES,
-    CARGO_SOURCE_WRITES_SOURCE, LOCAL_CARGO,
+    BUILD_ADMISSION_BACKEND, BUILD_ADMISSION_SOURCE, BUILD_DISK_LIMITS, BUILD_SLOT,
+    BUILD_SLOT_STATE, BUILD_SLOTS, CARGO_SOURCE_WRITES, CARGO_SOURCE_WRITES_SOURCE, LOCAL_CARGO,
 };
 
 /// The compiling cargo commands a lane may run locally.
@@ -276,27 +276,130 @@ fn nested_with(env: &[(OsString, OsString)], observer: &dyn ProcessObserver) -> 
 /// code. Busy or unavailable slots warn and the build proceeds immediately.
 pub(crate) fn run(gate: Gate<'_>) -> i32 {
     let env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    let backend = env
+        .iter()
+        .find(|(name, _)| name == OsStr::new(BUILD_ADMISSION_BACKEND))
+        .and_then(|(_, value)| value.to_str())
+        .and_then(|value| serde_json::from_str::<provenant_config::PortBackend>(value).ok());
+    let source = env
+        .iter()
+        .find(|(name, _)| name == OsStr::new(BUILD_ADMISSION_SOURCE))
+        .and_then(|(_, value)| value.to_str())
+        .and_then(|value| serde_json::from_str::<provenant_config::PortSource>(value).ok());
+    let (backend, source) = match (backend, source) {
+        (Some(backend), Some(source)) => (backend, source),
+        _ => {
+            return report("build admission port metadata is unavailable");
+        }
+    };
     let nested = nested(&env);
+    let execute_backend = backend.clone();
     run_with(
         gate,
         env,
         nested,
+        backend,
         |settings| {
             BuildSlots::open(&settings.state)
                 .and_then(|slots| slots.try_acquire(settings.slots))
                 .map_err(|error| error.to_string())
         },
-        |program, args, env| {
-            provenant_os::sys::run_wait(program, args, env).map_err(|error| error.to_string())
+        move |program, args, env| {
+            if !gated(args) || nested {
+                return provenant_os::sys::run_wait(program, args, env)
+                    .map_err(|error| error.to_string());
+            }
+            provenant_config::dispatch_port_backend(
+                &execute_backend,
+                || {
+                    provenant_os::sys::run_wait(program, args, env)
+                        .map_err(|error| error.to_string())
+                },
+                |command| {
+                    let Some(wrapper) = command.argv.first() else {
+                        return Err("repository build wrapper has no executable".into());
+                    };
+                    let mut arguments: Vec<OsString> = command
+                        .argv
+                        .iter()
+                        .skip(1)
+                        .map(|argument| OsString::from(argument.as_str()))
+                        .collect();
+                    arguments.push(program.as_os_str().to_owned());
+                    arguments.extend_from_slice(args);
+                    let mut explicit = Vec::new();
+                    for name in [
+                        "CARGO_TARGET_DIR",
+                        "CARGO_BUILD_JOBS",
+                        "CARGO_ENCODED_RUSTFLAGS",
+                        "RUSTFLAGS",
+                        "RUSTDOCFLAGS",
+                        "RUSTC",
+                        "RUSTDOC",
+                        "RUSTC_WRAPPER",
+                        "RUSTC_WORKSPACE_WRAPPER",
+                        provenant_core::consumer_env::BUILD_SLOT,
+                    ] {
+                        if let Some((_, value)) =
+                            env.iter().find(|(key, _)| key == OsStr::new(name))
+                        {
+                            explicit.push((OsString::from(name), value.clone()));
+                        }
+                    }
+                    explicit.push((
+                        OsString::from(provenant_core::consumer_env::PORT_PHASE),
+                        OsString::from("build"),
+                    ));
+                    explicit.push((
+                        OsString::from(provenant_core::consumer_env::PORT_SOURCE),
+                        OsString::from(source_name(source)),
+                    ));
+                    let wrapper_env =
+                        provenant_config::port_command_environment(env.iter().cloned(), &explicit);
+                    let code =
+                        provenant_os::sys::run_wait(Path::new(wrapper), &arguments, &wrapper_env)
+                            .map_err(|error| error.to_string())?;
+                    if command.exit_codes.success.contains(&code) {
+                        return Ok(0);
+                    }
+                    if command.exit_codes.unknown.contains(&code)
+                        || command.exit_codes.other == provenant_config::ExitDisposition::Unknown
+                    {
+                        warn(&format!(
+                            "repository build admission returned an unknown outcome (source: {:?})",
+                            source
+                        ));
+                    } else {
+                        warn(&format!(
+                            "repository build admission refused cargo (source: {:?})",
+                            source
+                        ));
+                    }
+                    Ok(if code == 0 { 1 } else { code })
+                },
+                || {
+                    provenant_os::sys::run_wait(program, args, env)
+                        .map_err(|error| error.to_string())
+                },
+            )
         },
         |message| warn(&message),
     )
+}
+
+fn source_name(source: provenant_config::PortSource) -> &'static str {
+    match source {
+        provenant_config::PortSource::Builtin => "builtin",
+        provenant_config::PortSource::Host => "host",
+        provenant_config::PortSource::Project => "project",
+    }
 }
 
 fn run_with(
     gate: Gate<'_>,
     mut env: Vec<(OsString, OsString)>,
     nested: bool,
+    backend: provenant_config::PortBackend,
     mut acquire: impl FnMut(&Settings) -> Result<Option<provenant_os::build_slots::SlotGuard>, String>,
     mut execute: impl FnMut(&Path, &[OsString], &[(OsString, OsString)]) -> Result<i32, String>,
     mut warning: impl FnMut(&str),
@@ -310,20 +413,36 @@ fn run_with(
         return report(&message);
     }
     let gate_this = gated(args) && !nested;
-    if gate_this && let Err(message) = check_disk(&env) {
+    if gate_this
+        && matches!(&backend, provenant_config::PortBackend::Builtin)
+        && let Err(message) = check_disk(&env)
+    {
         return report(&message);
     }
     let mut held = None;
-    if gate_this && let Some(settings) = &gate.settings {
-        match acquire(settings) {
+    if gate_this {
+        let admission = provenant_config::dispatch_port_backend(
+            &backend,
+            || match &gate.settings {
+                Some(settings) => acquire(settings),
+                None => Err("the host's build slot settings are missing or invalid".into()),
+            },
+            |_| Ok(None),
+            || Ok(None),
+        );
+        match admission {
             Ok(Some(slot)) => held = Some(slot),
-            Ok(None) => warning("all configured slots are busy; Cargo manages its own build locks"),
-            Err(error) => warning(&error),
+            Ok(None) if matches!(&backend, provenant_config::PortBackend::Builtin) => {
+                warning("all configured slots are busy; Cargo manages its own build locks")
+            }
+            Err(error) if matches!(&backend, provenant_config::PortBackend::Builtin) => {
+                warning(&error)
+            }
+            _ => {}
         }
-    } else if gate_this {
-        warning("the host's build slot settings are missing or invalid");
     }
-    if held.is_some()
+    if (held.is_some() || matches!(&backend, provenant_config::PortBackend::Command { .. }))
+        && gate_this
         && let Some((me, _)) = own(&SystemProcessObserver)
     {
         env.retain(|(name, _)| name != BUILD_SLOT);
@@ -481,6 +600,7 @@ mod tests {
                     gate,
                     env,
                     false,
+                    provenant_config::PortBackend::Builtin,
                     |_| unreachable!(),
                     |_, _, _| Ok(exit),
                     |message| warnings.push(message.to_owned()),
@@ -518,6 +638,7 @@ mod tests {
             gate,
             Vec::new(),
             false,
+            provenant_config::PortBackend::Builtin,
             |settings| {
                 let slots = BuildSlots::open(&settings.state).map_err(|error| error.to_string())?;
                 slots

@@ -2,7 +2,8 @@
 //! Provenant or hand to it, each with its stability.
 //!
 //! Every list is derived from the declaration its owner keeps, never typed out
-//! a second time: environment from `provenant_core::consumer_env`, repository
+//! a second time: environment (including build admission backend/source) from
+//! `provenant_core::consumer_env`, repository
 //! paths from `provenant_config::repository_files`, process-tree fields from
 //! the supervisor, exit codes from `exit_status`, commands from the parser and
 //! run files from `AttemptFile`. `docs/specs/consumer-contract.md` carries the

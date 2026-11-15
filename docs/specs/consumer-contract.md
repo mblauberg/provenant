@@ -94,6 +94,8 @@ listed because a lane's home is never the caller's.
 | `PROVENANT_ADMISSION_PROJECT` | port_command | provisional | The writer's project checkout. | admission port commands |
 | `PROVENANT_ADMISSION_OWNER_PID` | port_command | provisional | The Provenant process that owns the admission. | admission port commands |
 | `PROVENANT_ADMISSION_EPOCH` | port_command | provisional | The worktree lease epoch the admission holds. | admission port commands |
+| `PROVENANT_PORT_OPERATION` | port_command | provisional | The typed forge operation requested from the repository adapter. | forge port commands |
+| `PROVENANT_PORT_SOURCE` | port_command | provisional | Source of the selected build admission wrapper. | build admission port commands |
 | `PROVENANT_PORT_REQUEST_PATH` | port_command | provisional | The forge request path, such as `repos/{owner}/{repo}`. | CI observation and repository discovery port commands |
 | `PROVENANT_PORT_IF_NONE_MATCH` | port_command | provisional | The cached validator to send, or empty when none is sent. | CI observation and repository discovery port commands |
 | `PROVENANT_VERIFY_TIER` | port_command | provisional | The verify tier being run. | verify port commands |
@@ -103,6 +105,8 @@ listed because a lane's home is never the caller's.
 | `PROVENANT_ROOT` | lane | internal | Installed release assets. | every lane |
 | `PROVENANT_CARGO_SOURCE_WRITES` | lane | internal | Whether lane Cargo may write registry sources; the cargo shim explains offline failures with it. | lanes with a Cargo home |
 | `PROVENANT_CARGO_SOURCE_WRITES_SOURCE` | lane | internal | Where the Cargo source-write setting came from. | lanes with a Cargo home |
+| `PROVENANT_BUILD_ADMISSION_BACKEND` | lane | internal | Encoded build admission backend selected by the host. | only for the cargo child of the lane's cargo shim |
+| `PROVENANT_BUILD_ADMISSION_SOURCE` | lane | internal | Source of the selected build admission backend. | only for the cargo child of the lane's cargo shim |
 | `PROVENANT_BUILD_SLOT` | lane | internal | Marks a cargo process that holds a host build slot. | only for the cargo child of the lane's cargo shim |
 | `PROVENANT_BUILD_SLOT_STATE` | lane | internal | The host build-slot directory. | only for the cargo child of the lane's cargo shim |
 | `PROVENANT_BUILD_SLOTS` | lane | internal | The host build-slot count. | only for the cargo child of the lane's cargo shim |

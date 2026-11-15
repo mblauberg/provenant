@@ -212,6 +212,12 @@ fn run_inner(
     request: Request<'_>,
     report: &mut Report,
 ) -> Result<(), LandingError> {
+    let land_port = super::resolve_land_port(repo.project_path(), request.state)?;
+    if land_port != request.policy.publication_port {
+        return Err(LandingError::Refused(
+            "landing port changed since the plan was sealed".into(),
+        ));
+    }
     let _lock = receipt::lock(request.state)?;
     if !request.shadow
         && let Some(context) = &request.policy.landing
@@ -422,7 +428,13 @@ fn run_inner(
                     }
                 }
                 let decision = cleanup_unpublished(
-                    publish::decide_strategy(forge, request.target, request.settings, &candidate),
+                    publish::decide_strategy(
+                        forge,
+                        request.target,
+                        request.settings,
+                        &candidate,
+                        &land_port,
+                    ),
                     repo,
                     &candidate,
                 )?;
@@ -466,7 +478,13 @@ fn run_inner(
                 return cleanup_unpublished(Err(LandingError::UnmetGate(checks)), repo, &candidate);
             }
             let decision = cleanup_unpublished(
-                publish::decide_strategy(forge, request.target, request.settings, &candidate),
+                publish::decide_strategy(
+                    forge,
+                    request.target,
+                    request.settings,
+                    &candidate,
+                    &land_port,
+                ),
                 repo,
                 &candidate,
             )?;
@@ -536,9 +554,10 @@ fn run_inner(
                         attempt.dispatched =
                             Some(candidate.steps.iter().map(|step| step.pr.number).collect());
                         receipt::record_pending(request.state, &attempt)?;
-                        let command = request.settings.command.as_ref().ok_or_else(|| {
-                            LandingError::Failed("missing command declaration".into())
-                        })?;
+                        let provenant_config::LandBackend::Command { command } = &land_port.backend
+                        else {
+                            return Err(LandingError::Failed("publication backend changed".into()));
+                        };
                         repo.publish_command(command, &attempt)
                     }
                     PublishMode::FastForward => {
@@ -880,13 +899,12 @@ pub(super) mod tests {
             (true, false, false),
             (false, false, true),
         ] {
-            let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(1);
-            settings.strategy = provenant_records::landing::Strategy::Command;
-            settings.command = Some(provenant_records::landing::RepositoryCommand {
+            let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+            let command = provenant_records::landing::RepositoryCommand {
                 argv: vec!["publisher".into()],
                 unknown_exit_code: 75,
                 timeout_seconds: 30,
-            });
+            };
             repo.command_publishes = published;
             if unknown {
                 repo.command_result = Some(Err(LandingError::PublicationUnknown));
@@ -895,6 +913,13 @@ pub(super) mod tests {
                 repo.command_result = Some(Err(LandingError::Refused("publisher refused".into())));
             }
             let state = tempfile::tempdir()?;
+            std::fs::write(
+                state.path().join("ports.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "schema_version": provenant_config::PORTS_SCHEMA_VERSION,
+                    "land": {"source": "host", "backend": {"kind": "command", "command": command}},
+                }))?,
+            )?;
             let result = exercise(
                 &mut forge,
                 &mut repo,
@@ -985,7 +1010,7 @@ pub(super) mod tests {
         state: &std::path::Path,
         approvals: Approvals<'_>,
     ) -> Result<Report, LandingError> {
-        let policy = LandPolicy::resolve(
+        let mut policy = LandPolicy::resolve(
             settings,
             &BTreeMap::new(),
             None,
@@ -993,6 +1018,7 @@ pub(super) mod tests {
             &LandOverride::default(),
         )
         .map_err(|e| LandingError::Failed(e.to_string()))?;
+        policy.publication_port = super::super::resolve_land_port(repo.project_path(), state)?;
         run(
             forge,
             repo,

@@ -4,9 +4,7 @@ use provenant_cli::{
     Check, Globals,
     check::{CheckError, CheckPage, GitContext},
 };
-use provenant_config::{
-    PortBackend, PortCommandDisposition, PortSource, PortTable, Release, Targets,
-};
+use provenant_config::{PortCommandDisposition, PortSource, PortTable, Release, Targets};
 use provenant_core::CancelToken;
 use provenant_os::exec::SystemExecutor;
 use provenant_os::fs;
@@ -326,21 +324,26 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     selector,
                 );
                 let ports = PortTable::read_for(Some(&project), roots.state.as_path())?;
-                match ports.release.backend {
-                    PortBackend::Builtin => Ok(provenant_cli::check::release_page(
-                        git, range, selector, &page,
-                    )?),
-                    PortBackend::Command { command } => command_release_page(
-                        &project,
-                        roots.state.as_path(),
-                        command,
-                        ports.release.source,
-                        range,
-                        selector,
-                        &page,
-                    ),
-                    PortBackend::None => Err(ReleasePortFailure::Disabled.into()),
-                }
+                provenant_config::dispatch_port_backend(
+                    &ports.release.backend,
+                    || {
+                        Ok(provenant_cli::check::release_page(
+                            git, range, &selector, &page,
+                        )?)
+                    },
+                    |command| {
+                        command_release_page(
+                            &project,
+                            roots.state.as_path(),
+                            command.clone(),
+                            ports.release.source,
+                            range,
+                            &selector,
+                            &page,
+                        )
+                    },
+                    || Err(ReleasePortFailure::Disabled.into()),
+                )
             })
         }
     }?;

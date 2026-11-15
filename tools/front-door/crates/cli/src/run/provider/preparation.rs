@@ -3800,6 +3800,7 @@ pub(super) fn prepare_candidates(
         let coordination_reads = configure_build_slots(
             &mut spec,
             &build_settings,
+            &source,
             &home,
             scratch,
             &provenant_executable,

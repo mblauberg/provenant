@@ -37,16 +37,18 @@ pub mod policy;
 mod presets;
 mod providers;
 pub use providers::{ProviderSettings, ProviderUpdate};
-mod ports;
+pub mod ports;
 mod project_binding;
 pub use ports::{
-    CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition, Integration,
-    LandBackend, LandPort, PORTS_CONFIG, PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend,
-    PortBackendKind, PortCommand, PortCommandBackend, PortCommandDisposition, PortCommandExecution,
+    Adapter, CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition, Forge,
+    ForgeOperation, ForgePort, ForgeResponse, HeadersObservation, Integration, LandBackend,
+    LandPort, PORTS_CONFIG, PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend, PortBackendKind,
+    PortCommand, PortCommandBackend, PortCommandDisposition, PortCommandExecution,
     PortCommandPublication, PortCommandReceipt, PortCommandReceiptCollectionLock,
-    PortCommandReceiptEntry, PortCommandReceiptInventory, PortCommandReceiptProof,
-    PortEvidenceError, PortReceiptIssue, PortReceiptLifetime, PortSource, PortTable, VerifyPort,
-    VerifySelection, VerifyTier, WorktreeLayoutPort, execute_port_command,
+    PortCommandReceiptEntry, PortCommandReceiptInventory, PortCommandReceiptProof, PortError,
+    PortEvidenceError, PortExecution, PortReceiptIssue, PortReceiptLifetime, PortSource, PortTable,
+    VerifyPort, VerifySelection, VerifyTier, WorktreeLayoutPort, dispatch_port_backend,
+    execute_port_command, execute_port_command_with_input, land_backend, port_command_environment,
     port_command_receipt_proof, port_command_receipts, record_port_command,
     remove_port_command_receipt, try_lock_port_command_receipts,
 };

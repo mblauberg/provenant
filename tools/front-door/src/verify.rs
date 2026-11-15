@@ -2,8 +2,8 @@
 use crate::{emit, fail, roots};
 use provenant_cli::Globals;
 use provenant_config::{
-    CommandExitCodes, ExitDisposition, PortBackend, PortCommand, PortCommandDisposition,
-    PortCommandExecution, PortSource, PortTable,
+    CommandExitCodes, ExitDisposition, PortCommand, PortCommandDisposition, PortCommandExecution,
+    PortSource, PortTable,
 };
 use provenant_core::CancelToken;
 use provenant_os::exec::{SystemExecutor, Termination};
@@ -80,10 +80,12 @@ pub fn run(tier: Option<&str>, globals: &Globals) -> u8 {
             );
         }
     };
-    let stored_command_digest = match &declaration.backend {
-        PortBackend::Command { command } => Some(command.digest()),
-        PortBackend::Builtin | PortBackend::None => None,
-    };
+    let stored_command_digest = provenant_config::dispatch_port_backend(
+        &declaration.backend,
+        || None,
+        |command| Some(command.digest()),
+        || None,
+    );
     let environment = [
         (
             OsString::from(VERIFY_EFFECTIVE_CONFIG_JSON),
@@ -97,17 +99,18 @@ pub fn run(tier: Option<&str>, globals: &Globals) -> u8 {
     ];
     let timeout = Duration::from_secs(provenant_core::MAX_LANE_RUNTIME_SECONDS);
     let cancel = CancelToken::new();
-    let (backend, source, mut execution, should_record) = match declaration.backend {
-        PortBackend::Builtin => {
+    let selected = provenant_config::dispatch_port_backend(
+        &declaration.backend,
+        || {
             let script = resolved.assets.join("scripts/verify-tier");
             if !script.is_file() {
-                return fail(
+                return Err(fail(
                     COMMAND,
                     Outcome::Unavailable,
                     "VERIFY_ENGINE_UNAVAILABLE",
                     "the builtin verify tier engine is not present in the selected product assets",
                     globals,
-                );
+                ));
             }
             let arguments = [
                 script.as_os_str().to_owned(),
@@ -136,21 +139,19 @@ pub fn run(tier: Option<&str>, globals: &Globals) -> u8 {
                     if execution.disposition == PortCommandDisposition::Refused {
                         execution.disposition = PortCommandDisposition::Failed;
                     }
-                    ("builtin", declaration.source, execution, false)
+                    Ok(("builtin", declaration.source, execution, false))
                 }
-                Err(error) => {
-                    return fail(
-                        COMMAND,
-                        Outcome::Unavailable,
-                        "VERIFY_ENGINE_UNAVAILABLE",
-                        &format!("cannot start the builtin verify tier engine: {error}"),
-                        globals,
-                    );
-                }
+                Err(error) => Err(fail(
+                    COMMAND,
+                    Outcome::Unavailable,
+                    "VERIFY_ENGINE_UNAVAILABLE",
+                    &format!("cannot start the builtin verify tier engine: {error}"),
+                    globals,
+                )),
             }
-        }
-        PortBackend::Command { command } => {
-            let command = substitute_tier(&command, &tier);
+        },
+        |command| {
+            let command = substitute_tier(command, &tier);
             match execute(&command, &project, &[], &environment, timeout, &cancel) {
                 Ok(mut execution) => {
                     // The request key carries the selected tier; the digest binds
@@ -158,21 +159,21 @@ pub fn run(tier: Option<&str>, globals: &Globals) -> u8 {
                     if let Some(digest) = stored_command_digest {
                         execution.command_digest = digest;
                     }
-                    ("command", declaration.source, execution, true)
+                    Ok(("command", declaration.source, execution, true))
                 }
                 Err(_error) => {
                     let mut execution = PortCommandExecution::failed(&command);
                     if let Some(digest) = stored_command_digest {
                         execution.command_digest = digest;
                     }
-                    ("command", declaration.source, execution, true)
+                    Ok(("command", declaration.source, execution, true))
                 }
             }
-        }
-        PortBackend::None => {
-            return render(
+        },
+        || {
+            Err(render(
                 Report {
-                    tier,
+                    tier: tier.clone(),
                     backend: "none",
                     source: declaration.source,
                     disposition: None,
@@ -187,8 +188,12 @@ pub fn run(tier: Option<&str>, globals: &Globals) -> u8 {
                 )),
                 None,
                 globals,
-            );
-        }
+            ))
+        },
+    );
+    let (backend, source, mut execution, should_record) = match selected {
+        Ok(selected) => selected,
+        Err(code) => return code,
     };
     if execution.disposition == PortCommandDisposition::Succeeded && !execution.capture_complete() {
         execution.disposition = PortCommandDisposition::Unknown;

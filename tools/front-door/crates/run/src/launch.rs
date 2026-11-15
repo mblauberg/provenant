@@ -1181,12 +1181,16 @@ impl RunStore {
         let ports =
             provenant_config::PortTable::read_for(Some(&writer.project), &self.writer_registry)
                 .map_err(|_| "repository admission declaration is unavailable")?;
-        let (source, command) = match &ports.admission.backend {
-            provenant_config::PortBackend::Builtin | provenant_config::PortBackend::None => {
-                return Ok((record.clone(), None));
-            }
-            provenant_config::PortBackend::Command { command } => (ports.admission.source, command),
+        let command = provenant_config::dispatch_port_backend(
+            &ports.admission.backend,
+            || None,
+            Some,
+            || None,
+        );
+        let Some(command) = command else {
+            return Ok((record.clone(), None));
         };
+        let source = ports.admission.source;
         let binding = AdmissionPortBinding::new(source, command);
         let encoded = serde_json::to_value(&binding)
             .map_err(|_| "repository admission binding could not be encoded")?;
@@ -1263,14 +1267,27 @@ impl RunStore {
             ];
             let timeout =
                 std::time::Duration::from_secs(request.task.provider_timeout_seconds.max(1));
-            provenant_config::execute_port_command(
-                executor,
-                &binding.command,
-                &writer.project,
-                &[],
-                &environment,
-                timeout,
-                cancel,
+            let port = provenant_config::Port {
+                source: binding.source,
+                backend: provenant_config::PortBackend::Command {
+                    command: binding.command.clone(),
+                },
+            };
+            provenant_config::dispatch_port_backend(
+                &port.backend,
+                || provenant_config::PortCommandExecution::failed(&binding.command),
+                |command| {
+                    provenant_config::execute_port_command(
+                        executor,
+                        command,
+                        &writer.project,
+                        &[],
+                        &environment,
+                        timeout,
+                        cancel,
+                    )
+                },
+                || provenant_config::PortCommandExecution::failed(&binding.command),
             )
         } else {
             provenant_config::PortCommandExecution::failed(&binding.command)

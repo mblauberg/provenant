@@ -7,7 +7,7 @@ use provenant_core::CancelToken;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
-pub(crate) struct Request {
+pub struct Request {
     deadline: Instant,
     cancel: CancelToken,
 }
@@ -15,13 +15,13 @@ pub(crate) struct Request {
 impl Request {
     /// A request bounded by the caller's absolute `deadline` and interrupted by
     /// its `cancel` token.
-    pub(crate) fn new(deadline: Instant, cancel: CancelToken) -> Self {
+    pub fn new(deadline: Instant, cancel: CancelToken) -> Self {
         Self { deadline, cancel }
     }
 
     /// A standalone request: `budget` from now, with its own cancellation.
     #[allow(clippy::disallowed_methods, reason = "forge request deadline boundary")]
-    pub(crate) fn within(budget: Duration) -> Self {
+    pub fn within(budget: Duration) -> Self {
         Self::new(
             Instant::now()
                 .checked_add(budget)
@@ -33,7 +33,7 @@ impl Request {
     /// This request, its deadline shortened to at most `cap` from now. The
     /// cancellation stays shared with the original.
     #[allow(clippy::disallowed_methods, reason = "forge request deadline boundary")]
-    pub(crate) fn capped(&self, cap: Duration) -> Self {
+    pub fn capped(&self, cap: Duration) -> Self {
         let capped = Instant::now().checked_add(cap).unwrap_or_else(far_future);
         Self::new(self.deadline.min(capped), self.cancel.clone())
     }
@@ -41,7 +41,7 @@ impl Request {
     /// Time left before the deadline; zero once cancelled. Each operation
     /// derives its own bound from this, never from a duration fixed earlier.
     #[allow(clippy::disallowed_methods, reason = "forge request deadline boundary")]
-    pub(crate) fn remaining(&self) -> Duration {
+    pub fn remaining(&self) -> Duration {
         if self.cancel.is_cancelled() {
             Duration::ZERO
         } else {
@@ -49,11 +49,11 @@ impl Request {
         }
     }
 
-    pub(crate) fn is_cancelled(&self) -> bool {
+    pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
 
-    pub(crate) fn cancel(&self) -> &CancelToken {
+    pub fn cancel(&self) -> &CancelToken {
         &self.cancel
     }
 }

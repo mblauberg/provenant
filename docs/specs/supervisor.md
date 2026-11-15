@@ -133,6 +133,19 @@ replayable authority.
   `crates/supervisor/src/custody_tests.rs::contradictory_never_spawned_records_never_prove_absence`
 - Owner: `crates/os/src/fs.rs`
 
+### Build admission is a sourced port
+
+Sandboxed Cargo shims use `PortTable.build_admission`, independently of attempt
+admission: builtin uses host slots and the effective disk policy, command runs
+the repository wrapper around Cargo, and none omits admission. The host freezes
+the backend/source in `PROVENANT_BUILD_ADMISSION_BACKEND` and
+`PROVENANT_BUILD_ADMISSION_SOURCE`. Native launches retain their host toolchain;
+no shim is installed for them. Local-Cargo policy still applies to every shim
+backend. Wrapper execution streams Cargo output without a host-state receipt.
+- Why: build coordination varies by repository without changing attempt custody.
+- Test: `crates/providers/src/lane.rs::the_cargo_shim_hands_the_command_to_the_build_slot_gate`
+- Owner: `crates/providers/src/lane.rs`; `src/build_slot.rs`
+
 ### Bounded execution
 
 Captures and frames are bounded; an oversized frame is decoder loss, never a

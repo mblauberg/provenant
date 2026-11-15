@@ -118,11 +118,15 @@ impl crate::LaunchSpec {
             }
             Ok(shell_quote(value))
         };
-        if !(1..=64).contains(&gate.slots) || !["all", "check", "none"].contains(&gate.local_cargo)
+        if (matches!(&gate.backend, provenant_config::PortBackend::Builtin)
+            && !(1..=64).contains(&gate.slots))
+            || !["all", "check", "none"].contains(&gate.local_cargo)
         {
             return Err(ProviderError::Malformed);
         }
         let bin = scratch.join("bin");
+        let backend = serde_json::to_string(&gate.backend).map_err(|_| ProviderError::Malformed)?;
+        let source = serde_json::to_string(&gate.source).map_err(|_| ProviderError::Malformed)?;
         let disk = gate
             .disk_gate
             .as_ref()
@@ -137,12 +141,16 @@ impl crate::LaunchSpec {
             .transpose()?
             .unwrap_or_default();
         let script = format!(
-            "#!/bin/sh\n{disk}{state}={} {slots}={} {local}={}\nexport {state} {slots} {local}\nexec {} internal build-slot -- {} \"$@\"\n",
+            "#!/bin/sh\n{disk}{backend_env}={} {source_env}={} {state}={} {slots}={} {local}={}\nexport {backend_env} {source_env} {state} {slots} {local}\nexec {} internal build-slot -- {} \"$@\"\n",
+            shell_quote(&backend),
+            shell_quote(&source),
             text(gate.state)?,
             gate.slots,
             gate.local_cargo,
             text(gate.provenant)?,
             text(gate.cargo)?,
+            backend_env = consumer_env::BUILD_ADMISSION_BACKEND,
+            source_env = consumer_env::BUILD_ADMISSION_SOURCE,
             state = consumer_env::BUILD_SLOT_STATE,
             slots = consumer_env::BUILD_SLOTS,
             local = consumer_env::LOCAL_CARGO,
@@ -174,11 +182,37 @@ impl crate::LaunchSpec {
         });
         self.env[path_index].1 = next_path;
         let profile = &mut self.profile.spec;
-        // Read only: no write grant covers the slot directory.
-        profile.runtime_reads.push(subtree(slots));
+        // Read only: command and none backends do not receive host slot files.
+        if matches!(&gate.backend, provenant_config::PortBackend::Builtin) {
+            profile.runtime_reads.push(subtree(slots));
+        }
         profile
             .process_executables
             .extend([exact("/bin/sh"), exact(gate.provenant)]);
+        if let provenant_config::PortBackend::Command { command } = &gate.backend {
+            let program = command.argv.first().ok_or(ProviderError::Malformed)?;
+            let configured = Path::new(program);
+            let executable = if configured.is_absolute() || configured.components().count() > 1 {
+                if configured.is_absolute() {
+                    configured.to_path_buf()
+                } else {
+                    gate.project.join(configured)
+                }
+            } else {
+                let path = self
+                    .env
+                    .iter()
+                    .find(|(name, _)| name == "PATH")
+                    .map(|(_, value)| value);
+                path.and_then(|value| {
+                    std::env::split_paths(value)
+                        .map(|directory| directory.join(configured))
+                        .find(|candidate| candidate.is_file())
+                })
+                .ok_or(ProviderError::InvalidPath)?
+            };
+            profile.process_executables.push(exact(executable));
+        }
         profile.runtime_reads.push(exact(gate.provenant));
         profile.tool_exec_roots.push(subtree(bin));
         Ok(())
@@ -755,6 +789,12 @@ pub(crate) fn shell_quote(value: &str) -> String {
 
 /// What the `cargo` shim needs to take a host build slot.
 pub struct BuildSlotGate<'a> {
+    /// Effective project root used to resolve a repository wrapper executable.
+    pub project: &'a Path,
+    /// Selected sourced admission backend.
+    pub backend: provenant_config::PortBackend,
+    /// Source of the effective backend declaration.
+    pub source: provenant_config::PortSource,
     /// The `provenant` executable that runs `internal build-slot`.
     pub provenant: &'a Path,
     /// Host state directory, shared by every project, holding the slot files.
@@ -2407,6 +2447,9 @@ mod tests {
             slots: 3,
             cargo: Path::new("/home/.cargo/bin/cargo"),
             local_cargo: "all",
+            project: &root,
+            backend: provenant_config::PortBackend::Builtin,
+            source: provenant_config::PortSource::Builtin,
         };
         assert!(matches!(
             spec.configure_build_slots(&scratch, &gate),
@@ -2503,6 +2546,9 @@ mod tests {
             slots: 2,
             cargo: Path::new("/home/.cargo/bin/cargo"),
             local_cargo: "all",
+            project: Path::new("/p"),
+            backend: provenant_config::PortBackend::Builtin,
+            source: provenant_config::PortSource::Builtin,
         };
         assert!(matches!(
             spec.configure_build_slots(&base.join("scratch"), &gate),
@@ -2538,6 +2584,9 @@ mod tests {
                 slots,
                 cargo: Path::new("/c"),
                 local_cargo: "all",
+                project: Path::new("/p"),
+                backend: provenant_config::PortBackend::Builtin,
+                source: provenant_config::PortSource::Builtin,
             };
             assert!(
                 spec.configure_build_slots(Path::new("/scratch"), &gate)
@@ -2555,6 +2604,9 @@ mod tests {
                 slots: 1,
                 cargo: Path::new("/c"),
                 local_cargo: "all",
+                project: Path::new("/p"),
+                backend: provenant_config::PortBackend::Builtin,
+                source: provenant_config::PortSource::Builtin,
             };
             assert!(matches!(
                 spec.configure_build_slots(Path::new("/scratch"), &gate),
@@ -2573,6 +2625,9 @@ mod tests {
             slots: 1,
             cargo: Path::new("/cargo"),
             local_cargo: "all",
+            project: Path::new("/p"),
+            backend: provenant_config::PortBackend::Builtin,
+            source: provenant_config::PortSource::Builtin,
         };
         for missing_path in [true, false] {
             let mut spec = bare_spec("/usr/bin");

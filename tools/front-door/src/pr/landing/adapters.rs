@@ -182,6 +182,7 @@ impl GhForge {
     #[allow(clippy::disallowed_methods)]
     fn reader(&self) -> wait::Reader<'_> {
         wait::Reader {
+            state: &self.state,
             project: &self.project,
             deadline: self
                 .deadline
@@ -197,7 +198,7 @@ impl GhForge {
         if let Some(repository) = &self.repository {
             return Ok(repository.clone());
         }
-        let request = crate::pr::request::Request::new(
+        let request = provenant_config::ports::Request::new(
             self.reader().deadline,
             provenant_core::CancelToken::new(),
         );
@@ -218,7 +219,7 @@ impl GhForge {
         budget: Duration,
     ) -> Result<serde_json::Value, LandingError> {
         let repository = self.repository_name()?;
-        let request = crate::pr::request::Request::within(budget);
+        let request = provenant_config::ports::Request::within(budget);
         let mut observer = Observer::open(&self.state, &self.project, &repository, &request)
             .map_err(|error| match error {
                 ObserveError::RateLimited { .. } => LandingError::RateLimited(error.to_string()),
@@ -680,7 +681,7 @@ impl Forge for GhForge {
         let commit = object_id(commit)?;
         let repository = self.repository_name()?;
         // The checks, every page and the commit read share one deadline.
-        let request = crate::pr::request::Request::new(
+        let request = provenant_config::ports::Request::new(
             self.reader().deadline,
             provenant_core::CancelToken::new(),
         );
@@ -845,7 +846,14 @@ impl Forge for GhForge {
             "-f",
             &format!("base={target}"),
         ];
-        let result = execute_with(&self.project, &args, self.budget, false, None);
+        let result = crate::pr::forge_execute(
+            &self.state,
+            &self.project,
+            &args,
+            &provenant_config::ports::Request::within(self.budget),
+            false,
+            None,
+        );
         let response = match result {
             Ok(output) if output.termination == Termination::Exit(0) => Ok(output.stdout.bytes),
             other => Err(LandingError::Failed(format!(
@@ -865,34 +873,12 @@ impl Forge for GhForge {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CommandResult {
-    Landed,
-    Refused,
-    Unknown,
-}
-
-fn command_result(
-    command: &provenant_records::landing::RepositoryCommand,
-    termination: Termination,
-    timed_out: bool,
-) -> CommandResult {
-    if timed_out {
-        return CommandResult::Unknown;
-    }
-    match termination {
-        Termination::Exit(0) => CommandResult::Landed,
-        Termination::Exit(code) if code == command.unknown_exit_code => CommandResult::Unknown,
-        Termination::Exit(_) => CommandResult::Refused,
-        _ => CommandResult::Unknown,
-    }
-}
-
 // ----- Repo --------------------------------------------------------------
 
 /// Git plumbing in the project checkout. Refs live on the remote the target tracks.
 pub struct GitRepo<'a> {
     project: PathBuf,
+    host_state: PathBuf,
     git: Git,
     remote: Option<String>,
     local: Option<LocalFollowUp<'a>>,
@@ -907,6 +893,7 @@ impl<'a> GitRepo<'a> {
     pub fn new(project: &Path, host_state: &Path) -> Result<Self, LandingError> {
         Ok(Self {
             project: project.to_owned(),
+            host_state: host_state.to_owned(),
             git: Git::new(host_state).map_err(failed)?,
             remote: None,
             local: None,
@@ -1027,31 +1014,42 @@ impl Repo for GitRepo<'_> {
         command: &provenant_records::landing::RepositoryCommand,
         attempt: &PendingAttempt,
     ) -> Result<PublishResult, LandingError> {
-        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor};
+        use provenant_config::PortCommandDisposition as D;
         if !command.valid() {
             return Err(LandingError::Refused("invalid repository publisher".into()));
         }
+        let port = super::resolve_land_port(Some(&self.project), &self.host_state)?;
+        if port != attempt.policy.publication_port {
+            return Err(LandingError::Refused(
+                "landing port changed since the publication intent was sealed".into(),
+            ));
+        }
         let input = serde_json::to_vec(attempt)
             .map_err(|error| LandingError::Refused(format!("encode command intent: {error}")))?;
-        let argv: Vec<std::ffi::OsString> = command.argv.iter().map(Into::into).collect();
-        let mut options = ExecOptions::new(
-            &argv,
+        let mut forge = provenant_config::ForgePort::from_land_port(
+            port,
+            "land",
             &self.project,
-            Duration::from_secs(command.timeout_seconds),
-        );
-        options.stdin = Some(&input);
-        options.cleanup_process_group = true;
-        let executor = SystemExecutor::new(1).map_err(|error| {
-            LandingError::Refused(format!("prepare repository publisher: {error}"))
-        })?;
-        let outcome = executor
-            .execute(options)
+            &self.host_state,
+        )
+        .map_err(|error| LandingError::Refused(format!("prepare repository publisher: {error}")))?;
+        let execution = forge
+            .execute_with(
+                provenant_config::ForgeOperation::Land { intent: input },
+                Duration::from_secs(command.timeout_seconds),
+                |_, _, _, _| {
+                    Err(std::io::Error::other(
+                        "command publication requires a command landing port",
+                    ))
+                },
+            )
             .map_err(|_| LandingError::PublicationUnknown)?;
-        // Publisher output is diagnostic; only the declared exit protocol is evidence.
-        let _ = std::io::stderr().write_all(&outcome.stdout.bytes);
-        let _ = std::io::stderr().write_all(&outcome.stderr.bytes);
-        match command_result(command, outcome.termination, outcome.timed_out) {
-            CommandResult::Landed => Ok(PublishResult {
+        if let Some(outcome) = &execution.outcome {
+            let _ = std::io::stderr().write_all(&outcome.stdout.bytes);
+            let _ = std::io::stderr().write_all(&outcome.stderr.bytes);
+        }
+        match execution.disposition {
+            D::Succeeded => Ok(PublishResult {
                 landed: attempt
                     .candidate
                     .steps
@@ -1060,14 +1058,14 @@ impl Repo for GitRepo<'_> {
                     .collect(),
                 alarms: Vec::new(),
             }),
-            CommandResult::Unknown => Err(LandingError::PublicationUnknown),
-            CommandResult::Refused => Err(LandingError::Refused(
+            D::Refused => Err(LandingError::Refused(
                 "repository publisher refused the intent".into(),
             )),
+            _ => Err(LandingError::PublicationUnknown),
         }
     }
     fn project_path(&self) -> Option<&Path> {
-        self.local.as_ref().map(|_| self.project.as_path())
+        Some(self.project.as_path())
     }
     fn follow_local(&mut self, pr: &EligiblePr) -> Result<bool, LandingError> {
         if let Some(local) = &mut self.local {
@@ -1382,12 +1380,14 @@ impl ReviewRecordSource for ProvenantReviews {
 /// Observes forge check runs on the exact candidate, or runs the command plan.
 pub struct CheckGate {
     project: PathBuf,
+    state: PathBuf,
     forge: GhForge,
 }
 impl CheckGate {
     pub fn new(project: &Path, state: &Path) -> Self {
         Self {
             project: project.to_owned(),
+            state: state.to_owned(),
             forge: GhForge::new(project, state),
         }
     }
@@ -1555,7 +1555,7 @@ impl GateRunner for CheckGate {
                 &mut std::thread::sleep,
             ),
             provenant_cli::domains::GateKind::Commands => {
-                super::gate::execute_commands(&self.project, candidate, definition)
+                super::gate::execute_commands(&self.project, &self.state, candidate, definition)
             }
         }
     }
@@ -1642,39 +1642,6 @@ fn deliver_alarm(
     reason = "custom worktree harness includes tests without the test runner"
 )]
 mod tests {
-    #[test]
-    fn repository_command_exit_protocol_preserves_uncertainty() {
-        use provenant_records::landing::RepositoryCommand;
-        for unknown_exit_code in [17, 75, 255] {
-            let command = RepositoryCommand {
-                argv: vec!["publisher".into()],
-                unknown_exit_code,
-                timeout_seconds: 30,
-            };
-            for code in [0, 1, unknown_exit_code] {
-                let result = super::command_result(&command, Termination::Exit(code), false);
-                assert_eq!(
-                    result,
-                    if code == 0 {
-                        super::CommandResult::Landed
-                    } else if code == unknown_exit_code {
-                        super::CommandResult::Unknown
-                    } else {
-                        super::CommandResult::Refused
-                    }
-                );
-                assert_eq!(
-                    super::command_result(&command, Termination::Exit(code), true),
-                    super::CommandResult::Unknown
-                );
-            }
-            assert_eq!(
-                super::command_result(&command, Termination::Signal(9), false),
-                super::CommandResult::Unknown
-            );
-        }
-    }
-
     use super::*;
 
     #[test]

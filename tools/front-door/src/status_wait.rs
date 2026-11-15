@@ -738,8 +738,8 @@ fn forge_request(
     deadline: Instant,
     cancel: &CancelToken,
     pr_read_timeout: Duration,
-) -> crate::pr::request::Request {
-    crate::pr::request::Request::new(deadline, cancel.clone()).capped(pr_read_timeout)
+) -> provenant_config::ports::Request {
+    provenant_config::ports::Request::new(deadline, cancel.clone()).capped(pr_read_timeout)
 }
 
 /// The local paced-reread cadence for owner-side waits, resolved through the

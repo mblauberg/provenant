@@ -98,7 +98,7 @@ source names the reason; a file that is present but malformed is a typed
 error. Reports name each setting with its source.
 - Why: a wait must not outlive its budget in a transport it can no longer
   interrupt, and one setting must not fail three different ways.
-- Test: `src/status_wait.rs::a_target_settling_after_the_last_sample_is_reported_settled_at_expiry`; `crates/cli/src/wait.rs::wait_settings_resolve_through_one_failure_policy`; `src/pr/request.rs::a_capped_request_shares_cancellation_and_never_extends_the_deadline`
+- Test: `src/status_wait.rs::a_target_settling_after_the_last_sample_is_reported_settled_at_expiry`; `crates/cli/src/wait.rs::wait_settings_resolve_through_one_failure_policy`; `crates/config/src/ports/request.rs::a_capped_request_shares_cancellation_and_never_extends_the_deadline`
 Wait budgets clamp to `domains.wait.max_timeout_seconds` (shipped default four
 hours), warning once with the effective limit and source when exceeded. A larger
 request remains a blocking wait. Parsing retains the request so configured
@@ -185,8 +185,11 @@ at any supported configuration layer or using `land --poll` selects that fixed i
 all three waits. Source provenance decides this, so an explicit value is fixed even when it
 matches the bundled default.
 
-The `command` strategy invokes `land.command.argv` in the repository checkout,
-with the full pending intent as JSON on stdin. Its required declaration includes
+The effective `PortTable.land` declaration alone selects the publication backend.
+`none` returns typed unavailability before publication effects; `command` invokes
+its declared argv in the repository checkout. Candidate and ordering strategies
+remain independent of that backend. The command receives
+the full pending intent as JSON on stdin. Its required declaration includes
 `unknown_exit_code` (1..255) and `timeout_seconds` (>0). Exit 0 attests that the
 supplied candidate landed; other exits refuse, except the declared unknown code.
 Timeouts and signals are also unknown. The same pending markers, gate, approvals,

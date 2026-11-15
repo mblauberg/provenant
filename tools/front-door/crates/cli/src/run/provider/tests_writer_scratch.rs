@@ -1157,6 +1157,7 @@ printf 'agy 1.0.0\n'
     let coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
+        &project,
         &home,
         &confinement.plan.permissions().scratch.path,
         &codex_runtime,
@@ -1182,6 +1183,7 @@ printf 'agy 1.0.0\n'
     let skipped_coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
+        &project,
         &home,
         &confinement.plan.permissions().scratch.path,
         Path::new("relative-runtime"),

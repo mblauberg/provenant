@@ -70,7 +70,11 @@ pub const BUILD_SLOT: &str = "PROVENANT_BUILD_SLOT";
 pub const BUILD_SLOT_STATE: &str = "PROVENANT_BUILD_SLOT_STATE";
 pub const BUILD_SLOTS: &str = "PROVENANT_BUILD_SLOTS";
 pub const LOCAL_CARGO: &str = "PROVENANT_LOCAL_CARGO";
+pub const BUILD_ADMISSION_BACKEND: &str = "PROVENANT_BUILD_ADMISSION_BACKEND";
+pub const BUILD_ADMISSION_SOURCE: &str = "PROVENANT_BUILD_ADMISSION_SOURCE";
 pub const BUILD_DISK_LIMITS: &str = "PROVENANT_BUILD_DISK_LIMITS";
+pub const PORT_OPERATION: &str = "PROVENANT_PORT_OPERATION";
+pub const PORT_SOURCE: &str = "PROVENANT_PORT_SOURCE";
 pub const PORT_PHASE: &str = "PROVENANT_PORT_PHASE";
 pub const ADMISSION_ATTEMPT: &str = "PROVENANT_ADMISSION_ATTEMPT";
 pub const ADMISSION_WORKTREE: &str = "PROVENANT_ADMISSION_WORKTREE";
@@ -264,6 +268,20 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         ADMISSION,
     ),
     var(
+        PORT_OPERATION,
+        PortCommand,
+        Provisional,
+        "The typed forge operation requested from the repository adapter.",
+        "forge port commands",
+    ),
+    var(
+        PORT_SOURCE,
+        PortCommand,
+        Provisional,
+        "Source of the selected build admission wrapper.",
+        "build admission port commands",
+    ),
+    var(
         PORT_REQUEST_PATH,
         PortCommand,
         Provisional,
@@ -325,6 +343,20 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         Internal,
         "Where the Cargo source-write setting came from.",
         "lanes with a Cargo home",
+    ),
+    var(
+        BUILD_ADMISSION_BACKEND,
+        Lane,
+        Internal,
+        "Encoded build admission backend selected by the host.",
+        BUILD_SHIM,
+    ),
+    var(
+        BUILD_ADMISSION_SOURCE,
+        Lane,
+        Internal,
+        "Source of the selected build admission backend.",
+        BUILD_SHIM,
     ),
     var(
         BUILD_SLOT,

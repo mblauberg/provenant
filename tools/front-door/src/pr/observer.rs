@@ -13,8 +13,9 @@
 //!
 //! A commit is any head: a pull request head, a `land/**` candidate or a
 //! landed commit.
-use super::gh::{Forge, Gh, Response, rate_limit_reset};
-use super::request::Request;
+use super::gh::{Response, rate_limit_reset};
+use provenant_config::ports::Request;
+use provenant_config::{Forge, ForgePort};
 mod port;
 use provenant_os::fs::{Directory, LockMode, PublishMode};
 use serde::{Deserialize, Serialize};
@@ -86,40 +87,6 @@ impl Clock for WallClock {
     }
 }
 
-/// `gh api` in the project checkout. Each request is bounded by the time its
-/// bound request context has left and stopped by that context's cancellation.
-pub(crate) struct GhTransport {
-    project: PathBuf,
-    request: Request,
-}
-impl Forge for GhTransport {
-    fn bind(&mut self, request: &Request) {
-        self.request = request.clone();
-    }
-    fn get(&mut self, path: &str, etag: Option<&str>) -> std::io::Result<Response> {
-        let left = expired_request(&self.request)?.min(Duration::from_secs(60));
-        Gh::in_checkout(self.project.clone(), left, self.request.cancel().clone()).get(path, etag)
-    }
-}
-
-/// The time a transport may spend on its next request, or why it may not.
-pub(super) fn expired_request(request: &Request) -> std::io::Result<Duration> {
-    if request.is_cancelled() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "forge request was cancelled",
-        ));
-    }
-    let left = request.remaining();
-    if left.is_zero() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "forge request deadline passed",
-        ));
-    }
-    Ok(left)
-}
-
 /// Resolve the selected repository through the selected observation transport context.
 #[allow(clippy::disallowed_methods, reason = "forge transport timing boundary")]
 pub(crate) fn repository_for_project(
@@ -131,7 +98,7 @@ pub(crate) fn repository_for_project(
         return Err(ObserveError::Expired);
     }
     let mut forge = port::select_transport(state, project, request)?;
-    let response = forge.get(REPOSITORY_CONTEXT_PATH, None).map_err(|error| {
+    let response = port::get(&mut forge, REPOSITORY_CONTEXT_PATH, None).map_err(|error| {
         ObserveError::Unavailable(format!("cannot identify repository: {error}"))
     })?;
     if let Some(reset) = rate_limit_reset(&response, jiff::Timestamp::now().as_second()) {
@@ -375,7 +342,7 @@ pub(crate) struct Observer<F, C> {
     next_poll_interval: Duration,
 }
 
-impl Observer<port::SelectedTransport, WallClock> {
+impl Observer<ForgePort, WallClock> {
     /// Select the configured CI transport once, then share the observer cache.
     pub(crate) fn open(
         state: &Path,
@@ -794,7 +761,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         prune: fn(Value) -> Value,
     ) -> Result<Page, Fetch> {
         let etag = request_etag(self.cadence, previous);
-        let response = self.forge.get(path, etag).map_err(|error| {
+        let response = port::get(&mut self.forge, path, etag).map_err(|error| {
             let message = format!("cannot read CI: {error}");
             if matches!(
                 error.kind(),
@@ -1122,63 +1089,93 @@ mod tests {
             Observer::with(state, "Owner/Repo", self.clone(), self.clone()).expect("observer")
         }
     }
+    fn forge_response(response: Response) -> provenant_config::ForgeResponse {
+        provenant_config::ForgeResponse {
+            status: Some(response.status),
+            headers: provenant_config::HeadersObservation::Present {
+                status: response.status,
+                values: response.headers,
+            },
+            body: response.body,
+            execution: provenant_config::PortExecution {
+                disposition: provenant_config::PortCommandDisposition::Succeeded,
+                outcome: None,
+            },
+        }
+    }
+
     impl Forge for Shared {
-        fn get(&mut self, path: &str, etag: Option<&str>) -> io::Result<Response> {
-            self.pass();
-            let delay = self.with(|world| {
-                world.requests.push((path.into(), etag.map(str::to_owned)));
-                world.delay
-            });
-            self.sleep(delay);
-            self.with(|world| {
-                let mut headers = BTreeMap::new();
-                let now = world.now_ms / 1000;
-                if std::mem::take(&mut world.past_limit) {
-                    headers.insert("retry-after".into(), "0".into());
-                    return Ok(Response {
-                        status: 429,
+        fn request(
+            &mut self,
+            operation: provenant_config::ForgeOperation,
+            _budget: Duration,
+        ) -> Result<provenant_config::ForgeResponse, provenant_config::PortError> {
+            let provenant_config::ForgeOperation::Api { path, etag, .. } = operation else {
+                return Err(provenant_config::PortError::Response(
+                    "expected API request",
+                ));
+            };
+            let path = path.as_str();
+            let etag = etag.as_deref();
+            let response = (|| -> io::Result<Response> {
+                self.pass();
+                let delay = self.with(|world| {
+                    world.requests.push((path.into(), etag.map(str::to_owned)));
+                    world.delay
+                });
+                self.sleep(delay);
+                self.with(|world| {
+                    let mut headers = BTreeMap::new();
+                    let now = world.now_ms / 1000;
+                    if std::mem::take(&mut world.past_limit) {
+                        headers.insert("retry-after".into(), "0".into());
+                        return Ok(Response {
+                            status: 429,
+                            headers,
+                            body: Vec::new(),
+                        });
+                    }
+                    if let Some(until) = world.limited_until.filter(|until| *until > now) {
+                        headers.insert("x-ratelimit-remaining".into(), "0".into());
+                        headers.insert("x-ratelimit-reset".into(), until.to_string());
+                        return Ok(Response {
+                            status: 403,
+                            headers,
+                            body: br#"{"message":"API rate limit exceeded"}"#.to_vec(),
+                        });
+                    }
+                    let commit = path
+                        .split("/commits/")
+                        .nth(1)
+                        .and_then(|rest| rest.split('/').next())
+                        .unwrap_or_default();
+                    let body = if path.contains("/check-runs?") {
+                        world.runs.get(commit).cloned()
+                    } else {
+                        world.statuses.get(commit).cloned()
+                    }
+                    .unwrap_or_else(|| json!([]));
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    body.to_string().hash(&mut hasher);
+                    let tag = format!("W/\"{:x}\"", hasher.finish());
+                    headers.insert("etag".into(), tag.clone());
+                    if etag == Some(tag.as_str()) {
+                        return Ok(Response {
+                            status: 304,
+                            headers,
+                            body: Vec::new(),
+                        });
+                    }
+                    world.full_reads += 1;
+                    Ok(Response {
+                        status: 200,
                         headers,
-                        body: Vec::new(),
-                    });
-                }
-                if let Some(until) = world.limited_until.filter(|until| *until > now) {
-                    headers.insert("x-ratelimit-remaining".into(), "0".into());
-                    headers.insert("x-ratelimit-reset".into(), until.to_string());
-                    return Ok(Response {
-                        status: 403,
-                        headers,
-                        body: br#"{"message":"API rate limit exceeded"}"#.to_vec(),
-                    });
-                }
-                let commit = path
-                    .split("/commits/")
-                    .nth(1)
-                    .and_then(|rest| rest.split('/').next())
-                    .unwrap_or_default();
-                let body = if path.contains("/check-runs?") {
-                    world.runs.get(commit).cloned()
-                } else {
-                    world.statuses.get(commit).cloned()
-                }
-                .unwrap_or_else(|| json!([]));
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                body.to_string().hash(&mut hasher);
-                let tag = format!("W/\"{:x}\"", hasher.finish());
-                headers.insert("etag".into(), tag.clone());
-                if etag == Some(tag.as_str()) {
-                    return Ok(Response {
-                        status: 304,
-                        headers,
-                        body: Vec::new(),
-                    });
-                }
-                world.full_reads += 1;
-                Ok(Response {
-                    status: 200,
-                    headers,
-                    body: serde_json::to_vec(&body)?,
+                        body: serde_json::to_vec(&body)?,
+                    })
                 })
-            })
+            })()
+            .map_err(provenant_config::PortError::Executor)?;
+            Ok(forge_response(response))
         }
     }
     impl Clock for Shared {
@@ -1212,25 +1209,40 @@ mod tests {
         }
     }
     impl Forge for ResourceForge {
-        fn get(&mut self, path: &str, etag: Option<&str>) -> io::Result<Response> {
-            self.0
-                .lock()
-                .expect("requests")
-                .push((path.into(), etag.map(str::to_owned)));
-            let headers = BTreeMap::from([("etag".into(), "stable".into())]);
-            if etag == Some("stable") {
-                Ok(Response {
-                    status: 304,
-                    headers,
-                    body: Vec::new(),
-                })
-            } else {
-                Ok(Response {
-                    status: 200,
-                    headers,
-                    body: br#"{"number":12,"state":"open"}"#.to_vec(),
-                })
-            }
+        fn request(
+            &mut self,
+            operation: provenant_config::ForgeOperation,
+            _budget: Duration,
+        ) -> Result<provenant_config::ForgeResponse, provenant_config::PortError> {
+            let provenant_config::ForgeOperation::Api { path, etag, .. } = operation else {
+                return Err(provenant_config::PortError::Response(
+                    "expected API request",
+                ));
+            };
+            let path = path.as_str();
+            let etag = etag.as_deref();
+            let response = (|| -> io::Result<Response> {
+                self.0
+                    .lock()
+                    .expect("requests")
+                    .push((path.into(), etag.map(str::to_owned)));
+                let headers = BTreeMap::from([("etag".into(), "stable".into())]);
+                if etag == Some("stable") {
+                    Ok(Response {
+                        status: 304,
+                        headers,
+                        body: Vec::new(),
+                    })
+                } else {
+                    Ok(Response {
+                        status: 200,
+                        headers,
+                        body: br#"{"number":12,"state":"open"}"#.to_vec(),
+                    })
+                }
+            })()
+            .map_err(provenant_config::PortError::Executor)?;
+            Ok(forge_response(response))
         }
     }
 
@@ -1603,21 +1615,36 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         let mut world_pages = vec![first, second];
         struct Paged(Shared, Vec<Value>);
         impl Forge for Paged {
-            fn get(&mut self, path: &str, etag: Option<&str>) -> io::Result<Response> {
-                let index: usize = path
-                    .rsplit("&page=")
-                    .next()
-                    .and_then(|n| n.parse().ok())
-                    .unwrap_or(1);
-                if path.contains("/check-runs?") {
-                    let body = self
-                        .1
-                        .get(index - 1)
-                        .cloned()
-                        .unwrap_or_else(|| json!({"check_runs":[]}));
-                    self.0.with(|world| world.runs.insert(HEAD.into(), body));
-                }
-                self.0.get(path, etag)
+            fn request(
+                &mut self,
+                operation: provenant_config::ForgeOperation,
+                _budget: Duration,
+            ) -> Result<provenant_config::ForgeResponse, provenant_config::PortError> {
+                let provenant_config::ForgeOperation::Api { path, etag, .. } = operation else {
+                    return Err(provenant_config::PortError::Response(
+                        "expected API request",
+                    ));
+                };
+                let path = path.as_str();
+                let etag = etag.as_deref();
+                let response = (|| -> io::Result<Response> {
+                    let index: usize = path
+                        .rsplit("&page=")
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(1);
+                    if path.contains("/check-runs?") {
+                        let body = self
+                            .1
+                            .get(index - 1)
+                            .cloned()
+                            .unwrap_or_else(|| json!({"check_runs":[]}));
+                        self.0.with(|world| world.runs.insert(HEAD.into(), body));
+                    }
+                    port::get(&mut self.0, path, etag)
+                })()
+                .map_err(provenant_config::PortError::Executor)?;
+                Ok(forge_response(response))
             }
         }
         let mut paged = Observer::with(
@@ -1816,17 +1843,32 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
     fn a_server_error_is_retried_and_a_refusal_is_not() {
         struct Failing(Shared, Vec<u16>);
         impl Forge for Failing {
-            fn get(&mut self, path: &str, etag: Option<&str>) -> io::Result<Response> {
-                if let Some(status) = self.1.pop() {
-                    self.0
-                        .with(|world| world.requests.push((path.into(), None)));
-                    return Ok(Response {
-                        status,
-                        headers: BTreeMap::new(),
-                        body: b"{}".to_vec(),
-                    });
-                }
-                self.0.get(path, etag)
+            fn request(
+                &mut self,
+                operation: provenant_config::ForgeOperation,
+                _budget: Duration,
+            ) -> Result<provenant_config::ForgeResponse, provenant_config::PortError> {
+                let provenant_config::ForgeOperation::Api { path, etag, .. } = operation else {
+                    return Err(provenant_config::PortError::Response(
+                        "expected API request",
+                    ));
+                };
+                let path = path.as_str();
+                let etag = etag.as_deref();
+                let response = (|| -> io::Result<Response> {
+                    if let Some(status) = self.1.pop() {
+                        self.0
+                            .with(|world| world.requests.push((path.into(), None)));
+                        return Ok(Response {
+                            status,
+                            headers: BTreeMap::new(),
+                            body: b"{}".to_vec(),
+                        });
+                    }
+                    port::get(&mut self.0, path, etag)
+                })()
+                .map_err(provenant_config::PortError::Executor)?;
+                Ok(forge_response(response))
             }
         }
         let shared = Shared::new();

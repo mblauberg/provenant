@@ -625,7 +625,7 @@ fn receipt(
     )
 }
 
-fn outcome_complete(outcome: &ExecOutcome) -> bool {
+pub(super) fn outcome_complete(outcome: &ExecOutcome) -> bool {
     let stream_complete = |stream: &provenant_os::exec::CapturedStream| {
         !stream.truncated
             && stream.sink_lost_bytes == 0

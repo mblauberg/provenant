@@ -15,6 +15,10 @@ pub mod ports;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LandingError {
+    #[error("landing port is disabled (source: {port_source:?})")]
+    PortUnavailable {
+        port_source: provenant_config::PortSource,
+    },
     #[error("landing {id} unavailable: {reason}")]
     Unavailable {
         id: provenant_records::landing::LandingId,
@@ -113,13 +117,25 @@ pub(crate) fn run(
     match run_inner(options, globals, workers) {
         Ok(code) => code,
         Err(error) => {
+            let unavailable = matches!(
+                error.downcast_ref::<LandingError>(),
+                Some(LandingError::PortUnavailable { .. })
+            );
             let code = error
                 .downcast_ref::<super::wait::Failure>()
                 .map_or("LAND_POLICY", |failure| failure.code);
             crate::fail(
                 "land",
-                provenant_records::Outcome::Refused,
-                code,
+                if unavailable {
+                    provenant_records::Outcome::Unavailable
+                } else {
+                    provenant_records::Outcome::Refused
+                },
+                if unavailable {
+                    "LAND_PORT_UNAVAILABLE"
+                } else {
+                    code
+                },
                 &error.to_string(),
                 globals,
             )
@@ -196,9 +212,11 @@ fn batch_response(
         Some(LandingError::RateLimited(_)) => (Outcome::Unavailable, "RATE_LIMITED"),
         Some(LandingError::SpendingCap { .. }) => (Outcome::Refused, "LAND_SPENDING_CAP"),
         Some(LandingError::Conflict(_)) => (Outcome::Failed, "LAND_CONFLICT"),
-        Some(LandingError::Unimplemented(_) | LandingError::Unavailable { .. }) => {
-            (Outcome::Unavailable, "LAND_UNSUPPORTED")
-        }
+        Some(
+            LandingError::Unimplemented(_)
+            | LandingError::Unavailable { .. }
+            | LandingError::PortUnavailable { .. },
+        ) => (Outcome::Unavailable, "LAND_UNSUPPORTED"),
         Some(_) => (Outcome::Failed, "LAND_FAILED"),
         None if report
             .outcomes
@@ -341,6 +359,22 @@ fn resolve_checkout(
     )?)
 }
 
+/// Resolve publication authority before repository observations or publication effects.
+pub(super) fn resolve_land_port(
+    project: Option<&std::path::Path>,
+    state: &std::path::Path,
+) -> Result<provenant_config::LandPort, LandingError> {
+    let port = provenant_config::PortTable::read_for(project, state)
+        .map_err(|error| LandingError::Failed(format!("resolve landing port: {error}")))?
+        .land;
+    if matches!(port.backend, provenant_config::LandBackend::None) {
+        return Err(LandingError::PortUnavailable {
+            port_source: port.source,
+        });
+    }
+    Ok(port)
+}
+
 fn prepare_resolved(
     resolved: crate::roots::Resolved,
     tier: Option<&str>,
@@ -349,6 +383,8 @@ fn prepare_resolved(
     target: Option<&str>,
 ) -> Result<Prepared, Box<dyn std::error::Error>> {
     use provenant_cli::domains::LandOverride;
+    let publication_port =
+        resolve_land_port(Some(&resolved.project), resolved.roots.state.as_path())?;
     let config = provenant_cli::config_reads::read_for(&resolved.roots, "land policy")?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let runtime =
@@ -383,10 +419,11 @@ fn prepare_resolved(
         )
         .map_err(|error| -> Box<dyn std::error::Error> { error.into() })
     };
-    let validate_policy = |policy: policy::LandPolicy| -> Result<
+    let validate_policy = |mut policy: policy::LandPolicy| -> Result<
         (policy::LandPolicy, provenant_cli::domains::LandSettings),
         Box<dyn std::error::Error>,
     > {
+        policy.publication_port = publication_port.clone();
         let effective = policy.settings()?;
         let errors =
             provenant_config::DomainConfig::validate(&provenant_cli::domains::PrSettings {
@@ -465,7 +502,12 @@ pub(crate) fn submit(
         for member in &request.members {
             tracking.insert(
                 member.pr,
-                super::land::batch_track(&resolved.project, member.pr, globals)?,
+                super::land::batch_track(
+                    resolved.roots.state.as_path(),
+                    &resolved.project,
+                    member.pr,
+                    globals,
+                )?,
             );
         }
     }
@@ -620,7 +662,7 @@ fn run_inner(
         };
         let plan = policy.plan(capabilities, &prepared.review_scope)?;
         let unavailable = plan.strategy.ensure_executable(&plan.plan).err();
-        let value = serde_json::json!({"repository": repository, "target": prepared.target, "resolved_plan": plan, "unavailable": unavailable, "fields": policy.fields, "budget_rate_micros_per_minute": policy.budget_rate_micros_per_minute, "ci_patience_seconds": patience, "ci_patience_source": if options.wait.is_some() { "--wait" } else { "gate.timeout_seconds" }, "warnings": warnings});
+        let value = serde_json::json!({"repository": repository, "target": prepared.target, "resolved_plan": plan, "unavailable": unavailable, "publication_port": policy.publication_port, "fields": policy.fields, "budget_rate_micros_per_minute": policy.budget_rate_micros_per_minute, "ci_patience_seconds": patience, "ci_patience_source": if options.wait.is_some() { "--wait" } else { "gate.timeout_seconds" }, "warnings": warnings});
         let text = format!("{}\n", serde_json::to_string_pretty(&value)?);
         return Ok(crate::emit(
             &CommandResult::new("land", Outcome::Ok, value),

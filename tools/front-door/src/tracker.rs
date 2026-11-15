@@ -1,17 +1,14 @@
 //! Advisory tracker lint composition. Forge failures do not block work.
-use crate::{emit, pr, roots};
+use crate::{emit, roots};
 use provenant_cli::{
     Globals, Tracker,
     tracker::{self, Config, Finding},
 };
-use provenant_config::{Port, PortBackend, PortCommandDisposition, PortSource, PortTable};
-use provenant_core::CancelToken;
-use provenant_os::exec::SystemExecutor;
-use provenant_records::{CanonicalV1, CommandResult, Outcome};
+use provenant_config::{Port, PortTable};
+use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    ffi::OsString,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -40,150 +37,30 @@ struct Report {
     skipped: Vec<String>,
 }
 
-fn builtin_issue(root: &Path, number: u64, timeout: Duration) -> Result<Issue, String> {
-    let number = number.to_string();
-    let args = [
-        "gh",
-        "issue",
-        "view",
-        &number,
-        "--json",
-        "body,state,issueType",
-    ];
-    let output = pr::execute_for(root, &args, timeout, false)
-        .and_then(pr::successful)
-        .map_err(|e| e.to_string())?;
-    serde_json::from_slice(&output).map_err(|e| e.to_string())
-}
-
-enum TrackerPort {
-    Builtin,
-    Command {
-        command: provenant_config::PortCommand,
-        source: PortSource,
-        state: PathBuf,
-        executor: SystemExecutor,
-        cancel: CancelToken,
-    },
-    None {
-        source: PortSource,
-    },
-    Unavailable(String),
+/// The tracker projection uses the same forge adapter as pull/CI operations.
+struct TrackerPort {
+    port: Port,
+    state: PathBuf,
 }
 impl TrackerPort {
     fn from_port(port: Port, state: PathBuf) -> Self {
-        let source = port.source;
-        match port.backend {
-            PortBackend::Builtin => Self::Builtin,
-            PortBackend::Command { command } => match SystemExecutor::new(1) {
-                Ok(executor) => Self::Command {
-                    command,
-                    source,
-                    state,
-                    executor,
-                    cancel: CancelToken::new(),
-                },
-                Err(error) => {
-                    Self::Unavailable(format!("cannot start tracker command executor: {error}"))
-                }
-            },
-            PortBackend::None => Self::None { source },
-        }
+        Self { port, state }
     }
 
     fn issue(&mut self, root: &Path, number: u64, timeout: Duration) -> Result<Issue, String> {
-        match self {
-            Self::Builtin => {
-                builtin_issue(root, number, timeout).map_err(|_| "forge unavailable".to_owned())
-            }
-            Self::None { source } => Err(format!("tracker port is disabled (source: {source:?})")),
-            Self::Unavailable(error) => Err(error.clone()),
-            Self::Command {
-                command,
-                source,
-                state,
-                executor,
-                cancel,
-            } => {
-                let arguments = [OsString::from(number.to_string())];
-                let mut execution = provenant_config::execute_port_command(
-                    &*executor,
-                    command,
-                    root,
-                    &arguments,
-                    &[],
-                    timeout,
-                    cancel,
-                );
-                let issue = (|| {
-                    let outcome = execution.outcome.as_ref().ok_or_else(|| {
-                        format!(
-                            "tracker command port returned {} without an exit record",
-                            disposition_name(execution.disposition)
-                        )
-                    })?;
-                    if execution.disposition != PortCommandDisposition::Succeeded
-                        || !execution.capture_complete()
-                    {
-                        return Err(format!(
-                            "tracker command port returned {}",
-                            disposition_name(execution.disposition)
-                        ));
-                    }
-                    let issue: PortIssue =
-                        serde_json::from_slice(&outcome.stdout.bytes).map_err(|_| {
-                            "tracker command port returned invalid issue JSON".to_owned()
-                        })?;
-                    Ok(Issue {
-                        body: issue.body,
-                        state: issue.state,
-                        issue_type: issue.kind.map(|name| IssueType { name }),
-                    })
-                })();
-                if issue.is_err() && execution.disposition == PortCommandDisposition::Succeeded {
-                    execution.disposition = PortCommandDisposition::Unknown;
-                }
-                let key = format!(
-                    "{}:{number}",
-                    CanonicalV1::file_digest(root.as_os_str().as_encoded_bytes())
-                );
-                match provenant_config::record_port_command(
-                    state,
-                    "tracker",
-                    *source,
-                    "issue",
-                    &key,
-                    &execution,
-                    provenant_config::PortReceiptLifetime::AgeDays {
-                        days: provenant_config::DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS,
-                    },
-                ) {
-                    Ok(provenant_config::PortCommandPublication::Durable) => {}
-                    Ok(
-                        provenant_config::PortCommandPublication::VisibleDurabilityUnconfirmed {
-                            cause,
-                        },
-                    ) => {
-                        return Err(format!(
-                            "tracker command receipt is visible but durability is unconfirmed: {cause}"
-                        ));
-                    }
-                    Err(_) => return Err("cannot record tracker command evidence".to_owned()),
-                }
-                issue
-            }
-        }
-    }
-}
-
-fn disposition_name(disposition: PortCommandDisposition) -> &'static str {
-    match disposition {
-        PortCommandDisposition::Succeeded => "succeeded",
-        PortCommandDisposition::Unknown => "unknown",
-        PortCommandDisposition::Refused => "refused",
-        PortCommandDisposition::TimedOut => "timed_out",
-        PortCommandDisposition::Cancelled => "cancelled",
-        PortCommandDisposition::Failed => "failed",
+        let mut forge =
+            provenant_config::ForgePort::new(self.port.clone(), "tracker", root, &self.state)
+                .map_err(|error| error.to_string())?;
+        let response = forge
+            .request(provenant_config::ForgeOperation::Issue { number }, timeout)
+            .map_err(|error| error.to_string())?;
+        let issue: PortIssue = serde_json::from_slice(&response.body)
+            .map_err(|error| format!("invalid tracker projection: {error}"))?;
+        Ok(Issue {
+            body: issue.body,
+            state: issue.state,
+            issue_type: issue.kind.map(|name| IssueType { name }),
+        })
     }
 }
 
