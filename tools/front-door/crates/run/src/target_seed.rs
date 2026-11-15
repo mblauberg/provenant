@@ -141,16 +141,19 @@ pub fn lock_store(state: &Path) -> Result<LockGuard, Box<dyn std::error::Error>>
 
 /// Reacquire the store for publication after a build without dropping its
 /// completed stage on a short reader or collector lock. The bounded wait is
-/// safe while holding the build lock: collectors and refresh probes take the
-/// store lock first and only try the build lock without waiting.
-pub fn lock_store_for_publication(state: &Path) -> Result<LockGuard, Box<dyn std::error::Error>> {
+/// supplied by the caller and is safe while holding the build lock: collectors
+/// and refresh probes take the store lock first and only try the build lock
+/// without waiting.
+pub fn lock_store_for_publication(
+    state: &Path,
+    timeout_seconds: u64,
+) -> Result<LockGuard, Box<dyn std::error::Error>> {
     use provenant_core::{CancelToken, Clock, WaitBudget};
-    use std::{ffi::OsStr, time::Duration};
+    use std::ffi::OsStr;
 
-    const PUBLICATION_WAIT: Duration = Duration::from_secs(10);
     let directory = open_store_directory(state)?;
     let clock = provenant_os::clock::SystemClock::new();
-    let budget = WaitBudget::cli(clock.mono_now(), PUBLICATION_WAIT.as_secs())?;
+    let budget = WaitBudget::cli(clock.mono_now(), timeout_seconds)?;
     Ok(directory.lock(
         OsStr::new("store.lock"),
         LockMode::Exclusive,
