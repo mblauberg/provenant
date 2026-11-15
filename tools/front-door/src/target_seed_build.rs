@@ -1,6 +1,6 @@
 //! Build from a pinned remote-tracking commit in a disposable host checkout.
 use provenant_config::{CargoBuildProfile, LaneBuildSettings};
-use provenant_core::Clock;
+use provenant_core::{Clock, GitOid};
 use provenant_os::exec::{ExecError, ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_run::target_seed::{self, Manifest};
 use std::{
@@ -145,7 +145,117 @@ fn checkout_commit(project: &Path, checkout: &Path, commit: &str) -> Result<()> 
 /// The pinned remote-tracking commit every seed build starts from: the
 /// project's declared verify base (`verify.base` in the port table), so a
 /// repository with another remote or default branch needs no `origin/main`.
-fn verify_base(host_state: &Path, project: &Path) -> Result<(String, String)> {
+struct VerifyBase {
+    commit: String,
+    project_key: String,
+    workspace: PathBuf,
+    toolchain_files: Vec<(PathBuf, Vec<u8>)>,
+}
+
+fn read_verify_base_file(
+    repo: &provenant_confinement::ReadOnlyRepo,
+    executor: &dyn Executor,
+    utility: &provenant_confinement::UtilityRuntime,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+    tree: GitOid,
+    path: &Path,
+) -> Result<Option<Vec<u8>>> {
+    use provenant_confinement::utility::{GitObjectKind, run_read_utility};
+    let Some(oid) = verify_base_file_blob(repo, executor, utility, budget, cancel, tree, path)?
+    else {
+        return Ok(None);
+    };
+    let blob = run_read_utility(
+        executor,
+        provenant_confinement::GitRead::RawObject {
+            kind: GitObjectKind::Blob,
+            oid,
+        },
+        repo,
+        utility,
+        budget,
+        cancel,
+    )
+    .map_err(|error| seed_error("reading verify-base toolchain pin", &error))?;
+    if blob.termination != Termination::Exit(0)
+        || blob.timed_out
+        || blob.stdout.truncated
+        || blob.stdout.read_failed
+    {
+        return Err(io::Error::other("reading verify-base toolchain pin failed").into());
+    }
+    if blob.stdout.bytes.len() > 16 * 1024 {
+        return Err(io::Error::other("verify-base toolchain pin is too large").into());
+    }
+    Ok(Some(blob.stdout.bytes))
+}
+
+fn verify_base_file_blob(
+    repo: &provenant_confinement::ReadOnlyRepo,
+    executor: &dyn Executor,
+    utility: &provenant_confinement::UtilityRuntime,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+    tree: GitOid,
+    path: &Path,
+) -> Result<Option<GitOid>> {
+    use provenant_confinement::{repo::RepoPath, utility::run_read_utility};
+    let path = path
+        .to_str()
+        .ok_or_else(|| io::Error::other("verify-base path is not UTF-8"))?;
+    let pathspec = RepoPath::new(path)?;
+    let listing = run_read_utility(
+        executor,
+        provenant_confinement::GitRead::TreeEntries {
+            oid: tree,
+            prefix: pathspec,
+        },
+        repo,
+        utility,
+        budget,
+        cancel,
+    )
+    .map_err(|error| seed_error("reading verify-base paths", &error))?;
+    if listing.termination != Termination::Exit(0)
+        || listing.timed_out
+        || listing.stdout.truncated
+        || listing.stdout.read_failed
+    {
+        return Err(io::Error::other("reading verify-base paths failed").into());
+    }
+    let mut entries = listing
+        .stdout
+        .bytes
+        .split(|byte| *byte == 0)
+        .filter(|line| !line.is_empty());
+    let Some(entry) = entries.next() else {
+        return Ok(None);
+    };
+    if entries.next().is_some() {
+        return Err(io::Error::other("verify-base path is ambiguous").into());
+    }
+    let Some(separator) = entry.iter().position(|byte| *byte == b'\t') else {
+        return Err(io::Error::other("verify-base entry is invalid").into());
+    };
+    let metadata = std::str::from_utf8(&entry[..separator])?;
+    if &entry[separator + 1..] != path.as_bytes() {
+        return Err(io::Error::other("verify-base path did not match").into());
+    }
+    let mut fields = metadata.split_ascii_whitespace();
+    let mode = fields.next();
+    let kind = fields.next();
+    let oid = fields.next();
+    if fields.next().is_some() || !matches!(mode, Some("100644" | "100755")) || kind != Some("blob")
+    {
+        return Err(io::Error::other("verify-base path is not a regular file").into());
+    }
+    Ok(Some(GitOid::parse(oid.ok_or_else(|| {
+        io::Error::other("verify-base blob is missing")
+    })?)?))
+}
+
+fn verify_base(host_state: &Path, project: &Path, workspace: &Path) -> Result<VerifyBase> {
     use provenant_confinement::{
         repo::GitRefName,
         utility::{UtilityBudget, UtilityRuntime},
@@ -168,9 +278,53 @@ fn verify_base(host_state: &Path, project: &Path) -> Result<(String, String)> {
     let reference = GitRefName::remote_tracking(&base)?;
     let commit = facts
         .resolve_read_commit(&repo, &executor, &utility, budget, reference, &cancel)
-        .map_err(|error| seed_error("resolving verify base", &error))?
-        .to_string();
-    Ok((commit, project_key))
+        .map_err(|error| seed_error("resolving verify base", &error))?;
+    let tree = facts
+        .resolve_read_tree(&repo, &executor, &utility, budget, commit, &cancel)
+        .map_err(|error| seed_error("reading verify-base tree", &error))?;
+    let cargo_manifest = workspace.join("Cargo.toml");
+    if verify_base_file_blob(
+        &repo,
+        &executor,
+        &utility,
+        budget,
+        &cancel,
+        tree,
+        &cargo_manifest,
+    )?
+    .is_none()
+    {
+        return Err(io::Error::other(
+            "verify base has no Cargo manifest at the selected workspace",
+        )
+        .into());
+    }
+    let mut toolchain_files = Vec::new();
+    let mut directory = workspace.to_path_buf();
+    loop {
+        let mut found_in_directory = false;
+        for name in ["rust-toolchain", "rust-toolchain.toml"] {
+            let path = directory.join(name);
+            if let Some(bytes) =
+                read_verify_base_file(&repo, &executor, &utility, budget, &cancel, tree, &path)?
+            {
+                found_in_directory = true;
+                toolchain_files.push((path, bytes));
+            }
+        }
+        if found_in_directory {
+            break;
+        }
+        if !directory.pop() {
+            break;
+        }
+    }
+    Ok(VerifyBase {
+        commit: commit.to_string(),
+        project_key,
+        workspace: workspace.to_path_buf(),
+        toolchain_files,
+    })
 }
 
 /// What a refresh did.
@@ -178,7 +332,8 @@ fn verify_base(host_state: &Path, project: &Path) -> Result<(String, String)> {
 pub enum Refresh {
     /// This project has no selected Cargo workspace; nothing to seed.
     NotCargo,
-    /// A complete generation for this repository matches the commit, compiler and Cargo profile.
+    /// A complete generation for this repository matches its verify-base commit,
+    /// compiler and effective Cargo profile.
     Current,
     /// Another host seed build holds the build lock; nothing was started.
     Busy,
@@ -193,6 +348,100 @@ struct GenerationIdentity {
     rustc_vv: String,
     host_triple: String,
     cargo_profile: CargoBuildProfile,
+}
+
+fn workspace_relative(state: &Path, project: &Path) -> Result<Option<PathBuf>> {
+    let Some(workspace) = target_seed::cargo_build_directory(project, state)? else {
+        return Ok(None);
+    };
+    let project = project.canonicalize()?;
+    let relative = workspace
+        .strip_prefix(project)
+        .map_err(|_| io::Error::other("Cargo workspace is outside the project"))?;
+    Ok(Some(relative.to_path_buf()))
+}
+
+enum IdentityRefresh {
+    NotCargo,
+    Busy,
+    Ready {
+        identity: GenerationIdentity,
+        workspace: PathBuf,
+    },
+}
+
+fn is_lock_timeout(error: &(dyn Error + 'static)) -> bool {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        if error
+            .downcast_ref::<provenant_os::fs::FsError>()
+            .is_some_and(|error| matches!(error, provenant_os::fs::FsError::LockTimeout { .. }))
+        {
+            return true;
+        }
+        cause = error.source();
+    }
+    false
+}
+
+fn refresh_identity(state: &Path, project: &Path) -> Result<IdentityRefresh> {
+    refresh_identity_with_probe(state, project, |workspace| {
+        target_seed::rustc_metadata(workspace)
+            .map_err(|error| seed_error("probing verify-base compiler", &error).into())
+    })
+}
+
+fn refresh_identity_with_probe(
+    state: &Path,
+    project: &Path,
+    probe: impl FnOnce(&Path) -> Result<(String, String)>,
+) -> Result<IdentityRefresh> {
+    // A refresh that cannot inspect/publish the shared store should retry on
+    // the normal busy cadence without spawning Git or rustc.
+    let _store_lock = match target_seed::lock_store(state) {
+        Ok(lock) => lock,
+        Err(error) if is_lock_timeout(error.as_ref()) => return Ok(IdentityRefresh::Busy),
+        Err(error) => return Err(error),
+    };
+    let Some(workspace) = workspace_relative(state, project)? else {
+        return Ok(IdentityRefresh::NotCargo);
+    };
+    let base = verify_base(state, project, &workspace)?;
+    let (rustc_vv, host_triple) = rustc_metadata_for_base(state, &base, probe)?;
+    let cargo_profile = cargo_build_profile(state)?;
+    Ok(IdentityRefresh::Ready {
+        identity: GenerationIdentity {
+            project_key: base.project_key,
+            commit: base.commit,
+            rustc_vv,
+            host_triple,
+            cargo_profile,
+        },
+        workspace,
+    })
+}
+
+fn rustc_metadata_for_base(
+    state: &Path,
+    base: &VerifyBase,
+    probe: impl FnOnce(&Path) -> Result<(String, String)>,
+) -> Result<(String, String)> {
+    let store = target_seed::store_path(state);
+    let random = provenant_os::fs::temporary_name()?;
+    let staging = Staging(store.join(format!(".staging-verify-base-{}", random.to_string_lossy())));
+    fs::create_dir(&staging.0)?;
+    let checkout = staging.0.join("checkout");
+    fs::create_dir_all(&checkout)?;
+    for (path, bytes) in &base.toolchain_files {
+        let destination = checkout.join(path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(destination, bytes)?;
+    }
+    let workspace = checkout.join(&base.workspace);
+    fs::create_dir_all(&workspace)?;
+    probe(&workspace)
 }
 
 fn cargo_build_profile(state: &Path) -> Result<CargoBuildProfile> {
@@ -214,24 +463,19 @@ fn cargo_build_profile(state: &Path) -> Result<CargoBuildProfile> {
 #[allow(dead_code)]
 pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
     refuse_in_lane()?;
-    let Some(workspace) = target_seed::cargo_build_directory(project, state)? else {
-        return Ok(Refresh::NotCargo);
-    };
-    let (commit, project_key) = verify_base(state, project)?;
-    let (rustc_vv, host_triple) = target_seed::rustc_metadata(&workspace)?;
-    let cargo_profile = cargo_build_profile(state)?;
-    let identity = GenerationIdentity {
-        project_key,
-        commit,
-        rustc_vv,
-        host_triple,
-        cargo_profile,
+    let (identity, workspace) = match refresh_identity(state, project)? {
+        IdentityRefresh::NotCargo => return Ok(Refresh::NotCargo),
+        IdentityRefresh::Busy => return Ok(Refresh::Busy),
+        IdentityRefresh::Ready {
+            identity,
+            workspace,
+        } => (identity, workspace),
     };
     refresh_with(state, &identity, |stage| {
         build_into(
             stage,
             project,
-            state,
+            &workspace,
             &identity.commit,
             &identity.project_key,
             &identity.cargo_profile,
@@ -334,25 +578,40 @@ fn refuse_in_lane() -> Result<()> {
 
 pub fn build(state: &Path, project: &Path) -> Result<String> {
     refuse_in_lane()?;
-    let (commit, project_key) = verify_base(state, project)?;
+    let workspace = workspace_relative(state, project)?
+        .ok_or_else(|| io::Error::other("project has no selected Cargo workspace"))?;
+    let base = verify_base(state, project, &workspace)?;
     let cargo_profile = cargo_build_profile(state)?;
     publish(state, |stage| {
-        build_into(stage, project, state, &commit, &project_key, &cargo_profile)
+        build_into(
+            stage,
+            project,
+            &workspace,
+            &base.commit,
+            &base.project_key,
+            &cargo_profile,
+        )
     })
 }
 
 fn build_into(
     stage: &Path,
     project: &Path,
-    host_state: &Path,
+    workspace_relative: &Path,
     commit: &str,
     project_key: &str,
     cargo_profile: &CargoBuildProfile,
 ) -> Result<Manifest> {
     let checkout = stage.join("checkout");
     checkout_commit(project, &checkout, commit)?;
-    let worktree = target_seed::cargo_build_directory(&checkout, host_state)?
-        .ok_or_else(|| io::Error::other("project has no selected Cargo workspace"))?;
+    let checkout_root = checkout.canonicalize()?;
+    let worktree = checkout.join(workspace_relative).canonicalize()?;
+    if !worktree.starts_with(&checkout_root) || !worktree.join("Cargo.toml").metadata()?.is_file() {
+        return Err(io::Error::other(
+            "verify base has no Cargo manifest at the selected workspace",
+        )
+        .into());
+    }
     let target = stage.join("target");
     fs::create_dir(&target)?;
     let (rustc_vv, host_triple) = target_seed::rustc_metadata(&worktree)?;
@@ -488,8 +747,27 @@ mod checkout_tests {
         let checkout = temp.path().join("checkout");
         fs::create_dir(&remote).unwrap();
         git(&remote, &["init".into(), "--initial-branch=main".into()]).unwrap();
+        fs::write(
+            remote.join("Cargo.toml"),
+            "[package]\nname='seed-fixture'\nversion='0.1.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        fs::write(
+            remote.join("rust-toolchain.toml"),
+            include_str!("../rust-toolchain.toml"),
+        )
+        .unwrap();
         fs::write(remote.join("file"), "first").unwrap();
-        git(&remote, &["add".into(), "file".into()]).unwrap();
+        git(
+            &remote,
+            &[
+                "add".into(),
+                "Cargo.toml".into(),
+                "rust-toolchain.toml".into(),
+                "file".into(),
+            ],
+        )
+        .unwrap();
         let commit = |message: &str| {
             provenant_os::fixture::run_git(&remote, &["commit", "-am", message]).unwrap();
         };
@@ -516,8 +794,16 @@ mod checkout_tests {
         assert_ne!(pinned, local.trim());
         let state = temp.path().join("state");
         fs::create_dir(&state).unwrap();
-        let (primary_commit, primary_key) = verify_base(&state, &project).unwrap();
-        assert_eq!(primary_commit, pinned);
+        let workspace = workspace_relative(&state, &project).unwrap().unwrap();
+        let primary = verify_base(&state, &project, &workspace).unwrap();
+        assert_eq!(primary.commit, pinned);
+        assert_eq!(
+            primary.toolchain_files,
+            vec![(
+                PathBuf::from("rust-toolchain.toml"),
+                include_str!("../rust-toolchain.toml").as_bytes().to_vec()
+            )]
+        );
         let linked = temp.path().join("linked");
         git(
             &project,
@@ -530,15 +816,122 @@ mod checkout_tests {
             ],
         )
         .unwrap();
-        let (linked_commit, linked_key) = verify_base(&state, &linked).unwrap();
-        assert_eq!(linked_commit, pinned);
-        assert_eq!(linked_key, primary_key);
+        let linked = verify_base(&state, &linked, &workspace).unwrap();
+        assert_eq!(linked.commit, pinned);
+        assert_eq!(linked.project_key, primary.project_key);
         checkout_commit(&project, &checkout, pinned).unwrap();
         assert_eq!(fs::read_to_string(checkout.join("file")).unwrap(), "second");
         let actual =
             String::from_utf8(git(&checkout, &["rev-parse".into(), "HEAD".into()]).unwrap())
                 .unwrap();
         assert_eq!(actual.trim(), pinned);
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn currentness_uses_the_verify_base_toolchain_pin_not_the_live_checkout_pin() {
+        let temp = tempfile::tempdir().unwrap();
+        let remote = temp.path().join("remote");
+        let project = temp.path().join("project");
+        fs::create_dir(&remote).unwrap();
+        git(&remote, &["init".into(), "--initial-branch=main".into()]).unwrap();
+        fs::write(
+            remote.join("Cargo.toml"),
+            "[package]\nname='seed-fixture'\nversion='0.1.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        fs::write(
+            remote.join("rust-toolchain.toml"),
+            include_str!("../rust-toolchain.toml"),
+        )
+        .unwrap();
+        git(
+            &remote,
+            &[
+                "add".into(),
+                "Cargo.toml".into(),
+                "rust-toolchain.toml".into(),
+            ],
+        )
+        .unwrap();
+        provenant_os::fixture::run_git(&remote, &["commit", "-m", "verify base"]).unwrap();
+        git(
+            temp.path(),
+            &[
+                "clone".into(),
+                "--".into(),
+                remote.as_os_str().into(),
+                project.as_os_str().into(),
+            ],
+        )
+        .unwrap();
+        fs::write(
+            project.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = 'unavailable-seed-fixture-toolchain'\n",
+        )
+        .unwrap();
+        git(&project, &["add".into(), "rust-toolchain.toml".into()]).unwrap();
+        provenant_os::fixture::run_git(&project, &["commit", "-m", "live toolchain change"])
+            .unwrap();
+
+        let state = temp.path().join("state");
+        fs::create_dir(&state).unwrap();
+        let result = refresh_identity_with_probe(&state, &project, |probe| {
+            let pin = fs::read_to_string(probe.join("rust-toolchain.toml"))?;
+            assert_eq!(pin, include_str!("../rust-toolchain.toml"));
+            Ok((format!("version selected by {pin}"), "fixture-host".into()))
+        })
+        .unwrap();
+        let IdentityRefresh::Ready {
+            identity,
+            workspace,
+        } = result
+        else {
+            panic!("verify-base Cargo workspace should be refreshable")
+        };
+        let live_pin = fs::read_to_string(project.join("rust-toolchain.toml")).unwrap();
+        assert!(live_pin.contains("unavailable-seed-fixture-toolchain"));
+        assert_ne!(live_pin, include_str!("../rust-toolchain.toml"));
+        assert_eq!(workspace, PathBuf::new());
+        let base_commit =
+            String::from_utf8(git(&remote, &["rev-parse".into(), "main".into()]).unwrap()).unwrap();
+        assert_eq!(identity.commit, base_commit.trim());
+        publish(&state, |stage| {
+            fs::create_dir(stage.join("target"))?;
+            Ok(Manifest {
+                project_key: identity.project_key.clone(),
+                rustc_vv: identity.rustc_vv.clone(),
+                host_triple: identity.host_triple.clone(),
+                commit: identity.commit.clone(),
+                profile: "dev".into(),
+                cargo_profile: identity.cargo_profile.clone(),
+                features: vec![],
+                flags: vec![],
+            })
+        })
+        .unwrap();
+        assert_eq!(
+            refresh_with(&state, &identity, |_| {
+                panic!("the verify-base seed is current despite the live checkout pin")
+            })
+            .unwrap(),
+            Refresh::Current
+        );
+    }
+
+    #[test]
+    fn store_lock_contention_is_busy_before_workspace_or_compiler_probe() {
+        let state = tempfile::tempdir().unwrap();
+        let project = state.path().join("not-a-repository");
+        let _lock = target_seed::lock_store(state.path()).unwrap();
+        let mut probed = false;
+        let result = refresh_identity_with_probe(state.path(), &project, |_| {
+            probed = true;
+            Ok(("unexpected rustc invocation".into(), "host".into()))
+        })
+        .unwrap();
+        assert!(matches!(result, IdentityRefresh::Busy));
+        assert!(!probed, "compiler probe must not run while store is locked");
     }
 }
 
