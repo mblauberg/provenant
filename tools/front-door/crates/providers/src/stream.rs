@@ -58,7 +58,7 @@ pub enum ProviderEvent {
     Error,
     TransientError,
     Terminal,
-    /// Claude assistant text, held by the stream state as a fallback answer.
+    /// Claude or Cursor assistant text, held by the stream state as a fallback answer.
     /// It never leaves the stream state.
     AssistantText(String),
     /// A tool call or tool result. It invalidates earlier assistant text as the
@@ -333,9 +333,11 @@ impl StreamState {
                     self.last_assistant_text = Some(text.clone());
                 }
                 ProviderEvent::ToolActivity => self.last_assistant_text = None,
-                ProviderEvent::Text(text) if self.adapter == "claude" => {
+                ProviderEvent::Text(text) if matches!(self.adapter, "claude" | "cursor") => {
                     self.result_text_seen |= !text.trim().is_empty();
-                    if let Some(model) = self.resolve_answer_model(text)? {
+                    if self.adapter == "claude"
+                        && let Some(model) = self.resolve_answer_model(text)?
+                    {
                         answer_model = Some(model);
                     }
                 }
@@ -472,13 +474,15 @@ impl StreamState {
         }
         // Recover only a clean, complete terminal stream, using the same
         // answer identity checks as an ordinary result event.
-        if self.adapter == "claude"
+        if matches!(self.adapter, "claude" | "cursor")
             && status == OutcomeStatus::Success
             && !self.early_stop
             && !self.result_text_seen
             && let Some(text) = self.last_assistant_text.take()
         {
-            if let Some(model) = self.resolve_answer_model(&text)? {
+            if self.adapter == "claude"
+                && let Some(model) = self.resolve_answer_model(&text)?
+            {
                 final_events.push(ProviderEvent::Model(model));
             }
             final_events.push(ProviderEvent::Text(text));

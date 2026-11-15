@@ -315,6 +315,8 @@ enum Event {
         message: Message,
         session_id: String,
     },
+    #[serde(rename = "tool_call")]
+    ToolCall,
     #[serde(rename = "result")]
     Result {
         session_id: String,
@@ -371,13 +373,20 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             session_id,
         } if message.role == "assistant" => {
             let mut events = vec![E::Session(session_id)];
-            for content in message.content {
-                if let Content::Text { text } = content {
-                    events.push(E::Text(text));
-                }
+            let text: String = message
+                .content
+                .iter()
+                .filter_map(|content| match content {
+                    Content::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            if !text.trim().is_empty() {
+                events.push(E::AssistantText(text));
             }
             events
         }
+        Event::ToolCall => vec![E::ToolActivity],
         Event::Result {
             session_id,
             subtype,
