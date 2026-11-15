@@ -162,8 +162,11 @@ Keep these rules when your tooling and Provenant share a checkout:
 
 - Do not read or write Provenant's state root or run directories; use the
   commands above.
-- In a lane, `HOME` is the attempt's private home, not yours. Do not assume
-  your dotfiles or credentials are there.
+- A lane's `HOME` is selected during provider launch preparation. Unsandboxed
+  lanes use the caller's home by default; a provider or selected account may
+  use an account-specific or private home in either mode. Provider caches and
+  credentials may live elsewhere, so check the provider's runbook before
+  relying on a particular path.
 - Use `PROVENANT_GIT` for Git in a lane when it is set.
 - Treat an unset variable as "not in a lane", never as an error. Lanes started
   outside a project, or read-only lanes, set fewer variables; the contract's
