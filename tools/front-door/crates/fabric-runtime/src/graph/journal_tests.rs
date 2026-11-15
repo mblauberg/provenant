@@ -56,7 +56,8 @@ fn stored_fixture() -> StoredCheckpoint {
         .join("fabric/graphs")
         .join(project.to_string())
         .join("graph-g-test.json");
-    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    let bytes = std::fs::read(path).unwrap();
+    decode_checkpoint_in(&journal.directory, &bytes, "g-test").unwrap()
 }
 
 #[test]
@@ -219,8 +220,7 @@ fn interrupted_terminal_collection_resumes_derived_cleanup() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = std::fs::canonicalize(temp.path()).unwrap();
-    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.clone());
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
     let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
     let project = ProjectId::from_bytes([1; 16]);
     let clock = SystemClock::new();
@@ -232,7 +232,7 @@ fn interrupted_terminal_collection_resumes_derived_cleanup() {
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
 
-    let directory = base.join("fabric/graphs").join(project.to_string());
+    let directory = root.as_path().join("fabric/graphs").join(project.to_string());
     let prompt_blobs = || {
         std::fs::read_dir(&directory)
             .unwrap()
@@ -1513,7 +1513,7 @@ fn bound_attempt_manifest_survives_file_journal_reopen_and_reattachment() {
             .unwrap()
             .unwrap()
             .directory,
-        base_dir
+        inputs.checkout
     );
 }
 

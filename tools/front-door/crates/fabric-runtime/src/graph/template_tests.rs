@@ -146,7 +146,7 @@ fn bundled_leaf_fanout_prompts_contain_only_their_item() {
         for brief in [None, Some("Inspect the requested area")] {
             let mut node = json!({"id":"fanout", "use":name, "over":items});
             if let Some(brief) = brief {
-                node["brief"] = json!(brief);
+                node["prompt"] = json!(brief);
             }
             let compiled = compiler
                 .compile(&node)
@@ -419,7 +419,7 @@ type = "string"
             r#"
 nodes = [
   { id = "a", use = "inner", with = { area = "crates/run" } },
-  { id = "b", use = "task", after = ["a"], brief = "Act on the synthesis" },
+  { id = "b", use = "task", after = ["a"], prompt = "Act on the synthesis" },
 ]
 "#,
         )
@@ -632,7 +632,7 @@ fn delivery_templates_admit_bounded_review_repairs() {
         assert_eq!(slice.name.as_deref(), Some("repair-slice"));
         assert_eq!(slice.node["write_scope"], json!(["src"]));
         assert_eq!(slice.node["worktree"], "/fixture/writer");
-        assert_eq!(slice.node["extensions"][TEMPLATE_FIELD], "implement.fix");
+        assert_eq!(slice.node[TEMPLATE_FIELD], "implement.fix");
         let mut slices = library();
         slices
             .insert(Layer::Inline, "repair-slice", slice.clone())
@@ -994,7 +994,7 @@ custom = true
             Layer::Repository,
             "review.local.explicit",
             r#"
-[node.extensions]
+[node]
 review_lens = "explicit"
 "#,
         )

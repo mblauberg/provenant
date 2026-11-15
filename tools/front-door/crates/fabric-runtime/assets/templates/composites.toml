@@ -119,7 +119,7 @@ min_ok = { type = "integer", default = 1, min = 1 }
 
 [task-fan-out-synthesise]
 nodes = [
-  { id = "tasks", use = "task-fan-out", with = { items = "${items}", min_ok = "${min_ok}", prompt = "${brief}" } },
+  { id = "tasks", use = "task-fan-out", with = { items = "${items}", min_ok = "${min_ok}", brief = "${brief}" } },
   { id = "synthesis", use = "synthesise", after = ["tasks"], inputs = [{ node = "tasks", outputs = ["result"] }] },
 ]
 [task-fan-out-synthesise.parameters]
