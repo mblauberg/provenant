@@ -1059,12 +1059,14 @@ pub(crate) mod peer_tests {
             )?;
             let head = if lane_commit {
                 let lane = info.path.to_str().ok_or("lane path")?;
-                let output = rig.execute(
-                    &git,
-                    &["-C", lane, "commit", "--allow-empty", "-qm", "lane work"],
-                    None,
-                )?;
-                assert_eq!(crate::worktree_tests::support::code(&output), 0);
+                std::fs::write(info.path.join("lane-work.txt"), "lane work")?;
+                for args in [
+                    vec!["-C", lane, "add", "lane-work.txt"],
+                    vec!["-C", lane, "commit", "-qm", "lane work"],
+                ] {
+                    let output = rig.execute(&git, &args, None)?;
+                    assert_eq!(crate::worktree_tests::support::code(&output), 0);
+                }
                 let output = rig.execute(&git, &["-C", lane, "rev-parse", "HEAD"], None)?;
                 String::from_utf8(output.stdout.bytes)?
                     .trim()
