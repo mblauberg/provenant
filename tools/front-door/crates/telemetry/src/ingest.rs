@@ -632,7 +632,13 @@ fn read_transcript(
         // its timestamp is excluded or unavailable. Stream repeats do not.
         let observed_reply = if last_reply.as_ref() != Some(&key.1) {
             last_reply = Some(key.1.clone());
-            std::mem::take(&mut reply)
+            // The flushed context moves to its row; the cursor keeps the
+            // opaque extensions of its own reply record.
+            let fresh = crate::signals::ReplyContext {
+                extra: reply.extra.clone(),
+                ..Default::default()
+            };
+            std::mem::replace(&mut reply, fresh)
         } else {
             crate::signals::ReplyContext::default()
         };

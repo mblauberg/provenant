@@ -769,7 +769,7 @@ fn incremental_ingest_resumes_complete_lines_and_recovers_replacements() -> Resu
     drop(file);
     // Replacing a transcript invalidates its cursor, even when it grows.
     let replacement = message("m3", at, 5, 0, 0, 7);
-    std::fs::remove_file(f.dir("claude").join(path))?;
+    // The rewrite is in place, so the file identity is stable on every platform.
     f.write("claude", path, &replacement)?;
     assert_eq!(run()?.added, 1);
     assert_eq!(read_rows(&f.roots, &RowFilter::default())?.len(), 3);
@@ -787,13 +787,10 @@ fn incremental_ingest_resumes_complete_lines_and_recovers_replacements() -> Resu
             .ok_or_else(|| std::io::Error::other("missing replacement inode"))?,
     );
     assert_eq!(rewritten["future_cursor_store"], 10);
-    if cursor_identity == replacement_identity {
-        assert_eq!(rewritten_cursor["future_cursor"], 11);
-        assert_eq!(rewritten_cursor["reply"]["future_reply"], 12);
-    } else {
-        assert!(rewritten_cursor.get("future_cursor").is_none());
-        assert!(rewritten_cursor["reply"].get("future_reply").is_none());
-    }
+    // A stable identity keeps the cursor's opaque extensions across the reset.
+    assert_eq!(cursor_identity, replacement_identity);
+    assert_eq!(rewritten_cursor["future_cursor"], 11);
+    assert_eq!(rewritten_cursor["reply"]["future_reply"], 12);
     let segment_bytes = std::fs::read(&segment_path)?;
     let rewritten_row: serde_json::Value = serde_json::from_slice(
         segment_bytes
