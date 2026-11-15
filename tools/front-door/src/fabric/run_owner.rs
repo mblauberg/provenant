@@ -1484,13 +1484,8 @@ impl BinaryRunOwner<'_> {
                 let mut observation =
                     crate::status_wait::LocalObservation::subscribe(&event_paths, cadence);
                 let remote_pending = !remote_batches.is_empty();
-                let observation_extra = |observation: &crate::status_wait::LocalObservation| {
-                    let mut extra = provenant_records::ExtraFields::default();
-                    extra.insert(
-                        "observation".into(),
-                        serde_json::Value::String(observation.report(remote_pending)),
-                    );
-                    extra
+                let observation_report = |observation: &crate::status_wait::LocalObservation| {
+                    Some(observation.report(remote_pending))
                 };
                 // SQLite events can precede commit visibility and the shared
                 // hint is lossy under contention; deadline results get one final
@@ -1532,7 +1527,7 @@ impl BinaryRunOwner<'_> {
                                 condition,
                                 attempts,
                                 true,
-                                observation_extra(&observation),
+                                observation_report(&observation),
                                 refresh_local,
                             );
                         }
@@ -1580,7 +1575,7 @@ impl BinaryRunOwner<'_> {
                                                 condition,
                                                 attempts,
                                                 true,
-                                                observation_extra(&observation),
+                                                observation_report(&observation),
                                                 refresh_local,
                                             )
                                         }
@@ -1628,7 +1623,7 @@ impl BinaryRunOwner<'_> {
                             condition,
                             attempts,
                             timed_out,
-                            observation_extra(&observation),
+                            observation_report(&observation),
                             refresh_local,
                         );
                     }

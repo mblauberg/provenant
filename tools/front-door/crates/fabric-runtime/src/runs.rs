@@ -116,6 +116,8 @@ pub enum RunResult {
     Wait {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation: Option<String>,
         condition: WaitCondition,
         #[serde(with = "attempts_wire")]
         attempts: Vec<AttemptRecord>,
@@ -265,7 +267,7 @@ pub fn finish_wait_snapshot(
     condition: WaitCondition,
     mut attempts: Vec<AttemptRecord>,
     expired: bool,
-    extra: provenant_records::ExtraFields,
+    observation: Option<String>,
     refresh_local: impl FnOnce(&mut [AttemptRecord]) -> Result<(), FacadeError>,
 ) -> Result<RunResult, FacadeError> {
     if expired {
@@ -273,7 +275,8 @@ pub fn finish_wait_snapshot(
     }
     let satisfied = wait_satisfied(condition, attempts.iter().map(|record| &record.state));
     Ok(RunResult::Wait {
-        extra,
+        extra: Default::default(),
+        observation,
         condition,
         attempts,
         satisfied,
@@ -402,6 +405,28 @@ mod tests {
             summary["visible_extension"],
             serde_json::json!({"kept": true})
         );
+    }
+
+    #[test]
+    fn wait_observation_round_trips_and_rejects_wrong_types() {
+        for observation in [None, Some("event subscription".to_owned())] {
+            let result = finish_wait_snapshot(
+                WaitCondition::Any,
+                Vec::new(),
+                false,
+                observation.clone(),
+                |_| Ok(()),
+            )
+            .unwrap();
+            let mut value = serde_json::to_value(&result).unwrap();
+            value["future_observation"] = serde_json::json!({"source": "newer minor"});
+            let decoded: RunResult = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+            for malformed in [serde_json::json!(false), serde_json::json!(7), serde_json::json!({})] {
+                value["observation"] = malformed;
+                assert!(serde_json::from_value::<RunResult>(value.clone()).is_err());
+            }
+        }
     }
 
     #[test]
