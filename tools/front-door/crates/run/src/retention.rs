@@ -18,6 +18,7 @@ const EXPIRED: &str = AttemptFile::ProviderStateExpired.name();
 const STATE: &str = AttemptFile::ProviderState.name();
 const HISTORY: &str = AttemptFile::ProviderHistory.name();
 pub const TOMBSTONE: &str = ".provider-gc-";
+const PAYLOAD_LOW_WATER_RATIO: (u64, u64) = (3, 4);
 
 // These are fetched or generated again by Codex at startup. Sessions and
 // history databases deliberately do not appear here. Other adapters need
@@ -706,7 +707,9 @@ impl RunStore {
         if !self.root.metadata()?.same_identity(&expected.metadata()?) {
             return Err(RunError::unsafe_path(".", PathCheck::Identity));
         }
-        let low_water = (u128::from(cap_bytes) * 3 / 4) as u64;
+        let (numerator, denominator) = PAYLOAD_LOW_WATER_RATIO;
+        let low_water =
+            (u128::from(cap_bytes) * u128::from(numerator) / u128::from(denominator)) as u64;
         let mut report = PayloadReport {
             cap_bytes,
             low_water_bytes: low_water,
@@ -1380,12 +1383,7 @@ fn dispose(
     };
     if !dry_run {
         if metadata.kind == FileKind::Directory {
-            let detached = OsString::from(format!(
-                "{TOMBSTONE}{:016x}{:016x}-{}",
-                metadata.device,
-                metadata.inode,
-                name.to_string_lossy()
-            ));
+            let detached = tombstone_name(metadata.device, metadata.inode, name);
             parent.rename_noreplace(name, parent, &detached)?;
             parent.sync()?;
             remove_detached(parent, &detached, metadata.device, metadata.inode)?;
@@ -1396,6 +1394,13 @@ fn dispose(
     }
     report.removed.push(PathBuf::from(name));
     Ok(())
+}
+
+fn tombstone_name(device: u64, inode: u64, original: &OsStr) -> OsString {
+    OsString::from(format!(
+        "{TOMBSTONE}{device:016x}{inode:016x}-{}",
+        original.to_string_lossy()
+    ))
 }
 
 fn retry_tombstones(
@@ -1469,6 +1474,17 @@ fn remove_contents(tree: &PayloadTree, depth: usize) -> Result<()> {
         }
     }
     Ok(())
+}
+
+impl RunStore {
+    pub(crate) fn temporary_retained(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
+        call.check()?;
+        Ok(self.db.query_row(
+            "SELECT tmp_retained FROM attempts WHERE id=?1 AND project=?2",
+            rusqlite::params![id.to_string(), self.context.project_id.to_string()],
+            |row| row.get(0),
+        )?)
+    }
 }
 
 #[cfg(test)]
@@ -1636,7 +1652,14 @@ mod tests {
         let root = Directory::open_anchor(context.state_root.as_path())?;
         let now =
             WallTime::from_micros(200 + age).map_err(|_| RunError::Validation("fixture time"))?;
-        let mut report = store.gc_provider_state(&root, provider_state_days, now, dry_run, call)?;
+        let mut report = store.gc_provider_state_with_logs(
+            &root,
+            provider_state_days,
+            logs_retention_days(),
+            now,
+            dry_run,
+            call,
+        )?;
         let mut scratch = store.gc_temporary(&root, scratch_days, now, dry_run, call)?;
         report.removed.append(&mut scratch.removed);
         report.tightened.append(&mut scratch.tightened);
@@ -1648,33 +1671,16 @@ mod tests {
         Ok(report)
     }
 
-    #[test]
-    fn gc_repairs_open_claude_config_and_expires_state() -> TestResult {
-        let (_temp, context, store, input, attempt) = seeded()?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        withdraw(&store, &input, &call)?;
-        let config = attempt.join("provider-state/candidate-0/claude-config");
-        fs::set_permissions(&config, fs::Permissions::from_mode(0o755))?;
+    fn logs_retention_days() -> u64 {
+        provenant_config::RetentionSettings::default().logs_days
+    }
 
-        let preview = sweep(&store, &context, 7, DAY_MICROS, true, &call)?;
-        assert!(preview.errors.is_empty(), "{:?}", preview.errors);
-        assert_eq!(preview.tightened, vec![config.clone()]);
-        assert_eq!(fs::metadata(&config)?.permissions().mode() & 0o777, 0o755);
-        assert!(config.join(".credentials.json").exists());
-        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
-        assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert_eq!(report.tightened, vec![config.clone()]);
-        assert_eq!(fs::metadata(&config)?.permissions().mode() & 0o777, 0o700);
-        assert!(!config.join(".credentials.json").exists());
-        let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
-        assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert!(!attempt.join("provider-state").exists());
-        Ok(())
+    fn logs_retention_age() -> i64 {
+        DAY_MICROS.saturating_mul(logs_retention_days() as i64)
     }
 
     #[test]
-    fn gc_expiry_sweep_tightens_open_claude_config_itself() -> TestResult {
+    fn gc_repairs_open_claude_config_and_expires_state() -> TestResult {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -1685,10 +1691,22 @@ mod tests {
         fs::set_permissions(&config, fs::Permissions::from_mode(0o755))?;
         fs::set_permissions(&other, fs::Permissions::from_mode(0o707))?;
 
+        let preview = sweep(&store, &context, 7, DAY_MICROS, true, &call)?;
+        assert!(preview.errors.is_empty(), "{:?}", preview.errors);
+        assert!(preview.tightened.contains(&config));
+        assert!(preview.tightened.contains(&other));
+        assert_eq!(fs::metadata(&config)?.permissions().mode() & 0o777, 0o755);
+        assert_eq!(fs::metadata(&other)?.permissions().mode() & 0o777, 0o707);
+        assert!(config.join(".credentials.json").exists());
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.tightened.contains(&config));
+        assert!(report.tightened.contains(&other));
+        assert_eq!(fs::metadata(&config)?.permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&other)?.permissions().mode() & 0o777, 0o700);
+        assert!(!config.join(".credentials.json").exists());
         let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert!(report.tightened.contains(&config), "{:?}", report.tightened);
-        assert!(report.tightened.contains(&other), "{:?}", report.tightened);
         assert!(!attempt.join("provider-state").exists());
         Ok(())
     }
@@ -1723,55 +1741,51 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn gc_logs_keep_tail_and_evidence_and_obey_age_custody_and_preview() -> TestResult {
-        let (_temp, context, store, input, attempt) = seeded()?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let mut capture = vec![1; 200_000];
-        capture[200_000 - 65_536..].fill(2);
+    fn logs_fixture() -> std::result::Result<(Seeded, Vec<u8>), Box<dyn std::error::Error>> {
+        let seeded = seeded()?;
+        let attempt = &seeded.4;
+        let tail_bytes = usize::try_from(LOG_TAIL)?;
+        let mut capture = vec![1; tail_bytes * 3];
+        capture[capture.len() - tail_bytes..].fill(2);
         fs::write(attempt.join("stdout.log"), &capture)?;
         fs::write(attempt.join("stderr.log"), "small capture")?;
-
-        assert!(
-            sweep(&store, &context, 7, 31 * DAY_MICROS, false, &call)?
-                .attempt_logs
-                .is_empty()
-        );
-        withdraw(&store, &input, &call)?;
         fs::write(attempt.join("result.md"), "result evidence")?;
         fs::write(attempt.join("process-exit.json"), "exit evidence")?;
+        Ok((seeded, capture))
+    }
+
+    #[test]
+    fn gc_logs_follow_declared_age_and_preview_preserves_source() -> TestResult {
+        let ((_, context, store, input, attempt), capture) = logs_fixture()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let logs_age = logs_retention_age();
         assert!(
-            sweep(&store, &context, 7, 30 * DAY_MICROS - 1, false, &call)?
+            sweep(&store, &context, 7, logs_age - 1, false, &call)?
                 .attempt_logs
                 .is_empty()
         );
-        let preview = sweep(&store, &context, 7, 30 * DAY_MICROS, true, &call)?;
-        assert_eq!(preview.attempt_logs.len(), 1);
-        assert_eq!(preview.attempt_logs[0].bytes, 200_000 - 65_536);
+        let preview = sweep(&store, &context, 7, logs_age, true, &call)?;
+        let removal = preview
+            .attempt_logs
+            .iter()
+            .find(|entry| entry.path.ends_with("stdout.log"))
+            .ok_or("stdout log removal preview")?;
+        assert_eq!(removal.bytes, capture.len() as u64 - LOG_TAIL);
         assert_eq!(fs::read(attempt.join("stdout.log"))?, capture);
         assert!(!attempt.join("stdout.log.tail").exists());
-        let directory = Directory::open_anchor(&attempt)?;
-        let lease = directory.lock(
-            OsStr::new("writer.lock"),
-            LockMode::Exclusive,
-            call.lock_budget(),
-            call.cancel,
-            call.clock,
-        )?;
+        let applied = sweep(&store, &context, 7, logs_age, false, &call)?;
         assert!(
-            sweep(&store, &context, 7, 31 * DAY_MICROS, false, &call)?
+            applied
                 .attempt_logs
-                .is_empty()
+                .iter()
+                .any(|entry| entry.path.ends_with("stdout.log"))
         );
-        drop(lease);
-        let report = sweep(&store, &context, 7, 30 * DAY_MICROS, false, &call)?;
-        assert_eq!(report.attempt_logs.len(), 1);
         assert!(!attempt.join("stdout.log").exists());
-        assert_eq!(fs::read(attempt.join("stdout.log.tail"))?, vec![2; 65_536]);
         assert_eq!(
-            fs::read_to_string(attempt.join("stderr.log"))?,
-            "small capture"
+            fs::read(attempt.join("stdout.log.tail"))?,
+            vec![2; LOG_TAIL as usize]
         );
         assert_eq!(
             fs::read_to_string(attempt.join("result.md"))?,
@@ -1781,10 +1795,40 @@ mod tests {
             fs::read_to_string(attempt.join("process-exit.json"))?,
             "exit evidence"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn gc_logs_wait_for_custody_release_and_keep_other_capture() -> TestResult {
+        let ((_, context, store, input, attempt), _) = logs_fixture()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let directory = Directory::open_anchor(&attempt)?;
+        let lease = directory.lock(
+            OsStr::new("writer.lock"),
+            LockMode::Exclusive,
+            call.lock_budget(),
+            call.cancel,
+            call.clock,
+        )?;
+        let logs_age = logs_retention_age();
         assert!(
-            sweep(&store, &context, 7, 31 * DAY_MICROS, false, &call)?
+            sweep(&store, &context, 7, logs_age, false, &call)?
                 .attempt_logs
                 .is_empty()
+        );
+        assert!(attempt.join("stdout.log").exists());
+        drop(lease);
+        sweep(&store, &context, 7, logs_age, false, &call)?;
+        assert!(!attempt.join("stdout.log").exists());
+        assert_eq!(
+            fs::read_to_string(attempt.join("stderr.log"))?,
+            "small capture"
+        );
+        assert_eq!(
+            fs::read_to_string(attempt.join("result.md"))?,
+            "result evidence"
         );
         Ok(())
     }
@@ -1796,16 +1840,16 @@ mod tests {
         let call = call(&clock, &cancel);
         withdraw(&store, &input, &call)?;
         let directory = Directory::open_anchor(&attempt)?;
-        let capture = vec![b'x'; 200_000];
-        crate::artifacts::seal(&directory, "stderr.log", &capture, 300_000)?;
-        crate::artifacts::seal(&directory, "stderr.log.tail", b"older tail", 65_536)?;
+        let capture = vec![b'x'; usize::try_from(LOG_TAIL)? * 3];
+        crate::artifacts::seal(&directory, "stderr.log", &capture, (LOG_TAIL * 4) as u64)?;
+        crate::artifacts::seal(&directory, "stderr.log.tail", b"older tail", LOG_TAIL)?;
         let read = || {
             store.read_output(
                 input.attempt_id,
                 crate::ArtifactPart::Stderr,
                 crate::ByteRange {
                     offset: 0,
-                    max_bytes: 65_536,
+                    max_bytes: LOG_TAIL,
                 },
                 &context,
                 &call,
@@ -1813,15 +1857,15 @@ mod tests {
         };
         let original = read()?;
         assert!(original.complete);
-        assert_eq!(original.len, 200_000);
-        assert_eq!(original.bytes, vec![b'x'; 65_536]);
-        let report = sweep(&store, &context, 7, 31 * DAY_MICROS, false, &call)?;
+        assert_eq!(original.len, capture.len() as u64);
+        assert_eq!(original.bytes, vec![b'x'; LOG_TAIL as usize]);
+        let report = sweep(&store, &context, 7, logs_retention_age() + 1, false, &call)?;
         assert_eq!(report.attempt_logs.len(), 1, "{report:?}");
         let tail = read()?;
         assert!(!tail.complete);
         assert!(tail.eof);
-        assert_eq!(tail.len, 65_536);
-        assert_eq!(tail.bytes, vec![b'x'; 65_536]);
+        assert_eq!(tail.len, LOG_TAIL);
+        assert_eq!(tail.bytes, vec![b'x'; LOG_TAIL as usize]);
         assert_eq!(
             tail.digest,
             provenant_records::CanonicalV1::file_digest(&tail.bytes)
@@ -1836,6 +1880,7 @@ mod tests {
         let call = call(&clock, &cancel);
         let id = input.attempt_id;
         withdraw(&store, &input, &call)?;
+        let logs_age = logs_retention_age();
 
         let events_before = store.events(0, 64, Some(id), &call)?;
         assert!(
@@ -1843,16 +1888,14 @@ mod tests {
             "seeded terminal attempt must record multiple events"
         );
 
-        // Younger than logs_days (e.g. 29 days): events survive.
-        let young = sweep(&store, &context, 7, 30 * DAY_MICROS - 1, false, &call)?;
+        let young = sweep(&store, &context, 7, logs_age - 1, false, &call)?;
         assert_eq!(young.expired_events, 0);
         assert_eq!(
             store.events(0, 64, Some(id), &call)?.len(),
             events_before.len()
         );
 
-        // Dry run at logs_days (30 days): events survive.
-        let preview = sweep(&store, &context, 7, 30 * DAY_MICROS, true, &call)?;
+        let preview = sweep(&store, &context, 7, logs_age, true, &call)?;
         assert_eq!(preview.expired_events, (events_before.len() - 1) as u64);
         assert_eq!(
             store.events(0, 64, Some(id), &call)?.len(),
@@ -1860,7 +1903,7 @@ mod tests {
         );
 
         // Applied sweep expires intermediate events, retaining the newest row.
-        let applied = sweep(&store, &context, 7, 30 * DAY_MICROS, false, &call)?;
+        let applied = sweep(&store, &context, 7, logs_age, false, &call)?;
         assert_eq!(applied.expired_events, preview.expired_events);
         let retained = store.events(0, 64, Some(id), &call)?;
         assert_eq!(retained.len(), 1);
@@ -1870,7 +1913,7 @@ mod tests {
         );
         for dry_run in [true, false] {
             assert_eq!(
-                sweep(&store, &context, 7, 31 * DAY_MICROS, dry_run, &call)?.expired_events,
+                sweep(&store, &context, 7, logs_age + 1, dry_run, &call)?.expired_events,
                 0
             );
         }
@@ -2197,12 +2240,7 @@ mod tests {
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(report.kept.is_empty(), "{:?}", report.kept);
         assert!(!attempt.join("tmp").exists());
-        let retained: bool = store.db.query_row(
-            "SELECT tmp_retained FROM attempts WHERE id=?1",
-            [id.to_string()],
-            |row| row.get(0),
-        )?;
-        assert!(!retained);
+        assert!(!store.temporary_retained(id, &call)?);
         Ok(())
     }
 
@@ -2241,12 +2279,7 @@ mod tests {
             assert!(!candidate.join("auth.json").exists());
             assert!(!candidate.join("cache").exists());
             assert!(attempt.join(EXPIRED).exists());
-            let retained: bool = store.db.query_row(
-                "SELECT tmp_retained FROM attempts WHERE id=?1",
-                [id.to_string()],
-                |row| row.get(0),
-            )?;
-            assert!(retained);
+            assert!(store.temporary_retained(id, &call)?);
         }
         Ok(())
     }
@@ -2254,6 +2287,7 @@ mod tests {
     #[test]
     fn gc_clears_temporary_retained_only_after_applied_removal_across_projects() -> TestResult {
         let (_temp, mut context, store, input, attempt) = seeded()?;
+        let original_context = context.clone();
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         let id = input.attempt_id;
@@ -2266,27 +2300,16 @@ mod tests {
         // Host GC covers all indexed projects, not just the opening project.
         context.project_id = provenant_core::ProjectId::from_bytes([99; 16]);
         let store = RunStore::open(&context, &call)?;
-        let retained = || -> crate::Result<bool> {
-            Ok(store.db.query_row(
-                "SELECT tmp_retained FROM attempts WHERE id=?1",
-                [id.to_string()],
-                |row| row.get(0),
-            )?)
-        };
+        let original_store = RunStore::open(&original_context, &call)?;
         sweep(&store, &context, 7, 7 * DAY_MICROS, true, &call)?;
-        assert!(retained()?);
+        assert!(original_store.temporary_retained(id, &call)?);
         sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
         assert!(!attempt.join("tmp").exists());
-        assert!(!retained()?);
-        let raw: Vec<u8> = store.db.query_row(
-            "SELECT record FROM attempts WHERE id=?1",
-            [id.to_string()],
-            |row| row.get(0),
-        )?;
-        // The table row stores the decision; receipts are projected on read.
+        assert!(!original_store.temporary_retained(id, &call)?);
+        // The public record API restores receipts projected from the journal.
         let mut stored = terminal;
         stored.settlement_receipts = None;
-        assert_eq!(crate::db::decode_attempt(&raw)?, stored);
+        assert_eq!(original_store.record(id, &call)?, stored);
         Ok(())
     }
 
@@ -2364,28 +2387,30 @@ mod tests {
     }
 
     #[test]
-    fn gc_archives_cursor_chats_before_disposing_private_state() -> TestResult {
-        relocated_history_lifecycle(
-            "cursor",
-            ".cursor/chats",
-            &["project/session/store.db", "project/session/store.db-wal"],
-        )
-    }
-
-    #[test]
-    fn gc_archives_opencode_data_before_disposing_private_state() -> TestResult {
-        relocated_history_lifecycle(
-            "opencode",
-            "data/opencode",
-            &[
-                "opencode.db",
-                "opencode.db-wal",
-                "log/session.log",
-                "storage/message/session.json",
-                "snapshot/project/HEAD",
-                "shell/session.sh",
-            ],
-        )
+    fn gc_archives_provider_history_before_disposing_private_state() -> TestResult {
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "cursor",
+                ".cursor/chats",
+                &["project/session/store.db", "project/session/store.db-wal"],
+            ),
+            (
+                "opencode",
+                "data/opencode",
+                &[
+                    "opencode.db",
+                    "opencode.db-wal",
+                    "log/session.log",
+                    "storage/message/session.json",
+                    "snapshot/project/HEAD",
+                    "shell/session.sh",
+                ],
+            ),
+        ];
+        for (provider, layout, artifacts) in cases {
+            relocated_history_lifecycle(provider, layout, artifacts)?;
+        }
+        Ok(())
     }
 
     fn relocated_history_lifecycle(provider: &str, layout: &str, artifacts: &[&str]) -> TestResult {
@@ -2602,17 +2627,17 @@ mod tests {
             .create(candidate.join("cache"))?;
         fs::write(candidate.join("cache/payload.lock"), "cache")?;
         let metadata = fs::metadata(candidate.join("cache"))?;
-        let cache_tombstone = candidate.join(format!(
-            "{TOMBSTONE}{:016x}{:016x}-cache",
+        let cache_tombstone = candidate.join(tombstone_name(
             metadata.dev(),
-            metadata.ino()
+            metadata.ino(),
+            OsStr::new("cache"),
         ));
         fs::rename(candidate.join("cache"), &cache_tombstone)?;
         let metadata = fs::metadata(candidate.join("sessions"))?;
-        let unapproved = candidate.join(format!(
-            "{TOMBSTONE}{:016x}{:016x}-sessions",
+        let unapproved = candidate.join(tombstone_name(
             metadata.dev(),
-            metadata.ino()
+            metadata.ino(),
+            OsStr::new("sessions"),
         ));
         fs::rename(candidate.join("sessions"), &unapproved)?;
         let host = context
@@ -2636,12 +2661,8 @@ mod tests {
         let forged = candidate.join(format!("{TOMBSTONE}{:032x}-cache", 0));
         fs::DirBuilder::new().mode(0o700).create(&forged)?;
         fs::write(forged.join("keep"), "keep")?;
-        assert_eq!(
-            sweep(&store, &context, 7, DAY_MICROS, false, &call)?
-                .errors
-                .len(),
-            1
-        );
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(report.errors.iter().any(|issue| issue.path == forged));
         assert!(forged.join("keep").exists());
         Ok(())
     }
@@ -2720,10 +2741,10 @@ mod tests {
             .create(candidate.join("auth.json"))?;
         fs::write(candidate.join("auth.json/token"), "credential")?;
         let metadata = fs::metadata(candidate.join("auth.json"))?;
-        let tombstone = candidate.join(format!(
-            "{TOMBSTONE}{:016x}{:016x}-auth.json",
+        let tombstone = candidate.join(tombstone_name(
             metadata.dev(),
-            metadata.ino()
+            metadata.ino(),
+            OsStr::new("auth.json"),
         ));
         fs::rename(candidate.join("auth.json"), &tombstone)?;
         let malformed = candidate.join(format!(
@@ -2842,9 +2863,13 @@ mod tests {
     #[test]
     fn payload_pressure_evicts_oldest_first_down_to_low_water() -> TestResult {
         let pair = pair()?;
-        let report = payload(&pair, 400_000, 8 * DAY_MICROS, false, true)?;
+        let cap_bytes = 400_000;
+        let (numerator, denominator) = PAYLOAD_LOW_WATER_RATIO;
+        let expected_low_water =
+            (u128::from(cap_bytes) * u128::from(numerator) / u128::from(denominator)) as u64;
+        let report = payload(&pair, cap_bytes, 8 * DAY_MICROS, false, true)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert_eq!(report.low_water_bytes, 300_000);
+        assert_eq!(report.low_water_bytes, expected_low_water);
         assert_eq!(report.evicted.len(), 1, "{report:?}");
         assert_eq!(report.evicted[0].path, pair.older);
         assert!(report.reclaimed_bytes >= 262_144);
