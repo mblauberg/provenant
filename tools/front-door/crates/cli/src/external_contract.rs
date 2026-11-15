@@ -349,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn contract_cells_normalize_code_spans_but_keep_literal_backticks() {
+    fn contract_cells_normalise_code_spans_but_keep_literal_backticks() {
         assert_eq!(plain_cell("differs from `HOME`."), "differs from HOME.");
         assert_eq!(plain_cell(r"literal \`HOME\`"), r"literal \`HOME\`");
         assert_eq!(plain_cell("unbalanced `HOME"), "unbalanced `HOME");
