@@ -256,6 +256,24 @@ impl AccountRecord {
             capacity_cooldowns: Vec::new(),
         }
     }
+    /// Adopt the current registered scope (adapter and key identify the
+    /// account; a renamed label is adopted) across the record and the scoped
+    /// evidence it holds, keeping each scope's unknown fields.
+    pub fn adopt_account(&mut self, current: &AccountScope) -> AccountScope {
+        let stored = self.account.updated_from(current);
+        self.account = stored.clone();
+        // Each held scope keeps its own unknown fields, not the record's.
+        if let Some(snapshot) = self.snapshot.as_mut() {
+            snapshot.account = snapshot.account.updated_from(current);
+        }
+        for refusal in &mut self.refusals {
+            refusal.account = refusal.account.updated_from(current);
+        }
+        for cooldown in &mut self.capacity_cooldowns {
+            cooldown.account = cooldown.account.updated_from(current);
+        }
+        stored
+    }
     pub fn validate(&self) -> Result<(), QuotaError> {
         self.account.validate()?;
         if self.schema_version != 1 || self.claim.as_ref().is_some_and(|c| !component(&c.token)) {
@@ -413,7 +431,7 @@ impl UpdateIntent {
     pub fn check(&self, current: Option<&AccountRecord>) -> Result<(), QuotaError> {
         self.account.validate()?;
         if current != self.expected.as_ref()
-            || current.is_some_and(|r| !r.account.same_scope(&self.account))
+            || current.is_some_and(|r| !r.account.same_identity(&self.account))
         {
             return Err(QuotaError::Conflict);
         }

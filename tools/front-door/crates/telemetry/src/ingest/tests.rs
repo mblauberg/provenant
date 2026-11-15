@@ -1035,8 +1035,8 @@ fn native_attempt_store_preserves_unknown_versions_and_rejects_ambiguous_links()
 
 #[test]
 fn persisted_ingest_shapes_retain_additive_fields() {
-    let mut identity = serde_json::to_value(AccountIdentity::unknown()).unwrap();
-    identity["future_identity"] = serde_json::json!(1);
+    // AccountIdentity is an ordered identity key, so it carries no extra fields.
+    let identity = serde_json::to_value(AccountIdentity::unknown()).unwrap();
     let mut reply = serde_json::to_value(crate::signals::ReplyContext::default()).unwrap();
     reply["future_reply"] = serde_json::json!(2);
     let mut row = serde_json::json!({

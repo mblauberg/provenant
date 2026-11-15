@@ -238,17 +238,7 @@ pub fn reserve(
     {
         return Err(QuotaError::Conflict);
     }
-    let stored_account = record.account.updated_from(account);
-    record.account = stored_account.clone();
-    if let Some(snapshot) = record.snapshot.as_mut() {
-        snapshot.account = snapshot.account.updated_from(&stored_account);
-    }
-    for refusal in &mut record.refusals {
-        refusal.account = refusal.account.updated_from(&stored_account);
-    }
-    for cooldown in &mut record.capacity_cooldowns {
-        cooldown.account = cooldown.account.updated_from(&stored_account);
-    }
+    let stored_account = record.adopt_account(account);
     record.revision = record
         .revision
         .checked_add(1)
@@ -1371,7 +1361,7 @@ mod tests {
             before_cooldown.account.extra
         );
         assert_eq!(reserved.capacity_cooldowns[0].expires_unix_seconds, 700);
-        let replacement = QuotaSnapshot::test_snapshot(
+        let mut replacement = QuotaSnapshot::test_snapshot(
             renamed,
             QuotaStatus::Available,
             410,
@@ -1383,6 +1373,8 @@ mod tests {
                 resets_unix_seconds: Some(900),
             }],
         );
+        // A fresh probe reports its own details; unknown fields carry over onto them.
+        replacement.details = Some(crate::QuotaDetails::default());
         let done = complete(&reserved, "claim", 420, Ok(replacement), None).unwrap();
         let completed = done.replacement.unwrap();
         assert_eq!(completed.extra, before_record);

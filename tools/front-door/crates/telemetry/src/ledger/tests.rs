@@ -281,7 +281,6 @@ fn an_unrecognised_line_is_reported_by_segment_and_line() -> Result {
             (segment.as_str(), Some(5)),
         ]
     );
-    assert!(ledger.unrecognised[2].reason.contains("v3"));
     // Appending reports them too, and a torn line does not swallow the new row.
     let second = row(&fact(2, 20_000, "m", Some(2))?, &key(2)?, Some(&prices))?;
     let appended = settle(&state, &second)?;

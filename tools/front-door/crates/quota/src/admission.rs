@@ -63,7 +63,7 @@ pub fn record_capacity_cooldown(
     if model.is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
         return Err(QuotaError::Invalid("capacity model"));
     }
-    if current.is_some_and(|record| !record.account.same_scope(account)) {
+    if current.is_some_and(|record| !record.account.same_identity(account)) {
         return Err(QuotaError::Conflict);
     }
     let expires = now
@@ -75,7 +75,7 @@ pub fn record_capacity_cooldown(
     let mut record = current
         .cloned()
         .unwrap_or_else(|| AccountRecord::empty(account.clone()));
-    record.account = record.account.updated_from(account);
+    record.adopt_account(account);
     record.validate()?;
     record.revision = record
         .revision
@@ -402,13 +402,13 @@ pub fn record_refusal(
     let model = model
         .strip_prefix(&prefix)
         .ok_or(QuotaError::Invalid("provider refusal model"))?;
-    if current.is_some_and(|record| !record.account.same_scope(account)) {
+    if current.is_some_and(|record| !record.account.same_identity(account)) {
         return Err(QuotaError::Conflict);
     }
     let mut record = current
         .cloned()
         .unwrap_or_else(|| AccountRecord::empty(account.clone()));
-    record.account = record.account.updated_from(account);
+    record.adopt_account(account);
     record.validate()?;
     record.revision = record
         .revision

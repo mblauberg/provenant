@@ -99,7 +99,6 @@ fn usage_event_retains_additive_fields_through_bounded_decode() -> Result {
     )?)?;
     event["future_event"] = serde_json::json!(1);
     event["trace"]["future_trace"] = serde_json::json!(2);
-    event["account_identity"]["future_identity"] = serde_json::json!(3);
     crate::assert_record_round_trip::<super::Event>(event);
     Ok(())
 }
@@ -108,6 +107,8 @@ fn usage_event_retains_additive_fields_through_bounded_decode() -> Result {
 fn recording_on_a_missing_root_creates_nothing() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
+    // The fixture creates the state root; remove the empty directory to model a missing one.
+    std::fs::remove_dir(roots.state.as_path())?;
     record_cli(&roots, CLOCK, "root", 0, 4, None);
     assert!(!roots.state.as_path().exists());
     Ok(())
