@@ -79,6 +79,12 @@ fn fixture() -> Result<TestRig> {
     ] {
         fs::create_dir_all(rig.home.join(name))?;
     }
+    for name in provenant_confinement::cargo::CONFIG_FILES {
+        fs::write(
+            rig.home.join(".cargo").join(name),
+            b"# synthetic host Cargo configuration\n",
+        )?;
+    }
     fs::write(rig.home.join(".rustup/settings.toml"), b"")?;
     for name in provenant_core::CARGO_CREDENTIAL_FILES {
         fs::write(rig.home.join(".cargo").join(name), b"synthetic cargo token")?;
@@ -342,10 +348,23 @@ pub(crate) fn provider() -> Result {
         assert!(!cargo.starts_with(cache));
         fs::create_dir_all(&target)?;
         fs::write(target.join("compose-target"), b"target")?;
-        denied(&cargo.join("registry/compose-home"))?;
+        let registry_entry = cargo.join("registry/compose-home");
+        fs::write(&registry_entry, b"shared Cargo source write")?;
+        assert_eq!(
+            fs::read(&registry_entry)?.as_slice(),
+            b"shared Cargo source write"
+        );
         for name in provenant_core::CARGO_CREDENTIAL_FILES {
             assert!(fs::read(cargo.join(name)).is_err());
             denied(&cargo.join(name))?;
+        }
+        for name in provenant_confinement::cargo::CONFIG_FILES {
+            let config = cargo.join(name);
+            assert_eq!(
+                fs::read(&config)?.as_slice(),
+                b"# synthetic host Cargo configuration\n"
+            );
+            denied(&config)?;
         }
         for name in provenant_confinement::cargo::TRACKING_FILES {
             fs::write(cargo.join(name), b"fixture tracking")?;

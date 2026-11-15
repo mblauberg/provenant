@@ -145,10 +145,10 @@ fn bind_child_directory(
         .next()
         .ok_or(FacadeError::StateCorrupt)?;
     let directory = provenant_os::fs::Directory::open_anchor(&source)
-        .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
+        .map_err(|error| FacadeError::filesystem(&error))?;
     let metadata = directory
         .metadata()
-        .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
+        .map_err(|error| FacadeError::filesystem(&error))?;
     grants.source_identity = Some(provenant_records::run::SourceIdentity {
         device: metadata.device,
         inode: metadata.inode,
@@ -3464,10 +3464,10 @@ impl BoundGraphOwner<'_> {
                                     .into(),
                         })?;
                         let directory = provenant_os::fs::Directory::open_anchor(&source)
-                            .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
+                            .map_err(|error| FacadeError::filesystem(&error))?;
                         let identity = directory
                             .metadata()
-                            .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
+                            .map_err(|error| FacadeError::filesystem(&error))?;
                         let source_identity = provenant_records::run::SourceIdentity {
                             device: identity.device,
                             inode: identity.inode,

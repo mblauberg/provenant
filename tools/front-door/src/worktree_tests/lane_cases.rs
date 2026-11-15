@@ -621,11 +621,17 @@ pub(crate) fn lane_provider() -> Result {
     let output = SystemExecutor::new(1)?
         .execute(options)
         .map_err(|e| format!("lane identity spawn: {e:?}"))?;
+    if code(&output) != 0 {
+        return Err(format!(
+            "lane identity failed (termination={:?}); stdout={}; stderr={}",
+            output.termination,
+            String::from_utf8_lossy(&output.stdout.bytes),
+            String::from_utf8_lossy(&output.stderr.bytes)
+        )
+        .into());
+    }
     std::io::stdout().write_all(&output.stdout.bytes)?;
     std::io::stderr().write_all(&output.stderr.bytes)?;
-    if code(&output) != 0 {
-        return Err("lane identity failed".into());
-    }
     // Exercise the same publisher used by CLI overflow under confinement.
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME")?);
     let assets = PathBuf::from(std::env::var_os("PROVENANT_ROOT").ok_or("assets")?);
