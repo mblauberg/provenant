@@ -15,6 +15,8 @@ fn row() -> LaneRow {
         superseded_by: None,
         cause: None,
         state: "running".into(),
+        presence: None,
+        recorded_state: None,
         exit_code: None,
         reason: None,
         settlement: None,
@@ -190,6 +192,67 @@ fn lane_rows_reject_drift() {
     let mut value = serde_json::to_value(row()).unwrap();
     value["attempt_number"] = json!("1");
     rejected(&schema, value);
+}
+
+#[test]
+fn dead_and_unobservable_writer_projection_is_truthful_and_actionable() -> Result<(), Box<dyn std::error::Error>> {
+    // Spec: docs/specs/cli.md#status-selection
+    let project = crate::ProjectId::from_bytes([9; 16]);
+    let target = crate::WorkKey::new(project, "status-test", "writer", 1)?;
+    let attempt: crate::run::AttemptRecord = serde_json::from_value(json!({
+        "schema_version": 1,
+        "key": target,
+        "attempt_id": crate::AttemptId::from_bytes([2; 16]),
+        "project_id": project,
+        "attempt_number": 1,
+        "revision": 1,
+        "generation": 1,
+        "requested_route": {"kind":"named", "name":"fixture"},
+        "authority_digest": crate::Digest::from_bytes([3; 32]),
+        "queued_at": crate::WallTime::from_micros(1)?,
+        "state": {"state":"running"},
+        "usage": {},
+        "trace": {},
+        "read_only_writable": [],
+        "protected_paths": [],
+        "prompt": {
+            "path":{"encoding":"utf8", "path":"prompt"},
+            "digest":CanonicalV1::file_digest(b"fixture"),
+            "bytes":7,
+            "complete":true,
+            "redacted":false
+        }
+    }))?;
+    let dead = LaneRow::project(
+        &attempt,
+        LaneProjectionFacts {
+            presence: Some(LanePresence::Unattended),
+            stale: Some(true),
+            ..Default::default()
+        },
+    );
+    assert_eq!(dead.state, "unattended");
+    assert_eq!(dead.recorded_state.as_deref(), Some("running"));
+    assert_eq!(dead.presence, Some(LanePresence::Unattended));
+    assert!(dead.reason.as_deref().is_some_and(|reason| {
+        reason.contains("provenant reconcile") && reason.contains(&target.to_string())
+    }));
+
+    let unknown = LaneRow::project(
+        &attempt,
+        LaneProjectionFacts {
+            presence: Some(LanePresence::Unknown),
+            stale: None,
+            ..Default::default()
+        },
+    );
+    assert_eq!(unknown.state, "unknown");
+    assert_eq!(unknown.recorded_state.as_deref(), Some("running"));
+    assert_eq!(unknown.stale, None);
+    assert!(unknown.reason.as_deref().is_some_and(|reason| {
+        reason.contains("cannot be verified") && reason.contains("provenant reconcile")
+    }));
+    Ok(())
 }
 
 #[test]

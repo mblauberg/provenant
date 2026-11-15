@@ -47,6 +47,23 @@ then reads that attempt's custody records.
 - Why: signalling a recycled PID or a sibling's group kills unrelated work.
 - Owner: `crates/supervisor/src/process_os/`, `crates/supervisor/src/custody.rs`
 
+### Read-only writer presence
+
+Status uses the recorded boot, PID and native start identity for the guardian,
+provider and tracked descendants. It reports a writer as live only when the
+guardian or provider's exact identity is present and non-zombie. Declaring the
+holder gone additionally requires a complete process-tree checkpoint with no
+omitted descendants, every tracked descendant absent, and a complete bounded
+host census with no remaining process in the recorded session or groups.
+Missing or malformed checkpoints, reused PIDs without that whole-tree proof,
+inaccessible processes and incomplete censuses are unknown. Status only
+projects these facts; the tick recovery owner queues scoped settlement for
+verified absence, and reconciliation rechecks custody before changing attempt
+state.
+- Why: a dead guardian or recycled PID cannot hide a surviving provider child,
+  and uncertainty must not be turned into a running writer or an unsafe retry.
+- Owner: `crates/supervisor/src/custody.rs`, `crates/run/src/controls.rs`, `src/tick.rs`
+
 ### Guardian holds custody past its owner
 
 The guardian keeps the provider, attempt lock and writer lease after its owner
@@ -263,6 +280,9 @@ worktree, and custody outlives the requesting call. `worktree remove` refuses
 the primary, a live writer or observed process, and has no force. Dirty work
 requires explicit discard, with its recoverable archive captured before removal;
 it deletes a branch only with current landing evidence or explicit discard.
+A persisted writer reservation remains a custody fence when its kernel lock is
+absent: read-only occupancy is unknown until run-owned reconciliation settles
+the attempt, and cache guards refuse the slot without clearing its evidence.
 - Why: removing a tree under a live writer destroys its work.
 - Owner: `crates/confinement/src/worktrees.rs`
 

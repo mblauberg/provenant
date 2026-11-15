@@ -967,6 +967,274 @@ impl ProcessObserver for EmptyNativeWorld {
     }
 }
 
+struct HolderWorld {
+    boot: &'static str,
+    observations: std::collections::BTreeMap<i64, ProcessObservation>,
+    census_facts: Vec<crate::census::ProcessFact>,
+    census_complete: bool,
+}
+impl ProcessObserver for HolderWorld {
+    fn boot_identity(&self) -> std::result::Result<String, crate::census::CensusError> {
+        Ok(self.boot.into())
+    }
+    fn observe(&self, pid: i64) -> ProcessObservation {
+        self.observations.get(&pid).cloned().unwrap_or_else(|| {
+            ProcessObservation::Unknown(crate::census::ObservationIssue::Io)
+        })
+    }
+    fn census(
+        &self,
+        _: usize,
+    ) -> std::result::Result<crate::census::Census, crate::census::CensusError> {
+        let mut facts = self.census_facts.clone();
+        let mut unknown = Vec::new();
+        let mut absent = Vec::new();
+        for (pid, observation) in &self.observations {
+            match observation {
+                ProcessObservation::Present(fact)
+                    if !facts.iter().any(|current| current.identity.pid == *pid) =>
+                {
+                    facts.push(fact.clone());
+                }
+                ProcessObservation::Present(_) => {}
+                ProcessObservation::Absent => absent.push(*pid),
+                ProcessObservation::Unknown(issue) => unknown.push((*pid, *issue)),
+            }
+        }
+        crate::census::Census::from_observations(
+            facts,
+            unknown,
+            absent,
+            self.census_complete,
+            false,
+            crate::census::MAX_CENSUS_ENTRIES,
+        )
+    }
+}
+
+fn process_fact(identity: ProcessIdentity) -> crate::census::ProcessFact {
+    crate::census::ProcessFact {
+        identity,
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: None,
+    }
+}
+
+#[test]
+fn holder_presence_requires_exact_native_process_evidence() -> TestResult {
+    // Spec: docs/specs/supervisor.md#read-only-writer-presence
+    let root = tempfile::tempdir()?;
+    let directory = Directory::open_anchor(root.path())?;
+    let scope = scope();
+    let guardian = ProcessIdentity {
+        boot: "fixture-recorded-boot-v1".into(),
+        pid: 100,
+        native_start: 7,
+        group_id: 100,
+        session_id: 100,
+    };
+    let provider = ProcessIdentity {
+        boot: guardian.boot.clone(),
+        pid: 101,
+        native_start: 8,
+        group_id: 101,
+        session_id: 100,
+    };
+    write_record(
+        &directory,
+        "process.json",
+        &StoredObservation {
+            schema_version: 1,
+            scope,
+            guardian: Some(guardian.clone()),
+            provider: Some(provider.clone()),
+            descendants: Vec::new(),
+            census_complete: true,
+            publication_pending: false,
+            priority: None,
+            extra: Default::default(),
+        },
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+
+    let world = |guardian_observation, provider_observation| HolderWorld {
+        boot: "fixture-recorded-boot-v1",
+        observations: [
+            (guardian.pid, guardian_observation),
+            (provider.pid, provider_observation),
+        ]
+        .into_iter()
+        .collect(),
+        census_facts: Vec::new(),
+        census_complete: true,
+    };
+    let live = world(
+        ProcessObservation::Present(process_fact(guardian.clone())),
+        ProcessObservation::Present(process_fact(provider.clone())),
+    );
+    assert_eq!(
+        observe_holder(&directory, scope, &live),
+        HolderPresence::Live
+    );
+    let provider_only = world(
+        ProcessObservation::Absent,
+        ProcessObservation::Present(process_fact(provider.clone())),
+    );
+    assert_eq!(
+        observe_holder(&directory, scope, &provider_only),
+        HolderPresence::Live,
+        "an exact live provider remains running even when its guardian is absent"
+    );
+
+    let gone = world(ProcessObservation::Absent, ProcessObservation::Absent);
+    assert_eq!(
+        observe_holder(&directory, scope, &gone),
+        HolderPresence::Gone
+    );
+
+    let mut reused_provider = provider.clone();
+    reused_provider.native_start += 1;
+    reused_provider.group_id = 200;
+    reused_provider.session_id = 200;
+    let reused = world(
+        ProcessObservation::Absent,
+        ProcessObservation::Present(process_fact(reused_provider)),
+    );
+    assert_eq!(
+        observe_holder(&directory, scope, &reused),
+        HolderPresence::Gone,
+        "a recycled PID does not keep the original writer alive"
+    );
+
+    let child = ProcessIdentity {
+        boot: guardian.boot.clone(),
+        pid: 102,
+        native_start: 9,
+        group_id: 102,
+        session_id: guardian.session_id,
+    };
+    let child_survives = HolderWorld {
+        boot: "fixture-recorded-boot-v1",
+        observations: [
+            (guardian.pid, ProcessObservation::Absent),
+            (provider.pid, ProcessObservation::Absent),
+        ]
+        .into_iter()
+        .collect(),
+        census_facts: vec![process_fact(child)],
+        census_complete: true,
+    };
+    assert_eq!(
+        observe_holder(&directory, scope, &child_survives),
+        HolderPresence::Unknown,
+        "a surviving child in the recorded writer session prevents a dead classification"
+    );
+
+    let escaped = ProcessIdentity {
+        boot: guardian.boot.clone(),
+        pid: 103,
+        native_start: 10,
+        group_id: 103,
+        session_id: 103,
+    };
+    write_record(
+        &directory,
+        "process.json",
+        &StoredObservation {
+            schema_version: 1,
+            scope,
+            guardian: Some(guardian.clone()),
+            provider: Some(provider.clone()),
+            descendants: vec![escaped.clone()],
+            census_complete: true,
+            publication_pending: false,
+            priority: None,
+            extra: Default::default(),
+        },
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+    let escaped_survives = HolderWorld {
+        boot: "fixture-recorded-boot-v1",
+        observations: [
+            (guardian.pid, ProcessObservation::Absent),
+            (provider.pid, ProcessObservation::Absent),
+            (
+                escaped.pid,
+                ProcessObservation::Present(process_fact(escaped.clone())),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        census_facts: vec![process_fact(escaped)],
+        census_complete: true,
+    };
+    assert_eq!(
+        observe_holder(&directory, scope, &escaped_survives),
+        HolderPresence::Unknown,
+        "a tracked descendant that escaped the provider session prevents a dead classification"
+    );
+
+    write_record(
+        &directory,
+        "process.json",
+        &StoredObservation {
+            schema_version: 1,
+            scope,
+            guardian: Some(guardian.clone()),
+            provider: Some(provider.clone()),
+            descendants: Vec::new(),
+            census_complete: true,
+            publication_pending: false,
+            priority: None,
+            extra: Default::default(),
+        },
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+    let incomplete = HolderWorld {
+        census_complete: false,
+        ..world(ProcessObservation::Absent, ProcessObservation::Absent)
+    };
+    assert_eq!(
+        observe_holder(&directory, scope, &incomplete),
+        HolderPresence::Unknown,
+        "an incomplete host census cannot prove the whole owned tree is gone"
+    );
+
+    let unobservable = world(
+        ProcessObservation::Unknown(crate::census::ObservationIssue::PermissionDenied),
+        ProcessObservation::Absent,
+    );
+    assert_eq!(
+        observe_holder(&directory, scope, &unobservable),
+        HolderPresence::Unknown
+    );
+    Ok(())
+}
+
+#[test]
+fn missing_writer_process_checkpoint_is_unknown() -> TestResult {
+    // Spec: docs/specs/supervisor.md#read-only-writer-presence
+    let root = tempfile::tempdir()?;
+    let directory = Directory::open_anchor(root.path())?;
+    let world = HolderWorld {
+        boot: "fixture-recorded-boot-v1",
+        observations: Default::default(),
+        census_facts: Vec::new(),
+        census_complete: true,
+    };
+    assert_eq!(
+        observe_holder(&directory, scope(), &world),
+        HolderPresence::Unknown,
+        "a Running attempt without its process checkpoint needs inspection"
+    );
+    Ok(())
+}
+
 struct RebootWorld {
     boot: Option<&'static str>,
 }

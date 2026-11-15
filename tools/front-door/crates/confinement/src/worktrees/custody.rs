@@ -866,6 +866,9 @@ pub(crate) fn disk_writer_state(project_state: &Directory, path: &Path) -> Occup
         .metadata_at(OsStr::new(WRITER_LOCK), false)
         .is_err_and(|error| error.is_not_found())
     {
+        if let Err(state) = outstanding_reservation(&directory, path) {
+            return state;
+        }
         return Occupancy::Available;
     }
     let _probe = match provenant_supervisor::custody::writer_observation_guard(&directory) {
@@ -898,6 +901,7 @@ pub fn cache_writer_probe(
     let gate = match directory.metadata_at(OsStr::new(WRITER_LOCK), false) {
         Err(error) if error.is_not_found() => {
             retained_import(&directory).map_err(unknown)?;
+            outstanding_reservation(&directory, path)?;
             return Ok(None);
         }
         Err(error) => return Err(unknown(error.to_string())),
@@ -940,7 +944,32 @@ fn cache_writer_probe_under_gate(
         }
     };
     retained_import(&directory).map_err(unknown)?;
+    outstanding_reservation(&directory, path)?;
     Ok(guard)
+}
+
+/// A reservation is durable recovery evidence even after its writer lock has
+/// disappeared. Observation cannot decide whether it belongs to a live,
+/// unattended, or currently unobservable writer, so it must never project the
+/// slot as free or remove the evidence. Run-owned reconciliation settles it.
+fn outstanding_reservation(slot: &Directory, path: &Path) -> Result<(), Occupancy> {
+    let unknown = |detail: String| Occupancy::custody_unknown(path.to_path_buf(), detail);
+    let listing = provenant_supervisor::custody::list_writer_reservations_in_slot(slot)
+        .map_err(|error| unknown(format!("writer reservations could not be checked: {error}")))?;
+    if let Some(issue) = listing.issues.first() {
+        return Err(unknown(format!(
+            "writer reservation evidence could not be verified at {}: {}; inspect the attempt and run `provenant reconcile` before retrying",
+            issue.reservation.display(),
+            issue.reason
+        )));
+    }
+    if let Some(reservation) = listing.reservations.first() {
+        let attempt = reservation.scope.attempt;
+        return Err(unknown(format!(
+            "writer attempt {attempt} has an unsettled reservation; run `provenant reconcile {attempt}` before retrying"
+        )));
+    }
+    Ok(())
 }
 
 // Supervisor validates exact scoped settlement and run-owned release evidence.
@@ -976,6 +1005,7 @@ pub fn cache_writer_guard(project_state: &Directory, path: &Path) -> Result<Lock
         })?;
     drop(observation);
     retained_import(&directory).map_err(unknown)?;
+    outstanding_reservation(&directory, path)?;
     Ok(guard)
 }
 

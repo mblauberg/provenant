@@ -439,6 +439,93 @@ fn record_steer_admission(
     }
 }
 
+/// Read-only presence projection for one durable Running attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttemptPresence {
+    Live,
+    Unattended,
+    Unknown,
+    Settling,
+}
+
+/// Observe process presence from the attempt's scoped supervisor checkpoint.
+/// A published exit means settlement is pending; missing or unreadable proof
+/// never fabricates a live process.
+pub fn attempt_presence(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+) -> Option<AttemptPresence> {
+    attempt_presence_with_observer(root, record, &SystemProcessObserver)
+}
+
+/// Share one bounded host census across a status page containing multiple
+/// attempts. The caller supplies a read-only native snapshot from this host.
+pub fn attempt_presence_with_census(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+    census: &provenant_supervisor::census::Census,
+) -> Option<AttemptPresence> {
+    attempt_presence_with_observer_and_census(root, record, &SystemProcessObserver, census)
+}
+
+pub(crate) fn attempt_presence_with_observer(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+    observer: &dyn ProcessObserver,
+) -> Option<AttemptPresence> {
+    attempt_presence_inner(root, record, observer, None, false)
+}
+
+pub(crate) fn attempt_presence_with_observer_and_census(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+    observer: &dyn ProcessObserver,
+    census: &provenant_supervisor::census::Census,
+) -> Option<AttemptPresence> {
+    attempt_presence_inner(root, record, observer, Some(census), false)
+}
+
+fn attempt_presence_without_census(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+    observer: &dyn ProcessObserver,
+) -> Option<AttemptPresence> {
+    attempt_presence_inner(root, record, observer, None, true)
+}
+
+fn attempt_presence_inner(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+    observer: &dyn ProcessObserver,
+    census: Option<&provenant_supervisor::census::Census>,
+    census_unavailable: bool,
+) -> Option<AttemptPresence> {
+    if !matches!(record.state, AttemptState::Running { .. }) {
+        return None;
+    }
+    let path = root.join(format!("attempts/{}", record.attempt_id));
+    let Ok(attempt) = provenant_os::fs::Directory::open_anchor(&path) else {
+        return Some(AttemptPresence::Unknown);
+    };
+    match read_sealed(&attempt, "process-exit.json", RECORD_LIMIT) {
+        Ok(Some(_)) => return Some(AttemptPresence::Settling),
+        Ok(None) => {}
+        Err(_) => return Some(AttemptPresence::Unknown),
+    }
+    let holder = if let Some(census) = census {
+        custody::observe_holder_with_census(&attempt, RunStore::scope(record), observer, census)
+    } else if census_unavailable {
+        custody::HolderPresence::Unknown
+    } else {
+        custody::observe_holder(&attempt, RunStore::scope(record), observer)
+    };
+    Some(match holder {
+        custody::HolderPresence::Live => AttemptPresence::Live,
+        custody::HolderPresence::Gone => AttemptPresence::Unattended,
+        custody::HolderPresence::Unknown => AttemptPresence::Unknown,
+    })
+}
+
 /// Whether a running attempt is past its runtime deadline plus the grace.
 pub fn overdue_at(record: &AttemptRecord, now: WallTime) -> bool {
     let (AttemptState::Running { .. }, Some(deadline)) = (&record.state, record.runtime_deadline)
@@ -454,17 +541,14 @@ pub fn overdue_at(record: &AttemptRecord, now: WallTime) -> bool {
 /// exit recorded, so nothing is left to settle it. Read-only; unreadable
 /// state counts as not stale. `root` is the execution state root.
 pub fn holder_absent(root: &std::path::Path, record: &AttemptRecord) -> bool {
-    if !matches!(record.state, AttemptState::Running { .. }) {
-        return false;
-    }
-    let path = root.join(format!("attempts/{}", record.attempt_id));
-    let Ok(attempt) = provenant_os::fs::Directory::open_anchor(&path) else {
-        return false;
-    };
+    attempt_presence(root, record) == Some(AttemptPresence::Unattended)
+}
+
+fn running_attempt_reapable(presence: Option<AttemptPresence>) -> bool {
     matches!(
-        read_sealed(&attempt, "process-exit.json", RECORD_LIMIT),
-        Ok(None)
-    ) && custody::holder_gone(&attempt, RunStore::scope(record), &SystemProcessObserver)
+        presence,
+        Some(AttemptPresence::Unattended | AttemptPresence::Settling)
+    )
 }
 
 /// What reconcile found for one attempt.
@@ -1246,8 +1330,9 @@ mod reboot_tests {
     }
 
     #[test]
-    fn a_running_attempt_with_no_guardian_is_stale_and_reaped()
+    fn a_running_attempt_without_process_checkpoint_stays_unknown()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // Spec: docs/specs/supervisor.md#read-only-writer-presence
         let temp = tempfile::tempdir()?;
         let clock = crate::tests::clock();
         let cancel = provenant_core::CancelToken::new();
@@ -1267,14 +1352,33 @@ mod reboot_tests {
         )?;
         store.claim(id, &clock, &call)?.ok_or("not admitted")?;
         let record = store.record(id, &call)?;
-        assert!(holder_absent(context.state_root.as_path(), &record));
+        assert_eq!(
+            attempt_presence(context.state_root.as_path(), &record),
+            Some(AttemptPresence::Unknown),
+            "a missing process checkpoint cannot prove that the whole writer tree is gone"
+        );
+        assert!(!holder_absent(context.state_root.as_path(), &record));
         let spawned = std::cell::Cell::new(0);
         let reaped = store.reap_with(&call, |_, _| {
             spawned.set(spawned.get() + 1);
             Ok(())
         })?;
-        assert_eq!((reaped, spawned.get()), (1, 1));
+        assert_eq!((reaped, spawned.get()), (0, 0));
         Ok(())
+    }
+
+    #[test]
+    fn running_attempt_recovery_requires_absence_or_durable_exit_evidence() {
+        // Spec: docs/specs/supervisor.md#read-only-writer-presence
+        for presence in [
+            None,
+            Some(AttemptPresence::Live),
+            Some(AttemptPresence::Unknown),
+        ] {
+            assert!(!running_attempt_reapable(presence));
+        }
+        assert!(running_attempt_reapable(Some(AttemptPresence::Unattended)));
+        assert!(running_attempt_reapable(Some(AttemptPresence::Settling)));
     }
 
     #[test]
@@ -4375,11 +4479,60 @@ impl RunStore {
     /// and rejected writers with deferred cleanup. Recovery rechecks custody;
     /// queuing is best effort and leaves live holders alone.
     pub fn reap(&self, call: &Request<'_>) -> Result<usize> {
-        self.reap_with(call, provenant_os::exec::spawn_detached)
+        let observer = SystemProcessObserver;
+        let census = observer
+            .census(provenant_supervisor::census::MAX_CENSUS_ENTRIES)
+            .ok();
+        self.reap_with_census_and_spawn(
+            call,
+            &observer,
+            census.as_ref(),
+            provenant_os::exec::spawn_detached,
+        )
+    }
+    /// Queue recovery using one bounded host census shared by every attempt.
+    /// A failed or incomplete census leaves Running attempts untouched.
+    pub fn reap_with_census(
+        &self,
+        call: &Request<'_>,
+        census: &provenant_supervisor::census::Census,
+    ) -> Result<usize> {
+        self.reap_with_census_and_spawn(
+            call,
+            &SystemProcessObserver,
+            Some(census),
+            provenant_os::exec::spawn_detached,
+        )
+    }
+    /// Continue independent launcher/temporary recovery when host census is
+    /// unavailable. Running attempts remain Unknown and are not queued.
+    pub fn reap_without_census(&self, call: &Request<'_>) -> Result<usize> {
+        self.reap_with_census_and_spawn(
+            call,
+            &SystemProcessObserver,
+            None,
+            provenant_os::exec::spawn_detached,
+        )
     }
     pub(crate) fn reap_with(
         &self,
         call: &Request<'_>,
+        spawn: impl Fn(
+            &[std::ffi::OsString],
+            &std::path::Path,
+        ) -> std::result::Result<(), provenant_os::exec::ExecError>,
+    ) -> Result<usize> {
+        let observer = SystemProcessObserver;
+        let census = observer
+            .census(provenant_supervisor::census::MAX_CENSUS_ENTRIES)
+            .ok();
+        self.reap_with_census_and_spawn(call, &observer, census.as_ref(), spawn)
+    }
+    fn reap_with_census_and_spawn(
+        &self,
+        call: &Request<'_>,
+        observer: &dyn ProcessObserver,
+        census: Option<&provenant_supervisor::census::Census>,
         spawn: impl Fn(
             &[std::ffi::OsString],
             &std::path::Path,
@@ -4416,7 +4569,21 @@ impl RunStore {
                         .and_then(|id| self.record(id, call).ok())
                 })
                 .any(|attempt| match attempt.state {
-                    AttemptState::Running { .. } => true,
+                    AttemptState::Running { .. } => running_attempt_reapable(census.map_or_else(
+                            || attempt_presence_without_census(
+                                self.context.state_root.as_path(),
+                                &attempt,
+                                observer,
+                            ),
+                            |census| {
+                                attempt_presence_with_observer_and_census(
+                                    self.context.state_root.as_path(),
+                                    &attempt,
+                                    observer,
+                                    census,
+                                )
+                            },
+                        )),
                     AttemptState::Starting { .. } => self
                         .attempt_dir(attempt.attempt_id, false)
                         .is_ok_and(|dir| {

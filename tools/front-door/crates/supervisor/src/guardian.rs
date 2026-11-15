@@ -1645,6 +1645,8 @@ impl Driver<'_> {
                     scope: Scope,
                     guardian: &'a ProcessIdentity,
                     provider: Option<&'a ProcessIdentity>,
+                    descendants: &'a [ProcessIdentity],
+                    census_complete: bool,
                     priority: Option<i32>,
                     phase: Phase,
                     stdout_bytes: u64,
@@ -1665,6 +1667,9 @@ impl Driver<'_> {
                     scope: self.reservation.scope,
                     guardian: &self.guardian,
                     provider: self.reservation.provider.as_ref(),
+                    descendants: &self.reservation.descendants,
+                    census_complete: !self.reservation.census_incomplete
+                        && self.reservation.omitted_descendants == 0,
                     priority: child.priority,
                     phase: state.phase(),
                     stdout_bytes: out.outcome().total_bytes,

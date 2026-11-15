@@ -245,16 +245,34 @@ pub(super) fn projected_lanes(
         cwd: &resolved.project,
     };
     let mut seen = std::collections::BTreeSet::new();
-    let mut lanes = Vec::new();
+    let mut attempts = Vec::new();
     for number in numbers {
         for contribution in db.for_pr(&tracker.pr(*number), &call).ok()? {
             if !seen.insert(contribution.attempt) {
                 continue;
             }
-            lanes.push(
-                provenant_cli::run::project_retained_attempt(contribution.attempt, &edge).ok()?,
-            );
+            attempts.push(contribution.attempt);
         }
+    }
+    let census = (!attempts.is_empty())
+        .then(|| {
+            provenant_supervisor::census::ProcessObserver::census(
+                &provenant_supervisor::census::SystemProcessObserver,
+                provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+            )
+            .ok()
+        })
+        .flatten();
+    let mut lanes = Vec::new();
+    for attempt in attempts {
+        lanes.push(
+            provenant_cli::run::project_retained_attempt_with_census(
+                attempt,
+                &edge,
+                census.as_ref().ok_or(()),
+            )
+            .ok()?,
+        );
     }
     Some(lanes)
 }

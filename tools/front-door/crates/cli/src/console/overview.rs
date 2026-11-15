@@ -131,7 +131,12 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
         read_prompts: false,
     };
     let mut lanes = Vec::new();
-    let (mut running, attention) = (0usize, 0usize);
+    let (mut running, mut attention_count) = (0usize, 0usize);
+    let census = provenant_supervisor::census::ProcessObserver::census(
+        &provenant_supervisor::census::SystemProcessObserver,
+        provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+    )
+    .ok();
     let run = match RunStore::open_read_only(&context, &run_call) {
         Ok(Some(store)) => match store.overview_attempts(128, remaining_bytes, &run_call) {
             Ok(batch) => {
@@ -139,18 +144,36 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
                     let Some(label) = labels.get(&item.project_id.to_string()) else {
                         continue;
                     };
-                    let active = is_live(item.state);
-                    let row = crate::run::project_lane(
+                    let row = crate::run::project_lane_with_census(
                         &item.record,
                         &[],
                         roots.state.as_path(),
                         clock.wall_now().ok(),
-                        false,
+                        true,
+                        census.as_ref().ok_or(()),
+                    );
+                    let active = match row.presence {
+                        Some(provenant_records::wire::LanePresence::Live) => true,
+                        Some(
+                            provenant_records::wire::LanePresence::Unattended
+                            | provenant_records::wire::LanePresence::Unknown
+                            | provenant_records::wire::LanePresence::Settling,
+                        ) => false,
+                        None => is_live(item.state),
+                    };
+                    let attention = matches!(
+                        row.presence,
+                        Some(
+                            provenant_records::wire::LanePresence::Unattended
+                                | provenant_records::wire::LanePresence::Unknown
+                                | provenant_records::wire::LanePresence::Settling
+                        )
                     );
                     running += usize::from(active);
-                    if active {
+                    attention_count += usize::from(attention);
+                    if active || attention {
                         let key = &item.record.key;
-                        lanes.push(json!({"project_id":item.project_id,"project_label":label,"key":key,"attempt_id":row.attempt_id,"task_label":item.title,"state":row.state,"queued_at":item.record.queued_at,"cause":row.cause,"retry_of":row.retry_of,"superseded_by":row.superseded_by,"attention":false}));
+                        lanes.push(json!({"project_id":item.project_id,"project_label":label,"key":key,"attempt_id":row.attempt_id,"task_label":item.title,"state":row.state,"reason":row.reason,"presence":row.presence,"queued_at":item.record.queued_at,"cause":row.cause,"retry_of":row.retry_of,"superseded_by":row.superseded_by,"attention":attention}));
                     }
                 }
                 if batch.truncated {
@@ -168,7 +191,7 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
         json!({"schema_version":2,"needs_you":needs_you,"lanes":lanes,
         "counts":{"needs_you":(fabric != "unavailable" && fabric != "incompatible").then_some(needs_you.len()),
                   "running":(run != "unavailable" && run != "incompatible").then_some(running),
-                  "attention":(run != "unavailable" && run != "incompatible").then_some(attention)},
+                  "attention":(run != "unavailable" && run != "incompatible").then_some(attention_count)},
         "coverage":{"scope":"local","inbox":fabric,"runs":run,"nested_runs":"unavailable"}}),
     )
 }
