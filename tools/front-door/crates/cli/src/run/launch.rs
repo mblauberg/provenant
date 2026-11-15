@@ -417,6 +417,26 @@ impl run::Providers for PreparedProvider<'_> {
         self.fallback
             .decode_captures(route, stdout, stderr, exit, provider_state, context)
     }
+    fn decode_captures_with_continuation(
+        &self,
+        route: &run::RouteRecord,
+        stdout: &[u8],
+        stderr: &[u8],
+        exit: &ExitObservation,
+        provider_state: &Path,
+        context: Option<&run::HolderContext>,
+        continuation: Option<&run::ContinuationExpectation>,
+    ) -> Result<run::Decoded, String> {
+        self.fallback.decode_captures_with_continuation(
+            route,
+            stdout,
+            stderr,
+            exit,
+            provider_state,
+            context,
+            continuation,
+        )
+    }
 }
 
 pub(super) fn with_chair_index<T>(

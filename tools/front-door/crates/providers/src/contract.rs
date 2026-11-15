@@ -494,6 +494,21 @@ pub trait Adapter: Sync {
     fn account(&self, state: &StreamState) -> Result<AccountDetection, ProviderError>;
     fn prepare(&self, input: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError>;
     fn stream(&self, continuation: Option<&Continuation>) -> Result<StreamState, ProviderError>;
+    /// Create the shared stream decoder bound to the retained session and
+    /// applied model when the continuation object itself is no longer present
+    /// at the custody/terminal boundary.
+    fn stream_for_continuation(
+        &self,
+        session: &str,
+        model: &str,
+    ) -> Result<StreamState, ProviderError> {
+        if session.is_empty() || model.is_empty() {
+            return Err(ProviderError::UnknownIdentity);
+        }
+        let mut state = self.stream(None)?;
+        state.bind_identity(session, model);
+        Ok(state)
+    }
     /// If a later line fails, events from earlier lines in that call are
     /// retained in `finish().final_events()` alongside the malformed outcome.
     fn observe(

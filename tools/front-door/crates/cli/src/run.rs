@@ -632,8 +632,38 @@ impl run::Providers for Registry<'_> {
         provider_state: &Path,
         context: Option<&run::HolderContext>,
     ) -> Result<run::Decoded, String> {
+        self.decode_captures_with_continuation(
+            route,
+            stdout,
+            stderr,
+            exit,
+            provider_state,
+            context,
+            None,
+        )
+    }
+
+    fn decode_captures_with_continuation(
+        &self,
+        route: &run::RouteRecord,
+        stdout: &[u8],
+        stderr: &[u8],
+        exit: &ExitObservation,
+        provider_state: &Path,
+        context: Option<&run::HolderContext>,
+        continuation: Option<&run::ContinuationExpectation>,
+    ) -> Result<run::Decoded, String> {
+        let continuation_session = continuation.map(|expectation| expectation.session.as_str());
         let Some(context) = context else {
-            return self.decode_inner(route, stdout, stderr, exit, provider_state, false);
+            return self.decode_inner_expected(
+                route,
+                stdout,
+                stderr,
+                exit,
+                provider_state,
+                false,
+                continuation_session,
+            );
         };
         let (configuration_root, _) = context.disk_roots();
         // Every branch carries the holder home: without it the OpenCode
@@ -646,7 +676,15 @@ impl run::Providers for Registry<'_> {
                 home: holder_home,
                 ..Default::default()
             }
-            .decode_inner(route, stdout, stderr, exit, provider_state, false);
+            .decode_inner_expected(
+                route,
+                stdout,
+                stderr,
+                exit,
+                provider_state,
+                false,
+                continuation_session,
+            );
         }
         let mut inputs = provenant_core::RootInputs::new(
             context.roots.home.clone(),
@@ -662,13 +700,14 @@ impl run::Providers for Registry<'_> {
                     home: holder_home,
                     ..Default::default()
                 }
-                .decode_inner(
+                .decode_inner_expected(
                     route,
                     stdout,
                     stderr,
                     exit,
                     provider_state,
                     false,
+                    continuation_session,
                 )?;
                 if decoded.reason.as_deref().is_some_and(capacity_reason) {
                     let reason = decoded.reason.get_or_insert_with(String::new);
@@ -690,7 +729,15 @@ impl run::Providers for Registry<'_> {
             state_root: Some(configuration_root),
             ..Default::default()
         };
-        registry.decode_inner(route, stdout, stderr, exit, provider_state, true)
+        registry.decode_inner_expected(
+            route,
+            stdout,
+            stderr,
+            exit,
+            provider_state,
+            true,
+            continuation_session,
+        )
     }
     fn prepare(
         &self,
@@ -729,6 +776,27 @@ impl Registry<'_> {
         exit: &ExitObservation,
         provider_state: &Path,
         host_settlement: bool,
+    ) -> Result<run::Decoded, String> {
+        self.decode_inner_expected(
+            route,
+            stdout,
+            stderr,
+            exit,
+            provider_state,
+            host_settlement,
+            None,
+        )
+    }
+
+    fn decode_inner_expected(
+        &self,
+        route: &run::RouteRecord,
+        stdout: &[u8],
+        stderr: &[u8],
+        exit: &ExitObservation,
+        provider_state: &Path,
+        host_settlement: bool,
+        expected_session: Option<&str>,
     ) -> Result<run::Decoded, String> {
         let captured_stdout_len = stdout.len();
         let confirmed_intentional_stop = exit.cancel_delivered_before_exit == Some(true)
@@ -769,6 +837,18 @@ impl Registry<'_> {
             partial_signals: Vec::new(),
             turns: Vec::new(),
         };
+        let unproven = |reason: &str| run::Decoded {
+            terminal_cause: None,
+            outcome: run::Outcome::Unsettled,
+            result: String::new(),
+            complete: false,
+            observed_route: None,
+            usage: run::UsageRecord::default(),
+            session: None,
+            reason: Some(reason.into()),
+            partial_signals: Vec::new(),
+            turns: Vec::new(),
+        };
         let Some(adapter) = REGISTRY
             .iter()
             .find(|r| Some(r.adapter.id()) == route.provider.as_deref())
@@ -779,12 +859,29 @@ impl Registry<'_> {
         let model_observation = provenant_records::AdapterSpec::get(adapter.id())
             .map(|spec| spec.model_observation)
             .unwrap_or(provenant_records::ModelObservation::Stream);
-        let Ok(mut state) = adapter.stream(None) else {
-            return Ok(failed("provider stream is unavailable"));
+        let model = stream_model(route);
+        let mut state = match expected_session {
+            Some(session) => {
+                let Some(model) = model.as_deref() else {
+                    return Ok(unproven(
+                        "resumed provider route has no model identity for session validation",
+                    ));
+                };
+                match adapter.stream_for_continuation(session, model) {
+                    Ok(state) => state,
+                    Err(_) => return Ok(failed("provider stream is unavailable")),
+                }
+            }
+            None => {
+                let Ok(mut state) = adapter.stream(None) else {
+                    return Ok(failed("provider stream is unavailable"));
+                };
+                if let Some(model) = model.as_deref() {
+                    state.expect_model(model);
+                }
+                state
+            }
         };
-        if let Some(model) = stream_model(route) {
-            state.expect_model(&model);
-        }
         let (mut events, parse_error, identity_mismatch) = match adapter.observe(&mut state, stdout)
         {
             Ok(events) => (events, None, false),
@@ -840,6 +937,11 @@ impl Registry<'_> {
                 return Ok(decoded);
             }
         };
+        if expected_session.is_some() && outcome.session().is_none() {
+            return Ok(unproven(
+                "resumed provider did not report its retained session",
+            ));
+        }
         events.extend(outcome.final_events().iter().cloned());
         let state_root = self
             .state_root

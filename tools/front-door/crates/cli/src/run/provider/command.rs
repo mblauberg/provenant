@@ -397,6 +397,7 @@ pub(super) fn prepare_command(
         .ok_or_else(|| unavailable("host Cargo binding was not finalised".into()))?;
     Ok(run::PreparedLaunch {
         limits,
+        continuation_expectation: None,
         skipped_routes: Vec::new(),
         argv: spec.argv,
         environment: spec.env,

@@ -72,8 +72,9 @@ pub use holder::{
 #[cfg(test)]
 pub(crate) use launch::fixture_refusal;
 pub use launch::{
-    Decoded, LaunchPaths, PrepareRefusal, PreparedLaunch, PreparedStart, Providers, RefusalKind,
-    Started, WriteGrantLimit, access_root_allowed, capture_plan, concurrency, launch_policy,
+    ContinuationExpectation, Decoded, LaunchPaths, PrepareRefusal, PreparedLaunch, PreparedStart,
+    Providers, RefusalKind, Started, WriteGrantLimit, access_root_allowed, capture_plan,
+    concurrency, launch_policy,
 };
 pub use overview::{OverviewAttempt, OverviewState, RunOverview};
 pub use plan::{

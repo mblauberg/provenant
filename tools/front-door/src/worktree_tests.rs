@@ -957,6 +957,7 @@ impl provenant_run::Providers for WriterProvider {
                     )),
                     ..Default::default()
                 },
+                continuation_expectation: None,
                 skipped_routes: Vec::new(),
                 argv,
                 environment: Vec::new(),

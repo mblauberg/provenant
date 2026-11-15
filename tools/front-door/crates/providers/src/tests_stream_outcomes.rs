@@ -591,6 +591,38 @@ fn continuation_preserves_session_and_rejects_changed_identity_and_grants()
 }
 
 #[test]
+fn expected_continuation_session_is_not_observed_without_a_provider_frame()
+-> Result<(), ProviderError> {
+    let mut matching =
+        codex::Codex.stream_for_continuation("retained-thread", "requested-model")?;
+    codex::Codex.observe(
+        &mut matching,
+        b"{\"type\":\"thread.started\",\"thread_id\":\"retained-thread\"}\n",
+    )?;
+    assert_eq!(
+        codex::Codex.finish(matching, EXIT)?.session(),
+        Some("retained-thread")
+    );
+
+    let fresh = codex::Codex.stream_for_continuation("retained-thread", "requested-model")?;
+    assert_eq!(
+        codex::Codex.finish(fresh, EXIT)?.session(),
+        None,
+        "the expectation must not be returned as child evidence"
+    );
+
+    let mut wrong = codex::Codex.stream_for_continuation("retained-thread", "requested-model")?;
+    assert!(matches!(
+        codex::Codex.observe(
+            &mut wrong,
+            b"{\"type\":\"thread.started\",\"thread_id\":\"fresh-thread\"}\n"
+        ),
+        Err(ProviderError::IdentityMismatch)
+    ));
+    Ok(())
+}
+
+#[test]
 fn codex_oversized_command_output_is_skipped_but_other_oversize_fails_closed()
 -> Result<(), ProviderError> {
     // Shape of run 358cbf47 (#1514): a 1.17 MB command_execution item.

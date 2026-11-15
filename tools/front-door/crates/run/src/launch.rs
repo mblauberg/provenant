@@ -104,6 +104,12 @@ pub fn capture_plan(task: &TaskRequest, limits: &provenant_records::LaneLimits) 
 
 /// One prepared provider invocation. Secret inputs stay in memory and travel
 /// on the handoff pipe, then a dedicated read pipe into the provider.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContinuationExpectation {
+    /// The predecessor session bound by the provider's prepared stream.
+    pub session: String,
+}
+
 pub struct PreparedLaunch {
     pub argv: Vec<OsString>,
     pub environment: Vec<(OsString, OsString)>,
@@ -123,6 +129,10 @@ pub struct PreparedLaunch {
     /// The lane's limits, resolved once at preparation. Admission records
     /// them; launch, enforcement and the preamble read nothing else.
     pub limits: provenant_records::LaneLimits,
+    /// The retained session this prepared provider invocation must continue.
+    /// Admission seals it with the selected route for both live and terminal
+    /// identity validation.
+    pub continuation_expectation: Option<ContinuationExpectation>,
 }
 
 impl PreparedLaunch {
@@ -552,6 +562,7 @@ impl RunStore {
         let record = self.record_starting_launch(
             expected,
             &plan.route,
+            plan.continuation_expectation.as_ref(),
             writable,
             grants,
             plan.observed_head,
@@ -795,6 +806,36 @@ pub trait Providers {
         _context: Option<&crate::HolderContext>,
     ) -> std::result::Result<Decoded, String> {
         self.decode(route, stdout, exit, provider_state)
+    }
+    /// Decode captures with the retained session identity bound to a resumed
+    /// provider invocation. Existing decoders remain valid for fresh attempts.
+    fn decode_captures_with_continuation(
+        &self,
+        route: &RouteRecord,
+        stdout: &[u8],
+        stderr: &[u8],
+        exit: &ExitObservation,
+        provider_state: &std::path::Path,
+        context: Option<&crate::HolderContext>,
+        continuation: Option<&ContinuationExpectation>,
+    ) -> std::result::Result<Decoded, String> {
+        if continuation.is_some() {
+            return Ok(Decoded {
+                terminal_cause: None,
+                outcome: Outcome::Unsettled,
+                result: String::new(),
+                complete: false,
+                observed_route: None,
+                usage: UsageRecord::default(),
+                session: None,
+                reason: Some(
+                    "provider decoder cannot verify the retained continuation session".into(),
+                ),
+                partial_signals: Vec::new(),
+                turns: Vec::new(),
+            });
+        }
+        self.decode_captures(route, stdout, stderr, exit, provider_state, context)
     }
 }
 enum HandOff {
@@ -2806,6 +2847,7 @@ mod policy_reporting_tests {
         #[allow(unused_mut)]
         let mut prepared = PreparedLaunch {
             limits: Default::default(),
+            continuation_expectation: None,
             argv: vec!["fixture".into()],
             environment: vec![],
             stdin: vec![],
