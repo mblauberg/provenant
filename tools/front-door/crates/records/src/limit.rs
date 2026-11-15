@@ -83,6 +83,19 @@ pub enum BudgetAction {
 }
 
 impl BudgetAction {
+    pub const ALL: [Self; 3] = [Self::WrapUp, Self::Warn, Self::Stop];
+    /// The configuration spellings, in [`Self::ALL`] order. Schema metadata
+    /// for every budget-action field uses this one declaration.
+    pub const NAMES: [&'static str; 3] = {
+        let mut names = [""; 3];
+        let mut index = 0;
+        while index < Self::ALL.len() {
+            names[index] = Self::ALL[index].as_str();
+            index += 1;
+        }
+        names
+    };
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::WrapUp => "wrap_up",
@@ -370,6 +383,18 @@ impl LaneLimits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every action's configuration spelling is the one serde reads and writes.
+    #[test]
+    fn budget_action_names_are_its_serde_spellings() {
+        for (action, name) in BudgetAction::ALL.into_iter().zip(BudgetAction::NAMES) {
+            assert_eq!(serde_json::to_value(action).unwrap(), name);
+            assert_eq!(
+                serde_json::from_value::<BudgetAction>(name.into()).unwrap(),
+                action
+            );
+        }
+    }
 
     #[test]
     fn the_nearest_source_wins_and_a_ceiling_cannot_be_raised() {
