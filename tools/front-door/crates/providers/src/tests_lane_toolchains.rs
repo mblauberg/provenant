@@ -140,7 +140,8 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
     let keychain = account_home.join("Library/Keychains/login.keychain-db");
     std::fs::create_dir_all(keychain.parent().expect("keychain parent"))?;
     std::fs::write(&keychain, b"fixture keychain metadata only")?;
-    let account = identity::RegisteredAccount::new("agy", "cache-fixture", account_home.clone())?;
+    let account = identity::RegisteredAccount::new("agy", "cache-fixture", account_home.clone())
+        .map_err(|error| std::io::Error::other(format!("Agy fixture account: {error}")))?;
     let project = tempfile::tempdir()?;
     std::fs::create_dir_all(project.path().join(".git"))?;
     let prompt = Prompt::new("fixture".into());
@@ -168,7 +169,9 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
         if id == "agy" {
             input.account = Some(&account);
         }
-        let prepared = adapter.prepare(input)?;
+        let prepared = adapter
+            .prepare(input)
+            .map_err(|error| std::io::Error::other(format!("{id} preparation failed: {error}")))?;
         let selected_home = prepared
             .env
             .iter()
@@ -204,15 +207,16 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
                 );
             }
             if let Some(expected) = &expected_pnpm_store
-                && crate::package_cache::explicit_host_value(&host_var, &["PNPM_HOME"]).is_none() {
-                    assert_eq!(
-                        configured("pnpm_config_store_dir")
-                            .or_else(|| configured("npm_config_store_dir"))
-                            .as_ref(),
-                        Some(expected),
-                        "{id}"
-                    );
-                }
+                && crate::package_cache::explicit_host_value(&host_var, &["PNPM_HOME"]).is_none()
+            {
+                assert_eq!(
+                    configured("pnpm_config_store_dir")
+                        .or_else(|| configured("npm_config_store_dir"))
+                        .as_ref(),
+                    Some(expected),
+                    "{id}"
+                );
+            }
         }
         if id == "opencode" {
             if let Some(expected) = &expected_pnpm_cache {
@@ -225,15 +229,16 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
                 );
             }
             if let Some(expected) = &expected_pnpm_store
-                && crate::package_cache::explicit_host_value(&host_var, &["PNPM_HOME"]).is_none() {
-                    assert_eq!(
-                        configured("pnpm_config_store_dir")
-                            .or_else(|| configured("npm_config_store_dir"))
-                            .as_ref(),
-                        Some(expected),
-                        "{id}"
-                    );
-                }
+                && crate::package_cache::explicit_host_value(&host_var, &["PNPM_HOME"]).is_none()
+            {
+                assert_eq!(
+                    configured("pnpm_config_store_dir")
+                        .or_else(|| configured("npm_config_store_dir"))
+                        .as_ref(),
+                    Some(expected),
+                    "{id}"
+                );
+            }
             assert!(prepared.env.iter().any(|(key, value)| {
                 key == "XDG_CACHE_HOME" && value == "/fixture/state/cache"
             }));
