@@ -45,11 +45,15 @@ impl Providers for Ready {
         _: &TaskRequest,
         _: &str,
         _: &LaunchPaths,
-        _: Option<&AttemptRecord>,
+        resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
         Ok(PreparedLaunch {
             limits: Default::default(),
-            continuation_expectation: None,
+            continuation_expectation: resume.and_then(|record| record.session.as_ref()).map(
+                |session| ContinuationExpectation {
+                    session: session.clone(),
+                },
+            ),
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),
