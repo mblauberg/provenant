@@ -1445,7 +1445,7 @@ enum ExecutableChainRefusal {
 
 /// Walk from / using only no-follow descriptor-relative opens. The final
 /// descriptor must identify the same file that was opened for image evidence.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn root_owned_executable_chain(path: &std::path::Path, executable: &std::fs::File) -> bool {
     check_root_owned_executable_chain(path, executable).is_ok()
 }

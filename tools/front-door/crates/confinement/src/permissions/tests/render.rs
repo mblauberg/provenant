@@ -147,6 +147,10 @@ pub(super) fn rule_index_with_facts(
 }
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only the macOS escape and grant tests call it")
+)]
 pub(super) fn rule_index_without_strings(
     source: &str,
     action: RuleAction,
@@ -160,6 +164,10 @@ pub(super) fn rule_index_without_strings(
 }
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only the macOS escape and grant tests call it")
+)]
 pub(super) fn has_rule_atoms(
     source: &str,
     action: RuleAction,
