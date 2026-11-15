@@ -552,15 +552,12 @@ pub(super) fn remove_by_name_follows_the_branch_merge_state() -> Result {
     assert!(!merged.exists());
     assert!(!has_branch(&rig, "merged")?);
 
-    let kept = ok(&rig, &["worktree", "remove", "unmerged", "--json"])?;
-    assert!(
-        kept["data"]["pruned_refs"]
-            .as_array()
-            .is_some_and(Vec::is_empty)
-    );
-    assert_eq!(kept["data"]["retained"][0]["branch"], "unmerged");
-    assert_eq!(kept["data"]["retained"][0]["reason"], "not_merged");
-    assert!(!unmerged.exists());
+    // Work held only by its own branch is not proven preserved elsewhere, so
+    // removal without discard refuses and leaves the tree and branch intact.
+    let kept = command(&rig, &["worktree", "remove", "unmerged", "--json"])?;
+    assert_eq!(code(&kept), 1);
+    assert_eq!(json(&kept)?["status"], "refused");
+    assert!(unmerged.exists());
     assert!(has_branch(&rig, "unmerged")?);
 
     let discarded = ok(
