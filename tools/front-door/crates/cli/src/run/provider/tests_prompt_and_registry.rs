@@ -264,6 +264,7 @@ fn executable_discovery_after_wait_observes_the_completed_update()
         cwd: temp.path().into(),
         executables: Default::default(),
         executable_search_path: vec![temp.path().into()],
+        lane_path: None,
         git: "/usr/bin/git".into(),
         default_account_directories: Default::default(),
         credential_roots: Default::default(),

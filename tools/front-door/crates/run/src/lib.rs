@@ -59,7 +59,7 @@ pub use controls::{
     CancelReceipt, Reconciled, Resume, TemporaryReason, TemporaryReasonKind, UncertainReason,
     holder_absent, overdue_at,
 };
-pub use delivery::HostDeliveryContext;
+pub use delivery::{HostDeliveryContext, filtered_lane_path};
 pub use git_context::{
     GitContext, continuation_history, ensure_local_branch, ensure_recorded_local_branch,
     resolve_git_base, resolve_git_base_with_facts, review_merge_base, review_merge_base_between,
@@ -85,7 +85,7 @@ pub use retention::{
 pub use writer::{
     BoundSandboxBackend, LaunchConfinement, WriterFence, WriterLaunch, equivalent_writer,
     prepare_writer, prepare_writer_with_facts, resolve_reader_source, resolve_writer,
-    resolve_writer_proposal,
+    resolve_writer_proposal, trusted_lane_toolchain_diagnostic,
 };
 
 pub use db::{ExecutionContext, Request, RunStore};

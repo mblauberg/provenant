@@ -1000,6 +1000,94 @@ fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
     Ok(())
 }
 
+#[test]
+fn native_provider_preparation_uses_requester_path_without_supervisor_rustup()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    use std::{os::unix::fs::PermissionsExt, time::Duration};
+
+    const CHILD: &str = "PROVENANT_TEST_REQUESTER_PATH_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let argv = [
+            std::env::current_exe()?.into_os_string(),
+            "--exact".into(),
+            "tests::native_provider_preparation_uses_requester_path_without_supervisor_rustup"
+                .into(),
+            "--nocapture".into(),
+        ];
+        let env = [
+            (CHILD.into(), "1".into()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+        ];
+        let cwd = std::env::current_dir()?;
+        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(60));
+        options.env = Some(&env);
+        options.stdout = StreamPolicy::Capture { limit: 65536 };
+        options.stderr = StreamPolicy::Capture { limit: 65536 };
+        let output = SystemExecutor::new(1)?.execute(options)?;
+        assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
+        assert!(!output.timed_out, "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("1 passed"), "{output:?}");
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let requester_bin = temp.path().join("requester/.cargo/bin");
+    std::fs::create_dir_all(&requester_bin)?;
+    std::fs::write(requester_bin.join("rustup"), b"requester rustup shim")?;
+    std::fs::set_permissions(
+        requester_bin.join("rustup"),
+        std::fs::Permissions::from_mode(0o755),
+    )?;
+    std::os::unix::fs::symlink("rustup", requester_bin.join("rustc"))?;
+    let requester_path = std::env::join_paths([
+        requester_bin.as_os_str(),
+        std::ffi::OsStr::new("/usr/bin"),
+        std::ffi::OsStr::new("/bin"),
+    ])?;
+    let supervisor_path = std::env::var_os("PATH").unwrap_or_default();
+    assert!(
+        !std::env::split_paths(&supervisor_path).any(|entry| entry == requester_bin),
+        "fixture rustup shim unexpectedly appears on the supervisor PATH"
+    );
+    let host_var = |name: &str| match name {
+        "PATH" => Some(requester_path.clone()),
+        name if name == provenant_core::consumer_env::SANDBOX => Some("off".into()),
+        _ => None,
+    };
+
+    let prompt = Prompt::new("fixture".into());
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+    let mut input = fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        None,
+    );
+    input.host_var = &host_var;
+
+    let prepared = codex::Codex.prepare(input)?;
+    assert!(prepared.env.iter().any(|(key, value)| {
+        key == provenant_core::consumer_env::SANDBOX && value == "off"
+    }));
+    let paths = prepared
+        .env
+        .iter()
+        .filter(|(key, _)| key == "PATH")
+        .map(|(_, value)| value)
+        .collect::<Vec<_>>();
+    assert_eq!(paths.len(), 1);
+    let lane_path = std::env::split_paths(paths[0]).collect::<Vec<_>>();
+    assert!(
+        lane_path.contains(&requester_bin),
+        "prepared native lane PATH omitted the requester's rustup directory: {lane_path:?}"
+    );
+    Ok(())
+}
+
 /// Small: all adapters use the same identity/cache bindings, including a
 /// sparse native environment. No process-global environment mutation is needed.
 #[test]

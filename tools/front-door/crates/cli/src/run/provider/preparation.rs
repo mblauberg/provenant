@@ -3678,6 +3678,19 @@ pub(super) fn prepare_candidates(
             task,
             &plan,
         );
+        let lane_path = registry
+            .host
+            .and_then(|host| host.lane_path.as_deref())
+            .map(|path| {
+                use std::os::unix::ffi::OsStrExt;
+                let project = task
+                    .writer
+                    .as_ref()
+                    .map_or(source.as_path(), |writer| writer.project.as_path());
+                run::filtered_lane_path(std::ffi::OsStr::from_bytes(path), project, &cwd)
+            })
+            .transpose()
+            .map_err(|error| error.to_string())?;
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
                 credential_roots: credential_roots.clone(),
@@ -3695,6 +3708,8 @@ pub(super) fn prepare_candidates(
                 host_var: &|key| {
                     if key == provenant_core::consumer_env::SANDBOX {
                         Some(sandbox.env_value().into())
+                    } else if key == "PATH" && lane_path.is_some() {
+                        lane_path.clone()
                     } else {
                         host_provider_var(registry, key)
                     }

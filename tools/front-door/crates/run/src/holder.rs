@@ -152,6 +152,9 @@ pub struct HostLaunchContext {
     /// Original host search directories for providers unavailable during handoff.
     #[serde(default)]
     pub executable_search_path: Vec<PathBuf>,
+    /// Requester PATH bytes for native lanes, retained across host handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_path: Option<Vec<u8>>,
     pub git: PathBuf,
     /// Trusted environment overrides for adapter default account directories.
     #[serde(default)]
@@ -227,6 +230,7 @@ impl HostLaunchContext {
                         .collect()
                 })
                 .unwrap_or_default(),
+            lane_path: None,
             git,
             default_account_directories: Self::default_account_directories(),
             credential_roots: Self::credential_roots(),
@@ -3205,6 +3209,7 @@ mod disk_admission_tests {
                 cwd: temp.path().into(),
                 executables: Default::default(),
                 executable_search_path: Vec::new(),
+                lane_path: None,
                 git: "/usr/bin/git".into(),
                 default_account_directories: Default::default(),
                 credential_roots: Default::default(),

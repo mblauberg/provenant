@@ -79,6 +79,7 @@ fn capacity_guardian_context_records_and_reports_config_failure()
         cwd: temp.path().join("checkout"),
         executables: Default::default(),
         executable_search_path: Vec::new(),
+        lane_path: None,
         git: PathBuf::from("/usr/bin/git"),
         default_account_directories: Default::default(),
         credential_roots: Default::default(),

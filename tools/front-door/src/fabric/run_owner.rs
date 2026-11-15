@@ -1142,6 +1142,26 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(|_| FacadeError::io("resolve host graph launch context"))?,
         };
+        if let Some(graph_id) = submitted
+            .context
+            .as_ref()
+            .and_then(|context| context.graph_id.as_deref())
+        {
+            let execution = provenant_fabric_runtime::graph::FileJournal::execution(
+                &self.factory.context.roots.state,
+                self.factory.context.identity.project,
+                graph_id,
+            )
+            .map_err(graph_journal_error)?;
+            if let Some(value) = execution
+                .as_ref()
+                .and_then(|execution| execution.extra.get("requester_path"))
+            {
+                host_launch.lane_path = Some(
+                    serde_json::from_value(value.clone()).map_err(|_| FacadeError::StateCorrupt)?,
+                );
+            }
+        }
         host_launch.graph_directory = Some(self.factory.cwd.clone());
         host_launch.cwd = launch_directory.clone();
         let submission = self.with_edge(|edge| {

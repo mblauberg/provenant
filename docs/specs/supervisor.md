@@ -173,8 +173,13 @@ compare-and-swap.
 
 ### Native environment and sandbox tool stores
 
-Unsandboxed lanes inherit the host environment, PATH, tool caches and
-credentials in place. Provider account selectors still choose the registered
+Unsandboxed lanes inherit the host environment, tool caches and credentials in
+place. Their PATH comes from the requester of the run or retry, retained with
+the host graph execution for later advancement. Before lane preparation it is
+filtered to existing absolute directories outside the project and worktree,
+using the host delivery PATH rules. A remote peer records its own local agent
+PATH at ingress, since origin host directories need not exist on the peer.
+Provider account selectors still choose the registered
 account and its required credentials. Credential
 values stay in the live launch, never in prompts or receipts. Native launches
 skip skill copies, tool dependency discovery, credential symlink inventory and

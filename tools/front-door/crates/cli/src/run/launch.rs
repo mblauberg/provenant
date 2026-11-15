@@ -487,6 +487,7 @@ pub(super) fn launch_on_host_with_wait(
                         .collect()
                 })
                 .unwrap_or_default(),
+            lane_path: None,
             git: provenant_os::git::git_executable()
                 .ok_or_else(|| Fail::new(Status::Refused, ErrorKind::Git, "Git unavailable"))?,
             default_account_directories: run::HostLaunchContext::default_account_directories(),

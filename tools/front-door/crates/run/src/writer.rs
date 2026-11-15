@@ -1158,7 +1158,7 @@ impl LaunchConfinement {
         if cfg!(unix)
             && let Err(detail) =
                 verified_cargo_config(&build, &self.cargo_home.path).and_then(|()| {
-                    trusted_lane_toolchain(
+                    trusted_lane_toolchain_diagnostic(
                         &self.home,
                         worktree,
                         environment,
@@ -1588,7 +1588,7 @@ fn cargo_config_cannot_select_compiler(path: &Path) -> std::result::Result<(), &
 
 // Refuse the host probe if a lane can alter the host compiler or an earlier
 // PATH entry, or if its rustc does not resolve to the host rustup shim.
-fn trusted_lane_toolchain(
+pub fn trusted_lane_toolchain_diagnostic(
     home: &Path,
     worktree: &Path,
     environment: &[(OsString, OsString)],
@@ -2157,13 +2157,13 @@ mod cargo_setup_tests {
             let path = std::env::join_paths(path_entries).unwrap();
             let env = vec![(OsString::from("PATH"), path)];
             assert_eq!(
-                trusted_lane_toolchain(&home, &worktree, &env, path_grants),
+                trusted_lane_toolchain_diagnostic(&home, &worktree, &env, path_grants),
                 expected,
                 "{entry}"
             );
         }
         assert_eq!(
-            trusted_lane_toolchain(
+            trusted_lane_toolchain_diagnostic(
                 &home,
                 &worktree,
                 &[(OsString::from("PATH"), bin.as_os_str().to_owned())],
@@ -2176,7 +2176,7 @@ mod cargo_setup_tests {
             std::env::join_paths([scratch.join("bin").as_path(), bin.as_path()]).unwrap();
         let scratch_env = vec![(OsString::from("PATH"), scratch_path)];
         assert_eq!(
-            trusted_lane_toolchain(&home, &worktree, &scratch_env, &grants),
+            trusted_lane_toolchain_diagnostic(&home, &worktree, &scratch_env, &grants),
             Err(codes::RUSTC_NOT_RUSTUP_SHIM)
         );
     }

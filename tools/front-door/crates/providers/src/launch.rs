@@ -671,6 +671,11 @@ pub(crate) fn base_env(
         let mut env: Vec<_> = std::env::vars_os()
             .filter(|(name, _)| name != provenant_core::consumer_env::SANDBOX && name != "HOME")
             .collect();
+        // Apply the requester's path before adapters add their own wrappers.
+        if let Some(path) = (input.host_var)("PATH") {
+            env.retain(|(name, _)| name != "PATH");
+            env.push(("PATH".into(), path));
+        }
         // Establish the host's selected home before an adapter may isolate it.
         env.push(("HOME".into(), input.home.into()));
         env.push((provenant_core::consumer_env::SANDBOX.into(), "off".into()));
