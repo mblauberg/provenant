@@ -698,9 +698,9 @@ fn collect_owned_worktree_with(
                         }
                         replayed_receipt["removal_records"] = serde_json::to_value(&confirmed)?;
                         replayed_receipt["state"] = serde_json::json!("pruned");
-                        replayed_receipt.as_object_mut().map(|object| {
+                        if let Some(object) = replayed_receipt.as_object_mut() {
                             object.remove("retryable");
-                        });
+                        }
                         if let Some(object) = replayed_receipt.as_object_mut() {
                             object.remove("recovered_from_intent");
                         }

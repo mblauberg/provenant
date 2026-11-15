@@ -152,6 +152,10 @@ pub fn configure_fake_forge_ports(state: &Path, project: &Path, executable: &Pat
     Ok(())
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the fake forge port re-executes this test binary as its fixture gh"
+)]
 pub fn fake_forge_port(args: &[String]) -> Result<u8> {
     use std::{
         io::{self, Write},
@@ -220,13 +224,14 @@ pub fn fake_forge_port(args: &[String]) -> Result<u8> {
     Ok(0)
 }
 
-fn split_fake_http_response(
-    bytes: &[u8],
-) -> Result<(
+/// Status, headers and body of a fake HTTP response.
+type FakeHttpParts = (
     Option<u16>,
     Option<std::collections::BTreeMap<String, String>>,
     Vec<u8>,
-)> {
+);
+
+fn split_fake_http_response(bytes: &[u8]) -> Result<FakeHttpParts> {
     let separator = bytes
         .windows(4)
         .position(|part| part == b"\r\n\r\n")

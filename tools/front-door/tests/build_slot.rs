@@ -66,7 +66,7 @@ impl Rig {
         Ok(())
     }
 
-    fn command(&self, slots: u64, args: &[&str]) -> Command {
+    fn command(&self, slots: u64, args: &[&str]) -> Result<Command> {
         let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
         command
             .args(["internal", "build-slot", "--"])
@@ -77,12 +77,12 @@ impl Rig {
             .env_remove(provenant_core::consumer_env::BUILD_SLOT)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        set_builtin_admission(&mut command);
-        command
+        set_builtin_admission(&mut command)?;
+        Ok(command)
     }
 
     fn shim(&self, slots: u64, args: &[&str]) -> Result<Child> {
-        Ok(self.command(slots, args).spawn()?)
+        Ok(self.command(slots, args)?.spawn()?)
     }
 
     fn log(&self) -> Result<Vec<String>> {
@@ -98,18 +98,17 @@ impl Rig {
     }
 }
 
-fn set_builtin_admission(command: &mut Command) {
+fn set_builtin_admission(command: &mut Command) -> Result {
     command
         .env(
             provenant_core::consumer_env::BUILD_ADMISSION_BACKEND,
-            serde_json::to_string(&provenant_config::PortBackend::Builtin)
-                .expect("the builtin backend serializes"),
+            serde_json::to_string(&provenant_config::PortBackend::Builtin)?,
         )
         .env(
             provenant_core::consumer_env::BUILD_ADMISSION_SOURCE,
-            serde_json::to_string(&provenant_config::PortSource::Builtin)
-                .expect("the builtin source serializes"),
+            serde_json::to_string(&provenant_config::PortSource::Builtin)?,
         );
+    Ok(())
 }
 
 fn stderr_of(child: &mut Child) -> Result<String> {
@@ -291,7 +290,7 @@ fn missing_builtin_slot_settings_still_run_the_build() -> Result {
         .env("PATH", "/usr/bin:/bin")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    set_builtin_admission(&mut command);
+    set_builtin_admission(&mut command)?;
     let mut child = command.spawn()?;
     assert!(finish(&mut child, Duration::from_secs(10))?);
     assert!(rig.started("end"), "Cargo ran without a slot grant");
@@ -347,7 +346,7 @@ fn the_shims_exit_code_is_the_builds() -> Result {
     let rig = Rig::new()?;
     rig.provision(1)?;
     let status = rig
-        .command(1, &["no-such-subcommand-exits-zero"])
+        .command(1, &["no-such-subcommand-exits-zero"])?
         .status()?;
     assert!(status.success());
     let mut failing_command = Command::new(env!("CARGO_BIN_EXE_provenant"));
@@ -356,7 +355,7 @@ fn the_shims_exit_code_is_the_builds() -> Result {
         .env_remove("PROVENANT_BUILD_SLOT_STATE")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    set_builtin_admission(&mut failing_command);
+    set_builtin_admission(&mut failing_command)?;
     let failing = failing_command.status()?;
     assert_eq!(failing.code(), Some(7));
     Ok(())
@@ -402,7 +401,7 @@ fn disk_policy_applies_before_starting_a_new_build() -> Result {
                 &policy,
             );
             let mut child = rig
-                .command(1, &["build"])
+                .command(1, &["build"])?
                 .env("PROVENANT_BUILD_DISK_LIMITS", serde_json::to_string(&gate)?)
                 .spawn()?;
             let starts = !(below && effective == Strength::Refuse);

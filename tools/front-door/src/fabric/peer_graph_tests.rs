@@ -631,7 +631,6 @@ fn peer_hosted_lane_subtree_pages_are_bounded_complete_and_private() -> TestResu
         let Some(next) = subtree.next_node else {
             break;
         };
-        let next = usize::try_from(next)?;
         assert!(next > after && next < expected.len());
         after = next;
     }

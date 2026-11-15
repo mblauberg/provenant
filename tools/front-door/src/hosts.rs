@@ -829,12 +829,11 @@ mod tests {
             if let LegacyArtifact::LaunchAgent {
                 plist, disposition, ..
             } = artifact
+                && matches!(disposition, ArtifactDisposition::Replace)
             {
-                if matches!(disposition, ArtifactDisposition::Replace) {
-                    let path = home.path().join(plist);
-                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                    std::fs::write(path, b"current agent").unwrap();
-                }
+                let path = home.path().join(plist);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"current agent").unwrap();
             }
         }
         assert!(super::legacy_agent_warning(home.path()).is_none());

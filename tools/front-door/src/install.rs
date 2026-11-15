@@ -2393,6 +2393,10 @@ fn retire_legacy_agents_with(
 }
 
 #[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "the worktree driver includes this module without registering its tests"
+)]
 mod retired_agent_tests {
     #[allow(unused_imports)] // The worktree driver includes this module without libtest.
     use super::*;

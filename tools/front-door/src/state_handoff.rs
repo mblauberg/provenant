@@ -335,6 +335,7 @@ fn absent_or_empty(path: &Path) -> io::Result<bool> {
 #[cfg(test)]
 #[allow(
     dead_code,
+    unused_imports,
     reason = "the worktree driver includes this module without registering its tests"
 )]
 mod tests {

@@ -1121,7 +1121,7 @@ mod tests {
             };
             let path = path.as_str();
             let etag = etag.as_deref();
-            let response = (|| -> io::Result<Response> {
+            let respond = || -> io::Result<Response> {
                 self.pass();
                 let delay = self.with(|world| {
                     world.requests.push((path.into(), etag.map(str::to_owned)));
@@ -1177,8 +1177,8 @@ mod tests {
                         body: serde_json::to_vec(&body)?,
                     })
                 })
-            })()
-            .map_err(provenant_config::PortError::Executor)?;
+            };
+            let response = respond().map_err(provenant_config::PortError::Executor)?;
             Ok(forge_response(response))
         }
     }
@@ -1225,7 +1225,7 @@ mod tests {
             };
             let path = path.as_str();
             let etag = etag.as_deref();
-            let response = (|| -> io::Result<Response> {
+            let respond = || -> io::Result<Response> {
                 self.0
                     .lock()
                     .expect("requests")
@@ -1244,8 +1244,8 @@ mod tests {
                         body: br#"{"number":12,"state":"open"}"#.to_vec(),
                     })
                 }
-            })()
-            .map_err(provenant_config::PortError::Executor)?;
+            };
+            let response = respond().map_err(provenant_config::PortError::Executor)?;
             Ok(forge_response(response))
         }
     }
@@ -1631,7 +1631,7 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
                 };
                 let path = path.as_str();
                 let etag = etag.as_deref();
-                let response = (|| -> io::Result<Response> {
+                let mut respond = || -> io::Result<Response> {
                     let index: usize = path
                         .rsplit("&page=")
                         .next()
@@ -1646,8 +1646,8 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
                         self.0.with(|world| world.runs.insert(HEAD.into(), body));
                     }
                     port::get(&mut self.0, path, etag)
-                })()
-                .map_err(provenant_config::PortError::Executor)?;
+                };
+                let response = respond().map_err(provenant_config::PortError::Executor)?;
                 Ok(forge_response(response))
             }
         }
@@ -1859,7 +1859,7 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
                 };
                 let path = path.as_str();
                 let etag = etag.as_deref();
-                let response = (|| -> io::Result<Response> {
+                let mut respond = || -> io::Result<Response> {
                     if let Some(status) = self.1.pop() {
                         self.0
                             .with(|world| world.requests.push((path.into(), None)));
@@ -1870,8 +1870,8 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
                         });
                     }
                     port::get(&mut self.0, path, etag)
-                })()
-                .map_err(provenant_config::PortError::Executor)?;
+                };
+                let response = respond().map_err(provenant_config::PortError::Executor)?;
                 Ok(forge_response(response))
             }
         }

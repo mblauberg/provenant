@@ -311,6 +311,10 @@ fn attempt_scope(entry: &PortCommandReceiptEntry) -> Option<AttemptScope> {
 }
 
 #[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "the worktree driver includes this module without registering its tests"
+)]
 mod tests {
     use super::*;
     use provenant_records::{CanonicalV1, PortCommandDisposition, PortReceiptLifetime, PortSource};
