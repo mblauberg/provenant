@@ -585,14 +585,6 @@ macro_rules! declare_ports {
                 $(self.$field.set_source(source);)+
             }
 
-            fn set_port_source(&mut self, name: &str, source: PortSource) -> bool {
-                $(if name == stringify!($field) {
-                    self.$field.set_source(source);
-                    return true;
-                })+
-                false
-            }
-
             pub fn entries(&self) -> impl Iterator<Item = (&'static str, PortSource, PortBackendKind, bool, Option<&'static str>)> + '_ {
                 [$(
                     (stringify!($field), self.$field.source(), self.$field.backend_kind(), self.$field.valid(), port_unavailable_reason(&self.$field)),
@@ -616,12 +608,7 @@ declare_ports! {
     build_admission: Port,
 }
 
-fn apply_layer(
-    table: &mut serde_json::Value,
-    sources: &mut BTreeMap<String, PortSource>,
-    path: &Path,
-    source: PortSource,
-) -> io::Result<()> {
+fn apply_layer(table: &mut serde_json::Value, path: &Path, source: PortSource) -> io::Result<()> {
     let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -656,10 +643,16 @@ fn apply_layer(
             "compiled port table must be an object",
         )
     })?;
-    for (name, value) in object.iter() {
+    for (name, value) in object.iter_mut() {
         if name != "schema_version" {
+            let entry = value.as_object_mut().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "port entry must be an object")
+            })?;
+            entry.insert(
+                "source".into(),
+                serde_json::to_value(source).map_err(io::Error::other)?,
+            );
             target.insert(name.clone(), value.clone());
-            sources.insert(name.clone(), source);
         }
     }
     Ok(())
@@ -718,31 +711,19 @@ impl PortTable {
     /// Inspect well-typed declarations without hiding semantically invalid ports.
     pub fn read_for_inspection(project: Option<&Path>, host_state: &Path) -> io::Result<Self> {
         let mut document = serde_json::to_value(Self::builtin()).map_err(io::Error::other)?;
-        let mut sources = BTreeMap::new();
         apply_layer(
             &mut document,
-            &mut sources,
             &host_state.join("ports.json"),
             PortSource::Host,
         )?;
         if let Some(project) = project {
             apply_layer(
                 &mut document,
-                &mut sources,
                 &project.join(PORTS_CONFIG),
                 PortSource::Project,
             )?;
         }
-        let mut table: Self = serde_json::from_value(document).map_err(io::Error::other)?;
-        for (name, source) in sources {
-            if !table.set_port_source(&name, source) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "unknown port entry",
-                ));
-            }
-        }
-        Ok(table)
+        serde_json::from_value(document).map_err(io::Error::other)
     }
 }
 
@@ -1009,6 +990,7 @@ mod tests {
         let table =
             PortTable::read_for_inspection(Some(directory.path()), directory.path()).unwrap();
         let naming = table.entries().find(|entry| entry.0 == "naming").unwrap();
+        assert_eq!(naming.1, PortSource::Project);
         assert!(!naming.3);
         assert!(naming.4.is_some());
         assert!(PortTable::read_for(Some(directory.path()), directory.path()).is_err());
@@ -1067,30 +1049,46 @@ mod tests {
         let project = temp.path().join("project");
         std::fs::create_dir_all(&host).unwrap();
         std::fs::create_dir_all(project.join(".provenant")).unwrap();
-        std::fs::write(
-            host.join("ports.json"),
-            r#"{"schema_version":2,"ci_observation":{"source":"project","backend":{"kind":"none"}}}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            project.join(PORTS_CONFIG),
-            r#"{"schema_version":2,"naming":{"source":"host","backend":{"kind":"none"}}}"#,
-        )
-        .unwrap();
+        let builtin = serde_json::to_value(PortTable::builtin()).unwrap();
 
-        let table = PortTable::read_for(Some(&project), &host).unwrap();
-        let sources: BTreeMap<_, _> = table
-            .entries()
-            .map(|(name, source, _, _, _)| (name, source))
-            .collect();
-        assert_eq!(sources["ci_observation"], PortSource::Host);
-        assert_eq!(sources["naming"], PortSource::Project);
-        assert_eq!(sources["admission"], PortSource::Builtin);
-        assert_eq!(table.ci_observation.backend_kind(), PortBackendKind::None);
-        assert_eq!(table.naming.backend_kind(), PortBackendKind::None);
-        let host_only = PortTable::read_for(None, &host).unwrap();
-        assert_eq!(host_only.ci_observation.source, PortSource::Host);
-        assert_eq!(host_only.naming.source, PortSource::Builtin);
+        for &name in PortTable::PORT_NAMES {
+            for serialized_source in [None, Some(PortSource::Builtin)] {
+                let mut entry = builtin[name].clone();
+                entry["backend"] = serde_json::json!({"kind": "none"});
+                let object = entry.as_object_mut().unwrap();
+                object.remove("source");
+                if let Some(source) = serialized_source {
+                    object.insert("source".into(), serde_json::to_value(source).unwrap());
+                }
+                let mut overlay = serde_json::json!({"schema_version": PORTS_SCHEMA_VERSION});
+                overlay[name] = entry;
+                let bytes = serde_json::to_vec(&overlay).unwrap();
+                std::fs::write(host.join("ports.json"), &bytes).unwrap();
+                std::fs::write(project.join(PORTS_CONFIG), &bytes).unwrap();
+
+                for (project_path, expected_source) in [
+                    (None, PortSource::Host),
+                    (Some(project.as_path()), PortSource::Project),
+                ] {
+                    let table = PortTable::read_for(project_path, &host).unwrap();
+                    for (port, source, _, _, _) in table.entries() {
+                        assert_eq!(
+                            source,
+                            if port == name {
+                                expected_source
+                            } else {
+                                PortSource::Builtin
+                            },
+                            "{port}: overlay for {name} must not relabel omitted ports"
+                        );
+                    }
+                    let mut expected = builtin.clone();
+                    expected[name] = overlay[name].clone();
+                    expected[name]["source"] = serde_json::to_value(expected_source).unwrap();
+                    assert_eq!(serde_json::to_value(&table).unwrap(), expected);
+                }
+            }
+        }
     }
 
     #[test]
