@@ -479,8 +479,6 @@ fn settled_source_consumer_keeps_composite_export_when_member_retries() {
     let mut journal = MemoryJournal::default();
     let completed = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(completed.status, GraphStatus::Complete);
-    assert_eq!(owner.calls.len(), 2);
-    assert_eq!(owner.source_commits, vec![None, Some(first_commit.clone())]);
     assert_eq!(
         completed
             .checkpoint

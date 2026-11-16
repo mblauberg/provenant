@@ -1176,6 +1176,12 @@ fn state(
             NodeState::Running
         }
         Some(state) => state,
+        None if node.composite_members.iter().any(|child| {
+            !plan.nodes[positions[child]].advisory && patch::skipped_by_patch(checkpoint, child)
+        }) =>
+        {
+            NodeState::Blocked
+        }
         None => NodeState::Succeeded,
     }
 }
