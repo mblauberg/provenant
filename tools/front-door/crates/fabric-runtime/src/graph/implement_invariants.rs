@@ -7,16 +7,17 @@ fn implementation_is_planned_unless_its_brief_is_already_bounded() {
     let library = TemplateLibrary::bundled();
     let compiler = Compiler::new(&library);
     let limits = crate::config::GraphLimits::default();
-    for (template, bounded, expects_plan) in [
-        ("implement", false, true),
-        ("implement", true, false),
-        ("implement.plan", false, false),
-        ("implement.fix", false, false),
-        ("implement.issue", false, true),
+    for (template, bounded, no_plan, expects_plan) in [
+        ("implement", false, false, true),
+        ("implement", false, true, false),
+        ("implement", true, false, false),
+        ("implement.plan", false, false, false),
+        ("implement.fix", false, false, false),
+        ("implement.issue", false, false, true),
     ] {
         let mut raw = json!({"id":"work", "use":template, "prompt":"Meet the acceptance criteria",
             "worktree":"/fixture/writer", "write_scope":["src"]});
-        if bounded {
+        if bounded || no_plan {
             raw["with"] = json!({"bounded":true});
         }
         let document: GraphDocument = serde_json::from_value(json!({
