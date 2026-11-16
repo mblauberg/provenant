@@ -339,32 +339,32 @@ pub(super) fn graph_snapshot(
 
 #[cfg(test)]
 mod tests {
-    use super::node_digests;
-    use provenant_core::ProjectId;
-    use provenant_records::WorkKey;
-    use serde_json::{Value, json};
-
-    fn rows(attempt_state: &str, presence: Option<&str>) -> Vec<Value> {
-        let key = WorkKey::new(ProjectId::from_bytes([7; 16]), "graph", "task", 1).unwrap();
-        let key = json!(key);
-        let mut attempt = json!({
-            "kind":"attempt",
-            "work_key":key,
-            "state":attempt_state,
-            "graph_state":"running",
-            "cause_code":"steered"
-        });
-        if let Some(presence) = presence {
-            attempt["presence"] = json!(presence);
-        }
-        vec![
-            json!({"kind":"node","work_key":key,"state":"running"}),
-            attempt,
-        ]
-    }
-
     #[test]
-    fn terminal_selected_attempt_is_not_reported_as_a_running_outcome() {
+    fn selected_attempt_digest_preserves_graph_state_and_writer_presence() {
+        use super::node_digests;
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::{Value, json};
+
+        fn rows(attempt_state: &str, presence: Option<&str>) -> Vec<Value> {
+            let key = WorkKey::new(ProjectId::from_bytes([7; 16]), "graph", "task", 1).unwrap();
+            let key = json!(key);
+            let mut attempt = json!({
+                "kind":"attempt",
+                "work_key":key,
+                "state":attempt_state,
+                "graph_state":"running",
+                "cause_code":"steered"
+            });
+            if let Some(presence) = presence {
+                attempt["presence"] = json!(presence);
+            }
+            vec![
+                json!({"kind":"node","work_key":key,"state":"running"}),
+                attempt,
+            ]
+        }
+
         let digest = node_digests(&rows("cancelled", None)).remove(0);
 
         assert_eq!(
@@ -377,10 +377,7 @@ mod tests {
         assert!(!digest.settled, "the graph still requires settlement");
         assert!(digest.line.contains("cancelled node_state=running"));
         assert!(!digest.line.contains("running outcome=running"));
-    }
 
-    #[test]
-    fn current_writer_presence_is_primary_in_the_human_digest() {
         for (recorded_presence, presence) in [
             (Some("live"), "live"),
             (Some("unattended"), "unattended"),

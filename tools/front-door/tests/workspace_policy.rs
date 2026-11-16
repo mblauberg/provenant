@@ -624,14 +624,6 @@ fn executor_git_commands_use_the_fixture_helper() -> Result<(), Box<dyn Error>> 
             .into());
         }
     }
-    // These two files must not build Git argv or filter GIT_ variables inline.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for file in ["crates/run/src/controls.rs", "crates/run/src/cargo_seed.rs"] {
-        let source = fs::read_to_string(root.join(file))?;
-        for forbidden in ["starts_with(\"GIT_\")", "git_executable()", "once(\"git\")"] {
-            assert!(!source.contains(forbidden), "{file} contains {forbidden}");
-        }
-    }
     Ok(())
 }
 

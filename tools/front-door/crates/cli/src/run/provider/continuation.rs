@@ -398,7 +398,9 @@ pub(super) fn verify_native_continuation(
         .join("attempts")
         .join(prior.attempt_id.to_string())
         .join("provider-state");
-    if route.adapter == "codex" {
+    if AdapterSpec::get(&route.adapter)
+        .is_some_and(|spec| spec.model_observation == ModelObservation::Rollout)
+    {
         match super::observation::find_native_codex_rollout(
             &prior_state,
             session,

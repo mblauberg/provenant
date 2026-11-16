@@ -108,8 +108,9 @@ pub(super) fn find_native_codex_rollout(
     if model.is_empty() {
         return Err(ProviderError::UnknownIdentity);
     }
+    let provider = provenant_records::Harness::Codex.spec().name;
     let selected =
-        match native_session_location_for_route(provider_state, "codex", model, account_key) {
+        match native_session_location_for_route(provider_state, provider, model, account_key) {
             Ok(home) => home,
             Err(NativeSessionLocationError::Missing | NativeSessionLocationError::Unavailable) => {
                 return Ok(None);
@@ -121,12 +122,12 @@ pub(super) fn find_native_codex_rollout(
     if selected_home.is_some_and(|expected| expected != selected.as_path()) {
         return Err(ProviderError::IdentityMismatch);
     }
-    let expected_model = format!("codex/{model}");
+    let expected_model = format!("{provider}/{model}");
     let observed = provenant_providers::codex_rollout::observe(&selected, session)?;
     let observed_model = if observed.model.contains('/') {
         observed.model.clone()
     } else {
-        format!("codex/{}", observed.model)
+        format!("{provider}/{}", observed.model)
     };
     if observed_model != expected_model {
         return Err(ProviderError::IdentityMismatch);
@@ -156,13 +157,17 @@ pub(crate) fn observe_codex_rollout(
         .provider
         .as_deref()
         .ok_or(ProviderError::UnknownIdentity)?;
-    if provider != "codex" {
+    if !AdapterSpec::get(provider)
+        .is_some_and(|spec| spec.model_observation == provenant_records::ModelObservation::Rollout)
+    {
         return Err(ProviderError::UnknownIdentity);
     }
     let model = route
         .model
         .as_deref()
-        .and_then(|model| model.strip_prefix("codex/"))
+        .and_then(|model| model.split_once('/'))
+        .filter(|(prefix, _)| *prefix == provider)
+        .map(|(_, model)| model)
         .ok_or(ProviderError::UnknownIdentity)?;
     if native_home_required {
         return find_native_codex_rollout(

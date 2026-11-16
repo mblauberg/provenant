@@ -1280,8 +1280,7 @@ mod tests {
     fn bind(roots: &provenant_core::Roots, root: &std::path::Path) {
         use super::*;
         fs::create_dir_all(root).unwrap();
-        let git = provenant_os::git::git_executable().expect("Git unavailable");
-        let output = std::process::Command::new(git)
+        let output = provenant_os::fixture::git_command()
             .args(["init", "--quiet"])
             .current_dir(root)
             .output()
@@ -1303,8 +1302,7 @@ mod tests {
         use super::*;
         fs::create_dir_all(root).unwrap();
         fs::create_dir_all(common.parent().unwrap()).unwrap();
-        let git = provenant_os::git::git_executable().expect("Git unavailable");
-        let output = std::process::Command::new(git)
+        let output = provenant_os::fixture::git_command()
             .arg("init")
             .arg("--quiet")
             .arg("--separate-git-dir")
