@@ -185,10 +185,7 @@ fn codex_rollout_is_found_in_the_launched_candidate() -> Result<(), Box<dyn std:
                 Err(provenant_providers::ProviderError::IdentityMismatch)
             ));
             let other_route_record = codex_route_record("gpt-6-luna", Some("other-account"));
-            assert!(matches!(
-                observe_codex_rollout(&base, thread, &other_route_record, true),
-                Ok(_)
-            ));
+            assert!(observe_codex_rollout(&base, thread, &other_route_record, true).is_ok());
         } else {
             assert!(matches!(
                 observe_codex_rollout(&base, thread, &route_record, native),
@@ -1889,9 +1886,8 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
             crate::run::SourceAdmissionMode::Registered,
         )?;
         assert_eq!(admission.path, source);
-        let prepared = source_cwd(&registry, &task).unwrap_or_else(|error| {
-            panic!("source {}: {error}", source.display())
-        });
+        let prepared = source_cwd(&registry, &task)
+            .unwrap_or_else(|error| panic!("source {}: {error}", source.display()));
         assert_eq!(prepared, admission.path);
         assert!(
             !admission

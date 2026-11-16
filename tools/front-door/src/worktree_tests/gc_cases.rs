@@ -338,7 +338,7 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
     fs::write(rig.project.join(".gitignore"), ".worktrees/\ntarget/\n")?;
     git(&rig, &["add", ".gitignore"])?;
     git(&rig, &["commit", "-qm", "ignore output"])?;
-    let created = ok(&rig, &["worktree", "create", "idle", "--json"])?;
+    ok(&rig, &["worktree", "create", "idle", "--json"])?;
     let worktree = rig.project.join(".worktrees/idle");
     let cache = prepare_lane_cache(&rig, &worktree, "idle")?;
     let profile = |name: &str, age: u64| -> Result<PathBuf> {

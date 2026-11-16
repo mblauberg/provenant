@@ -265,7 +265,7 @@ impl worktrees::RetirementFeeds for Owner<'_> {
                         && record
                             .holder
                             .chair()
-                            .map_or(true, |holder_chair| holder_chair.host == chair.host)
+                            .is_none_or(|holder_chair| holder_chair.host == chair.host)
                         && !census_observed
                     {
                         census = provenant_supervisor::census::ProcessObserver::census(
