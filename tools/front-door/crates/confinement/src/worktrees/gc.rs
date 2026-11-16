@@ -270,10 +270,22 @@ fn refuse_unqualified_pending_retirement(
 }
 
 fn validate_forge_head(
-    feeds: &dyn RetirementFeeds,
+    feeds: Option<&dyn RetirementFeeds>,
     branch: &GitRefName,
     evidence: &LandedEvidence,
 ) -> Result<(), WorktreeError> {
+    // Git-backed proof is revalidated against retained refs and does not
+    // depend on a forge feed. Only a merge without a commit needs that feed.
+    if !matches!(
+        &evidence.source,
+        LandingSource::ForgeMerged {
+            merge_commit: None,
+            ..
+        }
+    ) {
+        return Ok(());
+    }
+    let feeds = feeds.ok_or(WorktreeError::RegistrationUnconfirmed)?;
     validate_forge_observation(feeds.forge(branch), evidence)
 }
 
@@ -1669,13 +1681,7 @@ fn collect_impl(
                 if let SelectedRetirement::Subsumed(evidence) = &action {
                     validate_removal_evidence(context, lane.head, evidence, &refs, cancel)?;
                     if let Some(branch) = branch.as_ref() {
-                        validate_forge_head(
-                            policy
-                                .retirement_feeds
-                                .ok_or(WorktreeError::RegistrationUnconfirmed)?,
-                            branch,
-                            evidence,
-                        )?;
+                        validate_forge_head(policy.retirement_feeds, branch, evidence)?;
                     }
                 }
 
@@ -1763,13 +1769,7 @@ fn collect_impl(
                         if let SelectedRetirement::Subsumed(evidence) = &action {
                             validate_removal_evidence(context, lane.head, evidence, &refs, cancel)?;
                             if let Some(branch) = branch.as_ref() {
-                                validate_forge_head(
-                                    policy
-                                        .retirement_feeds
-                                        .ok_or(WorktreeError::RegistrationUnconfirmed)?,
-                                    branch,
-                                    evidence,
-                                )?;
+                                validate_forge_head(policy.retirement_feeds, branch, evidence)?;
                             }
                         }
                         let retirement = begin_worktree_retirement(
