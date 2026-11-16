@@ -1347,6 +1347,14 @@ impl BinaryRunOwner<'_> {
             let mut attempt = attempt.unwrap_or_default();
             attempt.host = None;
             attempt.parent_sandboxed |= floored;
+            // Local admission stamps graph provenance from this host's work
+            // key. That stamp is not evidence on the wire: the peer refuses a
+            // caller-supplied flag and restamps after authenticating the
+            // graph envelope.
+            let mut task = task;
+            if let Some(context) = task.context.as_mut() {
+                context.graph_template_launch = false;
+            }
             let graph_context = provenant_fabric_runtime::hosts::GraphSubmitContext {
                 launch_actor: self
                     .actor
