@@ -148,13 +148,13 @@ fn admission_admits_only_its_own_steer_marker_and_fails_closed_otherwise() -> Te
             3 => (scope, context.actor_id, "other.cancel", steered),
             _ => (scope, context.actor_id, request_id.as_str(), steered),
         };
-        Ok(crate::db::bytes(&serde_json::json!({
+        crate::db::bytes(&serde_json::json!({
             "schema_version": 1,
             "scope": fields.0,
             "requester": fields.1,
             "request_id": fields.2,
             "reason": fields.3,
-        }))?)
+        }))
     };
     for (case, id) in ids.into_iter().enumerate() {
         let attempt = store.attempt_dir(id, false)?;

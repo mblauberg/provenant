@@ -1112,7 +1112,7 @@ fn launch_inventory_protects_each_registered_project_allocation_root()
         provenant_config::bind_project(
             &roots,
             provenant_config::ProjectLocation::from_verified_primary_checkout(
-                &primary.join(".git"),
+                primary.join(".git"),
                 &primary,
             )?,
         )?;
