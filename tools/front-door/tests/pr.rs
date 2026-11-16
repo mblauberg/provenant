@@ -464,6 +464,46 @@ fn pr_status_preserves_partial_results() -> Result {
     Ok(())
 }
 
+fn normalise_repo_api_argument(argument: &str) -> Option<String> {
+    let mut segments = argument.splitn(4, '/');
+    let resource = segments.next()?;
+    let owner = segments.next()?;
+    let repository = segments.next()?;
+    if resource != "repos"
+        || !matches!(
+            (owner, repository),
+            ("owner", "repo") | ("{owner}", "{repo}")
+        )
+    {
+        return None;
+    }
+    Some(match segments.next() {
+        Some(suffix) => format!("repos/{{owner}}/{{repo}}/{suffix}"),
+        None => "repos/{owner}/{repo}".into(),
+    })
+}
+
+/// Compare API operations after removing HTTP transport flags and canonicalising
+/// the repository identity used by this fixture.
+fn normalise_api_call(args: &[String]) -> Result<String> {
+    if args.first().map(String::as_str) != Some("api") {
+        return Ok(args.join(" "));
+    }
+    let mut operation = Vec::with_capacity(args.len());
+    let mut arguments = args.iter();
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--include" => {}
+            "-H" => {
+                arguments.next().ok_or("missing API header")?;
+            }
+            _ => operation
+                .push(normalise_repo_api_argument(argument).unwrap_or_else(|| argument.to_owned())),
+        }
+    }
+    Ok(operation.join(" "))
+}
+
 fn fake_gh(args: &[String]) -> Result<u8> {
     let call = args.join(" ");
     // Real gh rejects JSON fields it does not have; so does this fake.
@@ -526,13 +566,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             .open("gh-calls")?,
         "{call}"
     )?;
-    let normalised = call
-        .replace("api --include ", "api ")
-        .replace(" -H X-GitHub-Api-Version:2026-03-10", "")
-        .replace(
-            "api -H Accept:application/vnd.github+json -H X-GitHub-Api-Version:2022-11-28 ",
-            "api ",
-        );
+    let normalised = normalise_api_call(args)?;
     match normalised.as_str() {
         "api repos/{owner}/{repo}" => {
             io::stdout().write_all(br#"{"default_branch":"main","html_url":"https://github.com/owner/repo","full_name":"owner/repo","owner":{"login":"owner"}}"#)?;
@@ -540,7 +574,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
         "api --paginate --slurp repos/{owner}/{repo}/pulls/1668/reviews?per_page=100" => {
             io::stdout().write_all(b"[[]]")?;
         }
-        "api repos/{owner}/{repo}/pulls/1668" | "api repos/owner/repo/pulls/1668" => {
+        "api repos/{owner}/{repo}/pulls/1668" => {
             if Path::new("read-fail-after-merge").exists() && Path::new("merge-args").exists() {
                 writeln!(io::stderr(), "HTTP 502 Bad Gateway")?;
                 return Ok(1);
@@ -610,10 +644,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 br#"{"baseRefName":"main","url":"https://github.com/owner/repo/pull/1668"}"#,
             )?;
         }
-        value
-            if value.starts_with("api repos/{owner}/{repo}/git/commits/")
-                || value.starts_with("api repos/owner/repo/git/commits/") =>
-        {
+        value if value.starts_with("api repos/{owner}/{repo}/git/commits/") => {
             let commit = value.rsplit('/').next().ok_or("commit")?;
             let tree = if Path::new("live-pr").exists() {
                 let git = provenant_os::git::resolve_git_executable(None)
@@ -632,7 +663,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             let body = serde_json::json!({"tree":{"sha":tree}});
             io::stdout().write_all(&serde_json::to_vec(&body)?)?;
         }
-        "api repos/owner/repo/branches/main" => {
+        "api repos/{owner}/{repo}/branches/main" => {
             if Path::new("rate-read-once").exists() {
                 fs::remove_file("rate-read-once")?;
                 writeln!(io::stdout(), "HTTP/2 429\r\nretry-after: 0\r\n\r\n{{}}")?;
@@ -645,7 +676,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 io::stdout().write_all(br#"{"protected":false}"#)?;
             }
         }
-        "api repos/owner/repo/branches/main/protection" => {
+        "api repos/{owner}/{repo}/branches/main/protection" => {
             if Path::new("protection-404").exists() {
                 io::stdout().write_all(br#"{"message":"Not Found","status":"404"}"#)?;
             } else {
@@ -653,7 +684,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             }
             return Ok(1);
         }
-        "api --paginate --slurp repos/owner/repo/rules/branches/main?per_page=100" => {
+        "api --paginate --slurp repos/{owner}/{repo}/rules/branches/main?per_page=100" => {
             if Path::new("rules-fail").exists() {
                 return Ok(1);
             }
@@ -665,7 +696,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
         }
         // The CI observer reads one page per request, with response headers.
         value
-            if value.starts_with("api repos/owner/repo/commits/")
+            if value.starts_with("api repos/{owner}/{repo}/commits/")
                 && value.contains("/statuses?per_page=100&page=") =>
         {
             let page: usize = value.rsplit("&page=").next().ok_or("page")?.parse()?;
@@ -682,7 +713,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             io::stdout().write_all(&serde_json::to_vec(&body)?)?;
         }
         value
-            if value.starts_with("api repos/owner/repo/commits/")
+            if value.starts_with("api repos/{owner}/{repo}/commits/")
                 && value.contains("/check-runs?per_page=100&filter=latest&page=") =>
         {
             let commit = value

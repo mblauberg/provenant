@@ -1406,34 +1406,6 @@ pub(crate) fn land_cleanup(
                 .wall_now()
                 .map(|now| i128::from(now.as_micros()) * 1_000)
                 .map_err(|_| Error::Budget)?;
-            let collected = worktrees::collect(
-                context,
-                std::slice::from_ref(&lane),
-                &worktrees::WorktreeGcPolicy {
-                    upstream: None,
-                    terminal: &terminal,
-                    no_live_lanes: &no_live_lanes,
-                    regenerable: &regenerable,
-                    keep: &settings.keep,
-                    written_before_ns: now_ns,
-                    include_foreign: false,
-                    mode: provenant_confinement::worktrees::CollectionMode::Outputs,
-                    proof: None,
-                    upstream_reference: None,
-                    retirement_port: None,
-                    retirement_feeds: None,
-                    integration_patterns: &[],
-                    excluded_paths: &[],
-                    dry_run: false,
-                },
-                cancel,
-            )?;
-            landed.output = collected
-                .output
-                .into_iter()
-                .filter(|entry| entry.removed)
-                .map(|entry| entry.path)
-                .collect();
             let integration_ref =
                 provenant_confinement::repo::GitRefName::remote_tracking(integration)
                     .map_err(|_| Error::InvalidScope)?;
@@ -1486,6 +1458,12 @@ pub(crate) fn land_cleanup(
                 cancel,
             ) {
                 Ok(outcome) => {
+                    landed.output = outcome
+                        .output
+                        .into_iter()
+                        .filter(|entry| entry.removed)
+                        .map(|entry| entry.path)
+                        .collect();
                     landed.removed = outcome
                         .worktrees
                         .removed

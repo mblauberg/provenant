@@ -771,6 +771,31 @@ fn contribution_terminal(
     Ok(())
 }
 
+fn normalise_repo_api_argument(argument: &str) -> String {
+    let mut segments = argument.splitn(4, '/');
+    let Some(resource) = segments.next() else {
+        return argument.into();
+    };
+    let Some(owner) = segments.next() else {
+        return argument.into();
+    };
+    let Some(repository) = segments.next() else {
+        return argument.into();
+    };
+    if resource != "repos"
+        || !matches!(
+            (owner, repository),
+            ("owner", "repo") | ("{owner}", "{repo}")
+        )
+    {
+        return argument.into();
+    }
+    match segments.next() {
+        Some(suffix) => format!("repos/{{owner}}/{{repo}}/{suffix}"),
+        None => "repos/{owner}/{repo}".into(),
+    }
+}
+
 /// The fake `gh` the driver re-enters as: a passing, unchanged pull request.
 pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
     let call = args.join(" ");
@@ -840,6 +865,7 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
         "{call}"
     )?;
     // Route on the operation, independently of HTTP transport metadata.
+    let is_api = args.first().map(String::as_str) == Some("api");
     let mut operation = Vec::new();
     let mut arguments = args.iter();
     while let Some(argument) = arguments.next() {
@@ -848,7 +874,11 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
             "-H" => {
                 arguments.next().ok_or("missing HTTP header")?;
             }
-            _ => operation.push(argument.as_str()),
+            _ => operation.push(if is_api {
+                normalise_repo_api_argument(argument)
+            } else {
+                argument.clone()
+            }),
         }
     }
     let normalised = operation.join(" ");
@@ -860,14 +890,14 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
             let head: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("head.json"))?)?;
             io::stdout().write_all(&serde_json::to_vec(&serde_json::json!([[{"id": 1, "user": {"login": "reviewer"}, "state": "APPROVED", "commit_id": head["headRefOid"]}]]))?)?;
         }
-        value if value.starts_with("api repos/{owner}/{repo}/git/commits/") || value.starts_with("api repos/owner/repo/git/commits/") => {
+        value if value.starts_with("api repos/{owner}/{repo}/git/commits/") => {
             let commit = value.rsplit('/').next().ok_or("commit")?;
             let output = provenant_os::fixture::git_command().current_dir(&dir).args(["rev-parse", &format!("{commit}^{{tree}}")]).output()?;
             if !output.status.success() { return Err("cannot resolve fixture tree".into()); }
             let tree = String::from_utf8(output.stdout)?.trim().to_owned();
             io::stdout().write_all(&serde_json::to_vec(&serde_json::json!({"tree": {"sha": tree}}))?)?;
         }
-        value if (value.starts_with("api repos/{owner}/{repo}/pulls/") || value.starts_with("api repos/owner/repo/pulls/")) && !value.ends_with("/merge") => {
+        value if value.starts_with("api repos/{owner}/{repo}/pulls/") && !value.ends_with("/merge") => {
             let head: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("head.json"))?)?;
             let mut view: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("view.json"))?)?;
             if let Some(number) = value.rsplit('/').next().filter(|number| *number != "1668") {
@@ -977,23 +1007,21 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
                 br#"{"baseRefName":"main","url":"https://github.com/owner/repo/pull/1668"}"#,
             )?;
         }
-        "api repos/owner/repo/branches/main" | "api repos/{owner}/{repo}/branches/main" => {
+        "api repos/{owner}/{repo}/branches/main" => {
             io::stdout().write_all(br#"{"protected":false}"#)?;
         }
-        "api --paginate --slurp repos/owner/repo/rules/branches/main?per_page=100" | "api --paginate --slurp repos/{owner}/{repo}/rules/branches/main?per_page=100" => {
+        "api --paginate --slurp repos/{owner}/{repo}/rules/branches/main?per_page=100" => {
             io::stdout().write_all(b"[[]]")?;
         }
         // The CI observer reads through `gh api --include`, page by page.
         value
-            if (value.starts_with("api repos/owner/repo/commits/")
-                || value.starts_with("api repos/{owner}/{repo}/commits/"))
+            if value.starts_with("api repos/{owner}/{repo}/commits/")
                 && value.ends_with("/statuses?per_page=100&page=1") =>
         {
             io::stdout().write_all(b"HTTP/2.0 200 OK\r\n\r\n[]")?;
         }
         value
-            if (value.starts_with("api repos/owner/repo/commits/")
-                || value.starts_with("api repos/{owner}/{repo}/commits/"))
+            if value.starts_with("api repos/{owner}/{repo}/commits/")
                 && value.ends_with("/check-runs?per_page=100&filter=latest&page=1") =>
         {
             if dir.join("checks-fail").exists() {
