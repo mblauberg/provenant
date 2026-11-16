@@ -97,14 +97,15 @@ pub fn project_layout_for_common(
     let common = provenant_os::fs::canonicalize(common)?;
     let directory = Directory::open_anchor(&common)?;
     let identity = directory.metadata()?;
-    let inventory = RepoFacts::default().discover_worktree_inventory(
-        &common,
-        git,
-        environment,
-        executor,
-        inventory_timeout,
-        cancel,
-    )?;
+    let inventory =
+        RepoFacts::default().discover_worktree_inventory(WorktreeInventoryQuery::new(
+            &common,
+            git,
+            environment,
+            executor,
+            inventory_timeout,
+            cancel,
+        ))?;
     let entries = parse_worktree_list(&inventory)?;
     match verified_primary_from_inventory(&common, identity, &entries)? {
         Some(repo) => ProjectLayout::from_repo(&repo, true),
@@ -130,14 +131,16 @@ pub(crate) fn project_layout_for_common_with_bare_setting(
     let directory = Directory::open_anchor(&common)?;
     let identity = directory.metadata()?;
     let facts = RepoFacts::default();
-    let checkout_inventory = facts.discover_worktree_inventory_with_bare_setting(
-        &common,
-        git,
-        environment,
-        executor,
-        inventory_timeout,
-        cancel,
-        false,
+    let checkout_inventory = facts.discover_worktree_inventory(
+        WorktreeInventoryQuery::new(
+            &common,
+            git,
+            environment,
+            executor,
+            inventory_timeout,
+            cancel,
+        )
+        .with_bare_setting(false),
     )?;
     let checkout_entries = parse_worktree_list(&checkout_inventory)?;
     match verified_primary_from_inventory(&common, identity, &checkout_entries) {
@@ -149,14 +152,16 @@ pub(crate) fn project_layout_for_common_with_bare_setting(
     if trusted_bare != Some(true) {
         return Err(WorktreeError::ProjectLayoutUnresolved);
     }
-    let bare_inventory = facts.discover_worktree_inventory_with_bare_setting(
-        &common,
-        git,
-        environment,
-        executor,
-        inventory_timeout,
-        cancel,
-        true,
+    let bare_inventory = facts.discover_worktree_inventory(
+        WorktreeInventoryQuery::new(
+            &common,
+            git,
+            environment,
+            executor,
+            inventory_timeout,
+            cancel,
+        )
+        .with_bare_setting(true),
     )?;
     let bare_entries = parse_worktree_list(&bare_inventory)?;
     let bare_common_registered = bare_entries.iter().any(|entry| {
