@@ -108,6 +108,14 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'package(=provenant) & binary(=graph_provider) & test(=remote_only_writer_cli_starts_at_remote_tip)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# A branch writer launched from a linked, separate-Git-directory or bare-linked
+# checkout makes one real launch: Git subprocesses, two host process censuses,
+# provider preparation and the Git confinement handoff. That takes 9 to 14
+# seconds on a developer Mac and 22 to 30+ seconds on shared runners.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & (test(=writer_cli_branch_from_linked_checkout_uses_primary_layout) | test(=writer_cli_branch_from_separate_git_directory_uses_saved_primary) | test(=writer_cli_branch_from_bare_linked_checkout_uses_common_layout))'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 # These graph fixtures perform durable settlement and, for paging, repeatedly
 # read a large checkpoint. The eight-lane fixture also serialises and checks a
 # large graph and its stored prompts. Allow for shared-runner contention.
