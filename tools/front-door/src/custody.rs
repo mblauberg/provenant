@@ -368,7 +368,11 @@ pub(crate) fn presence_with_census(
 ) -> HolderPresence {
     if let Holder::Attempt { attempt, .. } = record.holder {
         // A local process census cannot prove absence on another host.
-        if record.holder.chair().is_some_and(|chair| chair.host != host) {
+        if record
+            .holder
+            .chair()
+            .is_some_and(|chair| chair.host != host)
+        {
             return HolderPresence::Unknown;
         }
         let clock = SystemClock::new();
