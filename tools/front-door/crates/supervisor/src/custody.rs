@@ -82,6 +82,9 @@ pub enum CustodyError {
     InvalidRecord,
     #[error("launch handoff is unconfirmed; reservation remains fenced")]
     HandoffUnknown,
+    /// This host cannot hold provider custody; nothing was handed off.
+    #[error("process custody is supported only on macOS")]
+    UnsupportedPlatform,
     #[error("sandbox profile transport handoff is unconfirmed; reservation remains fenced")]
     ProfileHandoffUnknown,
     #[error("operation was cancelled; custody is retained")]
@@ -1224,6 +1227,13 @@ pub fn launch(
     };
     if owned.lease.launched {
         return Err(failure(CustodyError::Fenced, publication));
+    }
+    // A host without provider custody refuses before the reservation records
+    // a handoff: the lease stays unlaunched, so the caller withdraws it rather
+    // than fencing an attempt whose launch can never be confirmed.
+    #[cfg(not(target_os = "macos"))]
+    if crate::process_os::provider::ensure_supported().is_err() {
+        return Err(failure(CustodyError::UnsupportedPlatform, publication));
     }
     let scope = owned.lease.scope();
     let requester = owned.command.requester;

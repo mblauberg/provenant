@@ -191,8 +191,6 @@ pub(crate) fn handoff(
     capture: CapturePlan,
     publication: &PublicationReservation,
 ) -> Result<()> {
-    #[cfg(not(target_os = "macos"))]
-    crate::process_os::provider::ensure_supported()?;
     if owned.command.protected_commands.len() > 128
         || owned
             .command
