@@ -1560,6 +1560,203 @@ mod lineage_tests {
     }
 
     #[test]
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    fn graph_writer_resume_uses_the_committed_terminal_head_and_original_source()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let mut execution = crate::tests::context(temp.path())?;
+        let project = temp.path().join("checkout");
+        let home = temp.path().join("home");
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(execution.state_root.as_path().into());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            roots.state.as_path(),
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        init_base_repository(&project)?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let (project_id, info) =
+            worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+                let info = worktrees::create(
+                    context,
+                    WorktreeCreate {
+                        branch: "steer-writer".into(),
+                        base: Some("HEAD".into()),
+                    },
+                    &cancel,
+                )?;
+                Ok((context.binding.project_id(), info))
+            })?;
+        execution.project_id = project_id;
+        let call = Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let store = RunStore::open(&execution, &call)?;
+        let writer = WriterRequest {
+            extra: Default::default(),
+            custody_project: Some(project_id),
+            project: project.clone(),
+            worktree: info.path.clone(),
+        };
+        let mut original = crate::tests::input();
+        original.attempt_id = AttemptId::from_bytes([212; 16]);
+        original.operation_id = "steer-committed-writer".parse()?;
+        crate::tests::rekey(&mut original);
+        let prior = original.attempt_id;
+        let source = provenant_core::GitOid::parse(&info.head)?;
+        original.request.task.writer = Some(writer.clone());
+        original.request.task.base = Some(info.head.clone());
+        original.request.task.head = Some(info.head.clone());
+        original.request.task.source_head = None;
+        original.request.task.context = Some(provenant_records::run::WorkContext {
+            graph_id: Some("steer-writer-resume".into()),
+            node_id: Some("writer".into()),
+            attempt: Some(1),
+            ..Default::default()
+        });
+        let route = crate::tests::route();
+        store.create(&original, &call)?;
+        let initial = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
+        worktrees::save_owner(
+            &initial.worktree,
+            &WorktreeOwner {
+                attempt_id: Some(prior),
+                operation_id: Some(original.operation_id.clone()),
+                branch: info.branch.clone().ok_or("writer branch missing")?,
+                base: info.head.clone(),
+                host: provenant_core::HostId::from_bytes([3; 16]),
+                created_at: original.created_at,
+                origin: WorktreeOrigin::Lane,
+                label: None,
+                reference: None,
+            },
+        )?;
+        let parent_record = store.record(prior, &call)?;
+        initial.snapshot(
+            store.context.state_root.as_path(),
+            &store.attempt_dir(prior, false)?,
+            RunStore::scope(&parent_record),
+        )?;
+
+        run_git(&info.path, &["config", "user.name", "Fixture"])?;
+        run_git(
+            &info.path,
+            &["config", "user.email", "fixture@example.invalid"],
+        )?;
+        std::fs::write(info.path.join("before.txt"), "committed predecessor work")?;
+        run_git(&info.path, &["add", "before.txt"])?;
+        run_git(&info.path, &["commit", "-qm", "predecessor work"])?;
+        let committed_head = String::from_utf8(run_git(&info.path, &["rev-parse", "HEAD"])?)?
+            .trim()
+            .to_owned();
+        let predecessor = provenant_core::GitOid::parse(&committed_head)?;
+        std::fs::write(info.path.join("pending.txt"), "retained uncommitted work")?;
+
+        let starting = store.mark_starting(
+            &store.record(prior, &call)?,
+            &route,
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let starting = store.record_starting_launch(
+            &starting,
+            &route,
+            None,
+            &[],
+            &Default::default(),
+            Some(predecessor),
+            0,
+            &Default::default(),
+            &call,
+        )?;
+        store.withdraw(
+            prior,
+            starting.state,
+            Outcome::Cancelled,
+            "fixture predecessor settled",
+            clock.wall_now()?,
+            &call,
+        )?;
+        let terminal = store.record(prior, &call)?;
+        assert_eq!(terminal.head, Some(predecessor));
+
+        let mut context = terminal
+            .context
+            .clone()
+            .ok_or("writer graph context missing")?;
+        context.attempt = Some(2);
+        context.writer_predecessor = Some(prior);
+        let finished_at = match terminal.state {
+            AttemptState::Terminal { finished_at, .. } => finished_at,
+            _ => return Err("writer predecessor was not terminal".into()),
+        };
+        let resume = Resume {
+            extend: Vec::new(),
+            prior,
+            expected_generation: 0,
+            operation_id: "steer-committed-writer-successor".parse()?,
+            attempt_id: AttemptId::from_bytes([213; 16]),
+            prompt: "Continue the same writer task".into(),
+            created_at: finished_at,
+        };
+        let child = store.resume_graph(&resume, &context, &call)?;
+        let child_task = store.request(child.attempt_id, &call)?.task;
+        assert_eq!(child_task.source_head.as_deref(), Some(info.head.as_str()));
+        assert_eq!(child_task.head.as_deref(), Some(committed_head.as_str()));
+        assert_eq!(child_task.writer.as_ref(), Some(&writer));
+        assert_eq!(child_task.route, original.request.task.route);
+        assert_eq!(child_task.account, original.request.task.account);
+        assert_eq!(
+            std::fs::read_to_string(info.path.join("pending.txt"))?,
+            "retained uncommitted work"
+        );
+
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let resumed = crate::prepare_writer(
+            child_task
+                .writer
+                .as_ref()
+                .ok_or("successor writer missing")?,
+            &store.writer_registry,
+            project_id,
+        )?;
+        resumed.require_continuation_source(&git, source, predecessor)?;
+        store.check_launch_writer_lineage(
+            &store.record(child.attempt_id, &call)?,
+            &child_task,
+            &resumed.worktree,
+            &call,
+        )?;
+
+        std::fs::write(
+            info.path.join("foreign-drift.txt"),
+            "newer after settlement",
+        )?;
+        run_git(&info.path, &["add", "foreign-drift.txt"])?;
+        run_git(&info.path, &["commit", "-qm", "post-settlement drift"])?;
+        let drifted = crate::prepare_writer(
+            child_task
+                .writer
+                .as_ref()
+                .ok_or("successor writer missing")?,
+            &store.writer_registry,
+            project_id,
+        )?;
+        assert!(matches!(
+            drifted.require_continuation_source(&git, source, predecessor),
+            Err(RunError::WriterSourceMismatch { expected, .. }) if expected == predecessor
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -4277,6 +4474,23 @@ impl RunStore {
             destination.open_pr |= prior.open_pr;
             deliver = Some(destination);
         }
+        // A retained writer continues from the predecessor's sealed terminal
+        // head, which may include commits made while it was running. Preserve
+        // the original source pin separately so launch preparation can prove
+        // that this exact head descends from the authorised source. A fresh
+        // replacement worktree keeps the caller's source/head fields.
+        let (head, source_head) = if writer.is_none() && task.writer.is_some() {
+            (
+                prior
+                    .head
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .or_else(|| task.head.clone()),
+                task.source_head.clone().or_else(|| task.head.clone()),
+            )
+        } else {
+            (task.head.clone(), task.source_head.clone())
+        };
         let prepared = PreparedRun {
             attempt_id: input.attempt_id,
             operation_id: input.operation_id.clone(),
@@ -4292,8 +4506,8 @@ impl RunStore {
                     build_heavy: task.build_heavy,
                     title: None,
                     base: task.base.clone(),
-                    head: task.head.clone(),
-                    source_head: task.source_head.clone(),
+                    head,
+                    source_head,
                     base_ref: task.base_ref.clone(),
                     profile: {
                         let mut profile = task.profile.clone();
