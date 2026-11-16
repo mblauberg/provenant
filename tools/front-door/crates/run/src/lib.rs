@@ -56,10 +56,9 @@ pub use admission::{
     LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{
-    CancelReceipt, Reconciled, Resume, SteerIntent, SteerReceipt, TemporaryReason,
-    AttemptPresence, TemporaryReasonKind, UncertainReason, attempt_presence,
-    attempt_presence_with_census, attempt_presence_with_unavailable_census, holder_absent,
-    overdue_at,
+    AttemptPresence, CancelReceipt, Reconciled, Resume, SteerIntent, SteerReceipt, TemporaryReason,
+    TemporaryReasonKind, UncertainReason, attempt_presence, attempt_presence_with_census,
+    attempt_presence_with_unavailable_census, holder_absent, overdue_at,
 };
 pub use delivery::{FilteredLanePath, HostDeliveryContext};
 pub use git_context::{

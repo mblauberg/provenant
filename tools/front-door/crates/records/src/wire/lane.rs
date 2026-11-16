@@ -423,8 +423,8 @@ impl LaneRow {
             matches!(lane.state, AttemptState::Terminal { .. }).then_some(LaneSettlement {
                 reason: terminal_reason,
             });
-        let recorded_state = (facts.presence.is_some() && state != recorded_state)
-            .then_some(recorded_state);
+        let recorded_state =
+            (facts.presence.is_some() && state != recorded_state).then_some(recorded_state);
         Self {
             project_id: lane.project_id.to_string(),
             graph: lane.key.graph().to_owned(),

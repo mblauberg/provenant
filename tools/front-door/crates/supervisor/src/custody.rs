@@ -1737,10 +1737,7 @@ fn observe_holder_record(
     record: StoredObservation,
     census: Option<&crate::census::Census>,
 ) -> HolderPresence {
-    if record.schema_version != 1
-        || record.scope != scope
-        || record.publication_pending
-    {
+    if record.schema_version != 1 || record.scope != scope || record.publication_pending {
         return HolderPresence::Unknown;
     }
     let Some(guardian) = record.guardian.as_ref() else {
@@ -1752,9 +1749,7 @@ fn observe_holder_record(
     }
     identities.extend(record.descendants.iter());
     if identities.iter().any(|identity| {
-        identity.validate().is_err()
-            || identity.native_start == 0
-            || identity.boot != guardian.boot
+        identity.validate().is_err() || identity.native_start == 0 || identity.boot != guardian.boot
     }) {
         return HolderPresence::Unknown;
     }
@@ -1770,9 +1765,7 @@ fn observe_holder_record(
     for (index, expected) in identities.into_iter().enumerate() {
         match observer.observe(expected.pid) {
             ProcessObservation::Present(fact)
-                if fact.validate().is_ok()
-                    && fact.identity == *expected
-                    && !fact.zombie =>
+                if fact.validate().is_ok() && fact.identity == *expected && !fact.zombie =>
             {
                 return if index < root_count {
                     HolderPresence::Live
@@ -1828,12 +1821,9 @@ fn classify_holder_census(
     // sessions are absent, but it cannot cover a child forked after the
     // asynchronously published checkpoint and escaped from those sessions.
     // Same-boot absence is therefore not quiescence authority.
-    for pid in std::iter::once(guardian.pid).chain(
-        record
-            .provider
-            .as_ref()
-            .map(|provider| provider.pid),
-    ) {
+    for pid in
+        std::iter::once(guardian.pid).chain(record.provider.as_ref().map(|provider| provider.pid))
+    {
         if matches!(census.process(pid), ProcessLookup::Unknown) {
             return HolderPresence::Unknown;
         }

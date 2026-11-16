@@ -195,7 +195,8 @@ fn lane_rows_reject_drift() {
 }
 
 #[test]
-fn dead_and_unobservable_writer_projection_is_truthful_and_actionable() -> Result<(), Box<dyn std::error::Error>> {
+fn dead_and_unobservable_writer_projection_is_truthful_and_actionable()
+-> Result<(), Box<dyn std::error::Error>> {
     // Spec: docs/specs/cli.md#status-selection
     let project = crate::ProjectId::from_bytes([9; 16]);
     let target = crate::WorkKey::new(project, "status-test", "writer", 1)?;

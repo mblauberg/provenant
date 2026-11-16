@@ -1328,7 +1328,10 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
             store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?.as_slice(),
             [(attempt, Reconciled::Uncertain { .. })] if *attempt == id
         ));
-        assert!(matches!(store.record(id, &call)?.state, AttemptState::Running { .. }));
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Running { .. }
+        ));
         assert!(reservation.exists());
         assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
         return Ok(());

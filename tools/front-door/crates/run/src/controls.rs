@@ -451,10 +451,7 @@ pub enum AttemptPresence {
 /// Observe process presence from the attempt's scoped supervisor checkpoint.
 /// A published exit means settlement is pending; missing or unreadable proof
 /// never fabricates a live process.
-pub fn attempt_presence(
-    root: &std::path::Path,
-    record: &AttemptRecord,
-) -> Option<AttemptPresence> {
+pub fn attempt_presence(root: &std::path::Path, record: &AttemptRecord) -> Option<AttemptPresence> {
     attempt_presence_with_observer(root, record, &SystemProcessObserver)
 }
 
@@ -4617,20 +4614,22 @@ impl RunStore {
                 })
                 .any(|attempt| match attempt.state {
                     AttemptState::Running { .. } => running_attempt_reapable(census.map_or_else(
-                            || attempt_presence_without_census(
+                        || {
+                            attempt_presence_without_census(
                                 self.context.state_root.as_path(),
                                 &attempt,
                                 observer,
-                            ),
-                            |census| {
-                                attempt_presence_with_observer_and_census(
-                                    self.context.state_root.as_path(),
-                                    &attempt,
-                                    observer,
-                                    census,
-                                )
-                            },
-                        )),
+                            )
+                        },
+                        |census| {
+                            attempt_presence_with_observer_and_census(
+                                self.context.state_root.as_path(),
+                                &attempt,
+                                observer,
+                                census,
+                            )
+                        },
+                    )),
                     AttemptState::Starting { .. } => self
                         .attempt_dir(attempt.attempt_id, false)
                         .is_ok_and(|dir| {

@@ -155,9 +155,8 @@ fn project_lane_inner(
 ) -> provenant_records::wire::LaneRow {
     let usage = lane.effective_usage();
     let presence = if !observe_host {
-        (unknown_when_host_unobserved
-            && matches!(lane.state, run::AttemptState::Running { .. }))
-        .then_some(provenant_records::wire::LanePresence::Unknown)
+        (unknown_when_host_unobserved && matches!(lane.state, run::AttemptState::Running { .. }))
+            .then_some(provenant_records::wire::LanePresence::Unknown)
     } else {
         let observed = match census {
             Some(Ok(census)) => run::attempt_presence_with_census(root, lane, census),
@@ -166,9 +165,7 @@ fn project_lane_inner(
         };
         observed.map(|presence| match presence {
             run::AttemptPresence::Live => provenant_records::wire::LanePresence::Live,
-            run::AttemptPresence::Unattended => {
-                provenant_records::wire::LanePresence::Unattended
-            }
+            run::AttemptPresence::Unattended => provenant_records::wire::LanePresence::Unattended,
             run::AttemptPresence::Unknown => provenant_records::wire::LanePresence::Unknown,
             run::AttemptPresence::Settling => provenant_records::wire::LanePresence::Settling,
         })

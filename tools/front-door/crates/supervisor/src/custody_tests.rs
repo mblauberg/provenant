@@ -978,9 +978,10 @@ impl ProcessObserver for HolderWorld {
         Ok(self.boot.into())
     }
     fn observe(&self, pid: i64) -> ProcessObservation {
-        self.observations.get(&pid).cloned().unwrap_or_else(|| {
-            ProcessObservation::Unknown(crate::census::ObservationIssue::Io)
-        })
+        self.observations
+            .get(&pid)
+            .cloned()
+            .unwrap_or_else(|| ProcessObservation::Unknown(crate::census::ObservationIssue::Io))
     }
     fn census(
         &self,
