@@ -267,10 +267,14 @@ fn lane_roots(
                 }
                 Some(cwd.to_path_buf())
             } else {
-                let state = host_state.unwrap_or(Path::new("/dev/null"));
-                let utility = provenant_confinement::UtilityRuntime::read_only(git, state)
-                    .map_err(|_| transport::TransportError::Unreadable)?
-                    .with_lane_roots(provenant_confinement::utility::lane_state_roots(state));
+                let utility = if let Some(state) = host_state {
+                    provenant_confinement::UtilityRuntime::read_only(git, state)
+                        .map_err(|_| transport::TransportError::Unreadable)?
+                        .with_lane_roots(provenant_confinement::utility::lane_state_roots(state))
+                } else {
+                    provenant_confinement::UtilityRuntime::read_only_without_host_state(git)
+                        .map_err(|_| transport::TransportError::Unreadable)?
+                };
                 let cancel = provenant_core::CancelToken::new();
                 let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))
                     .map_err(|_| transport::TransportError::Unreadable)?;
