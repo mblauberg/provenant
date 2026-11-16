@@ -1,7 +1,7 @@
 //! Durable settlement progress. Kernel locks protect only journal updates.
 use crate::{AdmissionError, RECORD_LIMIT, Result, RunError, artifacts::read_sealed};
 use provenant_core::retry::Backoff;
-use provenant_core::{CancelToken, Clock, DurationMicros, GitOid};
+use provenant_core::{ActorId, CancelToken, Clock, DurationMicros, GitOid, OperationId};
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
 use provenant_records::custody::Scope;
 use provenant_supervisor::census::{ProcessIdentity, ProcessObservation, SystemProcessObserver};
@@ -11,6 +11,91 @@ use std::{ffi::OsStr, sync::mpsc, time::Duration};
 const LIMIT: u32 = 3;
 const UNKNOWN_OWNER_LIMIT_MS: u64 = 10 * 60 * 1000;
 const CLAIM_BACKOFF: Backoff = Backoff::new(Duration::from_secs(5), 6, Duration::from_secs(120));
+
+/// The exact durable Steered request admitted by a delivered provider stop.
+/// It is the only cancellation record that writer settlement may consume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DeliveredSteerStop {
+    scope: Scope,
+    requester: ActorId,
+}
+
+impl DeliveredSteerStop {
+    pub(crate) fn from_exit(
+        attempt: &Directory,
+        exit: &provenant_supervisor::custody::ExitObservation,
+        requester: ActorId,
+    ) -> Result<Option<Self>> {
+        if exit.stop_reason != Some(provenant_supervisor::machine::StopReason::Steered)
+            || exit.never_spawned
+            || exit.cancel_delivered_before_exit != Some(true)
+        {
+            return Ok(None);
+        }
+        Self::from_marker(attempt, exit.scope, requester)
+    }
+
+    pub(crate) fn from_terminal_record(
+        attempt: &Directory,
+        record: &provenant_records::run::AttemptRecord,
+        requester: ActorId,
+    ) -> Result<Option<Self>> {
+        let confirmed = record.provider_launched == Some(true)
+            && record.terminal_evidence.as_ref()
+                == Some(&provenant_records::run::TerminalEvidence::ProcessExit)
+            && record.exit_evidence.is_some()
+            && matches!(
+                &record.state,
+                provenant_records::run::AttemptState::Terminal {
+                    terminal_cause: Some(provenant_records::run::TerminalCause::Steered),
+                    ..
+                }
+            );
+        if !confirmed {
+            return Ok(None);
+        }
+        Self::from_marker(attempt, crate::RunStore::scope(record), requester)
+    }
+
+    fn from_marker(attempt: &Directory, scope: Scope, requester: ActorId) -> Result<Option<Self>> {
+        let Some(raw) = read_sealed(attempt, "cancel.json", RECORD_LIMIT)? else {
+            return Ok(None);
+        };
+        let Ok(request) = crate::db::decode::<crate::store::CancellationEvidence>(&raw) else {
+            return Ok(None);
+        };
+        let expected_id = expected_request_id(scope);
+        if request.scope != scope
+            || request.requester != requester
+            || request.reason != provenant_supervisor::machine::StopReason::Steered
+            || expected_id != Some(request._request_id)
+        {
+            return Ok(None);
+        }
+        Ok(Some(Self { scope, requester }))
+    }
+
+    fn matches_marker(self, raw: &[u8]) -> bool {
+        let Ok(request) = crate::db::decode::<crate::store::CancellationEvidence>(raw) else {
+            return false;
+        };
+        request.scope == self.scope
+            && request.requester == self.requester
+            && request.reason == provenant_supervisor::machine::StopReason::Steered
+            && expected_request_id(self.scope).as_ref() == Some(&request._request_id)
+    }
+
+    pub(crate) fn marker_vetoes(self, attempt: &Directory) -> Result<bool> {
+        let Some(raw) = read_sealed(attempt, "cancel.json", RECORD_LIMIT)? else {
+            return Ok(true);
+        };
+        Ok(!self.matches_marker(&raw))
+    }
+}
+
+fn expected_request_id(scope: Scope) -> Option<OperationId> {
+    OperationId::parse(&format!("{}.{}.cancel", scope.attempt, scope.generation)).ok()
+}
 
 #[cfg(test)]
 thread_local! {
@@ -545,6 +630,28 @@ pub(crate) fn with_cancellation<T>(
     cancel: &CancelToken,
     action: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    with_cancellation_policy(attempt, scope, cancel, None, action)
+}
+
+/// Run writer settlement while accepting only its already delivered Steered
+/// request. A replacement explicit cancellation still cancels the import.
+pub(crate) fn with_cancellation_for_delivered_steer<T>(
+    attempt: &Directory,
+    scope: Scope,
+    cancel: &CancelToken,
+    stop: DeliveredSteerStop,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    with_cancellation_policy(attempt, scope, cancel, Some(stop), action)
+}
+
+fn with_cancellation_policy<T>(
+    attempt: &Directory,
+    scope: Scope,
+    cancel: &CancelToken,
+    delivered_steer: Option<DeliveredSteerStop>,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     #[derive(Deserialize)]
     struct Cancellation {
         scope: Scope,
@@ -555,12 +662,24 @@ pub(crate) fn with_cancellation<T>(
     std::thread::scope(|threads| {
         threads.spawn(move || {
             loop {
-                if let Ok(Some(raw)) = read_sealed(&directory, "cancel.json", RECORD_LIMIT)
-                    && let Ok(request) = serde_json::from_slice::<Cancellation>(&raw)
-                    && request.scope == scope
-                {
-                    token.cancel();
-                    break;
+                match read_sealed(&directory, "cancel.json", RECORD_LIMIT) {
+                    Ok(Some(raw)) => {
+                        let should_cancel = if let Some(stop) = delivered_steer {
+                            !stop.matches_marker(&raw)
+                        } else {
+                            serde_json::from_slice::<Cancellation>(&raw)
+                                .is_ok_and(|request| request.scope == scope)
+                        };
+                        if should_cancel {
+                            token.cancel();
+                            break;
+                        }
+                    }
+                    Ok(None) | Err(_) if delivered_steer.is_some() => {
+                        token.cancel();
+                        break;
+                    }
+                    Ok(None) | Err(_) => {}
                 }
                 match stopped.recv_timeout(Duration::from_millis(50)) {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,

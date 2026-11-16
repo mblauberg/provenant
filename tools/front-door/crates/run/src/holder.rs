@@ -953,6 +953,11 @@ impl RunStore {
                 .ok_or(RunError::Validation("pending import lacks writer"))?;
             let cancel = driver.cancellation();
             let budget_stop = record.state.terminal_cause() == Some(TerminalCause::TokenBudget);
+            let delivered_steer = crate::settlement::DeliveredSteerStop::from_terminal_record(
+                attempt,
+                &record,
+                record.verified_owner.unwrap_or(self.context.actor_id),
+            )?;
             let imported = crate::prepare_writer_with_facts(
                 writer,
                 &self.writer_registry,
@@ -960,15 +965,31 @@ impl RunStore {
                 &self.repo_facts,
             )
             .and_then(|launch| {
-                crate::settlement::with_cancellation(attempt, Self::scope(&record), &cancel, || {
-                    launch.terminal(
-                        self.context.state_root.as_path(),
+                let state = self.context.state_root.as_path();
+                match delivered_steer {
+                    Some(stop) => crate::settlement::with_cancellation_for_delivered_steer(
                         attempt,
-                        recovery,
-                        &mut driver,
-                        budget_stop,
-                    )
-                })
+                        Self::scope(&record),
+                        &cancel,
+                        stop,
+                        || {
+                            launch.terminal_after_delivered_steer(
+                                state,
+                                attempt,
+                                recovery,
+                                &mut driver,
+                                stop,
+                                budget_stop,
+                            )
+                        },
+                    ),
+                    None => crate::settlement::with_cancellation(
+                        attempt,
+                        Self::scope(&record),
+                        &cancel,
+                        || launch.terminal(state, attempt, recovery, &mut driver, budget_stop),
+                    ),
+                }
             });
             if let Err(error) = &imported {
                 driver.record_failure(&error.to_string())?;
@@ -1740,6 +1761,11 @@ impl RunStore {
         // current guardian could not establish ordering, its receipt stays unknown.
         let steered = exit.stop_reason == Some(StopReason::Steered)
             && (exit.never_spawned || exit.cancel_delivered_before_exit == Some(true));
+        let delivered_steer = crate::settlement::DeliveredSteerStop::from_exit(
+            attempt,
+            exit,
+            record.verified_owner.unwrap_or(self.context.actor_id),
+        )?;
         let mut cancelled = if exit.never_spawned {
             matches!(
                 exit.stop_reason,
@@ -2127,19 +2153,44 @@ impl RunStore {
                 .and_then(|writer| {
                     let driver = settlement.as_mut().ok_or(RunError::Contention)?;
                     let cancel = driver.cancellation();
-                    crate::settlement::with_cancellation(attempt, exit.scope, &cancel, || {
-                        writer.terminal(
-                            self.context.state_root.as_path(),
+                    let custody =
+                        recovery.ok_or(RunError::Validation("writer terminal custody missing"))?;
+                    let budget_stop = exit.stop_reason == Some(StopReason::TokenBudget)
+                        && !clean_budget
+                        && decoded.outcome == Outcome::TimedOut
+                        && !soft_budget_wrap_up(&record, &decoded.usage);
+                    match delivered_steer {
+                        Some(stop) => crate::settlement::with_cancellation_for_delivered_steer(
                             attempt,
-                            recovery
-                                .ok_or(RunError::Validation("writer terminal custody missing"))?,
-                            driver,
-                            exit.stop_reason == Some(StopReason::TokenBudget)
-                                && !clean_budget
-                                && decoded.outcome == Outcome::TimedOut
-                                && !soft_budget_wrap_up(&record, &decoded.usage),
-                        )
-                    })
+                            exit.scope,
+                            &cancel,
+                            stop,
+                            || {
+                                writer.terminal_after_delivered_steer(
+                                    self.context.state_root.as_path(),
+                                    attempt,
+                                    custody,
+                                    driver,
+                                    stop,
+                                    budget_stop,
+                                )
+                            },
+                        ),
+                        None => crate::settlement::with_cancellation(
+                            attempt,
+                            exit.scope,
+                            &cancel,
+                            || {
+                                writer.terminal(
+                                    self.context.state_root.as_path(),
+                                    attempt,
+                                    custody,
+                                    driver,
+                                    budget_stop,
+                                )
+                            },
+                        ),
+                    }
                 })
             };
             handoff = handoff
@@ -3940,21 +3991,34 @@ mod writer_recovery_tests {
         Ok(())
     }
 
+    // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
-    fn declared_stop_without_a_commit_reports_no_work_in_outcome_and_status()
+    fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use provenant_records::wire::lane::{LaneProjectionFacts, LaneRow};
-        for (changed, dirty, blocked, shared, budget, steered) in [
-            (false, false, false, false, false, false),
-            (true, false, false, false, false, false),
-            (false, true, false, false, false, false),
-            (false, false, true, false, false, false),
-            (true, false, false, true, false, false),
-            (true, false, false, true, false, true),
-            (true, false, false, false, true, false),
-            (false, true, false, false, true, false),
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Marker {
+            None,
+            DeliveredSteer,
+            ExplicitCancel,
+            ExplicitAfterSteer,
+        }
+        use Marker::{DeliveredSteer, ExplicitAfterSteer, ExplicitCancel};
+        for (changed, dirty, blocked, shared, budget, marker) in [
+            (false, false, false, false, false, Marker::None),
+            (true, false, false, false, false, Marker::None),
+            (false, true, false, false, false, Marker::None),
+            (false, false, true, false, false, Marker::None),
+            (true, false, false, true, false, Marker::None),
+            (true, false, false, true, false, DeliveredSteer),
+            (true, false, false, true, false, ExplicitCancel),
+            (true, false, false, true, false, ExplicitAfterSteer),
+            (true, false, false, false, true, Marker::None),
+            (false, true, false, false, true, Marker::None),
         ] {
+            let steered = matches!(marker, DeliveredSteer | ExplicitAfterSteer);
+            let explicit = matches!(marker, ExplicitCancel | ExplicitAfterSteer);
             let fixture = PrepareFixture::new()?;
             let execution = registered_landed_writer_fixture(&fixture)?;
             let (clock, cancel) = (clock(), CancelToken::new());
@@ -3962,6 +4026,13 @@ mod writer_recovery_tests {
             let store = RunStore::open(&execution, &call)?;
             let mut run = input();
             run.request.task.writer = Some(fixture.writer.clone());
+            let source = String::from_utf8(provenant_os::fixture::run_git(
+                &fixture.writer.worktree,
+                &["rev-parse", "HEAD"],
+            )?)?
+            .trim()
+            .to_owned();
+            run.request.task.head = Some(source.clone());
             store.create(&run, &call)?;
             let id = run.attempt_id;
             let limits = provenant_records::LaneLimits::default();
@@ -3998,7 +4069,7 @@ mod writer_recovery_tests {
             let pin = format!("refs/provenant/import/{}", launch.base);
             fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
             let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
-            let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+            let mut lease = provenant_supervisor::custody::acquire_writer(
                 directory,
                 scope,
                 binding,
@@ -4006,9 +4077,74 @@ mod writer_recovery_tests {
                 &cancel,
                 &clock,
             )?;
-            drop(provenant_supervisor::fixture::bind_writer_attempt(
-                lease, &attempt,
-            )?);
+            if marker != Marker::None {
+                use provenant_supervisor::census::{ProcessObservation, SystemProcessObserver};
+                let mut provider = match SystemProcessObserver
+                    .observe(i64::from(std::process::id()))
+                {
+                    ProcessObservation::Present(fact) if !fact.zombie => fact.identity,
+                    observation => {
+                        return Err(format!("fixture process unavailable: {observation:?}").into());
+                    }
+                };
+                let capture = provenant_os::capture::CaptureSourceIdentity {
+                    attempt: id.to_string(),
+                    generation: scope.generation,
+                    boot: provider.boot.clone(),
+                    pid: provider.pid,
+                    native_start: provider.native_start,
+                };
+                assert!(matches!(
+                    store.steer(
+                        id,
+                        "writer-marker-arbitration".parse()?,
+                        "Continue from the committed writer head.",
+                        &call,
+                    )?,
+                    crate::SteerReceipt::Queued { .. }
+                ));
+                if marker == ExplicitCancel {
+                    store.cancel(id, "explicit stop instead of steer", &call)?;
+                }
+                // Session readiness uses the actual steer path, which writes
+                // custody's versioned CancelRequest rather than an exit flag.
+                assert!(store.record_provider_session_ready(
+                    id,
+                    &route(),
+                    "writer-session",
+                    &capture,
+                    &call
+                )?);
+                let saved: crate::store::CancellationEvidence = crate::db::decode(
+                    &read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?.ok_or("cancel marker")?,
+                )?;
+                assert_eq!(
+                    saved.reason,
+                    if steered {
+                        StopReason::Steered
+                    } else {
+                        StopReason::ExplicitCancellation
+                    }
+                );
+                // Retain the same process binding for terminal confirmation.
+                // The synthetic guardian is absent; its session/group shape
+                // is fixture evidence, never authority to signal a process.
+                let guardian = provenant_supervisor::census::ProcessIdentity {
+                    boot: provider.boot.clone(),
+                    pid: 40,
+                    native_start: 1,
+                    group_id: 40,
+                    session_id: 40,
+                };
+                provider.group_id = provider.pid;
+                provider.session_id = guardian.session_id;
+                provenant_supervisor::fixture::record_spawned_provider(
+                    &mut lease, &attempt, guardian, provider,
+                )?;
+            } else {
+                lease = provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?;
+            }
+            drop(lease);
             let mut shared_head = None;
             if changed {
                 let objects = candidate.join("git-objects");
@@ -4078,9 +4214,22 @@ mod writer_recovery_tests {
                 observed.stop_reason = Some(StopReason::Steered);
                 observed.cancel_delivered_before_exit = Some(true);
             }
+            if marker == ExplicitCancel {
+                observed.stop_reason = Some(StopReason::ExplicitCancellation);
+                observed.cancel_delivered_before_exit = Some(true);
+            }
             crate::dispatch_tests::seal_exit(&store, &observed)?;
+            if marker == ExplicitAfterSteer {
+                assert_eq!(
+                    store.cancel(id, "explicit stop after delivered steer", &call)?,
+                    crate::CancelReceipt::Requested
+                );
+            }
             let mut fake =
                 crate::dispatch_tests::Fake::with_observed(Some(route()), Some(Outcome::Succeeded));
+            if marker != Marker::None {
+                fake.session = Some("writer-session".into());
+            }
             if budget {
                 fake.outcome = Some(Outcome::Failed);
                 fake.complete = Some(true);
@@ -4105,12 +4254,20 @@ mod writer_recovery_tests {
             }
             let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
             if let Some(head) = shared_head {
-                assert_eq!(finished.head, Some(head));
-                let terminal: crate::writer::WriterTerminal = crate::db::decode(
-                    &read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?
-                        .ok_or("writer terminal")?,
-                )?;
-                assert_eq!(terminal.head, head);
+                if explicit {
+                    assert_eq!(finished.head, None);
+                    assert!(
+                        read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?.is_none(),
+                        "a later explicit cancellation must veto writer publication"
+                    );
+                } else {
+                    assert_eq!(finished.head, Some(head));
+                    let terminal: crate::writer::WriterTerminal = crate::db::decode(
+                        &read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?
+                            .ok_or("writer terminal")?,
+                    )?;
+                    assert_eq!(terminal.head, head);
+                }
                 assert!(
                     provenant_os::fixture::run_git(
                         &fixture.writer.worktree,
@@ -4120,16 +4277,47 @@ mod writer_recovery_tests {
                     "settlement must preserve the native commit's clean index"
                 );
             }
-            if steered {
+            if marker != Marker::None {
                 assert!(matches!(
                     finished.state,
                     AttemptState::Terminal {
                         outcome: Outcome::Cancelled,
-                        terminal_cause: Some(TerminalCause::Steered),
+                        terminal_cause,
                         ..
-                    }
+                    } if terminal_cause == steered.then_some(TerminalCause::Steered)
                 ));
-                assert_eq!(finished.head, shared_head);
+                let child = store.prepare_steer_continuation(id, &call)?;
+                if explicit {
+                    assert_eq!(
+                        child, None,
+                        "explicit stop must veto continuation: {marker:?}"
+                    );
+                    assert_eq!(store.record(id, &call)?.superseded_by, None);
+                } else {
+                    let child = child.ok_or("delivered steer did not admit successor")?;
+                    let task = store.request(child, &call)?.task;
+                    assert_eq!(task.head, shared_head.map(|head| head.to_string()));
+                    assert_eq!(task.source_head.as_deref(), Some(source.as_str()));
+                    assert_eq!(task.writer.as_ref(), Some(&fixture.writer));
+                    let successor = crate::prepare_writer(
+                        task.writer.as_ref().ok_or("successor writer")?,
+                        &store.writer_registry,
+                        execution.project_id,
+                    )?;
+                    successor.require_continuation_source(
+                        &git,
+                        source.parse()?,
+                        shared_head.ok_or("committed writer head")?,
+                    )?;
+                    store.check_launch_writer_lineage(
+                        &store.record(child, &call)?,
+                        &task,
+                        &successor.worktree,
+                        &call,
+                    )?;
+                    assert_eq!(store.record(id, &call)?.superseded_by, Some(child));
+                    assert_eq!(store.prepare_steer_continuation(id, &call)?, Some(child));
+                }
                 continue;
             }
             if blocked {
