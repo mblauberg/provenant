@@ -1608,10 +1608,11 @@ mod lineage_tests {
         original.operation_id = "steer-committed-writer".parse()?;
         crate::tests::rekey(&mut original);
         let prior = original.attempt_id;
-        let source = provenant_core::GitOid::parse(&info.head)?;
+        let source = info.head;
+        let source_text = source.to_string();
         original.request.task.writer = Some(writer.clone());
-        original.request.task.base = Some(info.head.clone());
-        original.request.task.head = Some(info.head.clone());
+        original.request.task.base = Some(source_text.clone());
+        original.request.task.head = Some(source_text.clone());
         original.request.task.source_head = None;
         original.request.task.context = Some(provenant_records::run::WorkContext {
             graph_id: Some("steer-writer-resume".into()),
@@ -1628,7 +1629,7 @@ mod lineage_tests {
                 attempt_id: Some(prior),
                 operation_id: Some(original.operation_id.clone()),
                 branch: info.branch.clone().ok_or("writer branch missing")?,
-                base: info.head.clone(),
+                base: source_text.clone(),
                 host: provenant_core::HostId::from_bytes([3; 16]),
                 created_at: original.created_at,
                 origin: WorktreeOrigin::Lane,
@@ -1708,7 +1709,10 @@ mod lineage_tests {
         };
         let child = store.resume_graph(&resume, &context, &call)?;
         let child_task = store.request(child.attempt_id, &call)?.task;
-        assert_eq!(child_task.source_head.as_deref(), Some(info.head.as_str()));
+        assert_eq!(
+            child_task.source_head.as_deref(),
+            Some(source_text.as_str())
+        );
         assert_eq!(child_task.head.as_deref(), Some(committed_head.as_str()));
         assert_eq!(child_task.writer.as_ref(), Some(&writer));
         assert_eq!(child_task.route, original.request.task.route);
