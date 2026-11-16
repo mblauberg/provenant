@@ -1992,6 +1992,29 @@ fn scan_configuration_with_roots(
     cancel: &CancelToken,
     roots: &LaneRoots,
 ) -> Result<ConfigScan, UtilityError> {
+    scan_configuration_with_policy(executor, repo, runtime, budget, cancel, roots, true)
+}
+
+fn scan_configuration_origins_with_roots(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    roots: &LaneRoots,
+) -> Result<ConfigScan, UtilityError> {
+    scan_configuration_with_policy(executor, repo, runtime, budget, cancel, roots, false)
+}
+
+fn scan_configuration_with_policy(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    roots: &LaneRoots,
+    enforce_lane_settings: bool,
+) -> Result<ConfigScan, UtilityError> {
     let listing_args = transport::LISTING_ARGS.map(OsString::from);
     let outcome = run_git_probe(executor, repo, runtime, budget, cancel, &[], &listing_args)?;
     if outcome.termination != Termination::Exit(0) {
@@ -2121,6 +2144,7 @@ fn scan_configuration_with_roots(
             }
             // Not active for this HEAD: the matching worktree's probe decides.
             (_, None) => {}
+            (_, Some(_)) if !enforce_lane_settings => {}
             (_, Some(file)) => {
                 return Err(UtilityError::LaneConfiguration {
                     file: file.display().to_string(),
@@ -2177,6 +2201,27 @@ pub(crate) fn lane_configuration_files_with_roots(
     roots: &LaneRoots,
 ) -> Result<BTreeSet<PathBuf>, UtilityError> {
     let scan = scan_configuration_with_roots(executor, repo, runtime, budget, cancel, roots)?;
+    lane_configuration_files_from_scan(repo, runtime, roots, scan)
+}
+
+pub(crate) fn bootstrap_lane_configuration_files_with_roots(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    roots: &LaneRoots,
+) -> Result<BTreeSet<PathBuf>, UtilityError> {
+    let scan = scan_configuration_origins_with_roots(executor, repo, runtime, budget, cancel, roots)?;
+    lane_configuration_files_from_scan(repo, runtime, roots, scan)
+}
+
+fn lane_configuration_files_from_scan(
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    roots: &LaneRoots,
+    scan: ConfigScan,
+) -> Result<BTreeSet<PathBuf>, UtilityError> {
     let mut files = scan.lane_files;
     // An include may be named inside a lane even when Git reports the
     // resolved target as its origin. Seed the graph with the declared path.

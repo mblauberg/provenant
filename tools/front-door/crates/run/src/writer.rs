@@ -2181,8 +2181,8 @@ mod cargo_setup_tests {
         assert_eq!(request.project, source);
         assert_eq!(request.worktree, writer_path);
         assert_eq!(
-            resolve_reader_source(&state, &source, Path::new("README.md"))?,
-            source.join("README.md")
+            resolve_reader_source(&state, &source, Path::new("."))?,
+            source
         );
         let launch = prepare_writer(&request, &state, binding.project_id())?;
         assert_eq!(launch.project_root(), None);
