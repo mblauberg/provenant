@@ -121,9 +121,10 @@ pub(crate) fn bind_native(
     } else {
         (false, false)
     };
-    let bind_store = requested_store_binding && (store_explicit || !pnpm_home_explicit);
+    let bind_store = requested_store_binding && !store_explicit;
     let warn_pnpm = cache_selector_conflict || store_selector_conflict;
     let mut legacy_selector_injected = false;
+    let mut unresolved_store_family = false;
 
     if bind_cache
         && !cache_explicit
@@ -154,36 +155,47 @@ pub(crate) fn bind_native(
         }
     }
 
-    if bind_store
-        && !store_explicit
-        && let Some(family) = family
-    {
-        match pnpm_global_path(home, host_var, "storeDir", "store-dir") {
-            Setting::Missing => {
-                set_pnpm_selector(
-                    env,
-                    family,
-                    "npm_config_store_dir",
-                    "pnpm_config_store_dir",
-                    pnpm_default_store(home, host_var),
-                );
-                legacy_selector_injected |= family == PnpmSelectorFamily::Legacy;
+    if bind_store {
+        let configured_store = pnpm_global_path(home, host_var, "storeDir", "store-dir");
+        if let Some(family) = family {
+            match configured_store {
+                Setting::Missing if pnpm_home_explicit => {}
+                Setting::Missing => {
+                    set_pnpm_selector(
+                        env,
+                        family,
+                        "npm_config_store_dir",
+                        "pnpm_config_store_dir",
+                        pnpm_default_store(home, host_var),
+                    );
+                    legacy_selector_injected |= family == PnpmSelectorFamily::Legacy;
+                }
+                Setting::Present(Some(path)) => {
+                    set_pnpm_selector(
+                        env,
+                        family,
+                        "npm_config_store_dir",
+                        "pnpm_config_store_dir",
+                        path,
+                    );
+                    legacy_selector_injected |= family == PnpmSelectorFamily::Legacy;
+                }
+                Setting::Present(None) => warn_unsupported(),
             }
-            Setting::Present(Some(path)) => {
-                set_pnpm_selector(
-                    env,
-                    family,
-                    "npm_config_store_dir",
-                    "pnpm_config_store_dir",
-                    path,
-                );
-                legacy_selector_injected |= family == PnpmSelectorFamily::Legacy;
+        } else {
+            match configured_store {
+                Setting::Missing if pnpm_home_explicit => {}
+                Setting::Present(None) => warn_unsupported(),
+                Setting::Missing | Setting::Present(Some(_)) => {
+                    unresolved_store_family = true;
+                }
             }
-            Setting::Present(None) => warn_unsupported(),
         }
     }
 
-    if family.is_none() && (bind_cache || bind_store) {
+    if family.is_none()
+        && (bind_cache || unresolved_store_family || (requested_store_binding && store_explicit))
+    {
         warn_pnpm_family_unresolved();
     } else if warn_pnpm {
         warn_pnpm_selector_conflict();
@@ -1436,6 +1448,81 @@ mod tests {
                     Some(root.path().join("attempt/data").as_os_str())
                 );
             }
+        }
+    }
+
+    #[test]
+    fn pnpm_global_store_precedes_pnpm_home_when_provider_redirects_xdg() {
+        for (version, selector, other_selector) in [
+            ("10.33.2", "npm_config_store_dir", "pnpm_config_store_dir"),
+            ("12.16.1", "pnpm_config_store_dir", "npm_config_store_dir"),
+        ] {
+            let root = tempfile::tempdir().expect("fixture root");
+            let home = root.path().join("host");
+            let project = root.path().join("repo");
+            let host_config = home.join("config");
+            let private_config = root.path().join("provider/config");
+            let pnpm_home = home.join("pnpm-home");
+            std::fs::create_dir_all(project.join(".git")).expect("project root");
+            std::fs::create_dir_all(&host_config).expect("host config root");
+            let pnpm_bin = direct_pnpm_bin(&root.path().join("pnpm"), version);
+            let mut host =
+                host_vars(&[("XDG_CONFIG_HOME", &host_config), ("PNPM_HOME", &pnpm_home)]);
+            host.insert(
+                "PATH".to_owned(),
+                std::env::join_paths([&pnpm_bin]).expect("pnpm fixture PATH"),
+            );
+            let host_var = |name: &str| host.get(name).cloned();
+
+            let provider_env = || {
+                vec![
+                    ("HOME".into(), home.clone().into_os_string()),
+                    (
+                        "XDG_CONFIG_HOME".into(),
+                        private_config.clone().into_os_string(),
+                    ),
+                ]
+            };
+            let mut without_global_store = provider_env();
+            bind_native(&home, &project, &host_var, &mut without_global_store);
+            assert!(
+                var(&without_global_store, selector).is_none(),
+                "PNPM_HOME keeps its default when host storeDir is missing for pnpm {version}"
+            );
+
+            let config_dir = host_config.join("pnpm");
+            std::fs::create_dir_all(&config_dir).expect("pnpm host config");
+            std::fs::write(
+                config_dir.join("config.yaml"),
+                "storeDir: /host/shared-store\n",
+            )
+            .expect("host pnpm store setting");
+
+            let mut with_global_store = provider_env();
+            bind_native(&home, &project, &host_var, &mut with_global_store);
+            assert_eq!(
+                var(&with_global_store, selector),
+                Some(OsStr::new("/host/shared-store")),
+                "host global storeDir overrides PNPM_HOME fallback for pnpm {version}"
+            );
+            assert!(
+                var(&with_global_store, other_selector).is_none(),
+                "only the selected pnpm {version} selector family is injected"
+            );
+
+            std::fs::write(config_dir.join("config.yaml"), "storeDir:\n")
+                .expect("empty host pnpm store setting");
+            let mut with_unsupported_global_store = provider_env();
+            bind_native(
+                &home,
+                &project,
+                &host_var,
+                &mut with_unsupported_global_store,
+            );
+            assert!(
+                var(&with_unsupported_global_store, selector).is_none(),
+                "an unsupported explicit host storeDir is not replaced by PNPM_HOME for pnpm {version}"
+            );
         }
     }
 
