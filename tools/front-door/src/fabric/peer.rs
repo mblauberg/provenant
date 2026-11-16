@@ -747,7 +747,7 @@ pub fn peer(
             ),
             PeerAction::Output { input, .. } => peer_result(
                 owner
-                    .output(input.clone(), budget, &cancel)
+                    .output_for_peer(input.clone(), budget, &cancel)
                     .and_then(|mut data| {
                         let (OutputResult::Chunk { peer, target, .. }
                         | OutputResult::Artifact { peer, target, .. }) = &mut data;
