@@ -12,6 +12,46 @@ pub struct RepoFacts {
     worktree_listings: std::sync::Arc<std::sync::Mutex<BTreeMap<PathBuf, Vec<u8>>>>,
 }
 
+/// Bounded inputs for one Git worktree inventory query.
+pub struct WorktreeInventoryQuery<'a> {
+    cwd: &'a Path,
+    git: &'a Path,
+    environment: &'a [(OsString, OsString)],
+    executor: &'a dyn Executor,
+    timeout: std::time::Duration,
+    cancel: &'a CancelToken,
+    bare_override: Option<bool>,
+}
+
+impl<'a> WorktreeInventoryQuery<'a> {
+    pub fn new(
+        cwd: &'a Path,
+        git: &'a Path,
+        environment: &'a [(OsString, OsString)],
+        executor: &'a dyn Executor,
+        timeout: std::time::Duration,
+        cancel: &'a CancelToken,
+    ) -> Self {
+        Self {
+            cwd,
+            git,
+            environment,
+            executor,
+            timeout,
+            cancel,
+            bare_override: None,
+        }
+    }
+
+    /// Override Git's bare interpretation while reading the inventory. The
+    /// override is an input to layout verification, never proof of that layout.
+    #[must_use]
+    pub fn with_bare_setting(mut self, bare: bool) -> Self {
+        self.bare_override = Some(bare);
+        self
+    }
+}
+
 #[derive(PartialEq, Eq)]
 struct RegistrationStamp {
     name: OsString,
@@ -507,8 +547,16 @@ impl RepoFacts {
         timeout: std::time::Duration,
         cancel: &CancelToken,
     ) -> Result<Vec<PathBuf>, WorktreeError> {
-        let inventory =
-            self.discover_worktree_inventory(cwd, git, environment, executor, timeout, cancel)?;
+        let inventory = self.discover_worktree_inventory(
+            WorktreeInventoryQuery::new(
+                cwd,
+                git,
+                environment,
+                executor,
+                timeout,
+                cancel,
+            ),
+        )?;
         inventory_paths(&inventory)
     }
 
@@ -517,65 +565,15 @@ impl RepoFacts {
     /// from a registered common directory without guessing its checkout path.
     pub fn discover_worktree_inventory(
         &self,
-        cwd: &Path,
-        git: &Path,
-        environment: &[(OsString, OsString)],
-        executor: &dyn Executor,
-        timeout: std::time::Duration,
-        cancel: &CancelToken,
-    ) -> Result<Vec<u8>, WorktreeError> {
-        self.discover_worktree_inventory_inner(
-            cwd,
-            git,
-            environment,
-            executor,
-            timeout,
-            cancel,
-            None,
-        )
-    }
-
-    /// Read an inventory with an explicit bare setting. Layout bootstrap may
-    /// use this only after classifying the setting's local origin as trusted;
-    /// the override itself never proves a bare common directory.
-    pub(crate) fn discover_worktree_inventory_with_bare_setting(
-        &self,
-        cwd: &Path,
-        git: &Path,
-        environment: &[(OsString, OsString)],
-        executor: &dyn Executor,
-        timeout: std::time::Duration,
-        cancel: &CancelToken,
-        bare: bool,
-    ) -> Result<Vec<u8>, WorktreeError> {
-        self.discover_worktree_inventory_inner(
-            cwd,
-            git,
-            environment,
-            executor,
-            timeout,
-            cancel,
-            Some(bare),
-        )
-    }
-
-    fn discover_worktree_inventory_inner(
-        &self,
-        cwd: &Path,
-        git: &Path,
-        environment: &[(OsString, OsString)],
-        executor: &dyn Executor,
-        timeout: std::time::Duration,
-        cancel: &CancelToken,
-        bare_override: Option<bool>,
+        query: WorktreeInventoryQuery<'_>,
     ) -> Result<Vec<u8>, WorktreeError> {
         use provenant_os::exec::{ExecOptions, StreamPolicy};
         let mut argv = vec![
-            git.as_os_str().to_owned(),
+            query.git.as_os_str().to_owned(),
             "-c".into(),
             "core.fsmonitor=false".into(),
         ];
-        if let Some(bare) = bare_override {
+        if let Some(bare) = query.bare_override {
             argv.extend(["-c".into(), format!("core.bare={bare}").into()]);
         }
         argv.extend([
@@ -584,16 +582,19 @@ impl RepoFacts {
             "--porcelain".into(),
             "-z".into(),
         ]);
-        let mut options = ExecOptions::new(&argv, cwd, timeout);
-        options.env = Some(environment);
+        let mut options = ExecOptions::new(&argv, query.cwd, query.timeout);
+        options.env = Some(query.environment);
         options.stdin = Some(b"");
-        options.cancel = Some(cancel);
+        options.cancel = Some(query.cancel);
         options.stdout = StreamPolicy::Capture {
             limit: self.inventory_limit,
         };
         options.stderr = StreamPolicy::Capture { limit: 4096 };
         options.stop_on_output_limit = true;
-        let output = executor.execute(options).map_err(UtilityError::from)?;
+        let output = query
+            .executor
+            .execute(options)
+            .map_err(UtilityError::from)?;
         if output.stdout.truncated {
             return Err(UtilityError::Truncated { stream: "stdout" }.into());
         }
