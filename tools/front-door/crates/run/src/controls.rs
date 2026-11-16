@@ -4776,6 +4776,7 @@ impl RunStore {
             provenant_os::exec::spawn_detached,
         )
     }
+    #[cfg(test)]
     pub(crate) fn reap_with(
         &self,
         call: &Request<'_>,
@@ -6075,7 +6076,6 @@ mod tests {
 
         // The successor is timestamped from the terminal predecessor. Move
         // the fixture clock to that settlement time before admitting it.
-        drop(call);
         clock.advance(provenant_core::DurationMicros::from_micros(100))?;
         let call = crate::tests::call(&clock, &cancel);
 
@@ -6352,7 +6352,6 @@ mod tests {
                 &parent_exit,
                 &call,
             )?;
-            drop(call);
             clock.advance(provenant_core::DurationMicros::from_micros(100))?;
             let call = crate::tests::call(&clock, &cancel);
             let child = store

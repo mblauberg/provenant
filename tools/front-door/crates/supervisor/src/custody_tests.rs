@@ -981,7 +981,9 @@ impl ProcessObserver for HolderWorld {
         self.observations
             .get(&pid)
             .cloned()
-            .unwrap_or_else(|| ProcessObservation::Unknown(crate::census::ObservationIssue::Io))
+            .unwrap_or(ProcessObservation::Unknown(
+                crate::census::ObservationIssue::Io,
+            ))
     }
     fn census(
         &self,
