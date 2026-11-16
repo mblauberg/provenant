@@ -661,6 +661,45 @@ impl UtilityRuntime {
         .map_err(|_| UtilityError::UnreadableGitConfiguration)
     }
 
+    /// Resolve a common Git directory when the caller has no checkout. A
+    /// registered directory resolves through its binding; an unbound one is
+    /// common-only only with trusted local bare provenance.
+    pub fn project_layout_for_common(
+        &self,
+        executor: &dyn Executor,
+        common: &Path,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<crate::worktrees::ProjectLayout, UtilityError> {
+        let common = provenant_os::fs::canonicalize(common)
+            .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+        if self.host_state_available {
+            let location = provenant_config::ProjectLocation::new(common.clone())
+                .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+            if let Some(binding) =
+                provenant_config::lookup_project_at_state(&self.host_state, &location)
+                    .map_err(|_| UtilityError::UnreadableGitConfiguration)?
+            {
+                return self.project_layout_for_binding(executor, &binding, budget, cancel);
+            }
+        }
+        let environment = crate::worktrees::project_layout_git_environment();
+        let git = self.git.program()?;
+        let bootstrap = self.bootstrap_roots(&common, &common, &common)?;
+        let trusted_bare =
+            self.bare_setting_for_common(executor, &common, budget, cancel, &bootstrap)?;
+        crate::worktrees::project_layout_for_common_with_bare_setting(
+            executor,
+            &common,
+            trusted_bare,
+            &git,
+            &environment,
+            budget.timeout,
+            cancel,
+        )
+        .map_err(|_| UtilityError::UnreadableGitConfiguration)
+    }
+
     fn bare_setting_for_common(
         &self,
         executor: &dyn Executor,

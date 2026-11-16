@@ -297,7 +297,9 @@ pub fn project_layout(
 }
 
 /// Resolve a project layout without allocating a binding or updating its
-/// saved primary hint. Unbound checkouts use Git's verified inventory only.
+/// saved primary hint. A bound project keeps its binding-verified layout,
+/// including a bare common owner; unbound checkouts use Git's verified
+/// inventory only.
 pub fn project_layout_read_only(
     roots: &Roots,
     selected: &Path,
@@ -308,13 +310,10 @@ pub fn project_layout_read_only(
     let cancel = provenant_core::CancelToken::new();
     let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
     let discovered = utility.project_location(&executor, selected, budget, &cancel)?;
-    let repo = utility.open_read_repo(&executor, selected, budget, &cancel)?;
     if let Some(binding) = provenant_config::lookup_project(roots, &discovered.location)? {
-        let layout = utility.project_layout_for_binding(&executor, &binding, budget, &cancel)?;
-        if layout.project().is_some() || repo.private_git_dir() != repo.common_git_dir() {
-            return Ok(layout);
-        }
+        return Ok(utility.project_layout_for_binding(&executor, &binding, budget, &cancel)?);
     }
+    let repo = utility.open_read_repo(&executor, selected, budget, &cancel)?;
     Ok(
         provenant_confinement::worktrees::project_layout_for_checkout(
             &executor, &repo, &utility, budget, &cancel,
@@ -432,6 +431,66 @@ mod tests {
         let from_linked = project_layout(&roots, &linked)?;
         assert_eq!(from_linked.project(), Some(checkout.as_path()));
         assert_eq!(from_linked.root(), checkout);
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/run-git.md#project-layout-ownership
+    fn read_only_layout_keeps_a_bound_bare_common_owner() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let home = root.join("home");
+        let state = root.join("state");
+        let source = root.join("source");
+        let common = root.join("bare-common");
+        let linked = root.join("bare-linked");
+        for path in [&home, &state, &source] {
+            fs::create_dir_all(path)?;
+        }
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
+        let mut inputs = RootInputs::new(home, source.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        provenant_os::fixture::run_git(&source, &["init", "-q", "--initial-branch=main"])?;
+        fs::write(source.join("tracked.txt"), "base\n")?;
+        provenant_os::fixture::run_git(&source, &["add", "tracked.txt"])?;
+        provenant_os::fixture::run_git(&source, &["commit", "-qm", "base"])?;
+        let common_text = common.to_str().ok_or("non-UTF-8 fixture path")?;
+        provenant_os::fixture::run_git(
+            &root,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                source.to_str().ok_or("non-UTF-8 fixture path")?,
+                common_text,
+            ],
+        )?;
+        provenant_os::fixture::run_git(
+            &root,
+            &[
+                "--git-dir",
+                common_text,
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().ok_or("non-UTF-8 fixture path")?,
+                "HEAD",
+            ],
+        )?;
+        provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&common)?)?;
+
+        // A bound bare common directory is the allocation owner with no
+        // project checkout, whichever checkout or directory selects it.
+        for selected in [&linked, &common] {
+            let layout = project_layout_read_only(&roots, selected)?;
+            assert_eq!(layout.root(), common.as_path());
+            assert_eq!(layout.project(), None);
+        }
         Ok(())
     }
 

@@ -970,15 +970,12 @@ fn requester_path_roots(
                 .map_err(|error| format!("cannot verify requester PATH project layout: {error}"))?;
         layout.project().unwrap_or(layout.root()).to_path_buf()
     } else {
-        let layout = provenant_confinement::worktrees::project_layout_for_common(
-            executor,
-            &common,
-            git,
-            &provenant_confinement::worktrees::project_layout_git_environment(),
-            std::time::Duration::from_secs(5),
-            cancel,
-        )
-        .map_err(|error| format!("cannot verify requester PATH project layout: {error}"))?;
+        let layout =
+            provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))
+                .and_then(|budget| {
+                    utility.project_layout_for_common(executor, &common, budget, cancel)
+                })
+                .map_err(|error| format!("cannot verify requester PATH project layout: {error}"))?;
         layout.project().unwrap_or(layout.root()).to_path_buf()
     };
     Ok((project, selected))

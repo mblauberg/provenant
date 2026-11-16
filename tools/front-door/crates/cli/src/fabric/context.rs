@@ -736,12 +736,15 @@ impl Context {
         }
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let executor = SystemExecutor::new(1)?;
-        let layout = provenant_confinement::worktrees::project_layout_for_common(
+        let runtime =
+            provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())?
+                .with_lane_roots(provenant_confinement::utility::lane_state_roots(
+                    roots.state.as_path(),
+                ));
+        let layout = runtime.project_layout_for_common(
             &executor,
             common,
-            &git,
-            &provenant_confinement::worktrees::project_layout_git_environment(),
-            Duration::from_secs(5),
+            provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
             &CancelToken::new(),
         )?;
         Ok((layout.root().to_path_buf(), Some(common.to_path_buf())))

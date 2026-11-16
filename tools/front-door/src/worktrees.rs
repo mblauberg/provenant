@@ -1534,25 +1534,24 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         let selection = provenant_config::registered_gc_project_selection(&roots)?;
         skipped_transient = selection.skipped_transient;
         let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
+        let runtime = UtilityRuntime::read_only(&git, roots.state.as_path())?.with_lane_roots(
+            provenant_confinement::utility::lane_state_roots(roots.state.as_path()),
+        );
         let executor = SystemExecutor::new(1)?;
-        let environment = worktrees::project_layout_git_environment();
+        let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
         let cancel = CancelToken::new();
         for binding in selection.projects {
             let common = binding.common_dir();
-            let layout = match worktrees::project_layout_for_binding(
-                &executor,
-                &binding,
-                &git,
-                &environment,
-                Duration::from_secs(5),
-                &cancel,
-            ) {
-                Ok(layout) => layout,
-                Err(_) => {
-                    unobserved_projects.push(common.to_owned());
-                    continue;
-                }
-            };
+            // The utility owns bound layout resolution, including trusted
+            // local bare provenance for a checkout-less common directory.
+            let layout =
+                match runtime.project_layout_for_binding(&executor, &binding, budget, &cancel) {
+                    Ok(layout) => layout,
+                    Err(_) => {
+                        unobserved_projects.push(common.to_owned());
+                        continue;
+                    }
+                };
             let Some(path) = layout.project().map(Path::to_path_buf) else {
                 // Scheduled worktree GC requires a verified primary checkout;
                 // a bare common directory is an allocation owner, not a checkout.
@@ -1623,12 +1622,10 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         } else {
             provenant_config::bind_project(&roots, location)?
         };
-        let layout = worktrees::project_layout_for_binding(
+        let layout = runtime.project_layout_for_binding(
             &executor,
             &binding,
-            runtime.git_program_path(),
-            &worktrees::project_layout_git_environment(),
-            Duration::from_secs(5),
+            UtilityBudget::bounded(Duration::from_secs(5))?,
             &CancelToken::new(),
         )?;
         let primary = layout
@@ -2435,14 +2432,7 @@ fn with_context_mode_with_owner<T>(
         } else {
             provenant_config::bind_project(roots, location)?
         };
-        let layout = worktrees::project_layout_for_binding(
-            &executor,
-            &binding,
-            runtime.git_program_path(),
-            &worktrees::project_layout_git_environment(),
-            Duration::from_secs(5),
-            &cancel,
-        )?;
+        let layout = runtime.project_layout_for_binding(&executor, &binding, budget, &cancel)?;
         (binding, layout)
     };
     let worktrees_state = if read_only {

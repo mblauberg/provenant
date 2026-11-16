@@ -39,10 +39,11 @@ pub use landed::{
     CommitGraph, IntegrationEdge, LandedBy, Landing, LandingTarget, RepoGraph, Unproven,
     commit_parents, landed,
 };
-pub use layout::{
-    ProjectLayout, project_layout_for_binding, project_layout_for_checkout,
-    project_layout_for_common, project_layout_for_common_at_state, project_layout_git_environment,
-};
+pub use layout::{ProjectLayout, project_layout_for_checkout, project_layout_git_environment};
+// Strict resolvers without bare provenance are fixture seams; production
+// resolves layouts through `UtilityRuntime`.
+#[cfg(any(test, feature = "fixture"))]
+pub use layout::{project_layout_for_binding, project_layout_for_common};
 pub(crate) use layout::{
     project_layout_for_binding_primary, project_layout_for_binding_with_bare_setting,
     project_layout_for_common_with_bare_setting,

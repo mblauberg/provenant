@@ -124,6 +124,10 @@ impl ProjectLayout {
 /// Resolve a common Git directory to a verified project owner. Without
 /// independent bare provenance, an inventory that cannot identify a primary
 /// checkout is unresolved rather than common-only.
+///
+/// Test fixtures only: production resolves through `UtilityRuntime`, which
+/// owns trusted bare provenance, so it cannot select this strict resolver.
+#[cfg(any(test, feature = "fixture"))]
 pub fn project_layout_for_common(
     executor: &dyn Executor,
     common: &Path,
@@ -218,49 +222,13 @@ fn verified_project_layout_for_common(
         .transpose()
 }
 
-/// Resolve a common Git directory using its verified inventory and saved
-/// primary hint. Without a validated host-state root, callers should use
-/// `project_layout_for_common` directly.
-/// Host transport safety checks use this before reading effective repository
-/// configuration, so the inventory command has its own sanitised environment
-/// and does not recurse through `UtilityRuntime`.
-pub fn project_layout_for_common_at_state(
-    executor: &dyn Executor,
-    common: &Path,
-    host_state: &Path,
-    git: &Path,
-    environment: &[(std::ffi::OsString, std::ffi::OsString)],
-    inventory_timeout: Duration,
-    cancel: &CancelToken,
-) -> Result<ProjectLayout, WorktreeError> {
-    let common = canonicalize(common).map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
-    let location = provenant_config::ProjectLocation::new(common.clone())
-        .map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
-    let binding = provenant_config::lookup_project_at_state(host_state, &location)
-        .map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
-    match binding {
-        Some(binding) => project_layout_for_binding(
-            executor,
-            &binding,
-            git,
-            environment,
-            inventory_timeout,
-            cancel,
-        ),
-        None => project_layout_for_common(
-            executor,
-            &common,
-            git,
-            environment,
-            inventory_timeout,
-            cancel,
-        ),
-    }
-}
-
 /// Resolve a registered project using a forced non-bare inventory first, then
 /// its saved primary hint. A bare common directory requires separately
 /// classified provenance and cannot be inferred from inventory alone.
+///
+/// Test fixtures only: production resolves through `UtilityRuntime`, which
+/// owns trusted bare provenance, so it cannot select this strict resolver.
+#[cfg(any(test, feature = "fixture"))]
 pub fn project_layout_for_binding(
     executor: &dyn Executor,
     binding: &provenant_config::ProjectBinding,
