@@ -22,6 +22,24 @@ pub(crate) struct TerminalEffects {
     pub effects: Vec<(SettlementEffect, EffectDisposition)>,
 }
 
+// A delivered stop remains a fact even when identity evidence prevents a
+// cancelled terminal decision. Publication and crash replay use the same rule.
+fn cancellation_outcome_is_consistent(
+    delivered: Option<bool>,
+    identity: ProviderIdentityEvidence,
+    outcome: Outcome,
+    cause: Option<TerminalCause>,
+) -> bool {
+    if delivered != Some(true) || outcome == Outcome::Cancelled {
+        return true;
+    }
+    if identity.has_conflict() {
+        outcome == Outcome::Failed && cause == Some(TerminalCause::IdentityMismatch)
+    } else {
+        identity.is_incomplete() && outcome == Outcome::Unsettled && cause.is_none()
+    }
+}
+
 /// Whether an explicit stop was requested for exactly this attempt scope.
 /// Unreadable evidence counts as no request.
 pub(crate) fn cancel_requested(
@@ -603,7 +621,12 @@ impl RunStore {
                 return Err(RunError::Conflict);
             }
             if pending.schema_version == 2 {
-                let AttemptState::Terminal { outcome, .. } = pending.state else {
+                let AttemptState::Terminal {
+                    outcome,
+                    terminal_cause,
+                    ..
+                } = pending.state
+                else {
                     return Err(RunError::Conflict);
                 };
                 if (outcome == Outcome::Cancelled
@@ -621,8 +644,18 @@ impl RunStore {
                             != Some(
                                 provenant_supervisor::machine::StopReason::ExplicitCancellation,
                             ))
-                    || (stored.cancel_delivered_before_exit == Some(true)
-                        && outcome != Outcome::Cancelled)
+                    || !cancellation_outcome_is_consistent(
+                        stored.cancel_delivered_before_exit,
+                        ProviderIdentityEvidence::classify(
+                            stored.provider_identity_conflict,
+                            stored.provider_identity_evidence_incomplete,
+                            stored.provider_identity_eof_fragment,
+                            stored.stop_reason,
+                            stored.cancel_delivered_before_exit,
+                        ),
+                        outcome,
+                        terminal_cause,
+                    )
                 {
                     return Err(RunError::Conflict);
                 }
@@ -979,9 +1012,18 @@ impl RunStore {
         {
             return Err(RunError::Validation("prelaunch cancellation is unproven"));
         }
-        if exit.cancel_delivered_before_exit == Some(true)
-            && publication.outcome != Outcome::Cancelled
-        {
+        if !cancellation_outcome_is_consistent(
+            exit.cancel_delivered_before_exit,
+            ProviderIdentityEvidence::classify(
+                exit.provider_identity_conflict,
+                exit.provider_identity_evidence_incomplete,
+                exit.provider_identity_eof_fragment,
+                exit.stop_reason,
+                exit.cancel_delivered_before_exit,
+            ),
+            publication.outcome,
+            publication.terminal_cause,
+        ) {
             return Err(RunError::Validation(
                 "effective cancellation contradicts outcome",
             ));

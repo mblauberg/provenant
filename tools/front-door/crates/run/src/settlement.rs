@@ -829,6 +829,7 @@ mod tests {
             let context = crate::tests::context(temp.path())?;
             let store = crate::RunStore::open(&context, &call)?;
             let mut run = crate::tests::input();
+            run.created_at = clock.wall_now()?;
             run.request.task.writer = Some(crate::WriterRequest {
                 extra: Default::default(),
                 custody_project: Some(context.project_id),

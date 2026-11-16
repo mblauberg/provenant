@@ -6622,7 +6622,7 @@ mod tests {
                         publication.session = None;
                         (
                             provenant_records::run::SteeringState::NotContinued,
-                            Some(provenant_records::run::SteeringCause::SessionProofIncomplete),
+                            Some(provenant_records::run::SteeringCause::SessionUnavailable),
                         )
                     }
                     Case::MismatchedSession => {
