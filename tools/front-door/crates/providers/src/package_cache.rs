@@ -244,7 +244,7 @@ fn pnpm_selector_family(
     let selected = crate::launch::first_path_executable(&path, "pnpm")?;
     let selected = std::fs::canonicalize(selected).ok()?;
     if let Some(version) = direct_pnpm_version(&selected) {
-        return pnpm_family_from_version(&version);
+        return direct_pnpm_selector_family(cwd, home, host_var, &version);
     }
     if !is_corepack_pnpm_shim(&selected) {
         return None;
@@ -255,6 +255,30 @@ fn pnpm_selector_family(
         CorepackProjectSpec::Unknown => None,
         CorepackProjectSpec::NoPin => corepack_last_known_good(home, host_var)
             .and_then(|version| pnpm_family_from_version(&version)),
+    }
+}
+
+fn direct_pnpm_selector_family(
+    cwd: &Path,
+    home: &Path,
+    host_var: &dyn Fn(&str) -> Option<OsString>,
+    installed_version: &str,
+) -> Option<PnpmSelectorFamily> {
+    let installed_major = pnpm_version_major(installed_version)?;
+    let installed_family = pnpm_family_from_version(installed_version)?;
+    match project_package_manager_spec(cwd) {
+        CorepackProjectSpec::NoPin => Some(installed_family),
+        CorepackProjectSpec::Pnpm(reference) => {
+            let pinned_family = exact_pnpm_pin_family(&reference)?;
+            if installed_major < 10 {
+                return (pinned_family == installed_family).then_some(installed_family);
+            }
+            if pnpm_management_policy_overridden(cwd, home, host_var).ok()? {
+                return None;
+            }
+            Some(pinned_family)
+        }
+        CorepackProjectSpec::Unknown => None,
     }
 }
 
@@ -291,9 +315,46 @@ fn package_json(path: &Path) -> Option<serde_json::Value> {
 }
 
 fn pnpm_family_from_version(version: &str) -> Option<PnpmSelectorFamily> {
+    let major = pnpm_version_major(version)?;
+    Some(if major < 11 {
+        PnpmSelectorFamily::Legacy
+    } else {
+        PnpmSelectorFamily::Current
+    })
+}
+
+fn pnpm_version_major(version: &str) -> Option<u64> {
     let version = version.split('+').next()?.trim();
     let major = version.split(['.', '-']).next()?;
     if major.is_empty() || !major.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    major.parse().ok()
+}
+
+fn exact_pnpm_pin_family(reference: &str) -> Option<PnpmSelectorFamily> {
+    let version = reference.split('+').next()?;
+    let core = match version.split_once('-') {
+        Some((core, prerelease))
+            if !prerelease.is_empty()
+                && prerelease.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || ".-".contains(character)
+                }) =>
+        {
+            core
+        }
+        Some(_) => return None,
+        None => version,
+    };
+    let mut components = core.split('.');
+    let major = components.next()?;
+    let minor = components.next()?;
+    let patch = components.next()?;
+    if components.next().is_some()
+        || [major, minor, patch]
+            .iter()
+            .any(|component| component.is_empty() || !component.chars().all(|c| c.is_ascii_digit()))
+    {
         return None;
     }
     let major = major.parse::<u64>().ok()?;
@@ -323,15 +384,35 @@ fn corepack_project_spec(
     if host_var("COREPACK_ENV_FILE").is_some_and(|value| value.as_os_str() != OsStr::new("0")) {
         return CorepackProjectSpec::Unknown;
     }
+    if corepack_env_file_blocks_project(cwd, host_var) {
+        return CorepackProjectSpec::Unknown;
+    }
 
+    project_package_manager_spec(cwd)
+}
+
+fn corepack_env_file_blocks_project(
+    cwd: &Path,
+    host_var: &dyn Fn(&str) -> Option<OsString>,
+) -> bool {
+    let mut current = Some(cwd);
+    let mut depth = 0;
+    while let Some(directory) = current {
+        depth += 1;
+        if depth > 64 || corepack_env_file_present(directory, host_var) {
+            return true;
+        }
+        current = directory.parent();
+    }
+    false
+}
+
+fn project_package_manager_spec(cwd: &Path) -> CorepackProjectSpec {
     let mut current = Some(cwd);
     let mut depth = 0;
     while let Some(directory) = current {
         depth += 1;
         if depth > 64 {
-            return CorepackProjectSpec::Unknown;
-        }
-        if corepack_env_file_present(directory, host_var) {
             return CorepackProjectSpec::Unknown;
         }
         if !directory
@@ -369,6 +450,91 @@ fn corepack_project_spec(
     }
 
     CorepackProjectSpec::NoPin
+}
+
+fn pnpm_management_policy_overridden(
+    cwd: &Path,
+    home: &Path,
+    host_var: &dyn Fn(&str) -> Option<OsString>,
+) -> Result<bool, ()> {
+    const ENV_KEYS: &[&str] = &[
+        "npm_config_manage_package_manager_versions",
+        "pnpm_config_manage_package_manager_versions",
+        "npm_config_package_manager_strict",
+        "pnpm_config_package_manager_strict",
+        "npm_config_package_manager_strict_version",
+        "pnpm_config_package_manager_strict_version",
+        "npm_config_pm_on_fail",
+        "pnpm_config_pm_on_fail",
+        "COREPACK_ENABLE_STRICT",
+    ];
+    const YAML_KEYS: &[&str] = &[
+        "managePackageManagerVersions",
+        "packageManagerStrict",
+        "packageManagerStrictVersion",
+        "pmOnFail",
+        "manage-package-manager-versions",
+        "package-manager-strict",
+        "package-manager-strict-version",
+        "pm-on-fail",
+    ];
+    const INI_KEYS: &[&str] = &[
+        "manage-package-manager-versions",
+        "managePackageManagerVersions",
+        "package-manager-strict",
+        "packageManagerStrict",
+        "package-manager-strict-version",
+        "packageManagerStrictVersion",
+        "pm-on-fail",
+        "pmOnFail",
+    ];
+
+    if ENV_KEYS
+        .iter()
+        .any(|key| host_var_value(host_var, key).is_some())
+    {
+        return Ok(true);
+    }
+
+    let mut current = Some(cwd);
+    let mut depth = 0;
+    while let Some(directory) = current {
+        depth += 1;
+        if depth > 64 {
+            return Err(());
+        }
+        if read_optional(&directory.join(".npmrc"))?
+            .is_some_and(|contents| INI_KEYS.iter().any(|key| ini_has_key(&contents, key)))
+            || read_optional(&directory.join("pnpm-workspace.yaml"))?
+                .is_some_and(|contents| YAML_KEYS.iter().any(|key| yaml_has_key(&contents, key)))
+        {
+            return Ok(true);
+        }
+        if directory.join(".git").exists() {
+            break;
+        }
+        current = directory.parent();
+    }
+
+    let config_dir = pnpm_config_dir_host(host_var, home);
+    if read_optional(&config_dir.join("config.yaml"))?
+        .is_some_and(|contents| YAML_KEYS.iter().any(|key| yaml_has_key(&contents, key)))
+        || read_optional(&config_dir.join("rc"))?
+            .is_some_and(|contents| INI_KEYS.iter().any(|key| ini_has_key(&contents, key)))
+    {
+        return Ok(true);
+    }
+
+    for key in ["npm_config_userconfig", "npm_config_globalconfig"] {
+        let path = host_config_file(host_var, key, home.join(".npmrc"))?;
+        if read_optional(&path)?
+            .is_some_and(|contents| INI_KEYS.iter().any(|key| ini_has_key(&contents, key)))
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn corepack_env_file_present(
@@ -984,7 +1150,7 @@ fn warn_pnpm_family_unresolved() {
     use std::io::Write;
     let _ = writeln!(
         std::io::stderr().lock(),
-        "warning: the first PATH-selected pnpm version could not be identified safely; configured selectors were preserved and shared cache binding was skipped. Set the cache/store selector family supported by that pnpm version, or use cacheDir/storeDir in pnpm-workspace.yaml or supported global config.yaml"
+        "warning: the effective pnpm selector family could not be identified safely because the selected version or project management policy is ambiguous; configured selectors were preserved and shared cache binding was skipped. Set the cache/store selector family supported by the effective pnpm version, or use cacheDir/storeDir in pnpm-workspace.yaml or supported global config.yaml"
     );
 }
 
@@ -1041,6 +1207,40 @@ mod tests {
         .expect("pnpm package metadata");
         executable(&bin.join("pnpm"));
         bin
+    }
+
+    fn direct_pnpm_host_fixture(
+        root: &Path,
+        version: &str,
+    ) -> (PathBuf, PathBuf, PathBuf, HashMap<String, OsString>) {
+        let home = root.join("host-home");
+        let cache = root.join("host-cache");
+        let data = root.join("host-data");
+        let pnpm_bin = direct_pnpm_bin(&root.join("pnpm"), version);
+        let mut host = host_vars(&[("XDG_CACHE_HOME", &cache), ("XDG_DATA_HOME", &data)]);
+        host.insert(
+            "PATH".to_owned(),
+            std::env::join_paths([&pnpm_bin]).expect("pnpm fixture PATH"),
+        );
+        (home, cache, data, host)
+    }
+
+    fn private_home_xdg_env(root: &Path, account: &Path) -> Vec<(OsString, OsString)> {
+        vec![
+            ("HOME".into(), account.as_os_str().to_owned()),
+            (
+                "XDG_CACHE_HOME".into(),
+                root.join("attempt/cache").into_os_string(),
+            ),
+            (
+                "XDG_DATA_HOME".into(),
+                root.join("attempt/data").into_os_string(),
+            ),
+            (
+                "XDG_CONFIG_HOME".into(),
+                root.join("attempt/config").into_os_string(),
+            ),
+        ]
     }
 
     fn corepack_pnpm_bin(root: &Path) -> PathBuf {
@@ -1199,6 +1399,193 @@ mod tests {
             Some(OsStr::new("/configured/cache"))
         );
         assert!(var(&explicit, "npm_config_cache_dir").is_none());
+    }
+
+    #[test]
+    fn direct_pnpm_selector_family_uses_exact_project_pin_with_default_policy() {
+        for (
+            installed,
+            pinned,
+            expected,
+            cache_selector,
+            store_selector,
+            other_cache,
+            other_store,
+        ) in [
+            (
+                "10.33.2",
+                "12.16.1",
+                PnpmSelectorFamily::Current,
+                "pnpm_config_cache_dir",
+                "pnpm_config_store_dir",
+                "npm_config_cache_dir",
+                "npm_config_store_dir",
+            ),
+            (
+                "12.16.1",
+                "10.33.2",
+                PnpmSelectorFamily::Legacy,
+                "npm_config_cache_dir",
+                "npm_config_store_dir",
+                "pnpm_config_cache_dir",
+                "pnpm_config_store_dir",
+            ),
+            (
+                "10.33.2",
+                "10.30.0",
+                PnpmSelectorFamily::Legacy,
+                "npm_config_cache_dir",
+                "npm_config_store_dir",
+                "pnpm_config_cache_dir",
+                "pnpm_config_store_dir",
+            ),
+        ] {
+            let root = tempfile::tempdir().expect("fixture root");
+            let account = root.path().join("account-home");
+            let project = root.path().join("repo");
+            std::fs::create_dir_all(project.join(".git")).expect("project root");
+            std::fs::write(
+                project.join("package.json"),
+                format!(r#"{{"packageManager":"pnpm@{pinned}+sha512.fixture"}}"#),
+            )
+            .expect("project package manager pin");
+            let (home, cache, data, host) = direct_pnpm_host_fixture(root.path(), installed);
+            let host_var = |name: &str| host.get(name).cloned();
+            assert_eq!(
+                pnpm_selector_family(&project, &home, &host_var),
+                Some(expected),
+                "pnpm {installed} follows exact project pin {pinned}"
+            );
+
+            let mut env = private_home_xdg_env(root.path(), &account);
+            bind_native(&home, &project, &host_var, &mut env);
+            assert_eq!(
+                env_path(&env, cache_selector).as_ref(),
+                Some(&cache.join("pnpm")),
+                "effective pnpm {pinned} gets its cache selector"
+            );
+            assert_eq!(
+                env_path(&env, store_selector).as_ref(),
+                Some(&data.join("pnpm/store")),
+                "effective pnpm {pinned} gets its store selector"
+            );
+            assert!(env_path(&env, other_cache).is_none());
+            assert!(env_path(&env, other_store).is_none());
+        }
+    }
+
+    #[test]
+    fn direct_pnpm_selector_family_skips_ambiguous_pins_and_management() {
+        for scenario in [
+            "management-environment",
+            "management-project-config",
+            "management-global-config",
+            "version-range",
+            "dev-engines-range",
+            "older-cross-family-pin",
+        ] {
+            let root = tempfile::tempdir().expect("fixture root");
+            let account = root.path().join("account-home");
+            let project = root.path().join("repo");
+            std::fs::create_dir_all(project.join(".git")).expect("project root");
+            let installed = if scenario == "older-cross-family-pin" {
+                "9.15.0"
+            } else {
+                "10.33.2"
+            };
+            let manifest = match scenario {
+                "version-range" => r#"{"packageManager":"pnpm@^12.0.0"}"#,
+                "dev-engines-range" => {
+                    r#"{"devEngines":{"packageManager":{"name":"pnpm","version":">=11 <12"}}}"#
+                }
+                _ => r#"{"packageManager":"pnpm@12.16.1+sha512.fixture"}"#,
+            };
+            std::fs::write(project.join("package.json"), manifest)
+                .expect("project package manager declaration");
+            if scenario == "management-project-config" {
+                std::fs::write(project.join("pnpm-workspace.yaml"), "pmOnFail: ignore\n")
+                    .expect("project management setting");
+            }
+            let (home, _, _, mut host) = direct_pnpm_host_fixture(root.path(), installed);
+            if scenario == "management-global-config" {
+                let config_dir = pnpm_config_dir_host(&|name| host.get(name).cloned(), &home);
+                std::fs::create_dir_all(&config_dir).expect("pnpm global config directory");
+                std::fs::write(config_dir.join("rc"), "manage-package-manager-versions=false\n")
+                    .expect("global pnpm management setting");
+            }
+            if scenario == "management-environment" {
+                host.insert(
+                    "npm_config_manage_package_manager_versions".to_owned(),
+                    "false".into(),
+                );
+            }
+            let host_var = |name: &str| host.get(name).cloned();
+            assert_eq!(
+                pnpm_selector_family(&project, &home, &host_var),
+                None,
+                "{scenario} cannot safely determine the effective pnpm family"
+            );
+
+            let mut env = private_home_xdg_env(root.path(), &account);
+            env.push((
+                "pnpm_config_cache_dir".into(),
+                "/explicit/current-cache".into(),
+            ));
+            bind_native(&home, &project, &host_var, &mut env);
+            assert_eq!(
+                var(&env, "pnpm_config_cache_dir"),
+                Some(OsStr::new("/explicit/current-cache")),
+                "unresolved family preserves the configured selector"
+            );
+            assert!(var(&env, "npm_config_cache_dir").is_none());
+            assert!(var(&env, "pnpm_config_store_dir").is_none());
+            assert!(var(&env, "npm_config_store_dir").is_none());
+        }
+    }
+
+    #[test]
+    fn native_cache_binding_keeps_empty_npm_selector_with_pnpm_selectors() {
+        for (version, cache_selector, store_selector, other_cache, other_store) in [
+            (
+                "10.33.2",
+                "npm_config_cache_dir",
+                "npm_config_store_dir",
+                "pnpm_config_cache_dir",
+                "pnpm_config_store_dir",
+            ),
+            (
+                "12.16.1",
+                "pnpm_config_cache_dir",
+                "pnpm_config_store_dir",
+                "npm_config_cache_dir",
+                "npm_config_store_dir",
+            ),
+        ] {
+            let root = tempfile::tempdir().expect("fixture root");
+            let account = root.path().join("account-home");
+            let project = root.path().join("repo");
+            std::fs::create_dir_all(project.join(".git")).expect("project root");
+            let (home, cache, data, host) = direct_pnpm_host_fixture(root.path(), version);
+            let host_var = |name: &str| host.get(name).cloned();
+            let mut env = private_home_xdg_env(root.path(), &account);
+            env.push(("npm_config_cache".into(), OsString::new()));
+            bind_native(&home, &project, &host_var, &mut env);
+            assert_eq!(
+                var(&env, "npm_config_cache"),
+                Some(OsStr::new("")),
+                "an explicit empty native npm selector stays present"
+            );
+            assert_eq!(
+                env_path(&env, cache_selector).as_ref(),
+                Some(&cache.join("pnpm"))
+            );
+            assert_eq!(
+                env_path(&env, store_selector).as_ref(),
+                Some(&data.join("pnpm/store"))
+            );
+            assert!(env_path(&env, other_cache).is_none());
+            assert!(env_path(&env, other_store).is_none());
+        }
     }
 
     // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores

@@ -207,26 +207,25 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
                 home.join(".cache/pnpm")
             }
         });
-    let expected_pnpm_store_default =
-        if crate::package_cache::explicit_host_value(&host_var, &["PNPM_HOME"]).is_some() {
-            None
-        } else {
-            Some(
-                host_var("XDG_DATA_HOME")
-                    .map(std::path::PathBuf::from)
-                    .filter(|path| path.is_absolute())
-                    .map(|path| path.join("pnpm/store"))
-                    .unwrap_or_else(|| {
-                        if cfg!(target_os = "windows") {
-                            home.join("AppData/Local/pnpm/store")
-                        } else if cfg!(target_os = "macos") {
-                            home.join("Library/pnpm/store")
-                        } else {
-                            home.join(".local/share/pnpm/store")
-                        }
-                    }),
-            )
-        };
+    let expected_pnpm_store_default = if host_value("PNPM_HOME").is_some() {
+        None
+    } else {
+        Some(
+            host_var("XDG_DATA_HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|path| path.join("pnpm/store"))
+                .unwrap_or_else(|| {
+                    if cfg!(target_os = "windows") {
+                        home.join("AppData/Local/pnpm/store")
+                    } else if cfg!(target_os = "macos") {
+                        home.join("Library/pnpm/store")
+                    } else {
+                        home.join(".local/share/pnpm/store")
+                    }
+                }),
+        )
+    };
     let expected_pnpm_cache = host_value("pnpm_config_cache_dir")
         .or_else(|| host_value("npm_config_cache_dir"))
         .map(std::path::PathBuf::from)
