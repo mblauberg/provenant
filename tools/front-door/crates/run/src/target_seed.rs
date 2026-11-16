@@ -66,6 +66,32 @@ pub fn store_path(state: &Path) -> PathBuf {
     state.join("cargo-target-seeds")
 }
 
+/// Resolve host Cargo tools from the same Cargo home used by lanes, independent
+/// of the daemon's PATH. Errors are stable diagnostics and disclose the path
+/// searched without consulting a shell or guessing a home directory.
+pub fn cargo_tool(environment: &[(OsString, OsString)], tool: &str) -> io::Result<PathBuf> {
+    let home = environment
+        .iter()
+        .find(|(key, _)| key == "HOME")
+        .map(|(_, value)| PathBuf::from(value))
+        .ok_or_else(|| io::Error::other(format!("{tool} unresolved: HOME not set")))?;
+    let cargo_home = provenant_confinement::cargo::CargoHome::resolve(&home, |name| {
+        environment
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+    })?;
+    let candidate = cargo_home.path.join("bin").join(tool);
+    if !std::fs::metadata(&candidate).is_ok_and(|metadata| metadata.is_file()) {
+        return Err(io::Error::other(format!(
+            "{tool} unresolved: searched {}",
+            candidate.display()
+        )));
+    }
+    // Keep the shim name: rustup selects the invoked proxy from argv[0].
+    Ok(candidate)
+}
+
 /// Cargo environment settings that change which compiler, target, or untracked
 /// build flags a shared seed represents. Values stay in the native Cargo
 /// environment; callers use this only to decide whether caching is eligible.
@@ -172,10 +198,10 @@ pub fn lock_build(state: &Path) -> Result<LockGuard, Box<dyn std::error::Error>>
 
 pub fn rustc_metadata(worktree: &Path) -> io::Result<(String, String)> {
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
-    let argv = ["rustc".into(), "-vV".into()];
-    let mut env: Vec<_> = std::env::vars_os()
-        .filter(|(key, _)| key != "RUSTUP_AUTO_INSTALL")
-        .collect();
+    let mut env: Vec<_> = std::env::vars_os().collect();
+    let rustc = cargo_tool(&env, "rustc")?;
+    let argv = [rustc.into_os_string(), "-vV".into()];
+    env.retain(|(key, _)| key != "RUSTUP_AUTO_INSTALL");
     env.push(("RUSTUP_AUTO_INSTALL".into(), "0".into()));
     let mut options = ExecOptions::new(&argv, worktree, std::time::Duration::from_secs(30));
     options.env = Some(&env);
@@ -406,6 +432,23 @@ fn lane_release_pin(
 #[cfg(test)]
 mod lane_probe_tests {
     use super::*;
+
+    #[test]
+    fn seed_cargo_resolves_from_fixture_cargo_home_without_path() {
+        let root = tempfile::tempdir().unwrap();
+        let cargo = root.path().join("custom cargo").join("bin").join("cargo");
+        std::fs::create_dir_all(cargo.parent().unwrap()).unwrap();
+        std::fs::write(&cargo, "fixture").unwrap();
+        let environment = [
+            (OsString::from("HOME"), root.path().as_os_str().to_owned()),
+            (
+                OsString::from("CARGO_HOME"),
+                root.path().join("custom cargo").into_os_string(),
+            ),
+        ];
+
+        assert_eq!(cargo_tool(&environment, "cargo").unwrap(), cargo);
+    }
 
     #[test]
     fn seed_eligibility_rejects_unrecorded_compiler_and_target_overrides() {
