@@ -26,11 +26,22 @@ struct LayoutQuery<'a> {
 
 impl LayoutQuery<'_> {
     fn entries(&self, common: &Path, bare: bool) -> Result<Vec<GitWorktree>, WorktreeError> {
+        // Inventory is rooted at the Git common directory, which may live
+        // outside its checkout. Bind Git to that directory instead of relying
+        // on discovery from the caller's working directory.
+        let mut environment = self.environment.to_vec();
+        environment.retain(|(key, _)| {
+            !matches!(
+                key.to_str(),
+                Some("GIT_DIR" | "GIT_COMMON_DIR" | "GIT_WORK_TREE")
+            )
+        });
+        environment.push(("GIT_DIR".into(), common.as_os_str().to_owned()));
         let inventory = RepoFacts::default().discover_worktree_inventory(
             WorktreeInventoryQuery::new(
                 common,
                 self.git,
-                self.environment,
+                &environment,
                 self.executor,
                 self.timeout,
                 self.cancel,

@@ -63,9 +63,10 @@ fn registered_project_roots_for_repository(
         let root = canonical(binding.common_dir())?;
         return Ok((root.clone(), Some(root)));
     }
-    let layout = utility.project_layout_for_repository(
+    let layout = utility.project_layout_for_bound_repository(
         executor,
         repo,
+        binding,
         provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
         cancel,
     )?;
@@ -1312,6 +1313,7 @@ mod tests {
         assert_eq!(binding.primary_checkout_hint(), Some(checkout.as_path()));
         let git_program = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         let executor = provenant_os::exec::SystemExecutor::new(1)?;
+        std::fs::create_dir(base.join("utility-home"))?;
         let utility = provenant_confinement::UtilityRuntime::new(
             &git_program,
             base.join("utility-home"),
