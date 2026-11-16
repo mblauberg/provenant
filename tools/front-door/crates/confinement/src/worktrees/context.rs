@@ -95,14 +95,7 @@ pub fn with_context_using_workers_and_facts<T>(
     .map_err(|_| WorktreeError::InvalidRequest)?;
     let binding = provenant_config::bind_project(roots, location)
         .map_err(|_| WorktreeError::InvalidRequest)?;
-    let layout = project_layout_for_binding(
-        &executor,
-        &binding,
-        runtime.git_program_path(),
-        &project_layout_git_environment(),
-        Duration::from_secs(5),
-        cancel,
-    )?;
+    let layout = runtime.project_layout_for_repository(&executor, &selected, budget, cancel)?;
     let registry = child(&state, OsStr::new("worktrees"))?;
     let project_state = child(&registry, OsStr::new(&binding.project_id().to_string()))?;
     let lock_budget =

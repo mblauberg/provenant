@@ -656,20 +656,14 @@ pub(super) fn protected_worktrees(
         if !is_git {
             continue;
         }
-        let layout = provenant_confinement::worktrees::project_layout_for_binding(
-            &executor,
-            &binding,
-            git,
-            &provenant_confinement::worktrees::project_layout_git_environment(),
-            std::time::Duration::from_secs(5),
-            &cancel,
-        )
-        .map_err(|error| {
-            format!(
-                "cannot verify registered Git project layout at {}: {error}",
-                common.display()
-            )
-        })?;
+        let layout = utility
+            .project_layout_for_binding(&executor, &binding, budget, &cancel)
+            .map_err(|error| {
+                format!(
+                    "cannot verify registered Git project layout at {}: {error}",
+                    common.display()
+                )
+            })?;
         let ports = provenant_config::PortTable::read_for(layout.project(), roots.state.as_path())
             .map_err(|error| {
                 format!(

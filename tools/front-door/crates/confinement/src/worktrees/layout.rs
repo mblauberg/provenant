@@ -72,7 +72,7 @@ impl ProjectLayout {
         &self.directory
     }
 
-    pub(super) fn from_repo(repo: &VerifiedRepo, project: bool) -> Result<Self, WorktreeError> {
+    pub(crate) fn from_repo(repo: &VerifiedRepo, project: bool) -> Result<Self, WorktreeError> {
         let root = if project {
             repo.root_path().to_path_buf()
         } else {

@@ -939,6 +939,15 @@ fn classify_bare_origins(
     roots: &crate::transport::LaneRoots,
     lane_files: &std::collections::BTreeSet<PathBuf>,
 ) -> Result<Option<bool>, WorktreeError> {
+    classify_bare_origins_at_root(repo.root_path(), bytes, roots, lane_files)
+}
+
+pub(crate) fn classify_bare_origins_at_root(
+    root: &Path,
+    bytes: &[u8],
+    roots: &crate::transport::LaneRoots,
+    lane_files: &std::collections::BTreeSet<PathBuf>,
+) -> Result<Option<bool>, WorktreeError> {
     if !bytes.ends_with(&[0]) {
         return Err(WorktreeError::InvalidOutput);
     }
@@ -959,7 +968,7 @@ fn classify_bare_origins(
         let path = if path.is_absolute() {
             path
         } else {
-            repo.root_path().join(path)
+            root.join(path)
         };
         let in_lane = roots.contains(&path);
         let path = crate::transport::normalise(&path);

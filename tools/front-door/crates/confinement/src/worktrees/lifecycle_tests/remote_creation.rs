@@ -15,6 +15,23 @@ fn bare_common_layout_creates_writer_from_linked_executor_checkout() -> Result<(
         &env,
         &["clone", "--bare", source, common_text],
     )?;
+    let layout_state = fixture._temp.path().join("bare-layout-state");
+    provenant_os::fixture::private_state_dir(&layout_state)?;
+    let mut inputs = provenant_core::RootInputs::new(fixture.home.clone(), fixture.root.clone());
+    inputs.state_dir = Some(layout_state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let bare_binding =
+        provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&common)?)?;
+    let bare_runtime = crate::UtilityRuntime::new(&fixture.git, &fixture.home, &layout_state)?;
+    let empty_bare_layout = bare_runtime.project_layout_for_binding(
+        &fixture.executor,
+        &bare_binding,
+        fixture.budget()?,
+        &cancel(),
+    )?;
+    assert_eq!(empty_bare_layout.root(), common.canonicalize()?);
+    assert_eq!(empty_bare_layout.project(), None);
+
     let linked = fixture._temp.path().join("bare-linked");
     let linked_text = linked.to_str().ok_or("linked path")?;
     run_fixture_git(
@@ -55,9 +72,7 @@ fn bare_common_layout_creates_writer_from_linked_executor_checkout() -> Result<(
         serde_json::to_vec(&host_ports)?,
     )?;
 
-    // The fixture's common directory was created by `clone --bare` above;
-    // model the independently verified local-origin classification here.
-    let test = TestContext::new_with_trusted_bare_setting(&fixture, Some(true))
+    let test = TestContext::new(&fixture)
         .map_err(|error| std::io::Error::other(format!("context setup: {error}")))?;
     assert_eq!(test.layout.root(), common.canonicalize()?);
     assert_eq!(test.layout.project(), None);
