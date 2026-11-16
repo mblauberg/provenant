@@ -1412,17 +1412,105 @@ mod reboot_tests {
     }
 
     #[test]
-    fn running_attempt_recovery_requires_absence_or_durable_exit_evidence() {
-        // Spec: docs/specs/supervisor.md#read-only-writer-presence
-        for presence in [
-            None,
-            Some(AttemptPresence::Live),
-            Some(AttemptPresence::Unknown),
-        ] {
-            assert!(!running_attempt_reapable(presence));
+    fn tick_reaping_queues_settling_and_unattended_but_never_live_attempts() -> TestResult {
+        // Spec: docs/specs/supervisor.md#tick-driven-settlement
+        use provenant_supervisor::census::{
+            Census, CensusError, ProcessFact, ProcessIdentity, ProcessObservation,
+        };
+        struct Observer(ProcessFact, Census);
+        impl ProcessObserver for Observer {
+            fn boot_identity(&self) -> std::result::Result<String, CensusError> {
+                Ok(self.0.identity.boot.clone())
+            }
+            fn observe(&self, _: i64) -> ProcessObservation {
+                ProcessObservation::Present(self.0.clone())
+            }
+            fn census(&self, _: usize) -> std::result::Result<Census, CensusError> {
+                panic!("tick must reuse its shared census")
+            }
         }
-        assert!(running_attempt_reapable(Some(AttemptPresence::Unattended)));
-        assert!(running_attempt_reapable(Some(AttemptPresence::Settling)));
+        let fact = ProcessFact {
+            identity: ProcessIdentity {
+                boot: "fixture-current-boot".into(),
+                pid: 123,
+                native_start: 1,
+                group_id: 123,
+                session_id: 123,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let census = Census::from_observations([fact.clone()], [], [], true, false, 64)?;
+        let observer = Observer(fact.clone(), census);
+        for (presence, expected_spawns) in [
+            (AttemptPresence::Settling, 1),
+            (AttemptPresence::Unattended, 1),
+            (AttemptPresence::Live, 0),
+            (AttemptPresence::Unknown, 0),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let clock = crate::tests::clock();
+            let cancel = provenant_core::CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let context = crate::tests::context(temp.path())?;
+            let store = RunStore::open(&context, &call)?;
+            let run = crate::tests::input();
+            store.create(&run, &call)?;
+            let id = run.attempt_id;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &crate::tests::route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let record = store.record(id, &call)?;
+            let scope = RunStore::scope(&record);
+            let attempt = store.attempt_dir(id, false)?;
+            if presence == AttemptPresence::Settling {
+                crate::artifacts::seal(&attempt, "process-exit.json", b"{}", RECORD_LIMIT)?;
+            } else if presence != AttemptPresence::Unknown {
+                let mut identity = fact.identity.clone();
+                if presence == AttemptPresence::Unattended {
+                    identity.boot = "fixture-previous-boot".into();
+                }
+                crate::artifacts::seal(
+                    &attempt,
+                    "process.json",
+                    &serde_json::to_vec(&serde_json::json!({
+                        "schema_version": 1, "scope": scope, "guardian": identity,
+                        "publication_pending": false, "census_complete": true,
+                    }))?,
+                    RECORD_LIMIT,
+                )?;
+            }
+            assert_eq!(
+                attempt_presence_with_observer_and_census(
+                    context.state_root.as_path(),
+                    &record,
+                    &observer,
+                    &observer.1
+                ),
+                Some(presence)
+            );
+            let spawned = std::cell::Cell::new(0);
+            for _ in 0..2 {
+                store.reap_with_census_and_spawn(&call, &observer, Some(&observer.1), |_, _| {
+                    spawned.set(spawned.get() + 1);
+                    Ok(())
+                })?;
+            }
+            assert_eq!(
+                spawned.get(),
+                expected_spawns,
+                "{presence:?}: repeated ticks coalesce workers"
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -4753,7 +4841,8 @@ impl RunStore {
         )
     }
     /// Queue recovery using one bounded host census shared by every attempt.
-    /// A failed or incomplete census leaves Running attempts untouched.
+    /// A failed or incomplete census cannot prove a writer unattended;
+    /// durable exit evidence still permits settlement recovery.
     pub fn reap_with_census(
         &self,
         call: &Request<'_>,
@@ -4767,7 +4856,8 @@ impl RunStore {
         )
     }
     /// Continue independent launcher/temporary recovery when host census is
-    /// unavailable. Running attempts remain Unknown and are not queued.
+    /// unavailable. Without durable exit evidence, Running attempts remain
+    /// Unknown and are not queued.
     pub fn reap_without_census(&self, call: &Request<'_>) -> Result<usize> {
         self.reap_with_census_and_spawn(
             call,
