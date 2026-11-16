@@ -1248,8 +1248,15 @@ mod tests {
             Some(shared_default.as_os_str()),
             "an unconfigured NVM install uses the shared host default, not account HOME"
         );
-        let shared_pnpm_cache = pnpm_default_cache(&home, &host_var);
-        let shared_pnpm_store = pnpm_default_store(&home, &host_var);
+        let (cache_default, store_default) = if cfg!(target_os = "windows") {
+            ("AppData/Local/pnpm-cache", "AppData/Local/pnpm/store")
+        } else if cfg!(target_os = "macos") {
+            ("Library/Caches/pnpm", "Library/pnpm/store")
+        } else {
+            (".cache/pnpm", ".local/share/pnpm/store")
+        };
+        let shared_pnpm_cache = home.join(cache_default);
+        let shared_pnpm_store = home.join(store_default);
         assert_eq!(
             var(&env, "npm_config_cache_dir"),
             Some(shared_pnpm_cache.as_os_str()),
@@ -1367,10 +1374,10 @@ mod tests {
             let npm = env_path(&env, "npm_config_cache").unwrap_or_else(|| home.join(".npm"));
             let pnpm_cache = env_path(&env, "pnpm_config_cache_dir")
                 .or_else(|| env_path(&env, "npm_config_cache_dir"))
-                .unwrap_or_else(|| pnpm_default_cache(&home, &host_var));
+                .unwrap_or_else(|| expected[1].clone());
             let pnpm_store = env_path(&env, "pnpm_config_store_dir")
                 .or_else(|| env_path(&env, "npm_config_store_dir"))
-                .unwrap_or_else(|| pnpm_default_store(&home, &host_var));
+                .unwrap_or_else(|| expected[2].clone());
             assert_eq!([npm, pnpm_cache, pnpm_store], expected, "{adapter}");
             match adapter {
                 "agy" => {

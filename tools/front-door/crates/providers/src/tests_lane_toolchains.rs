@@ -194,15 +194,46 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
                     .then(|| home.join(".cache/node/corepack")),
             }
         });
+    let expected_pnpm_cache_default = host_var("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .map(|path| path.join("pnpm"))
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "windows") {
+                home.join("AppData/Local/pnpm-cache")
+            } else if cfg!(target_os = "macos") {
+                home.join("Library/Caches/pnpm")
+            } else {
+                home.join(".cache/pnpm")
+            }
+        });
+    let expected_pnpm_store_default =
+        if crate::package_cache::explicit_host_value(&host_var, &["PNPM_HOME"]).is_some() {
+            None
+        } else {
+            Some(
+                host_var("XDG_DATA_HOME")
+                    .map(std::path::PathBuf::from)
+                    .filter(|path| path.is_absolute())
+                    .map(|path| path.join("pnpm/store"))
+                    .unwrap_or_else(|| {
+                        if cfg!(target_os = "windows") {
+                            home.join("AppData/Local/pnpm/store")
+                        } else if cfg!(target_os = "macos") {
+                            home.join("Library/pnpm/store")
+                        } else {
+                            home.join(".local/share/pnpm/store")
+                        }
+                    }),
+            )
+        };
     let expected_pnpm_cache = host_value("pnpm_config_cache_dir")
         .or_else(|| host_value("npm_config_cache_dir"))
         .map(std::path::PathBuf::from)
         .or_else(|| {
             match crate::package_cache::pnpm_global_path(&home, &host_var, "cacheDir", "cache-dir")
             {
-                crate::package_cache::Setting::Missing => {
-                    Some(crate::package_cache::pnpm_default_cache(&home, &host_var))
-                }
+                crate::package_cache::Setting::Missing => Some(expected_pnpm_cache_default.clone()),
                 crate::package_cache::Setting::Present(path) => path,
             }
         });
@@ -212,15 +243,7 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
         .or_else(|| {
             match crate::package_cache::pnpm_global_path(&home, &host_var, "storeDir", "store-dir")
             {
-                crate::package_cache::Setting::Missing
-                    if crate::package_cache::explicit_host_value(&host_var, &["PNPM_HOME"])
-                        .is_some() =>
-                {
-                    None
-                }
-                crate::package_cache::Setting::Missing => {
-                    Some(crate::package_cache::pnpm_default_store(&home, &host_var))
-                }
+                crate::package_cache::Setting::Missing => expected_pnpm_store_default.clone(),
                 crate::package_cache::Setting::Present(path) => path,
             }
         });
