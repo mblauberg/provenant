@@ -136,7 +136,13 @@ fn dispatch_with(
     } else {
         0
     };
-    assert_eq!(settled.exit(), expected, "{}", settled.checkpoint);
+    assert_eq!(
+        settled.exit(),
+        expected,
+        "{}\n{}",
+        settled.checkpoint,
+        lane_logs(rig, &settled.checkpoint)
+    );
     // The settled checkpoint, in the shape a launch reports it.
     Ok(json!({"data":{"checkpoint":settled.checkpoint}}))
 }
@@ -145,6 +151,24 @@ fn attempt_id(submitted: &Value) -> Result<&str> {
     submitted["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
         .as_str()
         .ok_or_else(|| format!("attempt reference: {submitted}").into())
+}
+
+/// The first attempt's own output, so a failed lane names its cause.
+fn lane_logs(rig: &TestRig, checkpoint: &Value) -> String {
+    let Some(reference) = checkpoint["nodes"][0]["attempts"][0]["attempt_ref"].as_str() else {
+        return "no attempt reference".into();
+    };
+    let Ok(directory) = attempt_dir(rig, reference) else {
+        return format!("no attempt directory for {reference}");
+    };
+    ["stdout.log", "stderr.log"]
+        .iter()
+        .map(|name| match fs::read(directory.join(name)) {
+            Ok(bytes) => format!("{name}:\n{}", String::from_utf8_lossy(&bytes)),
+            Err(error) => format!("{name}: {error}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn attempt_dir(rig: &TestRig, reference: &str) -> Result<std::path::PathBuf> {
@@ -278,17 +302,23 @@ child=$!
 # Ready only when a published sample shows the child's own child (the cat helper);
 # the sampler publishes on its own cadence, so poll that condition, not a delay.
 # Only "sample unavailable" (exit 4) is retried; any other CLI failure fails now.
-attempt=0
+# The wait is bounded by time inside the lane's 15 s provider timeout, not by a
+# count, so a slow CLI start on a loaded host does not shorten it.
+deadline=$(($(/bin/date +%s) + 12))
 while :; do
     status=0
     "$1" process-tree --root "$$" --json > "$TMPDIR/sample.json" || status=$?
     if test "$status" = 0; then
         /usr/bin/grep -Eq "\"ppid\":$child[,}]" "$TMPDIR/sample.json" && break
-    else
-        test "$status" = 4
+    elif test "$status" != 4; then
+        printf 'process-tree exited %s\n' "$status" >&2
+        exit 1
     fi
-    attempt=$((attempt + 1))
-    test "$attempt" -lt 50
+    if test "$(/bin/date +%s)" -ge "$deadline"; then
+        printf 'no sample showed helper %s; last status %s\n' "$child" "$status" >&2
+        /bin/cat "$TMPDIR/sample.json" >&2
+        exit 1
+    fi
     /bin/sleep 0.05
 done
 # The sample is taken; release the grandchild helper cleanly through the FIFO gate.
