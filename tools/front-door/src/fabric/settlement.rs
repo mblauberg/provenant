@@ -101,7 +101,11 @@ pub(crate) fn advance_graphs_after_settlement(
         read_prompts: true,
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
-    let session = provenant_cli::run::Session { store, context };
+    let session = provenant_cli::run::Session {
+        store,
+        context,
+        chair: None,
+    };
     let store = &session.store;
     // The holder admitted this successor before releasing predecessor custody.
     // Launch only now, through the ordinary host resume path. Replaying this

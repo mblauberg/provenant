@@ -347,8 +347,25 @@ pub fn state_candidate(context: &Roots, candidate: PathBuf) -> Result<Roots, Roo
 
 #[allow(clippy::print_stderr)] // Root warnings go to the operator before any output.
 fn report_warnings(roots: &Roots) {
-    for warning in roots.state.warnings() {
-        eprintln!("warning: {}", warning.message());
+    if !roots.state.warnings().is_empty() && first_root_warning(roots.state.as_path()) {
+        for warning in roots.state.warnings() {
+            eprintln!("warning: {}", warning.message());
+        }
+    }
+}
+
+// Like config warnings, use an atomic marker in the state root so concurrent
+// commands and scheduled ticks report an unusual root only once.
+fn first_root_warning(state: &Path) -> bool {
+    let digest = provenant_records::CanonicalV1::file_digest(state.as_os_str().as_encoded_bytes());
+    let name = format!("root-warning-{digest}");
+    let Ok(dir) = provenant_os::fs::Directory::open_anchor(state) else {
+        return true;
+    };
+    match dir.create_new(OsStr::new(&name)) {
+        Ok(_) => true,
+        Err(error) if error.is_exists() => false,
+        Err(_) => true,
     }
 }
 
@@ -491,6 +508,20 @@ mod tests {
                 }))
             ));
         }
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/consumer-contract.md#state-root
+    fn unusual_root_warning_is_reported_once_per_root() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        std::fs::create_dir(&first)?;
+        std::fs::create_dir(&second)?;
+        assert!(super::first_root_warning(&first));
+        assert!(!super::first_root_warning(&first));
+        assert!(super::first_root_warning(&second));
         Ok(())
     }
 

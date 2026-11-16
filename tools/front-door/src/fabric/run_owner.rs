@@ -537,7 +537,13 @@ impl BinaryRunOwner<'_> {
         let store = provenant_run::RunStore::open(&context, &self.call(cancel))
             .map_err(run_error)?
             .with_host(ctx.identity.host);
-        Ok(provenant_cli::run::Session { store, context })
+        let chair = (context.actor_id == ctx.identity.inbox.actor)
+            .then(|| provenant_cli::fabric::current_chair(ctx).map_err(|error| error.to_string()));
+        Ok(provenant_cli::run::Session {
+            store,
+            context,
+            chair,
+        })
     }
     pub(crate) fn session_with_facts(
         &self,
@@ -614,7 +620,11 @@ impl BinaryRunOwner<'_> {
             .map_err(run_error)?
             .ok_or(FacadeError::NotFound)?
             .with_host(ctx.identity.host);
-        Ok(provenant_cli::run::Session { store, context })
+        Ok(provenant_cli::run::Session {
+            store,
+            context,
+            chair: None,
+        })
     }
     fn require_graph_control(
         &self,
