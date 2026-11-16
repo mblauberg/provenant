@@ -1071,6 +1071,86 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     Ok(())
 }
 
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+// Spec: docs/specs/run-git.md#project-layout-ownership
+#[test]
+fn launch_inventory_protects_each_registered_project_allocation_root()
+-> Result<(), Box<dyn std::error::Error>> {
+    // The context-free host inventory no longer guesses layouts from a
+    // registered common directory (65c6ad0456). This Git-aware launch input
+    // owns the protection instead: every registered project's verified
+    // allocation root, including ones not yet created.
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let state = root.join("state");
+    let active_source = root.join("active-source");
+    for path in [&home, &state, &active_source] {
+        std::fs::create_dir_all(path)?;
+    }
+    std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), active_source.clone());
+    inputs.state_dir = Some(state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let mut allocations = Vec::new();
+    for (project, allocation) in [
+        ("source", ".claude/worktrees"),
+        ("other-project", "project-writers"),
+    ] {
+        let primary = root.join(project);
+        std::fs::create_dir_all(&primary)?;
+        provenant_os::fixture::run_git(&primary, &["init", "-q"])?;
+        provenant_os::fixture::run_git(&primary, &["commit", "--allow-empty", "-qm", "base"])?;
+        let mut ports = provenant_config::PortTable::builtin();
+        ports.worktree_layout.roots = vec![PathBuf::from(allocation)];
+        ports.worktree_layout.default = PathBuf::from(format!("{allocation}/<branch>"));
+        std::fs::create_dir(primary.join(".provenant"))?;
+        std::fs::write(
+            primary.join(provenant_config::PORTS_CONFIG),
+            serde_json::to_vec(&ports)?,
+        )?;
+        provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::from_verified_primary_checkout(
+                &primary.join(".git"),
+                &primary,
+            )?,
+        )?;
+        allocations.push(primary.join(allocation));
+    }
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let registry = Registry {
+        roots: Some(&roots),
+        ..Default::default()
+    };
+    let protected = protected_worktrees(&registry, &active_source, &git)?;
+    let inventory = provenant_confinement::permissions::MandatoryRoots::for_host(
+        &roots,
+        &home,
+        &active_source,
+        &[],
+        &[],
+        &protected,
+    )?;
+    for allocation in allocations {
+        assert!(!allocation.exists(), "protection precedes the first checkout");
+        assert!(
+            protected.iter().any(|grant| grant.path == allocation
+                && grant.scope == PathScope::Subtree),
+            "{} is not protected",
+            allocation.display()
+        );
+        assert!(matches!(
+            inventory.validate_extra_write(&PathGrant {
+                path: allocation.join("later-checkout"),
+                scope: PathScope::Subtree,
+            }),
+            Err(provenant_confinement::permissions::PermissionError::ProtectedOverlap)
+        ));
+    }
+    Ok(())
+}
+
 #[test]
 fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_providers::Adapter;
