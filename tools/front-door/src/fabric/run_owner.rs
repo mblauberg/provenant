@@ -69,69 +69,46 @@ fn project_output_events_for_peer(
 
 #[cfg(test)]
 mod output_projection_tests {
-    use super::*;
-    use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
-    use provenant_records::CanonicalV1;
-    use provenant_records::run::{AttemptState, Outcome, RunEvent, TerminalCause};
-
-    fn attempt(state: serde_json::Value) -> provenant_run::AttemptRecord {
-        serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
-            "attempt_id": AttemptId::from_bytes([1; 16]),
-            "project_id": ProjectId::from_bytes([3; 16]),
-            "key": provenant_records::WorkKey::new(
-                ProjectId::from_bytes([3; 16]),
-                "graph",
-                "node",
-                1
-            ).unwrap(),
-            "attempt_number": 1,
-            "revision": 1,
-            "generation": 0,
-            "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
-            "authority_digest": Digest::from_bytes([5; 32]),
-            "queued_at": WallTime::from_micros(1).unwrap(),
-            "state": state,
-            "usage": {},
-            "read_only_writable": [],
-            "protected_paths": [],
-            "trace": {},
-            "prompt": {
-                "path":{"encoding":"utf8","path":"prompt.txt"},
-                "digest":CanonicalV1::file_digest(b""),
-                "bytes":0,
-                "complete":true,
-                "redacted":false
-            }
-        }))
-        .unwrap()
-    }
-
-    fn event(sequence: u64, cause: TerminalCause, reason: String, note: String) -> RunEvent {
-        RunEvent {
-            extra: Default::default(),
-            schema_version: 1,
-            sequence,
-            project_id: ProjectId::from_bytes([3; 16]),
-            attempt_id: AttemptId::from_bytes([1; 16]),
-            revision: sequence,
-            change: AttemptState::Terminal {
-                extra: Default::default(),
-                terminal_cause: Some(cause),
-                terminal_note: Some(note),
-                stop: None,
-                outcome: Outcome::PermissionDenied,
-                exit_code: None,
-                finished_at: WallTime::from_micros(i64::try_from(sequence).unwrap()).unwrap(),
-                reason: Some(reason),
-            },
-            trace: Default::default(),
-        }
-    }
-
     #[test]
     // Spec: docs/specs/state.md#config-never-widens-authority
     fn peer_output_redacts_only_the_typed_binding_refusal() {
+        use super::*;
+        use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
+        use provenant_records::{CanonicalV1, run::TerminalCause};
+
+        fn attempt(state: serde_json::Value) -> provenant_run::AttemptRecord {
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "attempt_id": AttemptId::from_bytes([1; 16]),
+                "project_id": ProjectId::from_bytes([3; 16]),
+                "key": provenant_records::WorkKey::new(
+                    ProjectId::from_bytes([3; 16]),
+                    "graph",
+                    "node",
+                    1
+                ).unwrap(),
+                "attempt_number": 1,
+                "revision": 1,
+                "generation": 0,
+                "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+                "authority_digest": Digest::from_bytes([5; 32]),
+                "queued_at": WallTime::from_micros(1).unwrap(),
+                "state": state,
+                "usage": {},
+                "read_only_writable": [],
+                "protected_paths": [],
+                "trace": {},
+                "prompt": {
+                    "path":{"encoding":"utf8","path":"prompt.txt"},
+                    "digest":CanonicalV1::file_digest(b""),
+                    "bytes":0,
+                    "complete":true,
+                    "redacted":false
+                }
+            }))
+            .unwrap()
+        }
+
         let private_path = "/private/host-state/projects/fixture";
         let private_repair = "chmod 700 /private/host-state/projects/fixture";
         let unsafe_binding = attempt(serde_json::json!({
@@ -149,7 +126,7 @@ mod output_projection_tests {
             reason.contains(private_path) && reason.contains(private_repair)
         }));
         let remote_reason = peer.reason.expect("peer diagnostic");
-        assert!(remote_reason.contains("project binding state directory is unsafe on the host"));
+        assert!(remote_reason.starts_with(TerminalCause::ProjectBindingDirectoryUnsafe.detail()));
         assert!(remote_reason.contains("ask the host owner"));
         assert!(!remote_reason.contains(private_path));
         assert!(!remote_reason.contains(private_repair));
@@ -178,6 +155,32 @@ mod output_projection_tests {
     #[test]
     // Spec: docs/specs/state.md#config-never-widens-authority
     fn peer_event_output_projects_typed_diagnostics_before_paging_without_text_scrubbing() {
+        use super::*;
+        use provenant_core::{AttemptId, ProjectId, WallTime};
+        use provenant_records::run::{AttemptState, Outcome, RunEvent, TerminalCause};
+
+        fn event(sequence: u64, cause: TerminalCause, reason: String, note: String) -> RunEvent {
+            RunEvent {
+                extra: Default::default(),
+                schema_version: 1,
+                sequence,
+                project_id: ProjectId::from_bytes([3; 16]),
+                attempt_id: AttemptId::from_bytes([1; 16]),
+                revision: sequence,
+                change: AttemptState::Terminal {
+                    extra: Default::default(),
+                    terminal_cause: Some(cause),
+                    terminal_note: Some(note),
+                    stop: None,
+                    outcome: Outcome::PermissionDenied,
+                    exit_code: None,
+                    finished_at: WallTime::from_micros(i64::try_from(sequence).unwrap()).unwrap(),
+                    reason: Some(reason),
+                },
+                trace: Default::default(),
+            }
+        }
+
         let private_path = "/private/host-state/projects/fixture";
         let private_repair = "chmod 700 /private/host-state/projects/fixture";
         let user_prompt = "retain prompt text mentioning /private/prompt-data".to_owned();
@@ -230,7 +233,43 @@ mod output_projection_tests {
     // Spec: docs/specs/supervisor.md#read-only-writer-presence
     fn peer_output_reports_unknown_without_proof_and_settling_on_a_sealed_exit()
     -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
+        use provenant_records::CanonicalV1;
         use std::os::unix::fs::PermissionsExt;
+
+        fn attempt(state: serde_json::Value) -> provenant_run::AttemptRecord {
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "attempt_id": AttemptId::from_bytes([1; 16]),
+                "project_id": ProjectId::from_bytes([3; 16]),
+                "key": provenant_records::WorkKey::new(
+                    ProjectId::from_bytes([3; 16]),
+                    "graph",
+                    "node",
+                    1
+                ).unwrap(),
+                "attempt_number": 1,
+                "revision": 1,
+                "generation": 0,
+                "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+                "authority_digest": Digest::from_bytes([5; 32]),
+                "queued_at": WallTime::from_micros(1).unwrap(),
+                "state": state,
+                "usage": {},
+                "read_only_writable": [],
+                "protected_paths": [],
+                "trace": {},
+                "prompt": {
+                    "path":{"encoding":"utf8","path":"prompt.txt"},
+                    "digest":CanonicalV1::file_digest(b""),
+                    "bytes":0,
+                    "complete":true,
+                    "redacted":false
+                }
+            }))
+            .unwrap()
+        }
 
         let record = attempt(serde_json::json!({"state":"running"}));
         let temp = tempfile::tempdir()?;

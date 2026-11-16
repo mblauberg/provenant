@@ -3939,7 +3939,7 @@ mod tests {
         // source commit are unchanged.
         let controlled = json!({
             "op":"run", "explain":true,
-            "document":{"prompt":"Inspect launch policy",
+            "document":{"brief":"Inspect launch policy",
                 "tier":"senior", "access":"read_only"},
             "attempt":{"host":"local", "confidential":true, "provider_timeout":42}
         });
