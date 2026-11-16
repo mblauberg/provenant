@@ -164,7 +164,7 @@ jobs:
       - name: Lint
         if: needs.macos-scope.outputs.run_rust == 'true'
         working-directory: tools/front-door
-        run: cargo clippy --workspace --all-targets --features fixture --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --features fixture --locked --keep-going -- -D warnings
 
       - name: Check harness assets
         run: |
@@ -505,7 +505,7 @@ jobs:
         timeout-minutes: 10
       - name: Lint Rust workspace
         working-directory: tools/front-door
-        run: cargo clippy --workspace --all-targets --features fixture --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --features fixture --locked --keep-going -- -D warnings
       - name: Build macOS test archive
         working-directory: tools/front-door
         run: >-
