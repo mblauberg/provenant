@@ -1406,45 +1406,6 @@ pub(crate) fn land_cleanup(
                 .wall_now()
                 .map(|now| i128::from(now.as_micros()) * 1_000)
                 .map_err(|_| Error::Budget)?;
-            let collected = worktrees::collect(
-                context,
-                std::slice::from_ref(&lane),
-                &worktrees::WorktreeGcPolicy {
-                    upstream: None,
-                    terminal: &terminal,
-                    no_live_lanes: &no_live_lanes,
-                    regenerable: &regenerable,
-                    keep: &settings.keep,
-                    written_before_ns: now_ns,
-                    include_foreign: true,
-                    mode: provenant_confinement::worktrees::CollectionMode::OutputsForRemoval,
-                    proof: None,
-                    upstream_reference: None,
-                    retirement_port: None,
-                    retirement_feeds: None,
-                    integration_patterns: &[],
-                    excluded_paths: &[],
-                    dry_run: false,
-                },
-                cancel,
-            )?;
-            landed.output = collected
-                .output
-                .into_iter()
-                .filter(|entry| entry.removed)
-                .map(|entry| entry.path)
-                .collect();
-            if let Some(kept) = collected.worktrees.retained.first() {
-                let detail = kept
-                    .detail
-                    .as_deref()
-                    .map_or(String::new(), |detail| format!("; {detail}"));
-                landed.kept = Some(format!(
-                    "branch {} kept: {:?}{detail}",
-                    kept.branch, kept.reason
-                ));
-                return Ok(landed);
-            }
             let integration_ref =
                 provenant_confinement::repo::GitRefName::remote_tracking(integration)
                     .map_err(|_| Error::InvalidScope)?;
@@ -1474,28 +1435,48 @@ pub(crate) fn land_cleanup(
             )?;
             let retention_owner = crate::retention_owner::Owner::new(&roots, &home, &project)
                 .with_merge_observation(&evidence);
-            match worktrees::collect_selected(
-                context,
-                std::slice::from_ref(&lane),
-                &worktrees::WorktreeGcPolicy {
-                    upstream: Some(integration_tip),
-                    mode: provenant_confinement::worktrees::CollectionMode::Worktrees,
-                    proof: Some(&evidence),
-                    upstream_reference: Some(integration_ref.as_str()),
-                    terminal: &terminal,
-                    no_live_lanes: &no_live_lanes,
-                    regenerable: &regenerable,
-                    keep: &settings.keep,
-                    written_before_ns: now_ns,
-                    include_foreign: true,
-                    retirement_port: Some(&retirement),
-                    retirement_feeds: Some(&retention_owner),
-                    integration_patterns: &[],
-                    excluded_paths: &[],
-                    dry_run: false,
-                },
-                cancel,
-            ) {
+            let policy = worktrees::WorktreeGcPolicy {
+                upstream: Some(integration_tip),
+                mode: provenant_confinement::worktrees::CollectionMode::Worktrees,
+                proof: Some(&evidence),
+                upstream_reference: Some(integration_ref.as_str()),
+                terminal: &terminal,
+                no_live_lanes: &no_live_lanes,
+                regenerable: &regenerable,
+                keep: &settings.keep,
+                written_before_ns: now_ns,
+                include_foreign: true,
+                retirement_port: Some(&retirement),
+                retirement_feeds: Some(&retention_owner),
+                integration_patterns: &[],
+                excluded_paths: &[],
+                dry_run: false,
+            };
+            let output_policy = worktrees::WorktreeGcPolicy {
+                mode: provenant_confinement::worktrees::CollectionMode::OutputsForRemoval,
+                ..policy
+            };
+            let collected =
+                worktrees::collect(context, std::slice::from_ref(&lane), &output_policy, cancel)?;
+            landed.output = collected
+                .output
+                .into_iter()
+                .filter(|entry| entry.removed)
+                .map(|entry| entry.path)
+                .collect();
+            if let Some(kept) = collected.worktrees.retained.first() {
+                let detail = kept
+                    .detail
+                    .as_deref()
+                    .map_or(String::new(), |detail| format!("; {detail}"));
+                landed.kept = Some(format!(
+                    "branch {} kept: {:?}{detail}",
+                    kept.branch, kept.reason
+                ));
+                return Ok(landed);
+            }
+            match worktrees::collect_selected(context, std::slice::from_ref(&lane), &policy, cancel)
+            {
                 Ok(outcome) => {
                     landed.removed = outcome
                         .worktrees
