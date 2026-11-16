@@ -191,10 +191,10 @@ fn unsafe_project_binding_source_refusal_keeps_typed_peer_guard() {
     let diagnostic = provenant_records::diagnostic::Diagnostic::new("invalid_input")
         .detail("/private/peer-state/projects/project has mode 0755")
         .next("run chmod 700 '/private/peer-state/projects/project' and retry");
-    let error = SourceViewError::new(
-        SourceStep::Repository,
-        SourceCause::ProjectBindingDirectory(Box::new(diagnostic)),
-    );
+    let error = SourceViewError {
+        step: SourceStep::Repository,
+        cause: SourceCause::ProjectBindingDirectory(Box::new(diagnostic)),
+    };
     let refusal = PrepareError::from(error).into_refusal();
     assert!(
         refusal
