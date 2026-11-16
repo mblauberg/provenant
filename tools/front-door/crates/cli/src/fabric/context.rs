@@ -1314,6 +1314,10 @@ mod tests {
         let git_program = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         let executor = provenant_os::exec::SystemExecutor::new(1)?;
         std::fs::create_dir(base.join("utility-home"))?;
+        std::fs::set_permissions(
+            base.join("utility-home"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )?;
         let utility = provenant_confinement::UtilityRuntime::new(
             &git_program,
             base.join("utility-home"),
