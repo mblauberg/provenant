@@ -1036,6 +1036,18 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
             None,
         )?;
         assert_eq!(code(&output), 0, "{output:?}");
+        // Git inventory names the external directory, not the checkout, so
+        // the binding carries the primary path captured from that checkout.
+        let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+        inputs.state_dir = Some(rig.state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::from_verified_primary_checkout(
+                provenant_os::fs::canonicalize(&metadata)?,
+                provenant_os::fs::canonicalize(&rig.project)?,
+            )?,
+        )?;
     }
     if location == "branch-bare-linked" {
         let bare = rig.root.join("bare.git");
@@ -1083,11 +1095,11 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
         assert_eq!(code(&output), 0, "{output:?}");
     }
     if location == "branch-worktree" {
-        let config_dir = rig.project.join(".provenant");
-        fs::create_dir_all(&config_dir)?;
+        let ports = rig.project.join(provenant_config::PORTS_CONFIG);
+        fs::create_dir_all(ports.parent().ok_or("ports parent")?)?;
         fs::write(
-            config_dir.join(provenant_config::PORTS_CONFIG),
-            br#"{"schema_version":2,"worktree_layout":{"roots":["writer-trees"],"default":"writer-trees/<branch>"}}"#,
+            ports,
+            br#"{"schema_version":2,"worktree_layout":{"backend":{"kind":"builtin"},"roots":["writer-trees"],"default":"writer-trees/<branch>"}}"#,
         )?;
         for args in [
             vec!["add", ".provenant/ports.json"],
@@ -1123,7 +1135,6 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
     if location == "branch-worktree" {
         assert!(
             !linked_invocation
-                .join(".provenant")
                 .join(provenant_config::PORTS_CONFIG)
                 .exists(),
             "fixture must keep the custom layout only in the primary checkout"
@@ -1239,7 +1250,8 @@ fn writer_cli_branch_from_linked_checkout_uses_primary_layout() -> Result {
     writer_cli_launches_from_cwd("branch-worktree")
 }
 
-fn writer_cli_branch_from_separate_git_directory_uses_inventory() -> Result {
+// Spec: docs/specs/run-git.md#project-layout-ownership
+fn writer_cli_branch_from_separate_git_directory_uses_saved_primary() -> Result {
     writer_cli_launches_from_cwd("branch-separate-git-dir")
 }
 
@@ -5365,8 +5377,8 @@ fn main() -> ExitCode {
                 writer_cli_branch_from_linked_checkout_uses_primary_layout,
             ),
             (
-                "writer_cli_branch_from_separate_git_directory_uses_inventory",
-                writer_cli_branch_from_separate_git_directory_uses_inventory,
+                "writer_cli_branch_from_separate_git_directory_uses_saved_primary",
+                writer_cli_branch_from_separate_git_directory_uses_saved_primary,
             ),
             (
                 "writer_cli_branch_from_bare_linked_checkout_uses_common_layout",
