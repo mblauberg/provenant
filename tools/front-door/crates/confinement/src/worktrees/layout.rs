@@ -97,16 +97,15 @@ pub fn project_layout_for_common(
     let common = provenant_os::fs::canonicalize(common)?;
     let directory = Directory::open_anchor(&common)?;
     let identity = directory.metadata()?;
-    let inventory = RepoFacts::default().discover_worktree_inventory(
-        WorktreeInventoryQuery::new(
+    let inventory =
+        RepoFacts::default().discover_worktree_inventory(WorktreeInventoryQuery::new(
             &common,
             git,
             environment,
             executor,
             inventory_timeout,
             cancel,
-        ),
-    )?;
+        ))?;
     let entries = parse_worktree_list(&inventory)?;
     match verified_primary_from_inventory(&common, identity, &entries)? {
         Some(repo) => ProjectLayout::from_repo(&repo, true),

@@ -547,16 +547,14 @@ impl RepoFacts {
         timeout: std::time::Duration,
         cancel: &CancelToken,
     ) -> Result<Vec<PathBuf>, WorktreeError> {
-        let inventory = self.discover_worktree_inventory(
-            WorktreeInventoryQuery::new(
-                cwd,
-                git,
-                environment,
-                executor,
-                timeout,
-                cancel,
-            ),
-        )?;
+        let inventory = self.discover_worktree_inventory(WorktreeInventoryQuery::new(
+            cwd,
+            git,
+            environment,
+            executor,
+            timeout,
+            cancel,
+        ))?;
         inventory_paths(&inventory)
     }
 
