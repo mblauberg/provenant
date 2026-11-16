@@ -57,24 +57,27 @@ const PEER_PROJECT_BINDING_NEXT: &str = concat!(
     "and private from other users, then retry",
 );
 
-fn has_project_binding_directory_guard(record: &AttemptRecord) -> bool {
-    record.skipped_routes.iter().any(|route| {
-        route.confinement_guard
-            == Some(provenant_records::diagnostic::ConfinementGuard::ProjectBindingDirectoryUnsafe)
-    })
+fn is_project_binding_directory_refusal(state: &provenant_records::run::AttemptState) -> bool {
+    matches!(
+        state,
+        provenant_records::run::AttemptState::Terminal {
+            terminal_cause: Some(
+                provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe
+            ),
+            ..
+        }
+    )
 }
 
-/// Remove host-local project-binding repair details before an attempt crosses
-/// the peer boundary. The stored/local record remains unchanged.
-pub fn project_peer_attempt_diagnostics(record: &mut AttemptRecord) {
-    if !has_project_binding_directory_guard(record) {
+fn project_peer_attempt_state_diagnostics(state: &mut provenant_records::run::AttemptState) {
+    if !is_project_binding_directory_refusal(state) {
         return;
     }
     if let provenant_records::run::AttemptState::Terminal {
         terminal_note,
         reason,
         ..
-    } = &mut record.state
+    } = state
     {
         if reason.is_some() {
             *reason = Some(PEER_PROJECT_BINDING_DETAIL.into());
@@ -85,10 +88,22 @@ pub fn project_peer_attempt_diagnostics(record: &mut AttemptRecord) {
     }
 }
 
+/// Remove host-local project-binding repair details before an attempt crosses
+/// the peer boundary. The stored/local record remains unchanged.
+pub fn project_peer_attempt_diagnostics(record: &mut AttemptRecord) {
+    project_peer_attempt_state_diagnostics(&mut record.state);
+}
+
+/// Project the terminal event's self-contained cause, without consulting the
+/// mutable attempt record that may have changed since the event was written.
+pub fn project_peer_run_event_diagnostics(event: &mut RunEvent) {
+    project_peer_attempt_state_diagnostics(&mut event.change);
+}
+
 impl From<AttemptRecord> for AttemptSummary {
     fn from(record: AttemptRecord) -> Self {
         let projected = provenant_records::wire::LaneRow::project(&record, Default::default());
-        let reason = if has_project_binding_directory_guard(&record) {
+        let reason = if is_project_binding_directory_refusal(&record.state) {
             Some(PEER_PROJECT_BINDING_DETAIL.to_owned())
         } else {
             projected.reason
@@ -483,7 +498,9 @@ mod tests {
             });
         record.state = AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: Some(provenant_records::run::TerminalCause::AccessPolicyRefused),
+            terminal_cause: Some(
+                provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe,
+            ),
             terminal_note: Some(private_repair.into()),
             stop: None,
             outcome: Outcome::PermissionDenied,
@@ -511,11 +528,30 @@ mod tests {
         assert!(remote.contains(PEER_PROJECT_BINDING_NEXT));
 
         let mut unrelated = record.clone();
-        unrelated.skipped_routes.clear();
+        if let AttemptState::Terminal { terminal_cause, .. } = &mut unrelated.state {
+            *terminal_cause = Some(provenant_records::run::TerminalCause::AccessPolicyRefused);
+        }
         project_peer_attempt_diagnostics(&mut unrelated);
         let unrelated_remote = serde_json::to_string(&unrelated).unwrap();
         assert!(unrelated_remote.contains(private_path));
         assert!(unrelated_remote.contains(private_repair));
+
+        let mut event = RunEvent {
+            extra: Default::default(),
+            schema_version: 1,
+            sequence: 1,
+            project_id: record.project_id,
+            attempt_id: record.attempt_id,
+            revision: record.revision,
+            change: record.state.clone(),
+            trace: Default::default(),
+        };
+        project_peer_run_event_diagnostics(&mut event);
+        let remote_event = serde_json::to_string(&event).unwrap();
+        assert!(!remote_event.contains(private_path));
+        assert!(!remote_event.contains(private_repair));
+        assert!(remote_event.contains(PEER_PROJECT_BINDING_DETAIL));
+        assert!(remote_event.contains(PEER_PROJECT_BINDING_NEXT));
 
         let summary = serde_json::to_string(&AttemptSummary::from(record)).unwrap();
         assert!(!summary.contains(private_path));

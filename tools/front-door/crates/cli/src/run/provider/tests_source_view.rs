@@ -211,6 +211,14 @@ fn unsafe_project_binding_source_refusal_keeps_typed_peer_guard() {
         refusal.skipped_routes[0].confinement_guard,
         Some(provenant_records::diagnostic::ConfinementGuard::ProjectBindingDirectoryUnsafe)
     );
+    assert_eq!(
+        refusal.terminal_cause,
+        provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe
+    );
+    assert_eq!(
+        refusal.boundary_class,
+        provenant_records::diagnostic::BoundaryClass::Authority
+    );
 }
 
 #[test]

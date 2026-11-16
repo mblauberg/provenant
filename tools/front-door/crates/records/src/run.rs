@@ -1237,6 +1237,8 @@ impl From<Outcome> for crate::AttemptOutcome {
 pub enum TerminalCause {
     /// The pinned source view of an isolated lane could not be built.
     SourceViewRefused,
+    /// A project-binding state directory failed its local owner or mode guard.
+    ProjectBindingDirectoryUnsafe,
     AccountLoginRequired,
     RouteResolutionRefused,
     AccessPolicyRefused,
@@ -1282,6 +1284,9 @@ impl TerminalCause {
     pub fn reason(self) -> &'static str {
         match self {
             Self::SourceViewRefused => "source view refused; provenant output ID",
+            Self::ProjectBindingDirectoryUnsafe => {
+                "project binding state directory unsafe; provenant output ID"
+            }
             Self::AccountLoginRequired => "login required; provenant output ID",
             Self::RouteResolutionRefused => "route refused; provenant output ID",
             Self::AccessPolicyRefused => "access policy refused; provenant output ID",
@@ -1324,6 +1329,9 @@ impl TerminalCause {
             }
             Self::SourceViewRefused => {
                 "the pinned source view of the lane could not be built; the step and cause follow. Retry, or raise domains.run.source_view_seconds, source_view_entries or source_view_bytes when the cause names a limit"
+            }
+            Self::ProjectBindingDirectoryUnsafe => {
+                "the project binding state directory is unsafe; ask the host owner to check its ownership and private permissions before retrying"
             }
             Self::RouteResolutionRefused => {
                 "route resolution refused the lane; check the model, effort, exclusions and availability with `provenant route resolve` and `provenant quota tick`"
