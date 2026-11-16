@@ -310,7 +310,10 @@ pub(super) fn continuation_for_policy(
     let located = if AdapterSpec::get(&route.adapter)
         .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
     {
-        super::observation::find_opencode_session(&prior_state, session)?
+        Some(super::observation::find_opencode_session(
+            &prior_state,
+            session,
+        )?)
     } else {
         loop {
             match find_session_state_within(&prior_state, session, policy.limits) {

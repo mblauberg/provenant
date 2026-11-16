@@ -4431,7 +4431,7 @@ pub(super) fn prepare_candidates(
         provider.argv_prompt_limit = Some(provenant_records::run::ArgvPromptLimitReceipt {
             value: argv_limit as u64,
             key: ARGV_LIMIT_KEY.into(),
-            origin: argv_origin_record,
+            origin: argv_origin_record.clone(),
             extra: Default::default(),
         });
         if let Some(event) = &dependency_event {
