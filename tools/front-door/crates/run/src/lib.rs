@@ -58,7 +58,8 @@ pub use admission::{
 pub use controls::{
     CancelReceipt, Reconciled, Resume, SteerIntent, SteerReceipt, TemporaryReason,
     AttemptPresence, TemporaryReasonKind, UncertainReason, attempt_presence,
-    attempt_presence_with_census, holder_absent, overdue_at,
+    attempt_presence_with_census, attempt_presence_with_unavailable_census, holder_absent,
+    overdue_at,
 };
 pub use delivery::{FilteredLanePath, HostDeliveryContext};
 pub use git_context::{

@@ -468,6 +468,16 @@ pub fn attempt_presence_with_census(
     attempt_presence_with_observer_and_census(root, record, &SystemProcessObserver, census)
 }
 
+/// Preserve attempt-scoped exit evidence when a command's shared host census
+/// failed. This path checks the sealed exit without starting another census;
+/// every remaining Running attempt stays unknown.
+pub fn attempt_presence_with_unavailable_census(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+) -> Option<AttemptPresence> {
+    attempt_presence_inner(root, record, &SystemProcessObserver, None, true)
+}
+
 pub(crate) fn attempt_presence_with_observer(
     root: &std::path::Path,
     record: &AttemptRecord,
@@ -1364,6 +1374,42 @@ mod reboot_tests {
             Ok(())
         })?;
         assert_eq!((reaped, spawned.get()), (0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn a_sealed_exit_stays_settling_when_the_shared_census_is_unavailable()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // Spec: docs/specs/supervisor.md#read-only-writer-presence
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let record = store.record(id, &call)?;
+        let attempt = provenant_os::fs::Directory::open_anchor(
+            &context.state_root.as_path().join(format!("attempts/{id}")),
+        )?;
+        crate::artifacts::seal(&attempt, "process-exit.json", b"settled exit", RECORD_LIMIT)?;
+
+        assert_eq!(
+            attempt_presence_with_unavailable_census(context.state_root.as_path(), &record),
+            Some(AttemptPresence::Settling),
+            "a failed shared census must not mask durable exit proof"
+        );
         Ok(())
     }
 

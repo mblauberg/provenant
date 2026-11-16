@@ -118,13 +118,14 @@ separately from verdict, findings count and findings availability.
 
 For a durable `running` attempt, host status reports native writer presence as
 `live`, `unattended`, `settling` or `unknown`. `running` is shown only while the
-recorded guardian or provider identity is present. `unattended` requires every
-recorded guardian, provider and tracked descendant identity to be absent, a
-complete process-tree checkpoint with no omitted descendants, and a complete
-bounded census with no remaining process in the recorded session or groups. A
-PID or its reuse alone, a host that cannot observe the writer, missing
-checkpoints, permission errors and incomplete evidence remain `unknown`; status
-does not mutate or schedule recovery.
+recorded guardian or provider identity is present. A changed boot proves the
+old process tree is gone. Same-boot absence remains `unknown`, even when the
+last process checkpoint and current bounded census are complete: a child may
+have forked into another session or group after the checkpoint and then been
+reparented. A sealed process exit reports `settling`. A PID or its reuse alone,
+a host that cannot observe the writer, missing checkpoints, permission errors,
+incomplete evidence and unreachable peers remain `unknown`; status does not
+mutate or schedule recovery.
 Unattended and settling rows name the scoped `provenant reconcile` action,
 which rechecks custody before settlement.
 
