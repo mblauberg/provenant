@@ -164,7 +164,9 @@ fn project_layout_for_common_with_hint_and_bare_setting(
     let common = canonicalize(common).map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
     let directory = Directory::open_anchor(&common)?;
     let identity = directory.metadata()?;
-    if let Some(layout) = verified_project_layout_for_common(&common, identity, primary_hint, query)? {
+    if let Some(layout) =
+        verified_project_layout_for_common(&common, identity, primary_hint, query)?
+    {
         return Ok(layout);
     }
 
@@ -183,6 +185,9 @@ fn project_layout_for_common_with_hint_and_bare_setting(
         Ok(None) | Err(WorktreeError::InvalidRequest) => {
             Err(WorktreeError::ProjectLayoutUnresolved)
         }
+        Err(error) => Err(error),
+    }
+}
 
 fn verified_project_layout_for_common(
     common: &Path,
@@ -200,9 +205,6 @@ fn verified_project_layout_for_common(
     primary_hint
         .map(|hint| project_layout_from_saved_primary_hint(common, common_identity, hint))
         .transpose()
-}
-        Err(error) => Err(error),
-    }
 }
 
 /// Resolve a common Git directory using its verified inventory and saved
@@ -285,8 +287,8 @@ pub(crate) fn project_layout_for_binding_primary(
         timeout: inventory_timeout,
         cancel,
     };
-    let common = canonicalize(binding.common_dir())
-        .map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
+    let common =
+        canonicalize(binding.common_dir()).map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
     let common_identity = Directory::open_anchor(&common)?.metadata()?;
     verified_project_layout_for_common(
         &common,
@@ -328,8 +330,8 @@ fn project_layout_from_saved_primary_hint(
     common_identity: provenant_os::fs::Metadata,
     checkout_hint: &Path,
 ) -> Result<ProjectLayout, WorktreeError> {
-    let checkout = canonicalize(checkout_hint)
-        .map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
+    let checkout =
+        canonicalize(checkout_hint).map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
     let repo = VerifiedRepo::open_structure_only(&checkout)
         .map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
     if repo.common_git_dir() != common

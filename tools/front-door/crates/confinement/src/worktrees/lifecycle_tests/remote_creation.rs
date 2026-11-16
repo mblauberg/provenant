@@ -55,7 +55,9 @@ fn bare_common_layout_creates_writer_from_linked_executor_checkout() -> Result<(
         serde_json::to_vec(&host_ports)?,
     )?;
 
-    let test = TestContext::new(&fixture)
+    // The fixture's common directory was created by `clone --bare` above;
+    // model the independently verified local-origin classification here.
+    let test = TestContext::new_with_trusted_bare_setting(&fixture, Some(true))
         .map_err(|error| std::io::Error::other(format!("context setup: {error}")))?;
     assert_eq!(test.layout.root(), common.canonicalize()?);
     assert_eq!(test.layout.project(), None);

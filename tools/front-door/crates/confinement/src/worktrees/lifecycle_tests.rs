@@ -118,6 +118,13 @@ pub(super) struct TestContext<'a> {
 
 impl<'a> TestContext<'a> {
     pub(super) fn new(fixture: &'a Fixture) -> Result<Self, Box<dyn Error>> {
+        Self::new_with_trusted_bare_setting(fixture, None)
+    }
+
+    pub(super) fn new_with_trusted_bare_setting(
+        fixture: &'a Fixture,
+        trusted_bare: Option<bool>,
+    ) -> Result<Self, Box<dyn Error>> {
         let binding_state = fixture._temp.path().join("bindings");
         provenant_os::fixture::private_state_dir(&binding_state)?;
         let mut inputs =
@@ -138,9 +145,10 @@ impl<'a> TestContext<'a> {
         let layout = if fixture.repo.private_git_dir() == fixture.repo.common_git_dir() {
             ProjectLayout::from_repo(&fixture.repo, true)?
         } else {
-            project_layout_for_binding(
+            crate::worktrees::project_layout_for_binding_with_bare_setting(
                 &fixture.executor,
                 &binding,
+                trusted_bare,
                 &fixture.git,
                 &project_layout_git_environment(),
                 std::time::Duration::from_secs(5),
