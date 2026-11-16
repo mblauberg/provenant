@@ -41,10 +41,7 @@ fn verified_primary_writer_context(
     let checkout = fs::canonicalize(&rig.project)?;
     let top_level = PathBuf::from(git(rig, &["rev-parse", "--show-toplevel"])?);
     let top_level = fs::canonicalize(top_level)?;
-    let private_git_dir = PathBuf::from(git(
-        rig,
-        &["rev-parse", "--absolute-git-dir"],
-    )?);
+    let private_git_dir = PathBuf::from(git(rig, &["rev-parse", "--absolute-git-dir"])?);
     let private_git_dir = fs::canonicalize(private_git_dir)?;
     let common_git_dir = PathBuf::from(git(rig, &["rev-parse", "--git-common-dir"])?);
     let common_git_dir = fs::canonicalize(if common_git_dir.is_absolute() {

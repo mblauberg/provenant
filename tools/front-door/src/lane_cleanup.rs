@@ -1865,7 +1865,12 @@ mod tests {
         // subsumption evidence for the other.
         run_git(
             &fixture.project,
-            &["checkout", "-qb", "lane/remote-old", &fixture.base.to_string()],
+            &[
+                "checkout",
+                "-qb",
+                "lane/remote-old",
+                &fixture.base.to_string(),
+            ],
         )?;
         std::fs::write(
             fixture.project.join("remote-unlanded-work.txt"),
@@ -1902,14 +1907,8 @@ mod tests {
                 (RefEndpoint::Local, "lane/old", fixture.unlanded),
                 (fixture.endpoint(), "lane/remote-old", remote_unlanded),
             ] {
-                let record = record_old_ref(
-                    context,
-                    &ledger,
-                    endpoint.clone(),
-                    branch,
-                    tip,
-                    cancel,
-                )?;
+                let record =
+                    record_old_ref(context, &ledger, endpoint.clone(), branch, tip, cancel)?;
                 let outcomes = if endpoint == RefEndpoint::Local {
                     vec![
                         fixture.with_retirement(context, cancel, &record, |retirement| {

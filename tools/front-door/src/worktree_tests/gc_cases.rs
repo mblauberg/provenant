@@ -52,7 +52,10 @@ fn commit_unlanded_lane(rig: &TestRig, path: &Path) -> Result<provenant_core::Gi
     let file = path.join("gc-fixture-unlanded.txt");
     fs::write(&file, "unique unlanded lane work\n")?;
     let worktree = path.to_str().ok_or("worktree path")?;
-    git(rig, &["-C", worktree, "add", "--", "gc-fixture-unlanded.txt"])?;
+    git(
+        rig,
+        &["-C", worktree, "add", "--", "gc-fixture-unlanded.txt"],
+    )?;
     git(
         rig,
         &["-C", worktree, "commit", "-qm", "unlanded GC fixture"],

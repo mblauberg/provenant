@@ -2212,7 +2212,8 @@ pub(crate) fn bootstrap_lane_configuration_files_with_roots(
     cancel: &CancelToken,
     roots: &LaneRoots,
 ) -> Result<BTreeSet<PathBuf>, UtilityError> {
-    let scan = scan_configuration_origins_with_roots(executor, repo, runtime, budget, cancel, roots)?;
+    let scan =
+        scan_configuration_origins_with_roots(executor, repo, runtime, budget, cancel, roots)?;
     lane_configuration_files_from_scan(repo, runtime, roots, scan)
 }
 
