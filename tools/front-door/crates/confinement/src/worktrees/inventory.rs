@@ -496,7 +496,7 @@ impl RepoFacts {
         roots: &crate::transport::LaneRoots,
     ) -> Result<Option<bool>, WorktreeError> {
         let scalar = budget.with_stdout_cap(self.scalar_limit)?;
-        let lane_files = crate::utility::lane_configuration_files_with_roots(
+        let lane_files = crate::utility::bootstrap_lane_configuration_files_with_roots(
             executor, repo, utility, budget, cancel, roots,
         )?;
         let bare = UtilityRuntime::local_bare_origins(executor, repo, utility, scalar, cancel)?;
