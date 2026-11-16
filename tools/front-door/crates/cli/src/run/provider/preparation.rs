@@ -842,7 +842,7 @@ impl PrepareError {
                     );
                     refusal.skipped_routes.push(skipped);
                 }
-                Box::new(refusal)
+                refusal
             }
             Self::Candidates {
                 message,
