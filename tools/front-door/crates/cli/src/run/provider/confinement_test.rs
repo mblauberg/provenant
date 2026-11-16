@@ -73,8 +73,10 @@ fn registered_project_inventory_keeps_unsafe_directory_diagnostic_typed()
         ..provenant_core::RootInputs::new(home, checkout)
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let binding =
-        provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(project)?)?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(project.join(".git"))?,
+    )?;
     let projects = state.join("projects");
     std::fs::set_permissions(&projects, std::fs::Permissions::from_mode(0o755))?;
 
