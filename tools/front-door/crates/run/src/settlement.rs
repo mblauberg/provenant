@@ -69,14 +69,11 @@ impl DeliveredSteerStop {
         if request.scope != scope
             || request.requester != requester
             || request.reason != provenant_supervisor::machine::StopReason::Steered
-            || expected_id.ok() != Some(request._request_id)
+            || expected_id != Some(request._request_id)
         {
             return Ok(None);
         }
-        Ok(Some(Self {
-            scope,
-            requester,
-        }))
+        Ok(Some(Self { scope, requester }))
     }
 
     fn matches_marker(self, raw: &[u8]) -> bool {
