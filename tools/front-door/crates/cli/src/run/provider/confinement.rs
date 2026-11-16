@@ -907,9 +907,10 @@ pub(in crate::run) fn filtered_requester_lane_path(
 pub(super) fn registered_project_binding(
     roots: &provenant_core::Roots,
     project: provenant_core::ProjectId,
-) -> Result<Option<provenant_config::ProjectBinding>, String> {
-    Ok(provenant_config::registered_projects(roots)
-        .map_err(|error| format!("cannot read registered project inventory: {error}"))?
+) -> Result<Option<provenant_config::ProjectBinding>, PrepareError> {
+    let bindings = provenant_config::registered_projects(roots)
+        .map_err(PrepareError::registered_project_inventory)?;
+    Ok(bindings
         .into_iter()
         .find(|binding| binding.project_id() == project))
 }

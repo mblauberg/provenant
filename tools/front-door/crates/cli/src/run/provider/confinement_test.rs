@@ -52,6 +52,73 @@ fn configured_grants_cannot_expose_host_indexes() -> Result<(), Box<dyn std::err
 }
 
 #[test]
+fn registered_project_inventory_keeps_unsafe_directory_diagnostic_typed()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    let project = base.join("project");
+    for path in [&home, &state, &project] {
+        std::fs::create_dir(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let roots = provenant_core::RootInputs {
+        state_dir: Some(state.clone()),
+        ..provenant_core::RootInputs::new(home, project.clone())
+    }
+    .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let binding =
+        provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(project)?)?;
+    let projects = state.join("projects");
+    std::fs::set_permissions(&projects, std::fs::Permissions::from_mode(0o755))?;
+
+    // Exercise the real registration inventory so both model and named-command
+    // callers receive the same typed refusal from their shared lookup owner.
+    let error = registered_project_binding(&roots, binding.project_id())
+        .expect_err("unsafe inventory must refuse preparation");
+    let refusal = error.into_refusal();
+    assert_eq!(
+        refusal.terminal_cause,
+        provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe
+    );
+    assert_eq!(
+        refusal.boundary_class,
+        provenant_records::diagnostic::BoundaryClass::Authority
+    );
+    assert!(
+        refusal
+            .message
+            .contains(&projects.to_string_lossy().to_string())
+    );
+    assert!(
+        refusal
+            .terminal_note
+            .as_deref()
+            .is_some_and(|note| note.contains("chmod 700"))
+    );
+    assert!(refusal.skipped_routes.iter().all(|route| {
+        !route
+            .detail
+            .contains(&projects.to_string_lossy().to_string())
+    }));
+
+    // Other inventory errors keep the pre-existing generic wording and are
+    // not promoted to an authority refusal.
+    let unrelated = PrepareError::registered_project_inventory(
+        provenant_config::ConfigError::InvalidProjectBinding,
+    );
+    assert_eq!(
+        unrelated.to_string(),
+        "cannot read registered project inventory: project binding state is invalid"
+    );
+    assert!(matches!(unrelated, PrepareError::Other(_)));
+    Ok(())
+}
+
+#[test]
 fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::{AuthenticationProfile, ProviderProfile};

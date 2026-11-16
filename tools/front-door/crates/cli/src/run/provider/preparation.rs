@@ -787,6 +787,13 @@ fn policy_code_for_resource(
     }
 }
 impl PrepareError {
+    pub(super) fn registered_project_inventory(error: provenant_config::ConfigError) -> Self {
+        match ReadOnlyPlanError::from(error) {
+            error @ ReadOnlyPlanError::ProjectBindingDirectory(_) => Self::ReadOnly(error),
+            error => Self::Other(format!("cannot read registered project inventory: {error}")),
+        }
+    }
+
     pub(super) fn into_refusal(self) -> Box<run::PrepareRefusal> {
         match self {
             Self::RouteResolution { error, checks } => {
