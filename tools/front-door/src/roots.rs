@@ -291,17 +291,9 @@ pub fn project_layout(
     let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
     let discovered = utility.project_location(&executor, selected, budget, &cancel)?;
     let binding = provenant_config::bind_project(roots, discovered.location)?;
-    let environment = provenant_confinement::worktrees::project_layout_git_environment();
-    Ok(
-        provenant_confinement::worktrees::project_layout_for_binding(
-            &executor,
-            &binding,
-            utility.git_program_path(),
-            &environment,
-            Duration::from_secs(5),
-            &cancel,
-        )?,
-    )
+    // The utility owns bound layout resolution, including trusted local bare
+    // provenance for a checkout-less common directory.
+    Ok(utility.project_layout_for_binding(&executor, &binding, budget, &cancel)?)
 }
 
 /// Resolve a project layout without allocating a binding or updating its
@@ -316,17 +308,9 @@ pub fn project_layout_read_only(
     let cancel = provenant_core::CancelToken::new();
     let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
     let discovered = utility.project_location(&executor, selected, budget, &cancel)?;
-    let environment = provenant_confinement::worktrees::project_layout_git_environment();
     let repo = utility.open_read_repo(&executor, selected, budget, &cancel)?;
     if let Some(binding) = provenant_config::lookup_project(roots, &discovered.location)? {
-        let layout = provenant_confinement::worktrees::project_layout_for_binding(
-            &executor,
-            &binding,
-            utility.git_program_path(),
-            &environment,
-            Duration::from_secs(5),
-            &cancel,
-        )?;
+        let layout = utility.project_layout_for_binding(&executor, &binding, budget, &cancel)?;
         if layout.project().is_some() || repo.private_git_dir() != repo.common_git_dir() {
             return Ok(layout);
         }
