@@ -1437,7 +1437,7 @@ pub(crate) fn land_cleanup(
                 .with_merge_observation(&evidence);
             let policy = worktrees::WorktreeGcPolicy {
                 upstream: Some(integration_tip),
-                mode: provenant_confinement::worktrees::CollectionMode::Worktrees,
+                mode: provenant_confinement::worktrees::CollectionMode::LandingCleanup,
                 proof: Some(&evidence),
                 upstream_reference: Some(integration_ref.as_str()),
                 terminal: &terminal,
@@ -1452,32 +1452,15 @@ pub(crate) fn land_cleanup(
                 excluded_paths: &[],
                 dry_run: false,
             };
-            let output_policy = worktrees::WorktreeGcPolicy {
-                mode: provenant_confinement::worktrees::CollectionMode::OutputsForRemoval,
-                ..policy
-            };
-            let collected =
-                worktrees::collect(context, std::slice::from_ref(&lane), &output_policy, cancel)?;
-            landed.output = collected
-                .output
-                .into_iter()
-                .filter(|entry| entry.removed)
-                .map(|entry| entry.path)
-                .collect();
-            if let Some(kept) = collected.worktrees.retained.first() {
-                let detail = kept
-                    .detail
-                    .as_deref()
-                    .map_or(String::new(), |detail| format!("; {detail}"));
-                landed.kept = Some(format!(
-                    "branch {} kept: {:?}{detail}",
-                    kept.branch, kept.reason
-                ));
-                return Ok(landed);
-            }
             match worktrees::collect_selected(context, std::slice::from_ref(&lane), &policy, cancel)
             {
                 Ok(outcome) => {
+                    landed.output = outcome
+                        .output
+                        .into_iter()
+                        .filter(|entry| entry.removed)
+                        .map(|entry| entry.path)
+                        .collect();
                     landed.removed = outcome
                         .worktrees
                         .removed

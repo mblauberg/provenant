@@ -1084,7 +1084,58 @@ pub(super) fn remove_tree_when_before_delete(
     {
         return Err(WorktreeError::Primary);
     }
-    let mut locked = lock_worktree_for_mutation(context, entry, cancel)?;
+    let locked = lock_worktree_for_mutation(context, entry, cancel)?;
+    remove_tree_when_before_delete_locked(
+        context,
+        entry,
+        expected_head,
+        locked,
+        cancel,
+        eligible,
+        output,
+        repository,
+        None,
+        before_delete,
+    )
+}
+
+/// Continue the same fenced removal while the caller retains its verified
+/// writer lease. Landing uses `before_output` to prune declared output only
+/// after removal eligibility is established, then rechecks eligibility before
+/// the shared removal core can mutate Git state.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn remove_tree_when_before_delete_locked(
+    context: &WorktreeContext<'_>,
+    entry: &GitWorktree,
+    expected_head: GitOid,
+    mut locked: LockedWorktree,
+    cancel: &CancelToken,
+    eligible: &dyn Fn(bool) -> Result<(), WorktreeError>,
+    output: Option<&provenant_config::ProjectGcSettings>,
+    repository: Repository,
+    mut before_output: Option<&mut dyn FnMut(&VerifiedWorktree) -> Result<(), WorktreeError>>,
+    before_delete: impl FnOnce(
+        &VerifiedWorktree,
+        &Path,
+        Option<&ArchiveInfo>,
+    ) -> Result<(), WorktreeError>,
+) -> Result<RemovedTree, WorktreeError> {
+    if entry.locked || entry.prunable {
+        return Err(WorktreeError::GitEntryHeld {
+            locked: entry.locked,
+        });
+    }
+    let canonical = canonicalize(&entry.path)?;
+    if context
+        .layout
+        .project()
+        .map(canonicalize)
+        .transpose()?
+        .as_ref()
+        == Some(&canonical)
+    {
+        return Err(WorktreeError::Primary);
+    }
     context.repo.revalidate()?;
     tree_unchanged(
         &context.facts.fresh_inventory(context, cancel)?,
@@ -1092,6 +1143,12 @@ pub(super) fn remove_tree_when_before_delete(
         expected_head,
     )?;
     eligible(true)?;
+    if let Some(before_output) = before_output.as_deref_mut() {
+        before_output(&locked.verified)?;
+        // Output walking can take long enough for eligibility evidence to
+        // change. Keep the same writer lease and revalidate before removal.
+        eligible(true)?;
+    }
     let prepared =
         worktree_dirty_at(context, locked.verified.repo(), cancel)? == WorktreeCondition::Ignored;
     if prepared && !matches!(repository, Repository::Discard) {

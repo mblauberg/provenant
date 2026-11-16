@@ -766,6 +766,82 @@ fn gc_output_pruning_holds_writer_but_not_repository_lock() -> Result<(), Box<dy
 }
 
 #[test]
+fn landing_output_pruning_keeps_the_writer_lease_through_retirement() -> Result<(), Box<dyn Error>>
+{
+    let fixture = Fixture::new()?;
+    fs::write(fixture.root.join(".gitignore"), "target/\n")?;
+    fixture.run(&["add", ".gitignore"])?;
+    fixture.run(&["commit", "-m", "ignore output"])?;
+    let test_context = TestContext::new(&fixture)?;
+    let context = test_context.context();
+    let mut lane = gc_merged_worktree(&test_context, &context, "landing-output-lease")?;
+    let target = lane.path.join("target");
+    fs::create_dir(&target)?;
+    fs::write(target.join("artifact"), "output")?;
+    lane.dirty = WorktreeCondition::Ignored;
+    let retirement = HostRetirementFixture::new(&test_context)?;
+    retirement.seed_lane(&context, &lane)?;
+    let state = context
+        .project_state
+        .open_verified_directory(&state_dir_name(&lane.path))?;
+    let output_observation = std::cell::Cell::new(None);
+    let retirement_observation = std::cell::Cell::new(None);
+    let terminal = |_: &Path| {
+        let repository_free = context
+            .repo
+            .common_dir()
+            .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
+            .is_ok();
+        let writer_held = matches!(
+            state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive),
+            Err(FsError::LockTimeout { .. })
+        );
+        output_observation.set(Some((repository_free, writer_held)));
+        true
+    };
+    let no_live_lanes = |candidate: &Path| {
+        if candidate == lane.path && !target.exists() {
+            let writer_admitted = state
+                .try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
+                .is_ok();
+            retirement_observation.set(Some((!target.exists(), !writer_admitted)));
+            !writer_admitted
+        } else {
+            true
+        }
+    };
+    let report = collect_selected(
+        &context,
+        std::slice::from_ref(&lane),
+        &WorktreeGcPolicy {
+            include_foreign: false,
+            retirement_port: Some(&retirement),
+            retirement_feeds: Some(&retirement),
+            mode: CollectionMode::LandingCleanup,
+            proof: None,
+            upstream_reference: None,
+            integration_patterns: &[],
+            excluded_paths: &[],
+            upstream: None,
+            terminal: &terminal,
+            no_live_lanes: &no_live_lanes,
+            regenerable: &["target".to_owned()],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+        },
+        &cancel(),
+    )?;
+
+    assert_eq!(output_observation.get(), Some((true, true)));
+    assert_eq!(retirement_observation.get(), Some((true, true)));
+    assert!(!lane.path.exists());
+    assert!(report.output[0].removed);
+    assert_eq!(report.worktrees.removed.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn gc_foreign_rechecks_changes_before_removal() -> Result<(), Box<dyn Error>> {
     #[derive(Clone, Copy)]
     enum Change {
