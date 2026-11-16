@@ -364,7 +364,6 @@ fn public_patch_skip_survives_unrelated_edits_and_retry_supersedes_it() {
     let mut resume_owner = FakeOwner {
         observations: [
             terminal_with_result(AttemptOutcome::Succeeded, "hold complete"),
-            terminal_with_result(AttemptOutcome::Succeeded, "member complete"),
             terminal_with_result(AttemptOutcome::Succeeded, "replacement complete"),
         ]
         .into(),
@@ -383,7 +382,7 @@ fn public_patch_skip_survives_unrelated_edits_and_retry_supersedes_it() {
     );
     assert_eq!(
         state(&resumed.checkpoint, "skipped--member"),
-        Some(NodeState::Succeeded)
+        Some(NodeState::Skipped)
     );
     assert_eq!(
         resume_owner
@@ -399,7 +398,7 @@ fn public_patch_skip_survives_unrelated_edits_and_retry_supersedes_it() {
             .iter()
             .filter(|call| call.0.node_id == "skipped--member")
             .count(),
-        1
+        0
     );
 
     let mut retry_checkpoint = resumed.checkpoint;

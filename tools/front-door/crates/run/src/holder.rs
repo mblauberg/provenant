@@ -4165,15 +4165,16 @@ mod writer_recovery_tests {
                         StopReason::ExplicitCancellation
                     }
                 );
-                // Retain the same process binding for terminal confirmation.
-                // The synthetic guardian is absent; its session/group shape
-                // is fixture evidence, never authority to signal a process.
+                // Keep the live provider binding for session readiness, but
+                // model a guardian identity whose PID has since been reused by
+                // this fixture process. Its different native start proves that
+                // guardian absent without assuming an arbitrary PID is free.
                 let guardian = provenant_supervisor::census::ProcessIdentity {
                     boot: provider.boot.clone(),
-                    pid: 40,
-                    native_start: 1,
-                    group_id: 40,
-                    session_id: 40,
+                    pid: provider.pid,
+                    native_start: provider.native_start.wrapping_sub(1),
+                    group_id: provider.pid,
+                    session_id: provider.pid,
                 };
                 provider.group_id = provider.pid;
                 provider.session_id = guardian.session_id;
