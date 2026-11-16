@@ -17,6 +17,7 @@ mod delivery;
 mod disk;
 mod git_context;
 mod holder;
+mod identity;
 mod launch;
 mod ledger;
 mod objects;
@@ -70,6 +71,7 @@ pub use holder::{
     HolderContext, HostLaunchContext, RetainedGit, RootSeed, RunHolder, SealedTask, retained_git,
     writer_base,
 };
+pub use identity::ProviderIdentityEvidence;
 #[cfg(test)]
 pub(crate) use launch::fixture_refusal;
 pub use launch::{

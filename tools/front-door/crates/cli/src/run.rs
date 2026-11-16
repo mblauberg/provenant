@@ -823,19 +823,14 @@ impl Registry<'_> {
             expected_session,
         } = options;
         let captured_stdout_len = stdout.len();
-        let confirmed_intentional_stop = exit.cancel_delivered_before_exit == Some(true)
-            && matches!(
-                exit.stop_reason,
-                Some(
-                    provenant_supervisor::machine::StopReason::ExplicitCancellation
-                        | provenant_supervisor::machine::StopReason::Steered
-                )
-            );
-        let stdout = if exit.provider_identity_eof_fragment
-            && !exit.provider_identity_conflict
-            && !exit.provider_identity_evidence_incomplete
-            && confirmed_intentional_stop
-        {
+        let identity_evidence = run::ProviderIdentityEvidence::classify(
+            exit.provider_identity_conflict,
+            exit.provider_identity_evidence_incomplete,
+            exit.provider_identity_eof_fragment,
+            exit.stop_reason,
+            exit.cancel_delivered_before_exit,
+        );
+        let stdout = if identity_evidence.tolerates_final_eof_fragment() {
             strip_final_eof_fragment(stdout)
         } else {
             stdout

@@ -6308,6 +6308,10 @@ mod tests {
             MismatchedSession,
             LiveThenTerminalMismatch,
             LiveThenTerminalIncomplete,
+            LiveThenTerminalSteeredEof,
+            LiveThenTerminalExplicitCancelEof,
+            LiveThenTerminalEofIncomplete,
+            LiveThenTerminalEofConflict,
             AccountMismatch,
         }
         for case in [
@@ -6316,6 +6320,10 @@ mod tests {
             Case::MismatchedSession,
             Case::LiveThenTerminalMismatch,
             Case::LiveThenTerminalIncomplete,
+            Case::LiveThenTerminalSteeredEof,
+            Case::LiveThenTerminalExplicitCancelEof,
+            Case::LiveThenTerminalEofIncomplete,
+            Case::LiveThenTerminalEofConflict,
             Case::AccountMismatch,
         ] {
             let temp = tempfile::tempdir()?;
@@ -6478,7 +6486,12 @@ mod tests {
                     .ok_or("child applied route")?;
                 let live_ack = matches!(
                     case,
-                    Case::LiveThenTerminalMismatch | Case::LiveThenTerminalIncomplete
+                    Case::LiveThenTerminalMismatch
+                        | Case::LiveThenTerminalIncomplete
+                        | Case::LiveThenTerminalSteeredEof
+                        | Case::LiveThenTerminalExplicitCancelEof
+                        | Case::LiveThenTerminalEofIncomplete
+                        | Case::LiveThenTerminalEofConflict
                 );
                 if live_ack {
                     assert!(store.record_provider_session_ready(
@@ -6517,7 +6530,7 @@ mod tests {
                         publication.session = None;
                         (
                             provenant_records::run::SteeringState::NotContinued,
-                            provenant_records::run::SteeringCause::SessionProofIncomplete,
+                            Some(provenant_records::run::SteeringCause::SessionProofIncomplete),
                         )
                     }
                     Case::MismatchedSession => {
@@ -6529,7 +6542,7 @@ mod tests {
                         publication.session = Some("different-session".into());
                         (
                             provenant_records::run::SteeringState::NotContinued,
-                            provenant_records::run::SteeringCause::SessionMismatch,
+                            Some(provenant_records::run::SteeringCause::SessionMismatch),
                         )
                     }
                     Case::LiveThenTerminalMismatch => {
@@ -6541,7 +6554,7 @@ mod tests {
                         publication.session = Some("different-session".into());
                         (
                             provenant_records::run::SteeringState::NotContinued,
-                            provenant_records::run::SteeringCause::SessionMismatch,
+                            Some(provenant_records::run::SteeringCause::SessionMismatch),
                         )
                     }
                     Case::LiveThenTerminalIncomplete => {
@@ -6554,7 +6567,61 @@ mod tests {
                         publication.session = None;
                         (
                             provenant_records::run::SteeringState::NotContinued,
-                            provenant_records::run::SteeringCause::SessionProofIncomplete,
+                            Some(provenant_records::run::SteeringCause::SessionProofIncomplete),
+                        )
+                    }
+                    Case::LiveThenTerminalSteeredEof | Case::LiveThenTerminalExplicitCancelEof => {
+                        exit.stop_reason =
+                            Some(if matches!(case, Case::LiveThenTerminalSteeredEof) {
+                                StopReason::Steered
+                            } else {
+                                StopReason::ExplicitCancellation
+                            });
+                        exit.cancel_delivered_before_exit = Some(true);
+                        exit.provider_identity_eof_fragment = true;
+                        publication.outcome = Outcome::Cancelled;
+                        publication.terminal_cause =
+                            matches!(case, Case::LiveThenTerminalSteeredEof)
+                                .then_some(TerminalCause::Steered);
+                        publication.reason = Some(
+                            "confirmed intentional stop ended at an incomplete final frame".into(),
+                        );
+                        publication.result =
+                            "provider session identity remained valid before the final fragment";
+                        publication.complete = false;
+                        publication.session = Some("fixture-session".into());
+                        (provenant_records::run::SteeringState::Resumed, None)
+                    }
+                    Case::LiveThenTerminalEofIncomplete => {
+                        exit.stop_reason = Some(StopReason::Steered);
+                        exit.cancel_delivered_before_exit = Some(true);
+                        exit.provider_identity_eof_fragment = true;
+                        exit.provider_identity_evidence_incomplete = true;
+                        publication.outcome = Outcome::Unsettled;
+                        publication.reason =
+                            Some("provider identity evidence was incomplete".into());
+                        publication.result = "provider identity evidence was incomplete";
+                        publication.complete = false;
+                        publication.session = None;
+                        (
+                            provenant_records::run::SteeringState::NotContinued,
+                            Some(provenant_records::run::SteeringCause::SessionProofIncomplete),
+                        )
+                    }
+                    Case::LiveThenTerminalEofConflict => {
+                        exit.stop_reason = Some(StopReason::Steered);
+                        exit.cancel_delivered_before_exit = Some(true);
+                        exit.provider_identity_eof_fragment = true;
+                        exit.provider_identity_conflict = true;
+                        publication.outcome = Outcome::Failed;
+                        publication.terminal_cause = Some(TerminalCause::IdentityMismatch);
+                        publication.result =
+                            "provider identity conflicted before the final fragment";
+                        publication.complete = false;
+                        publication.session = Some("fixture-session".into());
+                        (
+                            provenant_records::run::SteeringState::NotContinued,
+                            Some(provenant_records::run::SteeringCause::SessionMismatch),
                         )
                     }
                     Case::AccountMismatch => unreachable!(),
@@ -6574,7 +6641,7 @@ mod tests {
                     .ok_or("terminal steering status")?;
                 assert_eq!(status.state, expected_state);
                 assert_eq!(status.successor, Some(child));
-                assert_eq!(status.cause, Some(expected_cause));
+                assert_eq!(status.cause, expected_cause);
                 let (saved_live_ack, saved_terminal_final): (i64, i64) = store.db.query_row(
                     "SELECT live_ack,terminal_final FROM steer_continuations WHERE attempt=?1",
                     [parent.to_string()],

@@ -1943,14 +1943,19 @@ impl RunStore {
                         .is_some_and(|terminal| terminal != session)
                 })
         });
-        let identity_conflict = live_conflict
-            || exit
-                .as_ref()
-                .is_some_and(|exit| exit.provider_identity_conflict);
+        let identity_evidence = exit.as_ref().map(|exit| {
+            ProviderIdentityEvidence::classify(
+                exit.provider_identity_conflict,
+                exit.provider_identity_evidence_incomplete,
+                exit.provider_identity_eof_fragment,
+                exit.stop_reason,
+                exit.cancel_delivered_before_exit,
+            )
+        });
+        let identity_conflict =
+            live_conflict || identity_evidence.is_some_and(ProviderIdentityEvidence::has_conflict);
         let evidence_incomplete = terminal_unsettled
-            || exit.as_ref().is_none_or(|exit| {
-                exit.provider_identity_evidence_incomplete || exit.provider_identity_eof_fragment
-            });
+            || identity_evidence.is_none_or(ProviderIdentityEvidence::is_incomplete);
         let disposition = self.steer_successor_disposition(
             child.attempt_id,
             child,
