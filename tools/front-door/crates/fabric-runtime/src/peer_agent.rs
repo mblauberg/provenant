@@ -1322,7 +1322,11 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let location = provenant_config::ProjectLocation::new(common).unwrap();
+        // Git inventory names the external directory, not the checkout, so the
+        // binding carries the primary path captured from the verified checkout.
+        let location =
+            provenant_config::ProjectLocation::from_verified_primary_checkout(common, root)
+                .unwrap();
         provenant_config::bind_project(roots, location).unwrap();
     }
 
