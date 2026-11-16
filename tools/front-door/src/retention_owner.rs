@@ -241,6 +241,10 @@ impl worktrees::RetirementFeeds for Owner<'_> {
             project: Some(context.identity.project),
             ..Default::default()
         };
+        // Reuse one bounded process census for the whole ledger walk. If it is
+        // unavailable, the shared projection preserves Unknown conservatively.
+        let mut census = None;
+        let mut census_observed = false;
         loop {
             let page = ledger.custody(&query, &call).map_err(|e| e.to_string())?;
             for record in page
@@ -257,7 +261,27 @@ impl worktrees::RetirementFeeds for Owner<'_> {
                     {
                         continue;
                     }
-                    match crate::custody::presence(record, self.roots, chair.host, chair.actor) {
+                    if matches!(&record.holder, Holder::Attempt { .. })
+                        && record
+                            .holder
+                            .chair()
+                            .map_or(true, |holder_chair| holder_chair.host == chair.host)
+                        && !census_observed
+                    {
+                        census = provenant_supervisor::census::ProcessObserver::census(
+                            &provenant_supervisor::census::SystemProcessObserver,
+                            provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+                        )
+                        .ok();
+                        census_observed = true;
+                    }
+                    match crate::custody::presence_with_census(
+                        record,
+                        self.roots,
+                        chair.host,
+                        chair.actor,
+                        census.as_ref(),
+                    ) {
                         HolderPresence::Unattended => {}
                         HolderPresence::Live => {
                             return Err("live custody holder retains this item".into());
