@@ -1416,7 +1416,7 @@ pub(crate) fn land_cleanup(
                     regenerable: &regenerable,
                     keep: &settings.keep,
                     written_before_ns: now_ns,
-                    include_foreign: false,
+                    include_foreign: true,
                     mode: provenant_confinement::worktrees::CollectionMode::OutputsForRemoval,
                     proof: None,
                     upstream_reference: None,
