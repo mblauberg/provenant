@@ -3252,10 +3252,50 @@ impl WriterLaunch {
         settlement: &mut crate::settlement::Driver,
         budget_stop: bool,
     ) -> Result<()> {
+        self.terminal_with_delivered_steer(state, attempt, custody, settlement, None, budget_stop)
+    }
+
+    pub(crate) fn terminal_after_delivered_steer(
+        &self,
+        state: &Path,
+        attempt: &Directory,
+        custody: &provenant_supervisor::custody::Recovery,
+        settlement: &mut crate::settlement::Driver,
+        stop: crate::settlement::DeliveredSteerStop,
+        budget_stop: bool,
+    ) -> Result<()> {
+        self.terminal_with_delivered_steer(
+            state,
+            attempt,
+            custody,
+            settlement,
+            Some(stop),
+            budget_stop,
+        )
+    }
+
+    fn terminal_with_delivered_steer(
+        &self,
+        state: &Path,
+        attempt: &Directory,
+        custody: &provenant_supervisor::custody::Recovery,
+        settlement: &mut crate::settlement::Driver,
+        delivered_steer: Option<crate::settlement::DeliveredSteerStop>,
+        budget_stop: bool,
+    ) -> Result<()> {
         if custody.observe() != provenant_supervisor::custody::RecoveryState::Absent {
             return Err(RunError::Validation(
                 "writer object import requires absent custody",
             ));
+        }
+        if let Some(stop) = delivered_steer {
+            if stop.marker_vetoes(attempt)? {
+                return Err(RunError::Validation("lane import cancelled"));
+            }
+        } else if crate::artifacts::read_sealed(attempt, "cancel.json", crate::RECORD_LIMIT)?
+            .is_some()
+        {
+            return Err(RunError::Validation("lane import cancelled"));
         }
         let archive = crate::artifacts::subdir(attempt, OsStr::new("quarantine"), true)?;
         let base = custody
@@ -3374,7 +3414,12 @@ impl WriterLaunch {
             )?;
             settlement.advance(crate::settlement::Phase::Publish)?;
         }
-        if crate::artifacts::read_sealed(attempt, "cancel.json", crate::RECORD_LIMIT)?.is_some() {
+        let import_cancelled = if let Some(stop) = delivered_steer {
+            stop.marker_vetoes(attempt)?
+        } else {
+            crate::artifacts::read_sealed(attempt, "cancel.json", crate::RECORD_LIMIT)?.is_some()
+        };
+        if import_cancelled {
             return Err(RunError::Validation("lane import cancelled"));
         }
         if settlement.phase() == crate::settlement::Phase::Publish {
