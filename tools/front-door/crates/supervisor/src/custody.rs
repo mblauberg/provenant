@@ -1869,9 +1869,9 @@ pub fn checkpoint_before_reboot(
             .boot_identity()
             .is_ok_and(|boot| !boot.is_empty() && boot != guardian.boot)
 }
-/// Whether the guardian and provider recorded for this attempt are both gone
-/// in this boot. Only an observed absence counts; an unreadable process or
-/// record leaves the attempt open.
+/// Whether a changed boot proves that the guardian and provider recorded for
+/// this attempt are gone. Same-boot absence is unknown; unreadable process or
+/// record evidence also leaves the attempt open.
 pub fn holder_gone(directory: &Directory, scope: Scope, observer: &dyn ProcessObserver) -> bool {
     observe_holder(directory, scope, observer) == HolderPresence::Gone
 }

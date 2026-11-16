@@ -547,9 +547,10 @@ pub fn overdue_at(record: &AttemptRecord, now: WallTime) -> bool {
         .is_ok_and(|limit| now >= limit)
 }
 
-/// Whether a running attempt's guardian and provider are both gone with no
-/// exit recorded, so nothing is left to settle it. Read-only; unreadable
-/// state counts as not stale. `root` is the execution state root.
+/// Whether a running attempt has reboot-confirmed guardian/provider absence
+/// with no exit recorded. Same-boot absence remains unknown because its last
+/// checkpoint may miss an escaped child. Read-only; `root` is the execution
+/// state root.
 pub fn holder_absent(root: &std::path::Path, record: &AttemptRecord) -> bool {
     attempt_presence(root, record) == Some(AttemptPresence::Unattended)
 }
@@ -3454,11 +3455,11 @@ impl RunStore {
         )
         .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))
     }
-    /// Settle an attempt whose guardian and provider are both gone in this
-    /// boot and left no durable exit: nothing remains to import or publish, so
-    /// it ends Lost with a reason instead of waiting for a holder that is not
-    /// coming. Writer exclusion is taken without waiting, so a live guardian,
-    /// or an inheritor of its lease, keeps the attempt open.
+    /// Settle an attempt with no durable exit only when a changed boot proves
+    /// its prior process tree cannot remain alive. Same-boot absence is not
+    /// quiescence proof because the last checkpoint may miss an escaped child.
+    /// Writer exclusion is taken without waiting, so an inheritor of the
+    /// lease still keeps the attempt open.
     fn settle_holderless(
         &self,
         record: &AttemptRecord,

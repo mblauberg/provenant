@@ -1301,7 +1301,8 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
     }
 
     if boot == BootRelation::Same {
-        // Held writer exclusion means a guardian may remain: stay uncertain.
+        // Even after writer exclusion becomes available, the last checkpoint
+        // cannot prove a same-boot process tree is quiescent.
         let held = Directory::open_anchor(&custody)?.try_lock(
             std::ffi::OsStr::new("writer.lock"),
             provenant_os::fs::LockMode::Exclusive,
@@ -1314,39 +1315,21 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
         assert!(reservation.exists());
         assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
         drop(held);
-        if device_numbers == DeviceNumbers::Changed {
-            return Ok(());
-        }
-        if custody_evidence == CustodyEvidence::Unresolved {
-            assert!(matches!(
-                store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?.as_slice(),
-                [(attempt, Reconciled::Uncertain { .. })] if *attempt == id
-            ));
-            assert_eq!(store.record(id, &call)?, before);
-            assert!(reservation.exists());
-            return Ok(());
-        }
-        // Free exclusion and an absent guardian and provider leave no holder.
-        assert_eq!(store.reap_with(&call, |_, _| Ok(()))?, 1);
         if matches!(operation, RecoveryOperation::CancelThenReconcile) {
             assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
         }
         assert_eq!(
-            store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?,
-            vec![(id, Reconciled::Finished)]
+            store.reap_with(&call, |_, _| panic!(
+                "same-boot absence without a sealed exit is not reapable"
+            ))?,
+            0
         );
-        let AttemptState::Terminal {
-            outcome, reason, ..
-        } = store.record(id, &call)?.state
-        else {
-            return Err("holderless attempt stayed open".into());
-        };
-        assert_eq!(outcome, Outcome::Lost);
-        assert_eq!(
-            reason.as_deref(),
-            Some(crate::controls::LostReason::Holderless.message())
-        );
-        assert!(!reservation.exists());
+        assert!(matches!(
+            store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?.as_slice(),
+            [(attempt, Reconciled::Uncertain { .. })] if *attempt == id
+        ));
+        assert!(matches!(store.record(id, &call)?.state, AttemptState::Running { .. }));
+        assert!(reservation.exists());
         assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
         return Ok(());
     }
