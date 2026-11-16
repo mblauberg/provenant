@@ -68,6 +68,13 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         provenant_core::WallTime::from_micros(wall.as_micros() - 31 * 86_400_000_000)?,
         provenant_core::MonoTime::from_micros(0),
     );
+    // Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
+    // Captures must be old enough to expire, and their worktree must predate
+    // terminal publication so the attempts identify this worktree instance.
+    let created_at = clock.wall_now()?.as_micros() - 1_000_000;
+    fs::File::open(landing.worktree.join(".git"))?.set_modified(
+        std::time::UNIX_EPOCH + std::time::Duration::from_micros(created_at.try_into()?),
+    )?;
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
