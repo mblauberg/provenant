@@ -44,15 +44,15 @@ fn output_lane_row(
     now: Option<provenant_core::WallTime>,
     peer_output: bool,
 ) -> provenant_records::wire::LaneRow {
-    // Output is a read-only point query. The unavailable-census projection
-    // preserves scoped sealed-exit evidence and keeps all other Running
-    // attempts unknown without starting a census or reaper.
+    // Output is a read-only point query that may answer a peer. Presence
+    // reads scoped sealed-exit evidence without a census or reaper; host-local
+    // artefact paths never enter the row.
     if peer_output {
         let mut record = record.clone();
         provenant_fabric_runtime::runs::project_peer_attempt_diagnostics(&mut record);
-        provenant_cli::run::project_lane_with_census(&record, &[], root, now, true, Err(()))
+        provenant_cli::run::project_lane_presence_only(&record, root, now)
     } else {
-        provenant_cli::run::project_lane_with_census(record, &[], root, now, true, Err(()))
+        provenant_cli::run::project_lane_presence_only(record, root, now)
     }
 }
 
@@ -295,6 +295,84 @@ mod output_projection_tests {
             settling.presence,
             Some(provenant_records::wire::LanePresence::Settling)
         );
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/supervisor.md#read-only-writer-presence
+    fn serialised_peer_output_keeps_sealed_exit_presence_and_withholds_host_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
+        use provenant_records::CanonicalV1;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir()?;
+        let root = provenant_os::fs::canonicalize(temp.path())?;
+        let artifact = serde_json::json!({
+            "path":{"encoding":"utf8","path":"result.md"},
+            "digest":CanonicalV1::file_digest(b""),
+            "bytes":0,
+            "complete":true,
+            "redacted":false
+        });
+        let record: provenant_run::AttemptRecord = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "project_id": ProjectId::from_bytes([3; 16]),
+            "key": provenant_records::WorkKey::new(
+                ProjectId::from_bytes([3; 16]),
+                "graph",
+                "node",
+                1
+            )?,
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+            "authority_digest": Digest::from_bytes([5; 32]),
+            "queued_at": WallTime::from_micros(1)?,
+            "state": {"state":"running"},
+            "usage": {},
+            "read_only_writable": [],
+            "protected_paths": [],
+            "trace": {},
+            "prompt": artifact.clone(),
+            "result": artifact,
+        }))?;
+        let attempt_dir = root.join("attempts").join(record.attempt_id.to_string());
+        std::fs::create_dir_all(&attempt_dir)?;
+        for directory in [root.join("attempts"), attempt_dir.clone()] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let exit = attempt_dir.join("process-exit.json");
+        std::fs::write(&exit, b"sealed exit evidence")?;
+        std::fs::set_permissions(&exit, std::fs::Permissions::from_mode(0o600))?;
+        // Structured path wire stores the absolute path without its leading slash.
+        let host_root = root.to_str().ok_or("utf8 root")?.trim_start_matches('/');
+
+        // A caller on this host sees the artefact path, so the record does
+        // carry host-local paths for the peer projection to withhold.
+        let local = serde_json::to_string(&provenant_cli::run::project_lane_with_census(
+            &record,
+            &[],
+            &root,
+            None,
+            true,
+            Err(()),
+        ))?;
+        assert!(local.contains(host_root), "{local}");
+
+        for peer_output in [true, false] {
+            let row = output_lane_row(&record, &root, None, peer_output);
+            assert_eq!(row.state, "settling");
+            assert_eq!(
+                row.presence,
+                Some(provenant_records::wire::LanePresence::Settling)
+            );
+            let wire = serde_json::to_string(&row)?;
+            assert!(!wire.contains(host_root), "{wire}");
+        }
         Ok(())
     }
 }

@@ -116,7 +116,15 @@ pub fn project_lane(
     now_wall: Option<WallTime>,
     observe_host: bool,
 ) -> provenant_records::wire::LaneRow {
-    project_lane_inner(lane, waits, root, now_wall, observe_host, None, false)
+    project_lane_inner(
+        lane,
+        waits,
+        root,
+        now_wall,
+        HostView::from_observation(observe_host),
+        None,
+        false,
+    )
 }
 
 /// Project a status row using one bounded process census shared by the caller.
@@ -138,10 +146,59 @@ pub fn project_lane_with_census(
         waits,
         root,
         now_wall,
-        observe_host,
+        HostView::from_observation(observe_host),
         Some(census),
         true,
     )
+}
+
+/// Project a row for a reader that may be on another host. Presence comes from
+/// this host's sealed evidence without a census, so a finished attempt reads
+/// as settling, but no host-local artefact path or host file fact is
+/// projected: the row may cross a peer boundary.
+pub fn project_lane_presence_only(
+    lane: &run::AttemptRecord,
+    root: &Path,
+    now_wall: Option<WallTime>,
+) -> provenant_records::wire::LaneRow {
+    project_lane_inner(
+        lane,
+        &[],
+        root,
+        now_wall,
+        HostView::PresenceOnly,
+        Some(Err(())),
+        true,
+    )
+}
+
+/// What a lane projection may read from, and publish about, this host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostView {
+    /// Nothing: running attempts stay unknown and no host path is projected.
+    Unobserved,
+    /// Presence evidence only; host-local paths and file facts stay private.
+    PresenceOnly,
+    /// Presence plus host-local artefact paths for a caller on this host.
+    Local,
+}
+
+impl HostView {
+    fn from_observation(observe_host: bool) -> Self {
+        if observe_host {
+            Self::Local
+        } else {
+            Self::Unobserved
+        }
+    }
+
+    fn observes_presence(self) -> bool {
+        !matches!(self, Self::Unobserved)
+    }
+
+    fn projects_host_artifacts(self) -> bool {
+        matches!(self, Self::Local)
+    }
 }
 
 fn project_lane_inner(
@@ -149,12 +206,13 @@ fn project_lane_inner(
     waits: &[run::LaneWait],
     root: &Path,
     now_wall: Option<WallTime>,
-    observe_host: bool,
+    view: HostView,
     census: Option<std::result::Result<&provenant_supervisor::census::Census, ()>>,
     unknown_when_host_unobserved: bool,
 ) -> provenant_records::wire::LaneRow {
     let usage = lane.effective_usage();
-    let presence = if !observe_host {
+    let host_artifacts = view.projects_host_artifacts();
+    let presence = if !view.observes_presence() {
         (unknown_when_host_unobserved && matches!(lane.state, run::AttemptState::Running { .. }))
             .then_some(provenant_records::wire::LanePresence::Unknown)
     } else {
@@ -182,7 +240,7 @@ fn project_lane_inner(
             .0
             .map(run::provider_silence_reason)
             .or_else(|| {
-                (observe_host && matches!(lane.state, run::AttemptState::Starting { .. }))
+                (host_artifacts && matches!(lane.state, run::AttemptState::Starting { .. }))
                     .then(|| "launch preparation".to_owned())
             })
     });
@@ -193,7 +251,7 @@ fn project_lane_inner(
         .zip(lane.session.as_deref())
         .map(|(adapter, session)| {
             let attempt = artifact(root, lane, "");
-            let path = observe_host
+            let path = host_artifacts
                 .then(|| run::locate_transcript(&attempt, session, &lane.write_grants))
                 .flatten()
                 .map(|path| attempt.join(path));
@@ -204,7 +262,7 @@ fn project_lane_inner(
                     .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok()),
             }
         });
-    let result_path = observe_host
+    let result_path = host_artifacts
         .then(|| {
             lane.result
                 .as_ref()
@@ -212,7 +270,7 @@ fn project_lane_inner(
         })
         .flatten()
         .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok());
-    let retained = (observe_host
+    let retained = (host_artifacts
         && lane.settlement_receipts.as_ref().is_some_and(|receipts| {
             matches!(
                 receipts.git_import,
@@ -243,7 +301,7 @@ fn project_lane_inner(
             presence,
             result_path,
             transcript,
-            payload_evicted: observe_host
+            payload_evicted: host_artifacts
                 && artifact(
                     root,
                     lane,
