@@ -1,5 +1,7 @@
 use super::schema::{absolute_path, path_wire, validate};
 use super::*;
+use crate::CanonicalV1;
+use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
 use serde_json::json;
 
 fn row() -> LaneRow {
@@ -198,19 +200,19 @@ fn lane_rows_reject_drift() {
 fn dead_and_unobservable_writer_projection_is_truthful_and_actionable()
 -> Result<(), Box<dyn std::error::Error>> {
     // Spec: docs/specs/cli.md#status-selection
-    let project = crate::ProjectId::from_bytes([9; 16]);
+    let project = ProjectId::from_bytes([9; 16]);
     let target = crate::WorkKey::new(project, "status-test", "writer", 1)?;
     let attempt: crate::run::AttemptRecord = serde_json::from_value(json!({
         "schema_version": 1,
         "key": target,
-        "attempt_id": crate::AttemptId::from_bytes([2; 16]),
+        "attempt_id": AttemptId::from_bytes([2; 16]),
         "project_id": project,
         "attempt_number": 1,
         "revision": 1,
         "generation": 1,
         "requested_route": {"kind":"named", "name":"fixture"},
-        "authority_digest": crate::Digest::from_bytes([3; 32]),
-        "queued_at": crate::WallTime::from_micros(1)?,
+        "authority_digest": Digest::from_bytes([3; 32]),
+        "queued_at": WallTime::from_micros(1)?,
         "state": {"state":"running"},
         "usage": {},
         "trace": {},
