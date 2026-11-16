@@ -84,7 +84,7 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
     let git = init_fixture_repository(&executor, &project, &git_home)?;
     let roots = provenant_core::RootInputs {
         state_dir: Some(state.clone()),
-        ..provenant_core::RootInputs::new(home.clone(), project.clone())
+        ..provenant_core::RootInputs::new(home.clone(), assets.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
     let utility = UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;

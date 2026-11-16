@@ -482,6 +482,40 @@ impl UtilityRuntime {
         budget: UtilityBudget,
         cancel: &CancelToken,
     ) -> Result<crate::worktrees::ProjectLayout, UtilityError> {
+        self.project_layout_for_repository_with_binding(executor, repo, None, budget, cancel)
+    }
+
+    /// Resolve a repository layout using a binding already established by the
+    /// caller. Lane contexts may have an isolated state root that cannot
+    /// re-enumerate the host's project registry.
+    pub fn project_layout_for_bound_repository(
+        &self,
+        executor: &dyn Executor,
+        repo: &VerifiedRepo,
+        binding: &provenant_config::ProjectBinding,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<crate::worktrees::ProjectLayout, UtilityError> {
+        if binding.common_dir() != repo.common_git_dir() {
+            return Err(UtilityError::UnreadableGitConfiguration);
+        }
+        self.project_layout_for_repository_with_binding(
+            executor,
+            repo,
+            Some(binding),
+            budget,
+            cancel,
+        )
+    }
+
+    fn project_layout_for_repository_with_binding(
+        &self,
+        executor: &dyn Executor,
+        repo: &VerifiedRepo,
+        bound: Option<&provenant_config::ProjectBinding>,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<crate::worktrees::ProjectLayout, UtilityError> {
         if repo.private_git_dir() == repo.common_git_dir() {
             return crate::worktrees::ProjectLayout::from_repo(repo, true)
                 .map_err(|_| UtilityError::UnreadableGitConfiguration);
@@ -491,7 +525,9 @@ impl UtilityRuntime {
         let git = self.git.program()?;
         let location = provenant_config::ProjectLocation::new(repo.common_git_dir().to_path_buf())
             .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
-        let binding = if self.host_state_available {
+        let binding = if let Some(binding) = bound {
+            Some(binding.clone())
+        } else if self.host_state_available {
             provenant_config::lookup_project_at_state(&self.host_state, &location)
                 .map_err(|_| UtilityError::UnreadableGitConfiguration)?
         } else {

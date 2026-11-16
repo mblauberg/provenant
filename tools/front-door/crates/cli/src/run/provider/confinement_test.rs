@@ -62,18 +62,21 @@ fn registered_project_inventory_keeps_unsafe_directory_diagnostic_typed()
     let home = base.join("home");
     let state = base.join("state");
     let project = base.join("project");
-    for path in [&home, &state, &project] {
+    let checkout = base.join("checkout");
+    for path in [&home, &state, &project, &checkout] {
         std::fs::create_dir(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
     provenant_os::fixture::run_git(&project, &["init", "--quiet"])?;
     let roots = provenant_core::RootInputs {
         state_dir: Some(state.clone()),
-        ..provenant_core::RootInputs::new(home, project.clone())
+        ..provenant_core::RootInputs::new(home, checkout)
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let binding =
-        provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(project)?)?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(project.join(".git"))?,
+    )?;
     let projects = state.join("projects");
     std::fs::set_permissions(&projects, std::fs::Permissions::from_mode(0o755))?;
 
