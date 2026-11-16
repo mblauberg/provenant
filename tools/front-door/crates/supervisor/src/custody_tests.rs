@@ -1089,10 +1089,20 @@ fn holder_presence_requires_exact_native_process_evidence() -> TestResult {
         "an exact live provider remains running even when its guardian is absent"
     );
 
-    let gone = world(ProcessObservation::Absent, ProcessObservation::Absent);
+    let same_boot_absence = world(ProcessObservation::Absent, ProcessObservation::Absent);
     assert_eq!(
-        observe_holder(&directory, scope, &gone),
-        HolderPresence::Gone
+        observe_holder(&directory, scope, &same_boot_absence),
+        HolderPresence::Unknown,
+        "same-boot absence from a stale checkpoint does not prove quiescence"
+    );
+    let rebooted = HolderWorld {
+        boot: "fixture-new-boot-v1",
+        ..world(ProcessObservation::Absent, ProcessObservation::Absent)
+    };
+    assert_eq!(
+        observe_holder(&directory, scope, &rebooted),
+        HolderPresence::Gone,
+        "a changed boot proves the original process tree cannot still run"
     );
 
     let mut reused_provider = provider.clone();
@@ -1105,8 +1115,8 @@ fn holder_presence_requires_exact_native_process_evidence() -> TestResult {
     );
     assert_eq!(
         observe_holder(&directory, scope, &reused),
-        HolderPresence::Gone,
-        "a recycled PID does not keep the original writer alive"
+        HolderPresence::Unknown,
+        "a recycled PID does not prove the original writer tree is quiescent"
     );
 
     let child = ProcessIdentity {
@@ -1176,6 +1186,50 @@ fn holder_presence_requires_exact_native_process_evidence() -> TestResult {
         observe_holder(&directory, scope, &escaped_survives),
         HolderPresence::Unknown,
         "a tracked descendant that escaped the provider session prevents a dead classification"
+    );
+
+    // A guardian can crash after a provider forks an escaped child but before
+    // that identity reaches the next checkpoint. The complete flag only
+    // describes the last published snapshot, not all later forks.
+    write_record(
+        &directory,
+        "process.json",
+        &StoredObservation {
+            schema_version: 1,
+            scope,
+            guardian: Some(guardian.clone()),
+            provider: Some(provider.clone()),
+            descendants: Vec::new(),
+            census_complete: true,
+            publication_pending: false,
+            priority: None,
+            extra: Default::default(),
+        },
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+    let unrecorded_escape = ProcessIdentity {
+        boot: guardian.boot.clone(),
+        pid: 104,
+        native_start: 11,
+        group_id: 104,
+        session_id: 104,
+    };
+    let stale_complete_checkpoint = HolderWorld {
+        boot: "fixture-recorded-boot-v1",
+        observations: [
+            (guardian.pid, ProcessObservation::Absent),
+            (provider.pid, ProcessObservation::Absent),
+        ]
+        .into_iter()
+        .collect(),
+        census_facts: vec![process_fact(unrecorded_escape)],
+        census_complete: true,
+    };
+    assert_eq!(
+        observe_holder(&directory, scope, &stale_complete_checkpoint),
+        HolderPresence::Unknown,
+        "a complete current census cannot repair a stale escaped-child checkpoint"
     );
 
     write_record(

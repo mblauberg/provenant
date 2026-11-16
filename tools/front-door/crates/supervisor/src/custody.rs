@@ -1696,10 +1696,12 @@ pub enum HolderPresence {
     Unknown,
 }
 
-/// Observe the guardian and provider recorded for this exact attempt, then
-/// require a complete host census before declaring their process session gone.
-/// PID reuse never supplies liveness by itself; permission, malformed evidence,
-/// incomplete census and any remaining session member stay unknown.
+/// Observe the guardian and provider recorded for this exact attempt. Exact
+/// identities can prove a live holder, and a changed boot proves the old tree
+/// is gone. Same-boot absence stays unknown: the last durable descendant
+/// checkpoint can predate a fork into another session or process group.
+/// Permission, malformed evidence, incomplete census and any remaining session
+/// member also stay unknown.
 pub fn observe_holder(
     directory: &Directory,
     scope: Scope,
@@ -1822,8 +1824,10 @@ fn classify_holder_census(
     }) {
         return HolderPresence::Unknown;
     }
-    // Complete census plus no current process in the exact recorded session
-    // is the absence proof. PID reuse remains irrelevant to this conclusion.
+    // A complete current census can confirm that recorded identities and
+    // sessions are absent, but it cannot cover a child forked after the
+    // asynchronously published checkpoint and escaped from those sessions.
+    // Same-boot absence is therefore not quiescence authority.
     for pid in std::iter::once(guardian.pid).chain(
         record
             .provider
@@ -1834,7 +1838,7 @@ fn classify_holder_census(
             return HolderPresence::Unknown;
         }
     }
-    HolderPresence::Gone
+    HolderPresence::Unknown
 }
 
 /// A reboot after both identities were recorded proves the entire old process

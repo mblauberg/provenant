@@ -683,6 +683,7 @@ pub(crate) fn enrich_status_rows_within(
                         &failure.error.to_string(),
                         200
                     ));
+                    project_remote_attempt_unknown(row);
                     continue;
                 }
             };
@@ -787,6 +788,22 @@ fn project_attempt_failure(row: &mut Value) {
             row["next"] = row["reason"].clone();
         }
     }
+}
+
+/// A peer error is no evidence that a checkpoint's Running writer is still
+/// present. Keep its durable state and expose the unavailable observation on
+/// the attempt so the current node cannot render as Running without proof.
+fn project_remote_attempt_unknown(row: &mut Value) {
+    if row["kind"] != "attempt" || row["state"] != "running" {
+        return;
+    }
+    row["graph_state"] = row["state"].clone();
+    row["recorded_state"] = row["state"].clone();
+    row["state"] = json!("unknown");
+    row["presence"] = json!("unknown");
+    row["reason"] = json!(
+        "remote writer presence is unavailable; retry status on the owning host when it is reachable"
+    );
 }
 
 /// Surface the latest attempt's typed cause on its failed node as well. The
@@ -3230,6 +3247,47 @@ mod tests {
         assert_eq!(node["state"], "unknown");
         assert_eq!(node["presence"], "unknown");
         assert!(node["next"].as_str().unwrap().contains("provenant reconcile"));
+        let reading = render_graph_status(&rows);
+        let parent = reading
+            .lines()
+            .find(|line| line.starts_with("g/parent#"))
+            .unwrap();
+        assert!(parent.contains(" unknown "), "{reading}");
+        assert!(!parent.contains(" running "), "{reading}");
+    }
+
+    #[test]
+    fn remote_status_failure_downgrades_the_current_running_node_to_unknown() {
+        // Spec: docs/specs/cli.md#status-selection
+        let target = GraphTarget {
+            graph: "g".into(),
+            node: None,
+            attempt: None,
+        };
+        let mut rows = status_rows(&graph_snapshot(checkpoint("g")), &target);
+        let attempt = rows
+            .iter_mut()
+            .find(|row| row["kind"] == "attempt")
+            .unwrap();
+        attempt["latest_attempt"] = json!(true);
+        attempt["state"] = json!("running");
+        attempt["evidence_error"] = json!("peer status timed out");
+
+        project_remote_attempt_unknown(attempt);
+        project_node_liveness(&mut rows);
+
+        let attempt = rows
+            .iter()
+            .find(|row| row["kind"] == "attempt")
+            .unwrap();
+        assert_eq!(attempt["recorded_state"], "running");
+        assert_eq!(attempt["state"], "unknown");
+        assert_eq!(attempt["presence"], "unknown");
+        assert_eq!(attempt["evidence_error"], "peer status timed out");
+        let node = rows.iter().find(|row| row["kind"] == "node").unwrap();
+        assert_eq!(node["recorded_state"], "running");
+        assert_eq!(node["state"], "unknown");
+        assert_eq!(node["presence"], "unknown");
         let reading = render_graph_status(&rows);
         let parent = reading
             .lines()

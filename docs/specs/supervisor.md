@@ -51,14 +51,14 @@ then reads that attempt's custody records.
 
 Status uses the recorded boot, PID and native start identity for the guardian,
 provider and tracked descendants. It reports a writer as live only when the
-guardian or provider's exact identity is present and non-zombie. Declaring the
-holder gone additionally requires a complete process-tree checkpoint with no
-omitted descendants, every tracked descendant absent, and a complete bounded
-host census with no remaining process in the recorded session or groups.
-Missing or malformed checkpoints, reused PIDs without that whole-tree proof,
-inaccessible processes and incomplete censuses are unknown. Status only
-projects these facts. Explicit reconciliation queues scoped settlement and
-rechecks custody before changing attempt state.
+guardian or provider's exact identity is present and non-zombie. A changed boot
+proves the old process tree is gone. Same-boot absence remains unknown even
+with a complete census: the durable process checkpoint can predate a fork into
+another session or process group, and the census cannot identify that untracked
+child after reparenting. A sealed process exit reports settlement as pending.
+Missing or malformed checkpoints, reused PIDs, inaccessible processes and
+incomplete censuses are unknown. Status only projects these facts; scoped
+reconciliation rechecks custody before changing attempt state.
 - Why: a dead guardian or recycled PID cannot hide a surviving provider child,
   and uncertainty must not be turned into a running writer or an unsafe retry.
 - Owner: `crates/supervisor/src/custody.rs`, `crates/run/src/controls.rs`

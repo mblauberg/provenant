@@ -120,10 +120,11 @@ pub fn project_lane(
 }
 
 /// Project a status row using one bounded process census shared by the caller.
-/// `Err(())` records that census was unavailable, so every live attempt stays
-/// explicitly unknown instead of triggering one fresh host scan per row. A
-/// false `observe_host` also stays unknown for running attempts because this
-/// host cannot prove a remote writer dead or live.
+/// `Err(())` records that census was unavailable, so each live attempt stays
+/// explicitly unknown instead of triggering one fresh host scan per row,
+/// while a sealed exit can still report settlement pending. A false
+/// `observe_host` also stays unknown for running attempts because this host
+/// cannot prove a remote writer dead or live.
 pub fn project_lane_with_census(
     lane: &run::AttemptRecord,
     waits: &[run::LaneWait],
@@ -160,8 +161,7 @@ fn project_lane_inner(
     } else {
         let observed = match census {
             Some(Ok(census)) => run::attempt_presence_with_census(root, lane, census),
-            Some(Err(())) => matches!(lane.state, run::AttemptState::Running { .. })
-                .then_some(run::AttemptPresence::Unknown),
+            Some(Err(())) => run::attempt_presence_with_unavailable_census(root, lane),
             None => run::attempt_presence(root, lane),
         };
         observed.map(|presence| match presence {
