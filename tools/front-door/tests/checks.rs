@@ -325,13 +325,17 @@ fn release_checks_the_running_binary_as_an_artifact() -> Result {
     let findings = page["data"]["findings"]
         .as_array()
         .ok_or("release findings")?;
+    // The fixture owns the Git evidence: the planted token lives only in tree
+    // and history bytes, and every commit carries the fixture identity. Nothing
+    // may be reported against either. The executable under scan is built
+    // elsewhere, so which byte rules it trips is not the fixture's to pin.
+    let from_fixture: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding["path"]["path"] != "@artifact/provenant")
+        .collect();
     assert!(
-        findings.iter().all(|finding| {
-            let path = finding["path"]["path"].as_str().unwrap_or_default();
-            path == "@artifact/provenant"
-                || path.starts_with("@commit/") && finding["rule"] == "release.personal-email"
-        }),
-        "Git source and history bytes must stay outside the executable scan: {findings:?}"
+        from_fixture.is_empty(),
+        "Git source and history bytes are outside the executable scan: {findings:?}"
     );
     assert_eq!(code(&output), if findings.is_empty() { 0 } else { 1 });
     rig.assert_v1_root_untouched()
