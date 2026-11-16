@@ -859,20 +859,24 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
         &["route", "resolve", "--route", "utility", "--confidential"],
         0,
     )?;
-    let utility_model = pool["data"]["model"].as_str().ok_or("utility model")?;
-    let utility_model_id = format!(
-        "{}/{}",
-        pool["data"]["adapter"].as_str().ok_or("utility adapter")?,
-        utility_model
-    );
-    let candidates = pool["data"]["pool_selection"]["candidates"]
+    // The catalogue's utility pool is headed by cursor/composer-2.5, which only
+    // confidentiality excludes; under it the designated utility model is the
+    // first eligible candidate, and the receipt names exactly that pick.
+    let utility_model = "claude-haiku-5-5";
+    assert_eq!(pool["data"]["adapter"], "claude");
+    assert_eq!(pool["data"]["model"], utility_model);
+    let selection = &pool["data"]["pool_selection"];
+    assert_eq!(selection["pick"], "claude/claude-haiku-5-5");
+    let candidates = selection["candidates"]
         .as_array()
         .ok_or("utility candidates")?;
-    assert!(
-        candidates
-            .iter()
-            .any(|candidate| candidate["model"] == utility_model_id),
-        "selected route model {utility_model_id} is absent from its candidate receipt: {candidates:?}"
+    let first_eligible = candidates
+        .iter()
+        .find(|candidate| candidate["exclusion"].is_null())
+        .ok_or("no eligible utility candidate")?;
+    assert_eq!(
+        first_eligible["model"], selection["pick"],
+        "the pick is the top-ranked eligible candidate: {candidates:?}"
     );
     let resolved = call(
         &rig,
