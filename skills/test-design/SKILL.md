@@ -10,6 +10,7 @@ Tests cite the spec section they pin with `Spec: docs/specs/NAME.md#anchor`; the
 Classify failures as defects (fix code), stale or rigid tests (redesign or delete), or rigid code (redesign).
 When a test and the design disagree, the test moves; delete redundant tests and tests of removed mechanisms.
 Merge near-duplicates into table-driven invariants; avoid exact messages, counts, order or snapshots unless they are the invariant.
+One fact, one declaration: a test derives expectations from it and never keeps a second copy; tools regenerate recorded artefacts.
 Report each touched failing test as kept, redesigned, merged or deleted, with a one-line reason.
 
 ## Choose and prune
