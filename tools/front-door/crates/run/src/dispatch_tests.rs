@@ -1318,8 +1318,18 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
         if matches!(operation, RecoveryOperation::CancelThenReconcile) {
             assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
         }
+        let census = provenant_supervisor::census::Census::from_observations(
+            [],
+            [],
+            ["guardian", "provider"]
+                .into_iter()
+                .filter_map(|role| value[role]["pid"].as_i64()),
+            true,
+            false,
+            16,
+        )?;
         assert_eq!(
-            store.reap_with(&call, |_, _| panic!(
+            store.reap_with_census_and_spawn(&call, &observer, Some(&census), |_, _| panic!(
                 "same-boot absence without a sealed exit is not reapable"
             ))?,
             0

@@ -4791,7 +4791,7 @@ impl RunStore {
             .ok();
         self.reap_with_census_and_spawn(call, &observer, census.as_ref(), spawn)
     }
-    fn reap_with_census_and_spawn(
+    pub(crate) fn reap_with_census_and_spawn(
         &self,
         call: &Request<'_>,
         observer: &dyn ProcessObserver,
@@ -6253,6 +6253,7 @@ mod tests {
         child_exit.scope = RunStore::scope(&child_running);
         crate::dispatch_tests::seal_exit(&store, &child_exit)?;
         let mut child_publication = crate::tests::publication();
+        child_publication.started_at = child_running.started_at;
         child_publication.session = Some("fixture-session".into());
         store.publish_terminal(
             child,
@@ -6516,6 +6517,7 @@ mod tests {
                 let mut exit = crate::tests::exit();
                 exit.scope = RunStore::scope(&child_running);
                 let mut publication = crate::tests::publication();
+                publication.started_at = child_running.started_at;
                 publication.resolved_route = Some(child_route.clone());
                 publication.applied_route = Some(child_route.clone());
                 publication.observed_route = Some(child_route.clone());
@@ -6922,13 +6924,9 @@ mod tests {
             assert_eq!(child.is_some(), resumes);
             if let Some(child) = child {
                 assert_eq!(store.record(id, &call)?.superseded_by, Some(child));
-                assert_eq!(
-                    store
-                        .steering_status(id, &call)?
-                        .ok_or("steering status")?
-                        .state,
-                    provenant_records::run::SteeringState::Resumed
-                );
+                let status = store.steering_status(id, &call)?.ok_or("steering status")?;
+                assert_eq!(status.state, provenant_records::run::SteeringState::Queued);
+                assert_eq!(status.successor, Some(child));
             } else {
                 assert_eq!(store.record(id, &call)?.superseded_by, None);
             }
@@ -7206,6 +7204,8 @@ mod tests {
             exit.scope = RunStore::scope(&running);
             crate::dispatch_tests::seal_exit(&store, &exit)?;
             let mut publication = crate::tests::publication();
+            publication.started_at = running.started_at;
+            publication.finished_at = call.clock.wall_now()?;
             publication.session = Some("fixture-session".into());
             store.publish_terminal(parent, running.revision, &publication, &exit, &call)?;
 
