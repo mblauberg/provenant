@@ -486,14 +486,41 @@ impl UtilityRuntime {
             let binding = provenant_config::lookup_project_at_state(&self.host_state, &location)
                 .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
             let layout = match binding {
-                Some(binding) => crate::worktrees::project_layout_for_binding(
-                    executor,
-                    &binding,
-                    &git,
-                    &environment,
-                    budget.timeout,
-                    cancel,
-                ),
+                Some(binding) => {
+                    let primary = crate::worktrees::project_layout_for_binding_primary(
+                        executor,
+                        &binding,
+                        &git,
+                        &environment,
+                        budget.timeout,
+                        cancel,
+                    )
+                    .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+                    if let Some(primary) = primary {
+                        // Once a primary owner is structurally verified, its
+                        // project roots participate in the full config scan.
+                        // Do not classify `core.bare` first: a lane include
+                        // that sets it must be refused for this worktree, not
+                        // allowed to erase the project's roots.
+                        Ok(primary)
+                    } else {
+                        let bootstrap = self.bootstrap_lane_roots(repo)?;
+                        let trusted_bare = crate::worktrees::RepoFacts::default()
+                            .bare_setting_with_roots(
+                                repo, executor, self, budget, cancel, &bootstrap,
+                            )
+                            .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+                        crate::worktrees::project_layout_for_binding_with_bare_setting(
+                            executor,
+                            &binding,
+                            trusted_bare,
+                            &git,
+                            &environment,
+                            budget.timeout,
+                            cancel,
+                        )
+                    }
+                }
                 None => {
                     let bootstrap = self.bootstrap_lane_roots(repo)?;
                     let trusted_bare = crate::worktrees::RepoFacts::default()
@@ -2638,7 +2665,10 @@ pub(crate) mod tests {
             root.join(provenant_config::PORTS_CONFIG),
             serde_json::to_vec(&ports)?,
         )?;
-        fs::write(&included, "[user]\nname = lane-config\n")?;
+        fs::write(
+            &included,
+            "[core]\n\tbare = true\n[credential]\n\thelper = /bin/true\n[user]\n\tname = lane-config\n",
+        )?;
 
         let env = fixture_env(&fixture.home, temp);
         let root_text = root.to_str().ok_or("non-UTF8 primary path")?;
@@ -2676,9 +2706,9 @@ pub(crate) mod tests {
         run_fixture_git(
             &fixture.executor,
             &fixture.git,
-            &linked,
+            &common,
             &env,
-            &["config", "--worktree", "include.path", included_text],
+            &["config", "--file", "config", "include.path", included_text],
         )?;
 
         let state = temp.join("state");
