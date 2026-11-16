@@ -5,6 +5,7 @@ fn mark_created_lane_as_managed(
     roots: &provenant_core::Roots,
     path: &Path,
     branch: &str,
+    base: provenant_core::GitOid,
     head: provenant_core::GitOid,
 ) -> Result {
     let clock = provenant_os::clock::SystemClock;
@@ -20,18 +21,23 @@ fn mark_created_lane_as_managed(
         &cancel,
         |context| {
             let tree = provenant_confinement::verify_worktree(context.repo, path)?;
+            let reference = provenant_confinement::repo::GitRefName::branch(branch)
+                .map_err(|_| provenant_confinement::worktrees::WorktreeError::InvalidRequest)?;
+            let ledger = provenant_confinement::worktrees::RefLedger::for_context(context)?;
+            let lineage = ledger.observe_local_branch(&reference, head, &clock, &cancel)?;
+            if lineage.origin != provenant_records::custody::RefOrigin::Created {
+                return Err(provenant_confinement::worktrees::WorktreeError::InvalidRequest);
+            }
             let owner = provenant_confinement::worktrees::WorktreeOwner {
                 attempt_id: None,
                 operation_id: Some(operation_id),
                 branch: branch.to_owned(),
-                base: head.to_string(),
+                base: base.to_string(),
                 host: provenant_core::HostId::from_bytes([1; 16]),
                 created_at,
                 origin: provenant_confinement::worktrees::WorktreeOrigin::Lane,
                 label: None,
-                reference: provenant_confinement::worktrees::branch_ownership(
-                    context, branch, head,
-                )?,
+                reference: Some(lineage.ownership()),
             };
             provenant_confinement::worktrees::save_lane_owner_when_free(
                 context, &tree, &owner, head, None, false, &cancel,
@@ -40,6 +46,18 @@ fn mark_created_lane_as_managed(
         },
     )?;
     Ok(())
+}
+
+fn commit_unlanded_lane(rig: &TestRig, path: &Path) -> Result<provenant_core::GitOid> {
+    let file = path.join("gc-fixture-unlanded.txt");
+    fs::write(&file, "unique unlanded lane work\n")?;
+    let worktree = path.to_str().ok_or("worktree path")?;
+    git(rig, &["-C", worktree, "add", "--", "gc-fixture-unlanded.txt"])?;
+    git(
+        rig,
+        &["-C", worktree, "commit", "-qm", "unlanded GC fixture"],
+    )?;
+    Ok(git(rig, &["-C", worktree, "rev-parse", "HEAD"])?.parse()?)
 }
 
 pub(super) fn gc_refuses_bare_projects_and_their_linked_checkout_fallback() -> Result {
@@ -189,6 +207,7 @@ pub(super) fn gc_pressure_collects_only_the_selected_primary_project() -> Result
     rig.project = primary;
     let created = ok(&rig, &["worktree", "create", "idle", "--json"])?;
     let tree = rig.project.join(".worktrees/idle");
+    let head = commit_unlanded_lane(&rig, &tree)?;
     let (roots, context) = writer_context(&rig)?;
     mark_created_lane_as_managed(
         &rig,
@@ -196,6 +215,7 @@ pub(super) fn gc_pressure_collects_only_the_selected_primary_project() -> Result
         &tree,
         "idle",
         created["data"]["head"].as_str().ok_or("head")?.parse()?,
+        head,
     )?;
     fs::create_dir(tree.join("target"))?;
     fs::write(tree.join("target/artifact"), "selected output")?;
@@ -315,7 +335,7 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
     fs::write(rig.project.join(".gitignore"), ".worktrees/\ntarget/\n")?;
     git(&rig, &["add", ".gitignore"])?;
     git(&rig, &["commit", "-qm", "ignore output"])?;
-    ok(&rig, &["worktree", "create", "idle", "--json"])?;
+    let created = ok(&rig, &["worktree", "create", "idle", "--json"])?;
     let worktree = rig.project.join(".worktrees/idle");
     let cache = prepare_lane_cache(&rig, &worktree, "idle")?;
     let profile = |name: &str, age: u64| -> Result<PathBuf> {
@@ -390,6 +410,7 @@ pub(super) fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_
     git(&rig, &["commit", "-qm", "ignore output"])?;
     let created = ok(&rig, &["worktree", "create", "idle", "--json"])?;
     let worktree = rig.project.join(".worktrees/idle");
+    let head = commit_unlanded_lane(&rig, &worktree)?;
     let (roots, _) = writer_context(&rig)?;
     mark_created_lane_as_managed(
         &rig,
@@ -397,6 +418,7 @@ pub(super) fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_
         &worktree,
         "idle",
         created["data"]["head"].as_str().ok_or("head")?.parse()?,
+        head,
     )?;
     let cache = prepare_lane_cache(&rig, &worktree, "idle")?;
     fn age(path: &Path) -> Result {
@@ -858,11 +880,13 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
             .ok_or("alert failure")?
             .contains("disk alert failed")
     );
+    let gc_report = &collected["data"]["worktree_cleanup"][0];
     assert!(
-        collected["data"]["worktree_cleanup"][0]["worktrees"]["pruned_refs"]
+        gc_report["worktrees"]["pruned_refs"]
             .as_array()
             .ok_or("refs")?
-            .contains(&serde_json::json!("merged"))
+            .contains(&serde_json::json!("merged")),
+        "GC did not prune merged lane; report: {gc_report}"
     );
     assert!(!merged.exists());
     assert!(!cache.exists());

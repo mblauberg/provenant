@@ -35,6 +35,47 @@ pub(super) fn lane_prepare_isolates_nested_publishing_state() -> Result {
     lane_prepare_cases(&[("codex", true, true, 95), ("claude", true, true, 96)])
 }
 
+fn verified_primary_writer_context(
+    rig: &TestRig,
+) -> Result<(provenant_core::Roots, provenant_run::ExecutionContext)> {
+    let checkout = fs::canonicalize(&rig.project)?;
+    let top_level = PathBuf::from(git(rig, &["rev-parse", "--show-toplevel"])?);
+    let top_level = fs::canonicalize(top_level)?;
+    let private_git_dir = PathBuf::from(git(
+        rig,
+        &["rev-parse", "--absolute-git-dir"],
+    )?);
+    let private_git_dir = fs::canonicalize(private_git_dir)?;
+    let common_git_dir = PathBuf::from(git(rig, &["rev-parse", "--git-common-dir"])?);
+    let common_git_dir = fs::canonicalize(if common_git_dir.is_absolute() {
+        common_git_dir
+    } else {
+        checkout.join(common_git_dir)
+    })?;
+    if top_level != checkout || private_git_dir != common_git_dir {
+        return Err("lane fixture did not resolve to a verified primary checkout".into());
+    }
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), checkout.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let location = provenant_config::ProjectLocation::from_verified_primary_checkout(
+        common_git_dir,
+        checkout,
+    )?;
+    let binding = provenant_config::bind_project(&roots, location)?;
+    let context = provenant_run::ExecutionContext {
+        state_root: roots.state.clone(),
+        project_id: binding.project_id(),
+        actor_id: provenant_core::ActorId::from_bytes([62; 16]),
+        read_prompts: true,
+    };
+    Ok((roots, context))
+}
+
+fn fixture_io<T>(operation: &str, path: &Path, result: std::io::Result<T>) -> Result<T> {
+    result.map_err(|error| format!("{operation} {}: {error}", path.display()).into())
+}
+
 pub(super) fn lane_builds_and_tests_swift_in_a_registered_worktree() -> Result {
     let selected = cfg!(target_os = "macos")
         && Path::new("/usr/bin/swift").exists()
@@ -114,7 +155,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
     let worktree_arg = worktree.to_str().ok_or("worktree path")?;
     git(&rig, &["-C", worktree_arg, "add", ".cargo"])?;
     git(&rig, &["-C", worktree_arg, "commit", "-q", "-m", "wrapper"])?;
-    let (roots, context) = writer_context(&rig)?;
+    let (roots, context) = verified_primary_writer_context(&rig)?;
     let identity = command(&rig, &["fabric", "identity", "--json"])?;
     assert_eq!(
         code(&identity),
@@ -382,8 +423,21 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         );
         let selected_git =
             fs::canonicalize(provenant_os::git::git_executable().ok_or("host Git")?)?;
-        let scratch_git = confinement.plan.permissions().scratch.path.join("bin/git");
-        let git_entry = fs::symlink_metadata(&scratch_git)?.file_type();
+        let permissions = confinement.plan.permissions();
+        if matches!(probe, Probe::CargoReadOnly | Probe::SwiftReadOnly) {
+            fixture_io(
+                "inspect read-only scratch",
+                &permissions.scratch.path,
+                fs::metadata(&permissions.scratch.path),
+            )?;
+        }
+        let scratch_git = permissions.scratch.path.join("bin/git");
+        let git_entry = fixture_io(
+            "inspect scratch Git wrapper",
+            &scratch_git,
+            fs::symlink_metadata(&scratch_git),
+        )?
+        .file_type();
         assert!(
             git_entry.is_file(),
             "Git wrapper for {adapter} writer={writer} publishing={publishing}"
@@ -447,7 +501,6 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 .iter()
                 .any(|grant| grant.path == selected_git && grant.scope == PathScope::Exact)
         );
-        let permissions = confinement.plan.permissions();
         assert_eq!(
             permissions.scratch.path,
             paths.temporary.join("candidate-0")
@@ -467,9 +520,13 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 .is_symlink()
             );
         } else {
-            let settings: Value = serde_json::from_slice(&fs::read(
-                permissions.scratch.path.join("provenant-settings.json"),
-            )?)?;
+            let settings_path = permissions.scratch.path.join("provenant-settings.json");
+            let settings_bytes = fixture_io(
+                "read prepared lane settings",
+                &settings_path,
+                fs::read(&settings_path),
+            )?;
+            let settings: Value = serde_json::from_slice(&settings_bytes)?;
             assert!(
                 settings["hooks"]
                     .as_object()
@@ -790,19 +847,41 @@ fn verify_lane_profile(
         // The read-only fixture stays in the worktree so this also catches
         // SwiftPM output that ignores its scratch-path setting.
         let package = launch.cwd.join(".swift-probe");
-        fs::create_dir_all(package.join("Sources/LaneProbe"))?;
-        fs::create_dir_all(package.join("Tests/LaneProbeTests"))?;
-        fs::write(
-            package.join("Package.swift"),
-            "// swift-tools-version:5.9\nimport PackageDescription\nlet package = Package(name: \"LaneProbe\", targets: [.target(name: \"LaneProbe\"), .testTarget(name: \"LaneProbeTests\", dependencies: [\"LaneProbe\"])])\n",
+        let sources = package.join("Sources/LaneProbe");
+        fixture_io(
+            "create Swift fixture sources",
+            &sources,
+            fs::create_dir_all(&sources),
         )?;
-        fs::write(
-            package.join("Sources/LaneProbe/LaneProbe.swift"),
-            "public func answer() -> Int { 42 }\n",
+        let tests = package.join("Tests/LaneProbeTests");
+        fixture_io(
+            "create Swift fixture tests",
+            &tests,
+            fs::create_dir_all(&tests),
         )?;
-        fs::write(
-            package.join("Tests/LaneProbeTests/LaneProbeTests.swift"),
-            "import XCTest\n@testable import LaneProbe\nfinal class LaneProbeTests: XCTestCase { func testAnswer() { XCTAssertEqual(answer(), 42) } }\n",
+        let manifest = package.join("Package.swift");
+        fixture_io(
+            "write Swift fixture manifest",
+            &manifest,
+            fs::write(
+                &manifest,
+                "// swift-tools-version:5.9\nimport PackageDescription\nlet package = Package(name: \"LaneProbe\", targets: [.target(name: \"LaneProbe\"), .testTarget(name: \"LaneProbeTests\", dependencies: [\"LaneProbe\"])])\n",
+            ),
+        )?;
+        let source = sources.join("LaneProbe.swift");
+        fixture_io(
+            "write Swift fixture source",
+            &source,
+            fs::write(&source, "public func answer() -> Int { 42 }\n"),
+        )?;
+        let test = tests.join("LaneProbeTests.swift");
+        fixture_io(
+            "write Swift fixture test",
+            &test,
+            fs::write(
+                &test,
+                "import XCTest\n@testable import LaneProbe\nfinal class LaneProbeTests: XCTestCase { func testAnswer() { XCTAssertEqual(answer(), 42) } }\n",
+            ),
         )?;
         let command = if probe == Some(Probe::SwiftReadOnly) {
             "set -eu; tmp=$(cd \"$TMPDIR\" && pwd -P); test \"$(command -v swift)\" = \"$tmp/bin/swift\"; cd .swift-probe; swift build; swift test; test ! -e .build; printf 'lane-swift-read-only: PASS\\n'"
@@ -842,20 +921,46 @@ fn verify_lane_profile(
     if cfg!(target_os = "macos") && probe == Some(Probe::CargoReadOnly) {
         let scratch = &confinement.plan.permissions().scratch.path;
         let project = launch.cwd.join(".cargo-probe");
-        fs::create_dir_all(project.join("src"))?;
-        fs::write(
-            project.join("Cargo.toml"),
-            "[package]\nname = 'lane-probe'\nversion = '0.1.0'\nedition = '2024'\n\n[workspace]\n",
+        let source_directory = project.join("src");
+        fixture_io(
+            "create Cargo fixture sources",
+            &source_directory,
+            fs::create_dir_all(&source_directory),
+        )?;
+        let manifest = project.join("Cargo.toml");
+        fixture_io(
+            "write Cargo fixture manifest",
+            &manifest,
+            fs::write(
+                &manifest,
+                "[package]\nname = 'lane-probe'\nversion = '0.1.0'\nedition = '2024'\n\n[workspace]\n",
+            ),
         )?;
         let lock = project.join("Cargo.lock");
-        fs::write(
+        fixture_io(
+            "write Cargo fixture lock",
             &lock,
-            "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = \"lane-probe\"\nversion = \"0.1.0\"\n",
+            fs::write(
+                &lock,
+                "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = \"lane-probe\"\nversion = \"0.1.0\"\n",
+            ),
         )?;
-        fs::copy(&lock, scratch.join("cargo-probe.lock"))?;
-        fs::write(
-            project.join("src/lib.rs"),
-            "/// ```\n/// assert_eq!(2 + 2, 4);\n/// ```\npub fn doc() {}\n#[test] fn scratch_build_is_private() { assert_eq!(2 + 2, 4); }\n",
+        let scratch_lock = scratch.join("cargo-probe.lock");
+        fs::copy(&lock, &scratch_lock).map_err(|error| {
+            format!(
+                "copy Cargo fixture lock {} to {}: {error}",
+                lock.display(),
+                scratch_lock.display()
+            )
+        })?;
+        let source = source_directory.join("lib.rs");
+        fixture_io(
+            "write Cargo fixture source",
+            &source,
+            fs::write(
+                &source,
+                "/// ```\n/// assert_eq!(2 + 2, 4);\n/// ```\npub fn doc() {}\n#[test] fn scratch_build_is_private() { assert_eq!(2 + 2, 4); }\n",
+            ),
         )?;
         let argv = [
             "/bin/sh",
