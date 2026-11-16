@@ -142,8 +142,8 @@ Transfer to a named session is deferred.
 
 ### Output references and bounded tails
 
-For a graph with one top-level node, `output GRAPH` reads that node's newest
-settled attempt. For a composite root it reads the declared bounded result and
+For a graph with one non-composite top-level node, `output GRAPH` reads that
+node's newest settled attempt. For a composite root it reads the declared bounded result and
 returns its typed exports, without inventing an attempt identity. A bare graph
 with multiple top-level nodes remains ambiguous and lists only those nodes;
 `output GRAPH/NODE` selects a composite explicitly. Prompt, stderr, transcript,
