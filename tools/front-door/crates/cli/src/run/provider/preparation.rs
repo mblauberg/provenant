@@ -2571,7 +2571,8 @@ pub(super) fn prepare_candidates(
             registry.host,
             requester_cwd,
             &source,
-            &git,
+            &provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())
+                .map_err(|error| error.to_string())?,
             &git_executor,
             cancel,
             project_binding.as_ref(),

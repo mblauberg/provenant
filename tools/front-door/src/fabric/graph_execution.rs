@@ -15,11 +15,16 @@ impl super::Factory {
             .into_iter()
             .find(|binding| binding.project_id() == self.context.identity.project);
         let cancel = CancelToken::new();
+        let utility = provenant_confinement::UtilityRuntime::read_only(
+            &git,
+            self.context.roots.state.as_path(),
+        )
+        .map_err(|_| FacadeError::io("capture requester PATH"))?;
         let path = provenant_cli::run::filtered_requester_lane_path(
             self.host_launch.as_ref(),
             &self.cwd,
             &self.cwd,
-            &git,
+            &utility,
             &self.executor,
             &cancel,
             binding.as_ref(),

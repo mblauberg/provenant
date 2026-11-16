@@ -115,11 +115,13 @@ pub(super) fn prepare_command(
         None => requester_cwd,
     };
     let worktree_path = if task.writer.is_some() { &cwd } else { &source };
+    let utility = provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())
+        .map_err(|error| error.to_string())?;
     let lane_path = crate::run::filtered_requester_lane_path(
         registry.host,
         project_path,
         worktree_path,
-        &git,
+        &utility,
         &git_executor,
         cancel,
         project_binding.as_ref(),

@@ -883,16 +883,17 @@ pub(in crate::run) fn filtered_requester_lane_path(
     host: Option<&run::HostLaunchContext>,
     project_path: &Path,
     worktree_path: &Path,
-    git: &Path,
+    utility: &provenant_confinement::UtilityRuntime,
     executor: &dyn provenant_os::exec::Executor,
     cancel: &provenant_core::CancelToken,
     binding: Option<&provenant_config::ProjectBinding>,
 ) -> Result<run::FilteredLanePath, String> {
-    let (project, selected) = requester_path_roots(project_path, git, executor, cancel, binding)?;
+    let (project, selected) =
+        requester_path_roots(project_path, utility, executor, cancel, binding)?;
     let selected_worktree = if canonical(project_path)? == canonical(worktree_path)? {
         selected
     } else {
-        requester_path_roots(worktree_path, git, executor, cancel, binding)?.1
+        requester_path_roots(worktree_path, utility, executor, cancel, binding)?.1
     };
     run::FilteredLanePath::for_requester(host, &project, &selected_worktree)
         .map_err(|error| error.to_string())
@@ -914,11 +915,12 @@ pub(super) fn registered_project_binding(
 /// registered binding or the common directory's verified inventory.
 fn requester_path_roots(
     path: &Path,
-    git: &Path,
+    utility: &provenant_confinement::UtilityRuntime,
     executor: &dyn provenant_os::exec::Executor,
     cancel: &provenant_core::CancelToken,
     binding: Option<&provenant_config::ProjectBinding>,
 ) -> Result<(PathBuf, PathBuf), String> {
+    let git = utility.git_program_path();
     let path = canonical(path)?;
     if !path
         .ancestors()
@@ -958,15 +960,14 @@ fn requester_path_roots(
     } else if let Some(binding) =
         binding.filter(|binding| canonical(binding.common_dir()).is_ok_and(|bound| bound == common))
     {
-        let layout = provenant_confinement::worktrees::project_layout_for_binding(
-            executor,
-            binding,
-            git,
-            &provenant_confinement::worktrees::project_layout_git_environment(),
-            std::time::Duration::from_secs(5),
-            cancel,
-        )
-        .map_err(|error| format!("cannot verify requester PATH project layout: {error}"))?;
+        // The utility owns bound layout resolution, including trusted local
+        // bare provenance for a checkout-less common directory.
+        let layout =
+            provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))
+                .and_then(|budget| {
+                    utility.project_layout_for_binding(executor, binding, budget, cancel)
+                })
+                .map_err(|error| format!("cannot verify requester PATH project layout: {error}"))?;
         layout.project().unwrap_or(layout.root()).to_path_buf()
     } else {
         let layout = provenant_confinement::worktrees::project_layout_for_common(
