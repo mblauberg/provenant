@@ -1184,14 +1184,8 @@ impl RunStore {
         if intents.is_empty() {
             return Ok(None);
         }
-        let explicit_stop = read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
-            .and_then(|raw| crate::db::decode::<crate::store::CancellationEvidence>(&raw).ok())
-            .is_some_and(|request| {
-                request.requests_stop(
-                    Self::scope(&record),
-                    record.verified_owner.unwrap_or(self.context.actor_id),
-                )
-            });
+        let explicit_stop =
+            crate::store::CancelMarker::read(&attempt, Self::scope(&record))?.stops();
         if explicit_stop {
             // The guardian's sealed Steered reason and delivered-signal fact
             // describe the first interrupt. A later owner cancellation is a
@@ -2243,14 +2237,8 @@ impl RunStore {
             let manifest_conflicted = deferred
                 .iter()
                 .any(|(effect, _)| *effect == SettlementEffect::ManifestConflict);
-            let import_stop_requested = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
-                .and_then(|raw| crate::db::decode::<crate::store::CancellationEvidence>(&raw).ok())
-                .is_some_and(|request| {
-                    request.requests_stop(
-                        exit.scope,
-                        record.verified_owner.unwrap_or(self.context.actor_id),
-                    )
-                });
+            let import_stop_requested =
+                crate::store::CancelMarker::read(attempt, exit.scope)?.stops();
             let check = match check {
                 Err(error) if crate::writer::worktree_removed(writer) || manifest_conflicted => {
                     Err(error)
@@ -2520,11 +2508,7 @@ impl RunStore {
             if let Some(reason) = cancellation_reason(cancellation.as_deref())
                 && !typed_deadline
                 && !steered
-                && !crate::store::import_cancelled(
-                    attempt,
-                    exit.scope,
-                    record.verified_owner.unwrap_or(self.context.actor_id),
-                )?
+                && !crate::store::import_cancelled(attempt, exit.scope)?
             {
                 decoded.reason = Some(format!("cancelled: {reason}"));
             }

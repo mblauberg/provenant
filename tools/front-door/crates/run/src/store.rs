@@ -40,27 +40,64 @@ fn cancellation_outcome_is_consistent(
     }
 }
 
-/// Whether an explicit stop was requested for exactly this attempt scope.
-/// Unreadable evidence counts as no request.
+/// Whether `cancel.json` stops this attempt scope. Steer and owner stops
+/// share the marker; any marker other than this scope's Steered request,
+/// including an unreadable one, is a stop.
 pub(crate) fn cancel_requested(
     attempt: &provenant_os::fs::Directory,
     scope: provenant_records::custody::Scope,
 ) -> bool {
-    read_sealed(attempt, "cancel.json", RECORD_LIMIT)
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
-        .is_some_and(|request| {
-            request.get("scope") == serde_json::to_value(scope).ok().as_ref()
-                && request.get("reason").and_then(serde_json::Value::as_str)
-                    == Some("explicit_cancellation")
-        })
+    CancelMarker::read(attempt, scope).map_or(true, CancelMarker::stops)
+}
+
+/// What a sealed `cancel.json` means for one attempt scope. Only a
+/// well-formed Steered request for exactly this scope and its request id is
+/// not a stop. Any other present marker, including a foreign, explicit or
+/// undecodable one, fails closed as a stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CancelMarker {
+    Absent,
+    Steered { requester: provenant_core::ActorId },
+    Stop,
+}
+
+impl CancelMarker {
+    pub(crate) fn read(
+        attempt: &provenant_os::fs::Directory,
+        scope: provenant_records::custody::Scope,
+    ) -> Result<Self> {
+        Ok(read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
+            .map_or(Self::Absent, |raw| Self::classify(&raw, scope)))
+    }
+
+    pub(crate) fn classify(raw: &[u8], scope: provenant_records::custody::Scope) -> Self {
+        match decode::<CancellationEvidence>(raw) {
+            Ok(request)
+                if request.scope == scope
+                    && request.reason == provenant_supervisor::machine::StopReason::Steered
+                    && cancel_request_id(scope).as_ref() == Some(&request._request_id) =>
+            {
+                Self::Steered {
+                    requester: request.requester,
+                }
+            }
+            _ => Self::Stop,
+        }
+    }
+
+    pub(crate) fn stops(self) -> bool {
+        self == Self::Stop
+    }
+}
+
+/// The request id the supervisor writes for a stop of this scope.
+pub(crate) fn cancel_request_id(scope: provenant_records::custody::Scope) -> Option<OperationId> {
+    OperationId::parse(&format!("{}.{}.cancel", scope.attempt, scope.generation)).ok()
 }
 
 pub(crate) fn import_cancelled(
     attempt: &provenant_os::fs::Directory,
     scope: provenant_records::custody::Scope,
-    owner: provenant_core::ActorId,
 ) -> Result<bool> {
     let marked = read_sealed(attempt, "import-cancelled.json", RECORD_LIMIT)?
         .map(|raw| crate::db::decode_column::<provenant_records::custody::Scope>(&raw))
@@ -69,9 +106,7 @@ pub(crate) fn import_cancelled(
     if !marked {
         return Ok(false);
     }
-    Ok(read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
-        .and_then(|raw| decode::<CancellationEvidence>(&raw).ok())
-        .is_some_and(|request| request.requests_stop(scope, owner)))
+    Ok(CancelMarker::read(attempt, scope)?.stops())
 }
 
 /// One launch: exactly one attempt, its request and its scanned prompt.
@@ -633,11 +668,7 @@ impl RunStore {
                     && !stored.never_spawned
                     && stored.cancel_delivered_before_exit != Some(true)
                     && !(pending.terminal_evidence == Some(TerminalEvidence::ImportCancellation)
-                        && import_cancelled(
-                            &dir,
-                            Self::scope(&current),
-                            current.verified_owner.unwrap_or(self.context.actor_id),
-                        )?))
+                        && import_cancelled(&dir, Self::scope(&current))?))
                     || (outcome == Outcome::Cancelled
                         && stored.never_spawned
                         && stored.stop_reason
@@ -995,11 +1026,7 @@ impl RunStore {
         if publication.outcome == Outcome::Cancelled
             && !exit.never_spawned
             && exit.cancel_delivered_before_exit != Some(true)
-            && !import_cancelled(
-                &self.attempt_dir(id, false)?,
-                Self::scope(&old),
-                old.verified_owner.unwrap_or(self.context.actor_id),
-            )?
+            && !import_cancelled(&self.attempt_dir(id, false)?, Self::scope(&old))?
         {
             return Err(RunError::Validation(
                 "cancellation delivery before exit is unproven",
@@ -1505,11 +1532,7 @@ impl RunStore {
             redacted: publication.redacted,
         });
         let import_cancellation = publication.outcome == Outcome::Cancelled
-            && import_cancelled(
-                &self.attempt_dir(id, false)?,
-                Self::scope(&old),
-                old.verified_owner.unwrap_or(self.context.actor_id),
-            )?;
+            && import_cancelled(&self.attempt_dir(id, false)?, Self::scope(&old))?;
         let terminal_evidence = if import_cancellation {
             TerminalEvidence::ImportCancellation
         } else if publication.outcome == Outcome::Unsettled {
@@ -2080,13 +2103,7 @@ impl RunStore {
         // A stop sealed later is acknowledged by `cancel` seeing the terminal row.
         if next.cancellation_disposition.is_none()
             && let Ok(attempt) = self.attempt_dir(id, false)
-            && let Ok(Some(raw)) = read_sealed(&attempt, "cancel.json", RECORD_LIMIT)
-            && decode::<CancellationEvidence>(&raw).is_ok_and(|request| {
-                request.requests_stop(
-                    Self::scope(old),
-                    old.verified_owner.unwrap_or(self.context.actor_id),
-                )
-            })
+            && CancelMarker::read(&attempt, Self::scope(old)).is_ok_and(CancelMarker::stops)
         {
             let _ = self.record_cancellation(
                 id,

@@ -121,3 +121,70 @@ fn admission_warns_for_unconfigured_memory_floor_without_refusing() -> TestResul
     }
     Ok(())
 }
+
+#[test]
+// Spec: docs/specs/fabric.md#session-ready-steering
+fn admission_admits_only_its_own_steer_marker_and_fails_closed_otherwise() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let foreign = provenant_core::ActorId::from_bytes([0xee; 16]);
+    let ids = writers(&store, [120, 121, 122, 123, 124, 125], &call)?;
+    let marker = |id: AttemptId, case: usize| -> Result<Vec<u8>> {
+        let scope = RunStore::scope(&store.record(id, &call)?);
+        let request_id = format!("{}.{}.cancel", scope.attempt, scope.generation);
+        let wrong_scope = provenant_records::custody::Scope {
+            attempt: scope.attempt,
+            generation: scope.generation + 1,
+        };
+        let steered = provenant_supervisor::machine::StopReason::Steered;
+        let explicit = provenant_supervisor::machine::StopReason::ExplicitCancellation;
+        let fields = match case {
+            0 => return Ok(b"{not json".to_vec()),
+            1 => (scope, foreign, request_id.as_str(), explicit),
+            2 => (wrong_scope, context.actor_id, request_id.as_str(), steered),
+            3 => (scope, context.actor_id, "other.cancel", steered),
+            _ => (scope, context.actor_id, request_id.as_str(), steered),
+        };
+        Ok(crate::db::bytes(&serde_json::json!({
+            "schema_version": 1,
+            "scope": fields.0,
+            "requester": fields.1,
+            "request_id": fields.2,
+            "reason": fields.3,
+        }))?)
+    };
+    for (case, id) in ids.into_iter().enumerate() {
+        let attempt = store.attempt_dir(id, false)?;
+        if case < 5 {
+            artifacts::seal(&attempt, "cancel.json", &marker(id, case)?, RECORD_LIMIT)?;
+        }
+        let scope = RunStore::scope(&store.record(id, &call)?);
+        let expected = match case {
+            0..=3 => crate::store::CancelMarker::Stop,
+            4 => crate::store::CancelMarker::Steered {
+                requester: context.actor_id,
+            },
+            _ => crate::store::CancelMarker::Absent,
+        };
+        assert_eq!(
+            crate::store::CancelMarker::read(&attempt, scope)?,
+            expected,
+            "case {case}"
+        );
+        assert_eq!(
+            crate::store::cancel_requested(&attempt, scope),
+            case < 4,
+            "case {case}"
+        );
+        let admitted = store.admit(id, &attempt, &HostFacts::new(100), &clock, &cancel);
+        assert_eq!(
+            matches!(admitted, Err(RunError::Cancelled)),
+            case < 4,
+            "case {case}: {admitted:?}"
+        );
+    }
+    Ok(())
+}

@@ -234,6 +234,13 @@ the parent attempt's publication fence. A cancellation accepted before a child
 exists leaves a durable explicit-stop intent for the gate; if the child was
 already admitted, graph cancellation follows the validated continuation chain
 and targets its current leaf. The durable intent does not assert signal delivery.
+Steer and owner stops share one sealed cancel marker per attempt. Only a
+well-formed `Steered` request for exactly that attempt scope and its request ID
+leaves the marker non-stopping; admission, re-queue, import and continuation
+read any other present marker, including an undecodable or foreign one, as a
+stop.
+- Why: a marker Run cannot positively match must fail closed, as settlement
+  already does.
 
 This is continuation transport for #3318, not live input injection. Adapters
 advertise support as `continuation` only when their run path can retain and

@@ -1,7 +1,9 @@
 //! Durable settlement progress. Kernel locks protect only journal updates.
-use crate::{AdmissionError, RECORD_LIMIT, Result, RunError, artifacts::read_sealed};
+use crate::{
+    AdmissionError, RECORD_LIMIT, Result, RunError, artifacts::read_sealed, store::CancelMarker,
+};
 use provenant_core::retry::Backoff;
-use provenant_core::{ActorId, CancelToken, Clock, DurationMicros, GitOid, OperationId};
+use provenant_core::{ActorId, CancelToken, Clock, DurationMicros, GitOid};
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
 use provenant_records::custody::Scope;
 use provenant_supervisor::census::{ProcessIdentity, ProcessObservation, SystemProcessObserver};
@@ -58,31 +60,21 @@ impl DeliveredSteerStop {
     }
 
     fn from_marker(attempt: &Directory, scope: Scope, requester: ActorId) -> Result<Option<Self>> {
-        let Some(raw) = read_sealed(attempt, "cancel.json", RECORD_LIMIT)? else {
-            return Ok(None);
-        };
-        let Ok(request) = crate::db::decode::<crate::store::CancellationEvidence>(&raw) else {
-            return Ok(None);
-        };
-        let expected_id = expected_request_id(scope);
-        if request.scope != scope
-            || request.requester != requester
-            || request.reason != provenant_supervisor::machine::StopReason::Steered
-            || expected_id != Some(request._request_id)
-        {
-            return Ok(None);
-        }
-        Ok(Some(Self { scope, requester }))
+        let stop = Self { scope, requester };
+        Ok(stop
+            .matches(CancelMarker::read(attempt, scope)?)
+            .then_some(stop))
+    }
+
+    fn matches(self, marker: CancelMarker) -> bool {
+        marker
+            == CancelMarker::Steered {
+                requester: self.requester,
+            }
     }
 
     fn matches_marker(self, raw: &[u8]) -> bool {
-        let Ok(request) = crate::db::decode::<crate::store::CancellationEvidence>(raw) else {
-            return false;
-        };
-        request.scope == self.scope
-            && request.requester == self.requester
-            && request.reason == provenant_supervisor::machine::StopReason::Steered
-            && expected_request_id(self.scope).as_ref() == Some(&request._request_id)
+        self.matches(CancelMarker::classify(raw, self.scope))
     }
 
     pub(crate) fn marker_vetoes(self, attempt: &Directory) -> Result<bool> {
@@ -91,10 +83,6 @@ impl DeliveredSteerStop {
         };
         Ok(!self.matches_marker(&raw))
     }
-}
-
-fn expected_request_id(scope: Scope) -> Option<OperationId> {
-    OperationId::parse(&format!("{}.{}.cancel", scope.attempt, scope.generation)).ok()
 }
 
 #[cfg(test)]
