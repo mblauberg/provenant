@@ -6017,6 +6017,15 @@ mod tests {
             "Prioritise the smallest repair.",
             &call,
         )?;
+        assert!(matches!(
+            store.steer(
+                id,
+                first_operation.clone(),
+                "Replace the original intent.",
+                &call
+            ),
+            Err(RunError::OperationConflict)
+        ));
         let replay = store.steer(id, first_operation, "Inspect the failing path.", &call)?;
         let message_id = match first {
             SteerReceipt::Queued { message_id } => message_id,
