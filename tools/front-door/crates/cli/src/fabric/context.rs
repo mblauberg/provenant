@@ -184,7 +184,7 @@ pub fn chair_process() -> Option<provenant_records::custody::HolderProcess> {
     })
 }
 pub fn current_chair(context: &Context) -> Result<provenant_records::custody::Chair, EdgeError> {
-    let inbox = context.inbox_address(None)?;
+    let inbox = &context.identity.inbox;
     let actor = inbox.actor;
     Ok(provenant_records::custody::Chair {
         extra: Default::default(),
@@ -1152,38 +1152,57 @@ mod tests {
             let context = super::Context::open_for_project(roots, &home, &binding)?;
             let expected = context.inbox_address(None)?;
             assert_eq!(context.identity.inbox.actor, expected.actor);
-            assert_eq!(context.identity.inbox.agent, "codex");
-            assert_eq!(context.identity.client, "codex");
+            let expected_label = std::env::var("PROVENANT_TEST_EXPECTED_LABEL")?;
+            assert_eq!(context.identity.inbox.agent, expected_label);
+            let chair = super::current_chair(&context)?;
+            assert_eq!(chair.actor, context.identity.inbox.actor);
+            assert_eq!(chair.host, context.identity.host);
             return Ok(());
         }
 
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
-        let output = std::process::Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "fabric::context::tests::project_context_uses_the_active_harness_actor",
-                "--nocapture",
-            ])
-            .env(FIXTURE, &root)
-            .env("HOME", root.join("home"))
-            .env("XDG_CONFIG_HOME", root.join("config"))
-            .env("XDG_CACHE_HOME", root.join("cache"))
-            .env("PROVENANT_ROOT", root.join("project"))
-            .env("PROVENANT_STATE_DIR", root.join("state"))
-            .env_remove("PROVENANT_AGENT_LABEL")
-            .env_remove("PROVENANT_SESSION_ID")
-            .env_remove("CLAUDECODE")
-            .env_remove("CLAUDE_CODE_SESSION_ID")
-            .env_remove("CLAUDE_SESSION_ID")
-            .env("CODEX_THREAD_ID", "project-context-fixture")
-            .output()?;
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        for (client, label) in [
+            ("codex", "codex"),
+            ("claude", "claude"),
+            ("labelled", "reviewer"),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe()?);
+            command
+                .args([
+                    "--exact",
+                    "fabric::context::tests::project_context_uses_the_active_harness_actor",
+                    "--nocapture",
+                ])
+                .env(FIXTURE, root.join(client))
+                .env("HOME", root.join(client).join("home"))
+                .env("XDG_CONFIG_HOME", root.join(client).join("config"))
+                .env("XDG_CACHE_HOME", root.join(client).join("cache"))
+                .env("PROVENANT_ROOT", root.join(client).join("project"))
+                .env("PROVENANT_STATE_DIR", root.join(client).join("state"))
+                .env("PROVENANT_TEST_EXPECTED_LABEL", label)
+                .env_remove("PROVENANT_AGENT_LABEL")
+                .env_remove("PROVENANT_SESSION_ID")
+                .env_remove("CODEX_THREAD_ID")
+                .env_remove("CLAUDECODE")
+                .env_remove("CLAUDE_CODE_SESSION_ID")
+                .env_remove("CLAUDE_SESSION_ID");
+            if client == "codex" {
+                command.env("CODEX_THREAD_ID", "fixture");
+            } else {
+                command.env("CLAUDECODE", "1");
+                if client == "labelled" {
+                    command.env("PROVENANT_AGENT_LABEL", "reviewer");
+                }
+            }
+            let output = command.output()?;
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         Ok(())
     }
 

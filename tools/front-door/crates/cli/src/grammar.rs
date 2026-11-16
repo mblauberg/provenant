@@ -639,6 +639,9 @@ pub struct GraphRunArgs {
     /// list or table as TOML; repeatable
     #[arg(long = "set")]
     pub set: Vec<String>,
+    /// Skip the planner for implementation templates by setting bounded=true
+    #[arg(long)]
+    pub no_plan: bool,
     /// Read a graph document (JSON or TOML)
     #[arg(long)]
     pub file: Option<PathBuf>,
@@ -747,7 +750,8 @@ pub struct Reconcile {
         catalog_graph_target()
     )]
     pub targets: Vec<Target>,
-    /// Abandon settlement of this writer attempt, preserving its evidence
+    /// Abandon this attempt, preserving evidence; a nonterminal writer is declared lost
+    /// only when presence is not live, its lease is free and its worktree census is free
     #[arg(
         long,
         value_name = "TARGET",

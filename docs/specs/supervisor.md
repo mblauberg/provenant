@@ -63,6 +63,43 @@ reconciliation rechecks custody before changing attempt state.
   and uncertainty must not be turned into a running writer or an unsafe retry.
 - Owner: `crates/supervisor/src/custody.rs`, `crates/run/src/controls.rs`
 
+### Tick-driven settlement
+
+Tick queues recovery for settling and unattended attempts in every registered
+project, using one bounded host process census for the pass. Failed project
+recovery does not prevent other projects or scheduled tasks from running.
+A sealed exit remains settlement evidence when the census is unavailable;
+live attempts and same-boot unknown attempts retain their automatic fence.
+Repeated ticks reuse the recovery driver's backoff, queued-worker marker and
+native settlement locks rather than duplicating settlement work. The guardian
+persists a failed terminal publication in the scoped settlement journal so a
+status read can explain the pending settlement without consulting stderr.
+- Why: losing the guardian or its immediate terminal publication must not lose
+  the automatic path to a terminal attempt.
+- Owner: `src/tick.rs`, `crates/run/src/controls.rs`,
+  `crates/supervisor/src/settlement_progress.rs`
+
+### Explicit abandonment
+
+A chair may explicitly abandon a nonterminal writer with a reason when its
+presence is not live, its native writer lease is free and the configured
+worktree process census positively reports `Free`. Same-boot unknown presence
+is eligible only with both exclusion and positive non-occupancy evidence.
+Live presence, held exclusion and every non-free or incomplete occupancy
+result refuse abandonment with typed blocking evidence. Launch and attempt
+custody stay excluded during the decision. This escape hatch does not change
+the proof required by automatic reconciliation.
+
+The explicit loss intent is durable before the attempt is committed `lost`;
+repeating an interrupted abandonment with the same reason finishes it. An
+incomplete intent remains visibly settling until that retry. Abandonment warns
+that the attempt was declared lost and retains all attempt evidence, scratch,
+worktree contents and private Git. A never-dispatched queued attempt keeps its
+existing evidence-preserving cancellation behaviour.
+- Why: a dead guardian on the same boot needs a deliberate recovery path without
+  turning an incomplete process census into permission to reuse a worktree.
+- Owner: `crates/run/src/settlement.rs`, `crates/cli/src/run/reconcile.rs`
+
 ### Guardian holds custody past its owner
 
 The guardian keeps the provider, attempt lock and writer lease after its owner
@@ -109,8 +146,10 @@ unconfirmed sync is `durability_unconfirmed`, never absent.
 The writer reservation is published before spawn and cleared only after
 quiescence and run's terminal commit, or an authorised reconcile; the worktree
 flock stays held through import and [publication](run.md#publication-order). A
-missing or malformed reservation refuses recovery of that attempt, and scratch
-deletion needs a verified settlement commit.
+missing or malformed reservation refuses automatic recovery of that attempt;
+[explicit abandonment](#explicit-abandonment) instead requires native exclusion
+and positive worktree non-occupancy. Scratch deletion needs a verified settlement
+commit.
 - Why: a writer must never be freed on a partial or forged settlement.
 
 ### Stable locks and atomic writes

@@ -262,15 +262,20 @@ fn command_lane_reads_its_supervisors_process_tree_through_the_cli() -> Result {
     let binary = env!("CARGO_BIN_EXE_provenant");
     let script = r#"
 set -eu
+set +m
 test -n "$PROVENANT_PROCESS_TREE"
+gate="$TMPDIR/gate.$$"
+rm -f "$gate"
+mkfifo "$gate"
 /bin/sh -c '
-/bin/sleep 15 &
+set +m
+gate="$1"
+/bin/cat "$gate" >/dev/null &
 child=$!
-trap "kill $child 2>/dev/null || true; wait $child 2>/dev/null || true; exit 0" TERM
 wait "$child"
-' >/dev/null 2>&1 &
+' helper "$gate" >/dev/null 2>&1 &
 child=$!
-# Ready only when a published sample shows the child's own child (the sleep);
+# Ready only when a published sample shows the child's own child (the cat helper);
 # the sampler publishes on its own cadence, so poll that condition, not a delay.
 # Only "sample unavailable" (exit 4) is retried; any other CLI failure fails now.
 attempt=0
@@ -284,11 +289,12 @@ while :; do
     fi
     attempt=$((attempt + 1))
     test "$attempt" -lt 50
-    /bin/sleep 0.2
+    /bin/sleep 0.05
 done
-# The sample is taken; ask the child shell to reap its helper cleanly.
-kill -TERM "$child" 2>/dev/null || true
+# The sample is taken; release the grandchild helper cleanly through the FIFO gate.
+printf 'done\n' > "$gate"
 wait "$child" 2>/dev/null || true
+rm -f "$gate"
 printf '%s\n' "$PROVENANT_PROCESS_TREE"
 /bin/cat "$TMPDIR/sample.json"
 "#;
@@ -305,6 +311,12 @@ printf '%s\n' "$PROVENANT_PROCESS_TREE"
         &["domains", "run"],
         "sandboxed_routes",
         strings(&["command/memory-sandboxed"]),
+    )?;
+    configure(
+        &rig,
+        &["domains", "run"],
+        "resource_sample_interval_ms",
+        toml_edit::value(50_i64),
     )?;
     let _cleanup = rig.process_cleanup();
     for (name, foreign) in [

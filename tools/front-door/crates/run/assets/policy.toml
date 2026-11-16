@@ -312,6 +312,14 @@ strength = "refuse"
 justification = "A graph-bound task may receive only its own node's input directory, without a redirected path."
 
 [[rule]]
+code = "CONFINEMENT_SOURCE_AGENT_CONFIG_NONE"
+site = "cli/src/run/provider/confinement.rs#report_source_warnings"
+boundary = "none"
+strength = "off"
+knob = "policy.CONFINEMENT_SOURCE_AGENT_CONFIG_NONE"
+justification = "Project-local agent configuration is not a credential boundary; operators may opt into overlap warnings."
+
+[[rule]]
 code = "CONFINEMENT_SOURCE_CWD_AUTHORITY"
 site = "cli/src/run/provider/confinement.rs#source_cwd"
 boundary = "authority"

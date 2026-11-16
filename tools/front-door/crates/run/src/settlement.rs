@@ -8,7 +8,6 @@ use provenant_supervisor::census::{ProcessIdentity, ProcessObservation, SystemPr
 use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, sync::mpsc, time::Duration};
 
-const FILE: &str = "settlement-progress.json";
 const LIMIT: u32 = 3;
 const UNKNOWN_OWNER_LIMIT_MS: u64 = 10 * 60 * 1000;
 const CLAIM_BACKOFF: Backoff = Backoff::new(Duration::from_secs(5), 6, Duration::from_secs(120));
@@ -32,67 +31,13 @@ fn process_state(
     provenant_os::pid::process_state(pid)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Phase {
-    Import,
-    Publish,
-    Record,
-    Release,
-    Complete,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct Journal {
-    schema_version: u64,
-    scope: Scope,
-    phase: Phase,
-    attempts: u32,
-    head: Option<GitOid>,
-    base: Option<GitOid>,
-    owner: Option<ProcessIdentity>,
-    #[serde(default)]
-    owner_since_ms: u64,
-    #[serde(default)]
-    retry_after_ms: u64,
-    #[serde(default)]
-    recovery_failures: u32,
-    #[serde(default)]
-    blocking_reason: Option<String>,
-    #[serde(default)]
-    abandonment: Option<Abandonment>,
-    #[serde(default, flatten)]
-    extra: provenant_records::ExtraFields,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct Abandonment {
-    reason: String,
-    actor: provenant_core::ActorId,
-    at: provenant_core::WallTime,
-    phase: Phase,
-    #[serde(default, flatten)]
-    extra: provenant_records::ExtraFields,
-}
+pub(crate) use provenant_supervisor::settlement_progress::Phase;
+use provenant_supervisor::settlement_progress::{Abandonment, FILE, Journal};
 
 fn read(attempt: &Directory, scope: Scope) -> Result<Journal> {
     let journal = match read_sealed(attempt, FILE, RECORD_LIMIT)? {
         Some(raw) => crate::db::decode::<Journal>(&raw)?,
-        None => Journal {
-            schema_version: 1,
-            scope,
-            phase: Phase::Import,
-            attempts: 0,
-            head: None,
-            base: None,
-            owner: None,
-            owner_since_ms: 0,
-            retry_after_ms: 0,
-            recovery_failures: 0,
-            blocking_reason: None,
-            abandonment: None,
-            extra: Default::default(),
-        },
+        None => Journal::new(scope),
     };
     if journal.schema_version != 1 || journal.scope != scope || journal.attempts > LIMIT {
         return Err(RunError::Validation(
@@ -715,6 +660,192 @@ mod tests {
     }
 
     #[test]
+    fn abandon_requires_non_live_presence_free_lease_and_free_worktree() -> TestResult {
+        // Spec: docs/specs/supervisor.md#explicit-abandonment
+        use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
+        use provenant_supervisor::census::{
+            Census, CensusError, ProcessFact, ProcessIdentity, ProcessObserver,
+        };
+        struct Observer(ProcessFact);
+        impl ProcessObserver for Observer {
+            fn boot_identity(&self) -> std::result::Result<String, CensusError> {
+                Ok(self.0.identity.boot.clone())
+            }
+            fn observe(&self, _: i64) -> ProcessObservation {
+                ProcessObservation::Present(self.0.clone())
+            }
+            fn census(&self, _: usize) -> std::result::Result<Census, CensusError> {
+                Census::from_observations([self.0.clone()], [], [], true, false, 64)
+            }
+        }
+        struct Workers(Occupancy);
+        impl WorkerObserver for Workers {
+            fn observe_roots(
+                &self,
+                roots: &[std::path::PathBuf],
+            ) -> std::collections::BTreeMap<std::path::PathBuf, Occupancy> {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, self.0.clone()))
+                    .collect()
+            }
+        }
+        for (live, occupancy, held, allowed) in [
+            (true, Occupancy::Available, false, false),
+            (false, Occupancy::Available, false, true),
+            (false, Occupancy::Observed { process: None }, false, false),
+            (
+                false,
+                Occupancy::census_unknown("/fixture".into(), "incomplete census"),
+                false,
+                false,
+            ),
+            (false, Occupancy::Available, true, false),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let clock = clock();
+            let cancel = CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let context = crate::tests::context(temp.path())?;
+            let store = crate::RunStore::open(&context, &call)?;
+            let mut run = crate::tests::input();
+            run.request.task.writer = Some(crate::WriterRequest {
+                extra: Default::default(),
+                custody_project: Some(context.project_id),
+                project: temp.path().join("checkout"),
+                worktree: temp.path().join("checkout/.worktrees/abandon"),
+            });
+            store.create(&run, &call)?;
+            let id = run.attempt_id;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &crate::tests::route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let record = store.record(id, &call)?;
+            let scope = crate::RunStore::scope(&record);
+            let attempt = store.attempt_dir(id, false)?;
+            let slot = store
+                .attempt_writer_slot(id, &call)?
+                .ok_or("missing writer slot")?;
+            std::fs::create_dir_all(&slot)?;
+            let slot = Directory::open_anchor(&slot)?;
+            drop(provenant_supervisor::custody::acquire_reader(
+                slot.try_clone()?,
+                scope,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )?);
+            let lease = held
+                .then(|| slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive))
+                .transpose()?;
+            let observer = Observer(ProcessFact {
+                identity: ProcessIdentity {
+                    boot: "fixture-current-boot".into(),
+                    pid: 123,
+                    native_start: 1,
+                    group_id: 123,
+                    session_id: 123,
+                },
+                parent_pid: 1,
+                zombie: false,
+                cpu_micros: None,
+                command: None,
+            });
+            if live {
+                crate::artifacts::seal(
+                    &attempt,
+                    "process.json",
+                    &serde_json::to_vec(&serde_json::json!({
+                        "schema_version": 1, "scope": scope, "guardian": observer.0.identity,
+                        "publication_pending": false, "census_complete": true,
+                    }))?,
+                    RECORD_LIMIT,
+                )?;
+            }
+            crate::artifacts::seal(&attempt, "retained-evidence", b"keep", RECORD_LIMIT)?;
+            let workers = Workers(occupancy.clone());
+            let result = store.abandon_settlement_with_observer(
+                id,
+                "guardian lost",
+                &workers,
+                &call,
+                &observer,
+            );
+            if allowed {
+                assert!(matches!(result?, crate::Reconciled::Abandoned { .. }));
+                assert!(matches!(
+                    store.record(id, &call)?.state,
+                    crate::AttemptState::Terminal {
+                        outcome: crate::Outcome::Lost,
+                        ..
+                    }
+                ));
+                assert!(!provenant_supervisor::custody::reservation_present(
+                    &slot, scope
+                )?);
+                // Same-boot repetition and a crash after Lost but before completion
+                // both reuse the durable explicit intent.
+                {
+                    let _lock = journal_lock(&attempt)?;
+                    let mut journal = read(&attempt, scope)?;
+                    journal.phase = Phase::Record;
+                    write(&attempt, &journal)?;
+                }
+                assert!(matches!(
+                    store.abandon_settlement_with_observer(
+                        id,
+                        "guardian lost",
+                        &workers,
+                        &call,
+                        &observer
+                    )?,
+                    crate::Reconciled::Abandoned { .. }
+                ));
+                assert!(
+                    store
+                        .abandon_settlement_with_observer(
+                            id,
+                            "different",
+                            &workers,
+                            &call,
+                            &observer
+                        )
+                        .is_err()
+                );
+            } else {
+                let Err(RunError::AbandonBlocked(evidence)) = result else {
+                    panic!("expected typed abandon refusal");
+                };
+                match (&*evidence, live, held) {
+                    (AbandonmentRefusal::Live { .. }, true, _)
+                    | (AbandonmentRefusal::WriterLease { .. }, _, true) => {}
+                    (AbandonmentRefusal::Occupancy { state, .. }, false, false) => {
+                        assert_eq!(state, &occupancy)
+                    }
+                    _ => panic!("wrong refusal evidence: {evidence:?}"),
+                }
+                assert_eq!(store.record(id, &call)?, record);
+                assert!(provenant_supervisor::custody::reservation_present(
+                    &slot, scope
+                )?);
+            }
+            assert_eq!(
+                read_sealed(&attempt, "retained-evidence", RECORD_LIMIT)?.as_deref(),
+                Some(b"keep".as_slice())
+            );
+            drop(lease);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn stalled_supervisor_is_not_retried_and_is_rechecked() -> TestResult {
         let temp = tempfile::tempdir()?;
         let clock = clock();
@@ -1024,7 +1155,12 @@ mod tests {
                 )?);
             }
             let reason = "unresolvable retained route";
-            let result = store.abandon_settlement(id, reason, &call);
+            let result = store.abandon_settlement(
+                id,
+                reason,
+                &provenant_confinement::worktrees::SystemWorkerObserver,
+                &call,
+            );
             if fenced {
                 assert!(result.is_err());
                 assert!(matches!(
@@ -1039,12 +1175,22 @@ mod tests {
                 assert!(matches!(store.record(id, &call)?.state,
                     crate::AttemptState::Terminal { outcome: crate::Outcome::Cancelled, reason: Some(saved), .. } if saved == reason));
                 assert!(matches!(
-                    store.abandon_settlement(id, reason, &call)?,
+                    store.abandon_settlement(
+                        id,
+                        reason,
+                        &provenant_confinement::worktrees::SystemWorkerObserver,
+                        &call
+                    )?,
                     crate::Reconciled::Abandoned { .. }
                 ));
                 assert!(
                     store
-                        .abandon_settlement(id, "different reason", &call)
+                        .abandon_settlement(
+                            id,
+                            "different reason",
+                            &provenant_confinement::worktrees::SystemWorkerObserver,
+                            &call
+                        )
                         .is_err()
                 );
             }
@@ -1901,6 +2047,7 @@ mod tests {
                 actor: provenant_core::ActorId::from_bytes([4; 16]),
                 at: expiry,
                 phase: Phase::Import,
+                declare_lost: false,
                 extra: Default::default(),
             }),
             extra: Default::default(),
@@ -1978,7 +2125,12 @@ mod tests {
             })?,
             RECORD_LIMIT,
         )?;
-        store.abandon_settlement(run.attempt_id, reason, &call)?;
+        store.abandon_settlement(
+            run.attempt_id,
+            reason,
+            &provenant_confinement::worktrees::SystemWorkerObserver,
+            &call,
+        )?;
         let stored: serde_json::Value = serde_json::from_slice(
             &read_sealed(&directory, "queued-abandonment.json", RECORD_LIMIT)?
                 .ok_or("queued abandonment marker missing")?,
@@ -2015,7 +2167,11 @@ pub(crate) fn settling(attempt: &Directory, scope: Scope) -> Result<crate::Recon
 }
 
 pub(crate) fn abandoned(attempt: &Directory, scope: Scope) -> Result<Option<crate::Reconciled>> {
-    Ok(read(attempt, scope)?
+    let journal = read(attempt, scope)?;
+    if journal.phase != Phase::Complete {
+        return Ok(None);
+    }
+    Ok(journal
         .abandonment
         .map(|a| crate::Reconciled::Abandoned { reason: a.reason }))
 }
@@ -2051,6 +2207,26 @@ struct QueuedAbandonment {
     reason: String,
     #[serde(default, flatten)]
     extra: provenant_records::ExtraFields,
+}
+
+/// Evidence that prevents an explicit loss declaration. Unknown occupancy is
+/// retained verbatim so the chair can resolve the particular census blocker.
+#[derive(Debug, thiserror::Error)]
+pub enum AbandonmentRefusal {
+    #[error("attempt {scope:?} presence is live")]
+    Live { scope: Scope },
+    #[error("writer exclusion is unavailable: {evidence}")]
+    WriterLease { evidence: String },
+    #[error("worktree {path:?} is {state:?}: {evidence}")]
+    Occupancy {
+        path: std::path::PathBuf,
+        state: provenant_confinement::worktrees::Occupancy,
+        evidence: String,
+    },
+}
+
+fn abandon_refused(evidence: AbandonmentRefusal) -> RunError {
+    RunError::AbandonBlocked(Box::new(evidence))
 }
 
 impl crate::RunStore {
@@ -2113,7 +2289,19 @@ impl crate::RunStore {
         &self,
         id: provenant_core::AttemptId,
         reason: &str,
+        workers: &dyn provenant_confinement::worktrees::WorkerObserver,
         call: &crate::Request<'_>,
+    ) -> Result<crate::Reconciled> {
+        self.abandon_settlement_with_observer(id, reason, workers, call, &SystemProcessObserver)
+    }
+
+    fn abandon_settlement_with_observer(
+        &self,
+        id: provenant_core::AttemptId,
+        reason: &str,
+        workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+        call: &crate::Request<'_>,
+        observer: &dyn provenant_supervisor::census::ProcessObserver,
     ) -> Result<crate::Reconciled> {
         call.check()?;
         if reason.trim().is_empty() || reason.len() > 4096 {
@@ -2124,7 +2312,11 @@ impl crate::RunStore {
         let reason = provenant_confinement::redact::bounded_line(reason, 4096);
         let mut record = self.record(id, call)?;
         let attempt = self.attempt_dir(id, false)?;
-        let _driver = try_progress_lock(&attempt, "settlement-driver.lock")?;
+        let _driver = try_progress_lock(&attempt, "settlement-driver.lock").map_err(|error| {
+            abandon_refused(AbandonmentRefusal::WriterLease {
+                evidence: format!("settlement-driver.lock: {error}"),
+            })
+        })?;
         let queued = matches!(record.state, crate::AttemptState::Queued { .. });
         // A cancelled, never-launched terminal row also permits retry after a
         // crash between withdrawal and the abandonment journal publication.
@@ -2182,11 +2374,39 @@ impl crate::RunStore {
                 )?
                 .ok_or(RunError::Conflict)?;
         }
-        if !matches!(record.state, crate::AttemptState::Terminal { .. }) {
-            return Err(RunError::Nonterminal);
-        }
+        let nonterminal = !matches!(record.state, crate::AttemptState::Terminal { .. });
         let scope = Self::scope(&record);
         let mut journal = read(&attempt, scope)?;
+        let declare_lost =
+            nonterminal || journal.abandonment.as_ref().is_some_and(|a| a.declare_lost);
+        if journal
+            .abandonment
+            .as_ref()
+            .is_some_and(|a| a.reason != reason)
+        {
+            return Err(RunError::Conflict);
+        }
+        if declare_lost
+            && provenant_supervisor::custody::observe_holder(&attempt, scope, observer)
+                == provenant_supervisor::custody::HolderPresence::Live
+        {
+            return Err(abandon_refused(AbandonmentRefusal::Live { scope }));
+        }
+        // Exclude a still-starting submitter as well as a handed-off guardian.
+        let mut launch_guards = Vec::new();
+        if declare_lost {
+            for name in ["launcher.lock", "custody.lock"] {
+                launch_guards.push(
+                    attempt
+                        .try_lock(OsStr::new(name), LockMode::Exclusive)
+                        .map_err(|error| {
+                            abandon_refused(AbandonmentRefusal::WriterLease {
+                                evidence: format!("{name}: {error}"),
+                            })
+                        })?,
+                );
+            }
+        }
         let now = now_ms(call.clock)?;
         if journal.owner.as_ref().is_some_and(|owner| {
             owner.pid != i64::from(std::process::id()) && alive(owner, journal.owner_since_ms, now)
@@ -2194,6 +2414,7 @@ impl crate::RunStore {
             return Err(RunError::Contention);
         }
         let fence = self.writer_fences()?.into_iter().find(|f| f.scope == scope);
+        let mut unfenced_lease = None;
         let recovery = if let Some(fence) = fence {
             let slot = fence
                 .custody_directory()
@@ -2205,20 +2426,132 @@ impl crate::RunStore {
                 call.cancel,
                 call.clock,
             )
-            .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
-            if recovery.scope() != scope
-                || recovery.observe() != provenant_supervisor::custody::RecoveryState::Absent
+            .map_err(|error| {
+                abandon_refused(AbandonmentRefusal::WriterLease {
+                    evidence: error.to_string(),
+                })
+            })?;
+            if recovery.scope() != scope {
+                return Err(RunError::Conflict);
+            }
+            if !declare_lost
+                && recovery.observe() != provenant_supervisor::custody::RecoveryState::Absent
             {
                 return Err(RunError::Validation(
                     "abandonment requires absent writer custody",
                 ));
             }
             Some(recovery)
+        } else if declare_lost {
+            let slot = self.attempt_writer_slot(id, call)?;
+            let directory = match slot {
+                Some(slot) => {
+                    provenant_config::private_directory(&slot, true).map_err(|error| {
+                        abandon_refused(AbandonmentRefusal::WriterLease {
+                            evidence: error.to_string(),
+                        })
+                    })?
+                }
+                None => attempt.try_clone()?,
+            };
+            unfenced_lease = Some(
+                provenant_supervisor::custody::lock_writer_exclusion(
+                    &directory,
+                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.cancel,
+                    call.clock,
+                )
+                .map_err(|error| {
+                    abandon_refused(AbandonmentRefusal::WriterLease {
+                        evidence: error.to_string(),
+                    })
+                })?,
+            );
+            None
         } else if journal.abandonment.is_some() || unfenced {
             None
         } else {
             return Err(RunError::Validation("retained writer fence missing"));
         };
+        if declare_lost {
+            // Re-read presence after acquiring all native exclusion leases.
+            if provenant_supervisor::custody::observe_holder(&attempt, scope, observer)
+                == provenant_supervisor::custody::HolderPresence::Live
+            {
+                return Err(abandon_refused(AbandonmentRefusal::Live { scope }));
+            }
+            let writer = self.request(id, call)?.task.writer;
+            let path = writer
+                .as_ref()
+                .map(|w| w.worktree.clone())
+                .unwrap_or(attempt.current_path()?);
+            workers.invalidate();
+            let (states, details) = workers.observe_roots_with_details(std::slice::from_ref(&path));
+            let state = states.get(&path).cloned().unwrap_or_else(|| {
+                provenant_confinement::worktrees::Occupancy::census_unknown(
+                    path.clone(),
+                    "worker census did not return the requested tree",
+                )
+            });
+            if writer.is_none() || !state.is_available() {
+                let evidence = if writer.is_none() {
+                    "attempt has no recorded confinement worktree".into()
+                } else {
+                    details.get(&path).cloned().unwrap_or_else(|| match &state {
+                        provenant_confinement::worktrees::Occupancy::Unknown {
+                            evidence, ..
+                        } => evidence.clone(),
+                        _ => "worker census did not prove the tree free".into(),
+                    })
+                };
+                return Err(abandon_refused(AbandonmentRefusal::Occupancy {
+                    path,
+                    state,
+                    evidence,
+                }));
+            }
+            let current = self.record(id, call)?;
+            if Self::scope(&current) != scope || current.state != record.state {
+                return Err(RunError::Conflict);
+            }
+            // Publish explicit intent before Lost: an interrupted declaration can
+            // be retried on the same boot, even after the terminal row commits.
+            {
+                let _lock = journal_lock(&attempt)?;
+                journal = read(&attempt, scope)?;
+                if journal.abandonment.is_none() {
+                    if journal.phase == Phase::Complete {
+                        return Err(RunError::Conflict);
+                    }
+                    journal.abandonment = Some(Abandonment {
+                        reason: reason.clone(),
+                        actor: self.context.actor_id,
+                        at: call
+                            .clock
+                            .wall_now()
+                            .map_err(|_| RunError::Admission(AdmissionError::Clock))?,
+                        phase: journal.phase,
+                        declare_lost: true,
+                        extra: Default::default(),
+                    });
+                    write(&attempt, &journal)?;
+                }
+            }
+            self.commit_lost(
+                scope,
+                &format!("chair abandoned settlement: {reason}"),
+                call,
+            )?;
+            if !matches!(
+                self.record(id, call)?.state,
+                crate::AttemptState::Terminal {
+                    outcome: crate::Outcome::Lost,
+                    ..
+                }
+            ) {
+                return Err(RunError::Conflict);
+            }
+        }
         {
             let _lock = journal_lock(&attempt)?;
             journal = read(&attempt, scope)?;
@@ -2238,18 +2571,21 @@ impl crate::RunStore {
                         .wall_now()
                         .map_err(|_| RunError::Admission(AdmissionError::Clock))?,
                     phase: journal.phase,
+                    declare_lost: false,
                     extra: Default::default(),
                 });
-                journal.phase = Phase::Complete;
-                journal.owner = None;
-                write(&attempt, &journal)?;
             }
+            journal.phase = Phase::Complete;
+            journal.owner = None;
+            write(&attempt, &journal)?;
         }
         if let Some(recovery) = recovery {
             recovery
                 .release_lost()
                 .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
         }
+        drop(unfenced_lease);
+        drop(launch_guards);
         abandoned(&attempt, scope)?.ok_or(RunError::Conflict)
     }
 }
@@ -2449,14 +2785,17 @@ impl crate::RunStore {
                 let scope = Self::scope(&record);
                 let journal = read(&directory, scope)?;
                 if let Some(abandonment) = &journal.abandonment {
-                    return Ok((
-                        directory,
-                        scope,
+                    let state = if journal.phase == Phase::Complete {
                         crate::Reconciled::Abandoned {
                             reason: abandonment.reason.clone(),
-                        },
-                        false,
-                    ));
+                        }
+                    } else {
+                        crate::Reconciled::Settling {
+                            phase: "abandon".into(),
+                            blocking_reason: Some("explicit abandonment interrupted; repeat reconcile --abandon with the original reason".into()),
+                        }
+                    };
+                    return Ok((directory, scope, state, false));
                 }
                 let queued = matches!(record.state, crate::AttemptState::Queued { .. });
                 // A supervisor in uninterruptible sleep is never respawned.

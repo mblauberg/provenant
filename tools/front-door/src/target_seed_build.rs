@@ -721,6 +721,8 @@ fn build_into(
     let target = stage.join("target");
     fs::create_dir(&target)?;
     let (rustc_vv, host_triple) = target_seed::rustc_metadata(&worktree)?;
+    let environment = std::env::vars_os().collect::<Vec<_>>();
+    let cargo = target_seed::cargo_tool(&environment, "cargo")?;
     let mut flags = vec![
         "cargo build --locked --all-targets".to_owned(),
         "cargo test --locked --no-run".to_owned(),
@@ -739,10 +741,24 @@ fn build_into(
         &["build", "--locked", "--all-targets"][..],
         &["test", "--locked", "--no-run"][..],
     ] {
-        let argv: Vec<OsString> = std::iter::once(OsString::from("cargo"))
+        let argv: Vec<OsString> = std::iter::once(cargo.as_os_str().to_owned())
             .chain(args.iter().map(OsString::from))
             .collect();
         let mut overrides = cargo_profile.environment().to_vec();
+        let mut paths = vec![
+            cargo
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+        ];
+        if let Some(path) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&path));
+        }
+        overrides.push((
+            "PATH".into(),
+            std::env::join_paths(paths)
+                .map_err(|error| io::Error::other(format!("cargo PATH unresolved: {error}")))?,
+        ));
         overrides.extend([
             ("CARGO_TARGET_DIR".into(), target.as_os_str().into()),
             ("CARGO_BUILD_BUILD_DIR".into(), target.as_os_str().into()),

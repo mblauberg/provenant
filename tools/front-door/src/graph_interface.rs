@@ -527,10 +527,19 @@ fn bare_model_detail(model: &str, error: &BareModelError) -> String {
     }
 }
 
+fn implementation_template(name: &str) -> bool {
+    name == "implement" || name.starts_with("implement.")
+}
+
 fn run_input(
     request: GraphRunArgs,
 ) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
     (|| {
+        let no_plan = request.no_plan;
+        let implementation = request
+            .template
+            .as_deref()
+            .is_some_and(implementation_template);
         let sandbox = request.sandbox_override();
         let brief_source = select_brief_source([
             request.brief.map(BriefSource::Text),
@@ -597,6 +606,9 @@ fn run_input(
         }
         if let Some(sandbox) = sandbox {
             parameters["attempt.sandbox"] = json!(sandbox);
+        }
+        if no_plan && implementation {
+            parameters["bounded"] = json!(true);
         }
         let mut policy_inputs = Vec::new();
         if let Some(BriefSource::File(path)) = &brief_source {
@@ -792,12 +804,28 @@ mod tests {
             write_scope: Vec::new(),
             over: Vec::new(),
             set: Vec::new(),
+            no_plan: false,
             file: None,
             detached: false,
             sandbox: false,
             no_sandbox: false,
             explain: false,
         }
+    }
+
+    #[test]
+    fn no_plan_sets_bounded_for_implementation_templates() {
+        let mut request = run_request();
+        request.template = Some("implement".into());
+        request.no_plan = true;
+        let input = run_input(request).unwrap();
+        assert_eq!(input["set"]["bounded"], true);
+
+        let mut task = run_request();
+        task.template = Some("task".into());
+        task.no_plan = true;
+        let input = run_input(task).unwrap();
+        assert!(input["set"].get("bounded").is_none());
     }
 
     #[test]

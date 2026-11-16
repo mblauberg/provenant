@@ -638,6 +638,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
     let session = Session {
         store: run::RunStore::open(&context, &call)?,
         context,
+        chair: None,
     };
     let edge = Edge {
         roots: &roots,

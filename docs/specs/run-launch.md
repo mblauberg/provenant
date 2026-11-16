@@ -9,8 +9,9 @@ Paths are relative to `tools/front-door/`.
 
 Admission commits the reservation and attempt together. A verified worktree has
 at most one writer; resource probes do not hold the shared registry lock or run
-inside the transaction. Busy capacity is not a queue. Uncertain custody keeps
-its ownership until release is proved.
+inside the transaction. Busy capacity is not a queue. Direct-run custody uses
+the same captured project and actor identity as the run store. Uncertain custody
+keeps its ownership until release is proved.
 - Why: admission must not create duplicate writers or hold coordination locks across external work.
 
 Permanent pre-admission refusals are durable outcomes of their operation. Replay

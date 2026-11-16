@@ -273,7 +273,8 @@ resets or creates a worktree to satisfy a binding.
 Registered linked worktrees are verified at their real paths wherever they
 live, including `.claude/worktrees` and locations outside the project.
 Declared credential stores still refuse every overlapping source or grant;
-project-local agent configuration only warns. Explanation and launch
+project-local agent configuration is advisory, with overlap warnings off by
+default and configurable through `CONFINEMENT_SOURCE_AGENT_CONFIG_NONE`. Explanation and launch
 preparation share the same source admission decision.
 - Why: scouts share read access while review and repair keep one immutable subject.
 

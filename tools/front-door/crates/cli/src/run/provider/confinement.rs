@@ -1023,16 +1023,49 @@ fn source_admission_error(error: crate::run::SourceAdmissionError) -> SourceCwdE
     )
 }
 
-fn report_source_warnings(admission: &crate::run::SourceAdmission) {
+fn source_warning_messages(
+    admission: &crate::run::SourceAdmission,
+    policy: &provenant_records::policy::Policy,
+) -> Vec<String> {
+    admission
+        .warnings
+        .iter()
+        .filter_map(|warning| {
+            policy
+                .check(
+                    "CONFINEMENT_SOURCE_AGENT_CONFIG_NONE",
+                    provenant_records::policy::Facts::violation(format!(
+                        "source overlaps {} (source: {})",
+                        warning.path.display(),
+                        warning.source
+                    )),
+                )
+                .message()
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+fn report_source_warnings(
+    admission: &crate::run::SourceAdmission,
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+) {
     use std::io::Write;
+    let project = task
+        .profile
+        .policy_project
+        .or(registry.project_id)
+        .map(|project| project.to_string())
+        .unwrap_or_default();
+    let policy = registry
+        .roots
+        .map_or_else(provenant_records::policy::Policy::default, |roots| {
+            run::launch_policy(roots.state.as_path(), &project, task)
+        });
     let mut stderr = std::io::stderr().lock();
-    for warning in &admission.warnings {
-        let _ = writeln!(
-            stderr,
-            "warning: source overlaps {} (source: {})",
-            warning.path.display(),
-            warning.source,
-        );
+    for message in source_warning_messages(admission, &policy) {
+        let _ = writeln!(stderr, "warning: {message}");
     }
 }
 
@@ -1063,7 +1096,7 @@ pub(super) fn source_cwd(
             crate::run::SourceAdmissionMode::Live,
         )
         .map_err(source_admission_error)?;
-        report_source_warnings(&admission);
+        report_source_warnings(&admission, registry, task);
         return Ok(admission.path);
     };
     if task.writer.is_some() || (!task.access.source_live && task.head.is_none()) {
@@ -1084,7 +1117,7 @@ pub(super) fn source_cwd(
     };
     let admission = crate::run::admit_source_root(cwd, state, source, &credentials, mode)
         .map_err(source_admission_error)?;
-    report_source_warnings(&admission);
+    report_source_warnings(&admission, registry, task);
     if !task.access.source_live && admission.path != *source {
         return Err(source_cwd_authority(
             "graph source checkout changed location".into(),
@@ -1799,6 +1832,29 @@ pub(super) fn writer_source_context(
 #[cfg(test)]
 mod alias_tests {
     use super::*;
+
+    #[test]
+    // Spec: docs/specs/fabric.md#sources-and-read-roots
+    fn source_configuration_warning_is_opt_in() {
+        use provenant_records::policy::{Policy, Source, Strength};
+        let admission = crate::run::SourceAdmission {
+            path: "/project".into(),
+            warnings: vec![crate::run::SourceWarning {
+                path: "/project/.claude".into(),
+                source: "project-local agent configuration (.claude)".into(),
+            }],
+        };
+        let mut policy = Policy::default();
+        assert!(source_warning_messages(&admission, &policy).is_empty());
+        policy.overlay(
+            &std::collections::BTreeMap::from([(
+                "CONFINEMENT_SOURCE_AGENT_CONFIG_NONE".into(),
+                Strength::Warn,
+            )]),
+            Source::Host,
+        );
+        assert_eq!(source_warning_messages(&admission, &policy).len(), 1);
+    }
 
     #[test]
     fn only_the_temporary_variables_move_to_the_alias() {

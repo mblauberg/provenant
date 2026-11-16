@@ -2191,10 +2191,19 @@ impl Driver<'_> {
         drop(self._custody.take());
         // Worktree exclusion spans settlement retries; attempt custody is free.
         let settled = (|| {
-            if holder
-                .terminal(&self.holder_context, &self.attempt, &exit, &recovery)
-                .is_err()
+            if let Err(error) =
+                holder.terminal(&self.holder_context, &self.attempt, &exit, &recovery)
             {
+                if let Err(persist_error) = crate::settlement_progress::terminal_failed(
+                    &self.attempt,
+                    self.reservation.scope,
+                    &error.to_string(),
+                ) {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "cannot retain terminal failure: {persist_error}"
+                    );
+                }
                 return false;
             }
             let verified = self
