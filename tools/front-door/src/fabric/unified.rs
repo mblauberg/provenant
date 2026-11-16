@@ -935,7 +935,11 @@ fn project_node_liveness(rows: &mut [Value]) {
                     row["graph_id"].as_str()?.to_owned(),
                     row["node_id"].as_str()?.to_owned(),
                 ),
-                (row["state"].clone(), row["presence"].clone(), row["reason"].clone()),
+                (
+                    row["state"].clone(),
+                    row["presence"].clone(),
+                    row["reason"].clone(),
+                ),
             ))
         })
         .collect();
@@ -3239,14 +3243,21 @@ mod tests {
         attempt["recorded_state"] = json!("running");
         attempt["state"] = json!("unknown");
         attempt["presence"] = json!("unknown");
-        attempt["reason"] = json!("the writer process state cannot be verified; run `provenant reconcile g/parent` to inspect recovery before retrying");
+        attempt["reason"] = json!(
+            "the writer process state cannot be verified; run `provenant reconcile g/parent` to inspect recovery before retrying"
+        );
         project_node_liveness(&mut rows);
 
         let node = rows.iter().find(|row| row["kind"] == "node").unwrap();
         assert_eq!(node["recorded_state"], "running");
         assert_eq!(node["state"], "unknown");
         assert_eq!(node["presence"], "unknown");
-        assert!(node["next"].as_str().unwrap().contains("provenant reconcile"));
+        assert!(
+            node["next"]
+                .as_str()
+                .unwrap()
+                .contains("provenant reconcile")
+        );
         let reading = render_graph_status(&rows);
         let parent = reading
             .lines()
@@ -3276,10 +3287,7 @@ mod tests {
         project_remote_attempt_unknown(attempt);
         project_node_liveness(&mut rows);
 
-        let attempt = rows
-            .iter()
-            .find(|row| row["kind"] == "attempt")
-            .unwrap();
+        let attempt = rows.iter().find(|row| row["kind"] == "attempt").unwrap();
         assert_eq!(attempt["recorded_state"], "running");
         assert_eq!(attempt["state"], "unknown");
         assert_eq!(attempt["presence"], "unknown");
