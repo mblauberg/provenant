@@ -40,7 +40,7 @@ fn native_codex_home(
                 .find(|(key, _)| key == "CODEX_HOME")
                 .map(|(_, value)| std::path::PathBuf::from(value.as_os_str()))
         })
-        .unwrap_or_else(|| host_home.join(provenant_core::CODEX_ACCOUNT_DIRECTORY))
+        .unwrap_or_else(|| host_home.join(provenant_core::CODEX_ACCOUNT_DIRECTORY.1))
 }
 
 crate::adapter!(Codex, "codex", prepare);
