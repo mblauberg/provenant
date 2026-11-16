@@ -538,6 +538,7 @@ impl From<crate::run::TerminalCause> for StopCause {
         use crate::run::TerminalCause as T;
         match cause {
             T::SourceViewRefused => Self::SourceViewRefused,
+            T::ProjectBindingDirectoryUnsafe => Self::AccessPolicyRefused,
             T::AccountLoginRequired => Self::AuthRequired,
             T::RouteResolutionRefused => Self::RouteRefused,
             T::AccessPolicyRefused => Self::AccessPolicyRefused,

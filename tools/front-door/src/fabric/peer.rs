@@ -761,14 +761,18 @@ pub fn peer(
                     extra: Default::default(),
                 },
             ),
-            PeerAction::RunEvents { after, limit, .. } => {
-                peer_result(owner.events(*after, *limit, &cancel), |data| {
-                    PeerResult::RunEvents {
-                        data,
-                        extra: Default::default(),
+            PeerAction::RunEvents { after, limit, .. } => peer_result(
+                owner.events(*after, *limit, &cancel).map(|mut data| {
+                    for event in &mut data.items {
+                        provenant_fabric_runtime::runs::project_peer_run_event_diagnostics(event);
                     }
-                })
-            }
+                    data
+                }),
+                |data| PeerResult::RunEvents {
+                    data,
+                    extra: Default::default(),
+                },
+            ),
             PeerAction::Lanes { all, limit, .. } => peer_result(
                 owner.lanes_local(*all, *limit, &cancel).map(|mut data| {
                     for attempt in &mut data {

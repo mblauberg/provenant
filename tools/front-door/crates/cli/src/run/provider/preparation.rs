@@ -822,12 +822,16 @@ impl PrepareError {
                     &error.cause,
                     super::source_tree::SourceCause::ProjectBindingDirectory(_)
                 );
-                let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::SourceViewRefused,
-                    detail.clone(),
-                );
+                let cause = if binding_refusal {
+                    provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe
+                } else {
+                    provenant_records::run::TerminalCause::SourceViewRefused
+                };
+                let mut refusal = run::PrepareRefusal::boxed(cause, detail.clone());
                 refusal.terminal_note = Some(detail);
                 if binding_refusal {
+                    refusal.boundary_class =
+                        provenant_records::diagnostic::BoundaryClass::Authority;
                     let mut skipped = skip(
                         "project binding state",
                         SkipKind::Refused,
@@ -838,7 +842,7 @@ impl PrepareError {
                     );
                     refusal.skipped_routes.push(skipped);
                 }
-                Box::new(refusal)
+                refusal
             }
             Self::Candidates {
                 message,
@@ -1420,6 +1424,8 @@ impl PlanCheckError {
         refusal.resource = skipped.guard_resource;
         refusal.skipped_routes.push(skipped);
         if let Self::ReadOnly(ReadOnlyPlanError::ProjectBindingDirectory(diagnostic)) = self {
+            refusal.terminal_cause =
+                provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe;
             refusal.message = diagnostic
                 .detail
                 .unwrap_or_else(|| "project binding state directory is unsafe".into());
@@ -5743,5 +5749,9 @@ fn binding_refusal_preserves_local_repair_and_closed_route_guard() {
     assert_eq!(
         refusal.skipped_routes[0].confinement_guard,
         Some(provenant_records::diagnostic::ConfinementGuard::ProjectBindingDirectoryUnsafe)
+    );
+    assert_eq!(
+        refusal.terminal_cause,
+        provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe
     );
 }
