@@ -76,6 +76,8 @@ impl PreviewWalk {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CollectionMode {
     Outputs,
+    /// Output-only collection gated by the shared removal cleanliness checks.
+    OutputsForRemoval,
     Worktrees,
 }
 
@@ -1493,41 +1495,54 @@ fn collect_impl(
             };
             let protected =
                 output_protection(context, locked.verified.repo(), policy.keep, cancel)?;
-            if policy.mode == CollectionMode::Outputs {
-                let output = if (policy.terminal)(&lane.path) {
-                    &mut report.output
-                } else {
-                    &mut report.idle_output
-                };
-                let output_start = output.len();
-                walk_output(
-                    locked.verified.repo().root_dir(),
-                    &lane.path,
-                    Path::new(""),
-                    &effective,
-                    &layout_roots,
-                    &protected,
-                    output,
-                    0,
-                    &preview_walk,
+            if policy.mode == CollectionMode::OutputsForRemoval {
+                // Landing cleanup may reclaim output only after the same
+                // cleanliness and ignored-output checks used by removal.
+                let cleanliness = worktree_cleanliness_at(context, locked.verified.repo(), cancel)?;
+                super::lifecycle::removal_verdict(&cleanliness, false, true)?;
+                precheck_removal(
+                    context,
+                    locked.verified.repo(),
+                    policy.regenerable,
+                    policy.keep,
+                    cancel,
                 )?;
+            }
+            let output = if (policy.terminal)(&lane.path) {
+                &mut report.output
+            } else {
+                &mut report.idle_output
+            };
+            let output_start = output.len();
+            walk_output(
+                locked.verified.repo().root_dir(),
+                &lane.path,
+                Path::new(""),
+                &effective,
+                &layout_roots,
+                &protected,
+                output,
+                0,
+                &preview_walk,
+            )?;
 
-                let output_bytes = output[output_start..]
-                    .iter()
-                    .filter(|entry| entry.removed || entry.reason == "would_remove")
-                    .map(|entry| entry.bytes)
-                    .fold(0_u64, u64::saturating_add);
-                let output_errors = output[output_start..]
-                    .iter()
-                    .filter(|entry| !entry.removed && entry.reason != "would_remove")
-                    .map(|entry| RetentionIssue {
-                        path: entry.path.clone(),
-                        operation: "remove declared output".into(),
-                        cause: entry.reason.clone(),
-                    })
-                    .collect::<Vec<_>>();
-                report.byte_errors.extend(output_errors);
-                report.bytes = report.bytes.saturating_add(output_bytes);
+            let output_bytes = output[output_start..]
+                .iter()
+                .filter(|entry| entry.removed || entry.reason == "would_remove")
+                .map(|entry| entry.bytes)
+                .fold(0_u64, u64::saturating_add);
+            let output_errors = output[output_start..]
+                .iter()
+                .filter(|entry| !entry.removed && entry.reason != "would_remove")
+                .map(|entry| RetentionIssue {
+                    path: entry.path.clone(),
+                    operation: "remove declared output".into(),
+                    cause: entry.reason.clone(),
+                })
+                .collect::<Vec<_>>();
+            report.byte_errors.extend(output_errors);
+            report.bytes = report.bytes.saturating_add(output_bytes);
+            if policy.mode != CollectionMode::Worktrees {
                 row.detail = Some("output retention only".into());
                 return Ok(());
             }
@@ -1668,6 +1683,22 @@ fn collect_impl(
                     ),
                 )
             };
+            let planned_cache = if dry {
+                match crate::cache::preview_worktree_cargo_cache(context.home, &locked.verified) {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        report.cache_errors.push(RetentionIssue {
+                            path: lane.path.clone(),
+                            operation: "measure private cache".into(),
+                            cause: error.to_string(),
+                        });
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            drop(locked);
             let eligible = |census: bool| -> Result<(), WorktreeError> {
                 if let SelectedRetirement::Subsumed(evidence) = &action {
                     validate_removal_evidence(context, lane.head, evidence, &refs, cancel)?;
@@ -1701,69 +1732,6 @@ fn collect_impl(
                 }
             };
             eligible(true)?;
-            // Run the same admission and cleanliness checks as removal
-            // before planning or deleting regenerable output. A dirty or
-            // unknown tree keeps its target alongside the work that kept the
-            // checkout.
-            let cleanliness = worktree_cleanliness_at(context, locked.verified.repo(), cancel)?;
-            super::lifecycle::removal_verdict(&cleanliness, false, true)?;
-            precheck_removal(
-                context,
-                locked.verified.repo(),
-                policy.regenerable,
-                policy.keep,
-                cancel,
-            )?;
-            let output = if (policy.terminal)(&lane.path) {
-                &mut report.output
-            } else {
-                &mut report.idle_output
-            };
-            let output_start = output.len();
-            walk_output(
-                locked.verified.repo().root_dir(),
-                &lane.path,
-                Path::new(""),
-                &effective,
-                &layout_roots,
-                &protected,
-                output,
-                0,
-                &preview_walk,
-            )?;
-
-            let output_bytes = output[output_start..]
-                .iter()
-                .filter(|entry| entry.removed || entry.reason == "would_remove")
-                .map(|entry| entry.bytes)
-                .fold(0_u64, u64::saturating_add);
-            let output_errors = output[output_start..]
-                .iter()
-                .filter(|entry| !entry.removed && entry.reason != "would_remove")
-                .map(|entry| RetentionIssue {
-                    path: entry.path.clone(),
-                    operation: "remove declared output".into(),
-                    cause: entry.reason.clone(),
-                })
-                .collect::<Vec<_>>();
-            report.byte_errors.extend(output_errors);
-            report.bytes = report.bytes.saturating_add(output_bytes);
-            let planned_cache = if dry {
-                match crate::cache::preview_worktree_cargo_cache(context.home, &locked.verified) {
-                    Ok(entry) => entry,
-                    Err(error) => {
-                        report.cache_errors.push(RetentionIssue {
-                            path: lane.path.clone(),
-                            operation: "measure private cache".into(),
-                            cause: error.to_string(),
-                        });
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            drop(locked);
             if !dry {
                 let port = policy
                     .retirement_port
