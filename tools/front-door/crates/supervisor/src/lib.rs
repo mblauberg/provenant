@@ -15,6 +15,7 @@ pub mod fixture;
 mod guardian;
 pub mod machine;
 pub mod process_tree;
+pub mod settlement_progress;
 #[cfg(feature = "fixture")]
 pub use guardian::ExitPublisher;
 

@@ -1059,6 +1059,59 @@ fn read_cadence(directory: &Directory) -> Result<Cadence, Box<dyn std::error::Er
     }
 }
 
+/// Recovery is independent of graph journals: even an orphaned attempt must
+/// eventually settle. Share one host census across all registered projects.
+fn reap_projects(resolved: &crate::roots::Resolved) -> Result<&'static str, String> {
+    use provenant_supervisor::census::{
+        MAX_CENSUS_ENTRIES, ProcessObserver, SystemProcessObserver,
+    };
+    let census = SystemProcessObserver.census(MAX_CENSUS_ENTRIES).ok();
+    let clock = SystemClock;
+    let cancel = provenant_core::CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let mut errors = Vec::new();
+    for binding in
+        provenant_config::registered_projects(&resolved.roots).map_err(|e| e.to_string())?
+    {
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let context = provenant_cli::fabric::Context::open_for_project(
+                resolved.roots.clone(),
+                &resolved.home,
+                &binding,
+            )?;
+            let execution = provenant_run::ExecutionContext {
+                state_root: resolved.roots.state.clone(),
+                project_id: binding.project_id(),
+                actor_id: context.identity.inbox.actor,
+                read_prompts: false,
+            };
+            if let Some(store) = provenant_run::RunStore::open_disk_read_only(&execution, &call)? {
+                let store = store.with_writer_registry(resolved.roots.state.as_path());
+                match &census {
+                    Some(census) => {
+                        store.reap_with_census(&call, census)?;
+                    }
+                    None => {
+                        store.reap_without_census(&call)?;
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            errors.push(format!("{}: {error}", binding.project_id()));
+        }
+    }
+    if errors.is_empty() {
+        Ok("queued")
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
 fn tick(
     globals: &Globals,
     workers: &'static dyn WorkerObserver,
@@ -1075,6 +1128,7 @@ fn tick(
     let config = provenant_cli::config_reads::read_for(&resolved.roots, "tick")?;
     let clock = SystemClock;
     let now = clock.wall_now()?;
+    let settlement = Task::run("settlement", || reap_projects(&resolved));
     let graphs =
         crate::fabric::tick_graphs(&resolved, now, workers).unwrap_or_else(|error| Graphs {
             advanced: 0,
@@ -1143,6 +1197,7 @@ fn tick(
         gc,
         target_seed,
         steward::run(&config.domains.steward, &resolved, workers),
+        settlement,
         Task::idle("notice_batch_flush", "unwired"),
         Task::idle("quota_refresh", "unwired"),
     ];
@@ -1155,12 +1210,13 @@ pub(crate) fn run(globals: &Globals, workers: &'static dyn WorkerObserver) -> u8
             let failed = !data.graphs.errors.is_empty()
                 || data.tasks.iter().any(|task| task.error.is_some());
             let mut human = format!(
-                "tick: graphs={} errors={} gc={} seed={} steward={}\n",
+                "tick: graphs={} errors={} gc={} seed={} steward={} settlement={}\n",
                 data.graphs.advanced,
                 data.graphs.errors.len(),
                 data.tasks[0].state,
                 data.tasks[1].state,
-                data.tasks[2].state
+                data.tasks[2].state,
+                data.tasks[3].state
             );
             for warning in &data.graphs.warnings {
                 human.push_str(&format!("warning: {warning}\n"));

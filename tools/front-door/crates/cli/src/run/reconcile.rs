@@ -76,13 +76,34 @@ pub(super) fn reconcile_inner(
         let reason = command
             .reason
             .ok_or(run::RunError::Validation("abandonment requires a reason"))?;
-        let state =
-            session
-                .service()
-                .abandon_settlement(id, &reason, &request(&clock, &cancel)?)?;
+        let policy_workers = provenant_confinement::worktrees::CensusPolicyWorkers::from_roots(
+            &provenant_confinement::worktrees::SystemWorkerObserver,
+            edge.roots,
+        )
+        .map_err(run::RunError::from)?;
+        let workers = provenant_confinement::worktrees::CensusSession::new(&policy_workers, &clock);
+        let nonterminal = !matches!(
+            session.store.record(id, &call)?.state,
+            run::AttemptState::Terminal { .. } | run::AttemptState::Queued { .. }
+        );
+        let state = session.service().abandon_settlement(
+            id,
+            &reason,
+            &workers,
+            &request(&clock, &cancel)?,
+        )?;
         return Ok((
-            json!({"target": target.to_string(), "attempt_id": id, "found": state}),
-            format!("{target} {}\n", reconcile_summary(&state)),
+            json!({"target": target.to_string(), "attempt_id": id, "found": state,
+                "warning": nonterminal.then_some("attempt declared lost by the chair; all evidence retained")}),
+            format!(
+                "{target} {}\n{}",
+                reconcile_summary(&state),
+                if nonterminal {
+                    "warning: attempt declared lost by the chair; all evidence retained\n"
+                } else {
+                    ""
+                }
+            ),
         ));
     }
     let session = open(edge, &request(&clock, &cancel)?)?;

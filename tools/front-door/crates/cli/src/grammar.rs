@@ -747,7 +747,8 @@ pub struct Reconcile {
         catalog_graph_target()
     )]
     pub targets: Vec<Target>,
-    /// Abandon settlement of this writer attempt, preserving its evidence
+    /// Abandon this attempt, preserving evidence; a nonterminal writer is declared lost
+    /// only when presence is not live, its lease is free and its worktree census is free
     #[arg(
         long,
         value_name = "TARGET",

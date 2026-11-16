@@ -420,6 +420,8 @@ pub enum HelperSafety {
 
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("abandonment refused: {0}")]
+    AbandonBlocked(Box<settlement::AbandonmentRefusal>),
     #[error("{}", .0.detail.as_deref().unwrap_or("dispatch was refused"))]
     RecordedRefusal(Box<provenant_records::diagnostic::Diagnostic>),
     #[error("continuation preparation refused: {}", cause.detail())]
@@ -660,6 +662,9 @@ impl RunError {
         let kind = ErrorKind::from(self);
         let mut diagnostic = Diagnostic::new(kind.code()).category(kind.category());
         match self {
+            Self::AbandonBlocked(evidence) => {
+                diagnostic = diagnostic.detail(evidence.to_string());
+            }
             Self::ContinuationRefused { cause } => {
                 diagnostic = diagnostic.detail(cause.detail());
             }

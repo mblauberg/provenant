@@ -2407,7 +2407,8 @@ impl Recovery {
         clear_reservation(&self.directory, self.scope())
     }
     /// Release custody of an attempt the Run owner has committed Lost after
-    /// `holder_gone`. No attempt artefacts or worktree contents are removed.
+    /// `holder_gone`, or an explicit chair abandonment with non-live presence
+    /// and positive worktree non-occupancy. No attempt artefacts or worktree contents are removed.
     pub fn release_lost(mut self) -> Result<()> {
         self.clear_settled_reservation()
     }
