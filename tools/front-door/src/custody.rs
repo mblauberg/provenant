@@ -359,7 +359,7 @@ fn pending_retirements(
         .map_err(RetirementWriter::error)
 }
 
-fn presence_with_census(
+pub(crate) fn presence_with_census(
     record: &CustodyRecord,
     roots: &Roots,
     host: provenant_core::HostId,
@@ -401,13 +401,18 @@ fn presence_with_census(
                     ) {
                         return HolderPresence::Unknown;
                     }
-                    match census.and_then(|census| {
-                        provenant_run::attempt_presence_with_census(
+                    let presence = match census {
+                        Some(census) => provenant_run::attempt_presence_with_census(
                             roots.state.as_path(),
                             &attempt,
                             census,
-                        )
-                    }) {
+                        ),
+                        None => provenant_run::attempt_presence_with_unavailable_census(
+                            roots.state.as_path(),
+                            &attempt,
+                        ),
+                    };
+                    match presence {
                         Some(
                             provenant_run::AttemptPresence::Unattended
                             | provenant_run::AttemptPresence::Settling,
