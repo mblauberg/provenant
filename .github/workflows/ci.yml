@@ -470,6 +470,38 @@ jobs:
         working-directory: tools/front-door
         run: cargo shear
 
+  rust-macos-lint:
+    name: Lint macOS Rust workspace
+    runs-on: macos-15
+    timeout-minutes: 20
+    needs: [macos-scope]
+    if: needs.macos-scope.outputs.run_rust == 'true'
+    env:
+      CARGO_INCREMENTAL: "0"
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: tools/front-door
+          shared-key: ${{ inputs.cold_cache && format('front-door-ci-macos-lint-{0}-cold-{1}-{2}', env.RUST_DEVELOPMENT_CACHE, github.run_id, github.run_attempt) || format('front-door-ci-macos-lint-{0}', env.RUST_DEVELOPMENT_CACHE) }}
+          add-job-id-key: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Lint Rust workspace
+        working-directory: tools/front-door
+        run: cargo clippy --workspace --all-targets --features fixture --locked --keep-going -- -D warnings
+
   rust-macos-archive:
     name: Build macOS test archive
     runs-on: macos-15
@@ -492,7 +524,7 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+        run: rustup toolchain install 1.99.1 --profile minimal
       - name: Cache Rust build artefacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -503,9 +535,6 @@ jobs:
       - name: Install nextest
         uses: ./.github/actions/install-nextest
         timeout-minutes: 10
-      - name: Lint Rust workspace
-        working-directory: tools/front-door
-        run: cargo clippy --workspace --all-targets --features fixture --locked --keep-going -- -D warnings
       - name: Build macOS test archive
         working-directory: tools/front-door
         run: >-
@@ -825,6 +854,7 @@ jobs:
       - macos-scope
       - generated-reference
       - rust-lint
+      - rust-macos-lint
       - rust-test-archive
       - rust
       - rust-macos-archive
