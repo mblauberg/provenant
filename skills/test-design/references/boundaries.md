@@ -7,3 +7,6 @@ bounded poll instead of sleeping. If a necessary seam is missing, use `diagnose`
 
 Preserve user-authored work when establishing a failing test. Follow the failure
 triage and pruning procedure in `test-design`; do not hide a real behaviour change.
+
+Each check declares its stage (lint, compile, fast, integration, full); a change
+runs only the stages its inputs affect.
