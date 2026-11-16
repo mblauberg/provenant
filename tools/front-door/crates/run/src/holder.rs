@@ -2102,7 +2102,12 @@ impl RunStore {
         if let Some(writer) = &task.writer {
             let refusal = object_import_refused(attempt, exit.scope)?;
             let refused = refusal.is_some();
-            let check = if cancelled {
+            // A delivered steer interrupts the provider, then continues the
+            // same writer. Settle its terminal Git head under the existing
+            // custody and writer proof before admitting that continuation.
+            // Ordinary cancellation still retains its private evidence
+            // without importing or publishing it.
+            let check = if cancelled && (!steered || exit.never_spawned) {
                 Ok(())
             } else if settlement.is_none() {
                 Err(RunError::ObjectImportLimit(
@@ -3940,14 +3945,15 @@ mod writer_recovery_tests {
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use provenant_records::wire::lane::{LaneProjectionFacts, LaneRow};
-        for (changed, dirty, blocked, shared, budget) in [
-            (false, false, false, false, false),
-            (true, false, false, false, false),
-            (false, true, false, false, false),
-            (false, false, true, false, false),
-            (true, false, false, true, false),
-            (true, false, false, false, true),
-            (false, true, false, false, true),
+        for (changed, dirty, blocked, shared, budget, steered) in [
+            (false, false, false, false, false, false),
+            (true, false, false, false, false, false),
+            (false, true, false, false, false, false),
+            (false, false, true, false, false, false),
+            (true, false, false, true, false, false),
+            (true, false, false, true, false, true),
+            (true, false, false, false, true, false),
+            (false, true, false, false, true, false),
         ] {
             let fixture = PrepareFixture::new()?;
             let execution = registered_landed_writer_fixture(&fixture)?;
@@ -4068,6 +4074,9 @@ mod writer_recovery_tests {
             if budget {
                 observed.stop_reason = Some(StopReason::TokenBudget);
                 observed.termination = Some(Termination::Exit(1));
+            } else if steered {
+                observed.stop_reason = Some(StopReason::Steered);
+                observed.cancel_delivered_before_exit = Some(true);
             }
             crate::dispatch_tests::seal_exit(&store, &observed)?;
             let mut fake =
@@ -4110,6 +4119,18 @@ mod writer_recovery_tests {
                     .is_empty(),
                     "settlement must preserve the native commit's clean index"
                 );
+            }
+            if steered {
+                assert!(matches!(
+                    finished.state,
+                    AttemptState::Terminal {
+                        outcome: Outcome::Cancelled,
+                        terminal_cause: Some(TerminalCause::Steered),
+                        ..
+                    }
+                ));
+                assert_eq!(finished.head, shared_head);
+                continue;
             }
             if blocked {
                 // A blocked writer seals one typed stop.
