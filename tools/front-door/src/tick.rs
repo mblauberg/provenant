@@ -984,6 +984,7 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
 
 /// The last seed pass, for the tick's report. Failures stay visible; full
 /// collection retries them daily, while scoped Busy work retries on the tick.
+#[cfg(test)]
 fn seed_state(directory: &Directory) -> &'static str {
     match directory.read_bounded(SEED_RESULT.as_ref(), 64 * 1024) {
         Ok(bytes) => match serde_json::from_slice::<GcResult>(&bytes) {
@@ -1139,9 +1140,7 @@ fn read_cadence(directory: &Directory) -> Result<Cadence, Box<dyn std::error::Er
 /// Recovery is independent of graph journals: even an orphaned attempt must
 /// eventually settle. Share one host census across all registered projects.
 fn reap_projects(resolved: &crate::roots::Resolved) -> Result<&'static str, String> {
-    use provenant_supervisor::census::{
-        MAX_CENSUS_ENTRIES, ProcessObserver, SystemProcessObserver,
-    };
+    use provenant_supervisor::census::{MAX_CENSUS_ENTRIES, SystemProcessObserver};
     let census = SystemProcessObserver.census(MAX_CENSUS_ENTRIES).ok();
     let clock = SystemClock;
     let cancel = provenant_core::CancelToken::new();

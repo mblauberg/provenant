@@ -1472,13 +1472,15 @@ mod tests {
 
         const EXACT_12: &str = r#"{"packageManager":"pnpm@12.16.1+sha512.fixture"}"#;
         const EXACT_10: &str = r#"{"packageManager":"pnpm@10.30.0"}"#;
-        let table: &[(
-            &str,
-            &str,
-            Option<&str>,
+        // (case, pnpm version, packageManager pin, management, expected family)
+        type Row<'a> = (
+            &'a str,
+            &'a str,
+            Option<&'a str>,
             Management,
             Option<PnpmSelectorFamily>,
-        )] = &[
+        );
+        let table: &[Row<'_>] = &[
             ("no pin, legacy", "10.33.2", None, Managed, Some(Legacy)),
             ("no pin, current", "12.16.1", None, Managed, Some(Current)),
             (

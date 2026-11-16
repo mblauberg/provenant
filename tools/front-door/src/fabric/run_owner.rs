@@ -122,7 +122,7 @@ mod output_projection_tests {
                 stop: None,
                 outcome: Outcome::PermissionDenied,
                 exit_code: None,
-                finished_at: WallTime::from_micros(sequence).unwrap(),
+                finished_at: WallTime::from_micros(i64::try_from(sequence).unwrap()).unwrap(),
                 reason: Some(reason),
             },
             trace: Default::default(),

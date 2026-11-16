@@ -1256,10 +1256,11 @@ mod tests {
     fn registered_project_root_uses_external_common_hint_and_keeps_bare_projects_host_only()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::{
-            registered_project_roots_for_binding, registered_project_roots_for_repository,
+            registered_project_roots_for_repository, registered_project_roots_from_binding,
         };
         use provenant_core::{CancelToken, RootInputs};
         use std::path::Path;
+        use std::time::Duration;
 
         fn git(cwd: &Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
             let output = provenant_os::fixture::git_command()
@@ -1382,7 +1383,7 @@ mod tests {
         let bare_binding =
             provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&bare)?)?;
         assert_eq!(bare_binding.primary_checkout_hint(), None);
-        let (bare_root, bare_project) = registered_project_roots_for_binding(
+        let (bare_root, bare_project) = registered_project_roots_from_binding(
             &bare_binding,
             &executor,
             &utility,
