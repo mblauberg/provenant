@@ -4000,12 +4000,16 @@ mod writer_recovery_tests {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         enum Marker {
             None,
+            AdmissionSteer,
+            AdmissionCancel,
             DeliveredSteer,
             ExplicitCancel,
             ExplicitAfterSteer,
         }
         use Marker::{DeliveredSteer, ExplicitAfterSteer, ExplicitCancel};
         for (changed, dirty, blocked, shared, budget, marker) in [
+            (false, false, false, false, false, Marker::AdmissionSteer),
+            (false, false, false, false, false, Marker::AdmissionCancel),
             (false, false, false, false, false, Marker::None),
             (true, false, false, false, false, Marker::None),
             (false, true, false, false, false, Marker::None),
@@ -4046,6 +4050,41 @@ mod writer_recovery_tests {
                 &limits,
                 &call,
             )?;
+            if matches!(marker, Marker::AdmissionSteer | Marker::AdmissionCancel) {
+                let record = store.record(id, &call)?;
+                let scope = RunStore::scope(&record);
+                let attempt = store.attempt_dir(id, false)?;
+                crate::artifacts::seal(
+                    &attempt,
+                    "cancel.json",
+                    &crate::db::bytes(&serde_json::json!({
+                        "schema_version": 1,
+                        "scope": scope,
+                        "requester": execution.actor_id,
+                        "request_id": format!("{}.{}.cancel", scope.attempt, scope.generation),
+                        "reason": if marker == Marker::AdmissionSteer {
+                            StopReason::Steered
+                        } else {
+                            StopReason::ExplicitCancellation
+                        }
+                    }))?,
+                    RECORD_LIMIT,
+                )?;
+                let admitted = store.admit(
+                    id,
+                    &attempt,
+                    &crate::tests::HostFacts::new(100),
+                    &clock,
+                    &cancel,
+                );
+                if marker == Marker::AdmissionCancel {
+                    assert!(matches!(admitted, Err(RunError::Cancelled)));
+                    assert_eq!(store.record(id, &call)?.state, record.state);
+                } else {
+                    assert!(matches!(admitted?.state, AttemptState::Running { .. }));
+                }
+                continue;
+            }
             let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
             let scope = RunStore::scope(&record);
             let attempt = store.attempt_dir(id, false)?;

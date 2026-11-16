@@ -817,7 +817,18 @@ impl RunStore {
     ) -> Result<AttemptRecord> {
         let call = Request { clock, cancel };
         call.check()?;
-        if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some() {
+        let record = self.record(id, &call)?;
+        // A steer interrupt uses the same marker as an owner stop. Only the
+        // owner's explicit cancellation of this scope vetoes admission.
+        if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
+            .and_then(|raw| crate::db::decode::<crate::store::CancellationEvidence>(&raw).ok())
+            .is_some_and(|request| {
+                request.requests_stop(
+                    Self::scope(&record),
+                    record.verified_owner.unwrap_or(self.context.actor_id),
+                )
+            })
+        {
             return Err(RunError::Cancelled);
         }
         let ticket = self.ticket(&self.db, id)?;
