@@ -987,18 +987,78 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
 fn seed_state(directory: &Directory) -> &'static str {
     match directory.read_bounded(SEED_RESULT.as_ref(), 64 * 1024) {
         Ok(bytes) => match serde_json::from_slice::<GcResult>(&bytes) {
-            Ok(result) => match result.state.as_str() {
-                "queued" => "queued",
-                "running" => "running",
-                "complete" => "complete",
-                "busy" => "busy",
-                "disabled" => "disabled",
-                _ => "last_failed",
-            },
+            Ok(result) => seed_result_state(&result.state),
             Err(_) => "last_failed",
         },
         Err(error) if error.is_not_found() => "idle",
         Err(_) => "last_failed",
+    }
+}
+
+fn seed_result_state(state: &str) -> &'static str {
+    match state {
+        "queued" => "queued",
+        "running" => "running",
+        "complete" => "complete",
+        "busy" => "busy",
+        "disabled" => "disabled",
+        _ => "last_failed",
+    }
+}
+
+/// Project persisted errors onto a small, safe set of operator-facing causes.
+/// The stored detail can include command arguments, stderr, or repository paths.
+fn safe_seed_failure_diagnostic(error: Option<&str>) -> &'static str {
+    let Some(error) = error.filter(|error| !error.is_empty()) else {
+        return "The seed refresh failed without a saved cause. Run `provenant worktree seed-build` in the affected repository for current details.";
+    };
+    if error.contains("shared Cargo target seed is unavailable while") {
+        "A Rust or Cargo override prevents reliable shared-seed reuse. Review host overrides, then run `provenant worktree seed-build` in the affected repository."
+    } else if error.contains("Cargo configuration cannot be represented")
+        || error.contains("cargo_config_")
+    {
+        "Cargo configuration selects a build setting the shared seed cannot represent. Review the host and repository Cargo config, then run `provenant worktree seed-build` in the affected repository."
+    } else if error.contains("cannot verify registered Git directory")
+        || error.contains("Git executable unavailable")
+        || error.contains("git unavailable")
+    {
+        "A registered Git repository could not be verified. Check its local Git or worktree state, then rerun `provenant tick`."
+    } else if error.contains("verify base") || error.contains("verify-base") {
+        "The configured verify base could not be read or lacks the selected Cargo workspace. Refresh or correct that ref, then run `provenant worktree seed-build` in the affected repository."
+    } else if error.contains("command failed:") || error.contains("running seed command:") {
+        "A Cargo or Git command failed while refreshing the seed. Run `provenant worktree seed-build` in the affected repository for local details."
+    } else {
+        "A registered repository's seed could not be refreshed or verified. Run `provenant worktree seed-build` in the affected repository for local details."
+    }
+}
+
+fn target_seed_task(directory: &Directory) -> Task {
+    match directory.read_bounded(SEED_RESULT.as_ref(), 64 * 1024) {
+        Ok(bytes) => match serde_json::from_slice::<GcResult>(&bytes) {
+            Ok(result) => {
+                let state = seed_result_state(&result.state);
+                if state == "last_failed" {
+                    Task::idle_with_diagnostic(
+                        "target_seed",
+                        state,
+                        safe_seed_failure_diagnostic(result.error.as_deref()),
+                    )
+                } else {
+                    Task::idle("target_seed", state)
+                }
+            }
+            Err(_) => Task::idle_with_diagnostic(
+                "target_seed",
+                "last_failed",
+                "The local seed result could not be read. Run `provenant worktree seed-build` in the affected repository for current details.",
+            ),
+        },
+        Err(error) if error.is_not_found() => Task::idle("target_seed", "idle"),
+        Err(_) => Task::idle_with_diagnostic(
+            "target_seed",
+            "last_failed",
+            "The local seed result could not be read. Run `provenant worktree seed-build` in the affected repository for current details.",
+        ),
     }
 }
 
@@ -1015,6 +1075,8 @@ struct Task {
     state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic: Option<&'static str>,
 }
 
 impl Task {
@@ -1024,11 +1086,13 @@ impl Task {
                 task,
                 state,
                 error: None,
+                diagnostic: None,
             },
             Err(error) => Self {
                 task,
                 state: "failed",
                 error: Some(error),
+                diagnostic: None,
             },
         }
     }
@@ -1037,6 +1101,19 @@ impl Task {
             task,
             state,
             error: None,
+            diagnostic: None,
+        }
+    }
+    fn idle_with_diagnostic(
+        task: &'static str,
+        state: &'static str,
+        diagnostic: &'static str,
+    ) -> Self {
+        Self {
+            task,
+            state,
+            error: None,
+            diagnostic: Some(diagnostic),
         }
     }
 }
@@ -1124,20 +1201,25 @@ fn tick(
             // Busy retries and abandoned detached jobs are re-admitted here.
             // The queue protocol retains their scope and coalesces a full pass.
             if seed_retry_due(&directory, now) {
-                if queue_seed(&directory, now, None, || {
+                match queue_seed(&directory, now, None, || {
                     spawn_seed_worker(resolved.roots.state.as_path(), &resolved.home)
-                })
-                .is_err()
-                {
-                    Task::idle("target_seed", "last_failed")
-                } else {
-                    Task::idle("target_seed", seed_state(&directory))
+                }) {
+                    Err(error) => Task::idle_with_diagnostic(
+                        "target_seed",
+                        "last_failed",
+                        safe_seed_failure_diagnostic(Some(&error)),
+                    ),
+                    Ok(()) => target_seed_task(&directory),
                 }
             } else {
-                Task::idle("target_seed", seed_state(&directory))
+                target_seed_task(&directory)
             }
         }
-        Err(_) => Task::idle("target_seed", "last_failed"),
+        Err(_) => Task::idle_with_diagnostic(
+            "target_seed",
+            "last_failed",
+            "The local tick state directory is unavailable. Check host state permissions, then rerun `provenant tick`.",
+        ),
     };
     let tasks = vec![
         gc,
@@ -1180,6 +1262,10 @@ pub(crate) fn run(globals: &Globals, workers: &'static dyn WorkerObserver) -> u8
                     task.error
                         .as_ref()
                         .map(|error| format!("{}: {error}", task.task))
+                }))
+                .chain(data.tasks.iter().filter_map(|task| {
+                    task.diagnostic
+                        .map(|diagnostic| format!("note: {}: {diagnostic}", task.task))
                 }))
                 .collect();
             let summary = provenant_cli::Summary::new(
@@ -1412,6 +1498,43 @@ mod tests {
             .unwrap();
         let result: GcResult = serde_json::from_slice(&bytes).unwrap();
         (seed_state(directory), result.error)
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn seed_failure_report_projects_a_safe_cause_and_action() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let directory = provenant_config::private_directory(&root, true).unwrap();
+        write_result(
+            &directory,
+            SEED_RESULT,
+            "tick-seed",
+            WallTime::from_micros(1_000_000).unwrap(),
+            "failed",
+            Some(
+                "/private/sensitive/repo: command failed: [\"cargo\", \"--token\", \"do-not-print\"] API_KEY=secret-value".into(),
+            ),
+        )
+        .unwrap();
+
+        let task = target_seed_task(&directory);
+        assert_eq!(task.state, "last_failed");
+        assert!(task.error.is_none(), "a seed note must not fail the tick");
+        let diagnostic = task.diagnostic.unwrap();
+        assert!(diagnostic.contains("Cargo or Git command failed"));
+        assert!(diagnostic.contains("provenant worktree seed-build"));
+
+        let rendered = serde_json::to_string(&task).unwrap();
+        for private_detail in [
+            "/private/sensitive/repo",
+            "--token",
+            "do-not-print",
+            "API_KEY",
+            "secret-value",
+        ] {
+            assert!(!rendered.contains(private_detail));
+        }
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed

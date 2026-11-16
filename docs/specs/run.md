@@ -66,6 +66,10 @@ retry at the next scheduled collection, while busy projects retry on the next
 tick without rebuilding other failed projects. Full requests supersede queued
 busy retries and reevaluate prior failures. Detached pending and active scopes
 survive process interruption and are retried after a minute.
+When a scheduled refresh fails, `provenant tick` reports a bounded cause category
+and a next step from the saved result. This note does not expose persisted
+command output, repository paths or environment values, and does not change the
+tick outcome or retry schedule.
 - Why: reuse must not introduce incompatible or partially collected build output.
 
 ## Publication order
