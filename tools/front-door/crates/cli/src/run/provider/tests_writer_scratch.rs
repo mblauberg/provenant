@@ -1347,44 +1347,60 @@ printf 'agy 1.0.0\n'
     assert_eq!(credential.mediation, "gh wrapper (advisory)");
     assert!(!serde_json::to_string(credential)?.contains("fixture-host-token"));
     let gh_config = publishing_paths.temporary.join("candidate-0/gh-config");
-    assert!(gh_config.is_dir());
-    assert!(
-        publishing
-            .environment
-            .iter()
-            .any(|(key, value)| key == "GH_CONFIG_DIR" && value == gh_config.as_os_str())
-    );
-    assert_eq!(std::fs::read_dir(&gh_config)?.count(), 0);
     let gh_shim = std::fs::read_to_string(publishing_paths.temporary.join("candidate-0/bin/gh"))?;
-    assert!(gh_shim.contains(gh_config.to_str().ok_or("gh config path")?));
     assert!(gh_shim.contains(provenant_config::GH_INVOCATIONS_FILE));
-    assert!(
-        !gh_shim.contains(
-            home.join(".config/gh")
-                .to_str()
-                .ok_or("host gh config path")?
-        )
-    );
-    // If gh is installed, exercise its real configuration parser without a
-    // network request. The private directory gives the ordinary default even
-    // when the host config is linked or absent.
-    if let Ok(real_gh) = find_executable("gh") {
-        let argv = [
-            real_gh.into_os_string(),
-            "config".into(),
-            "get".into(),
-            "git_protocol".into(),
-        ];
-        let environment = [
-            ("HOME".into(), home.as_os_str().to_owned()),
-            ("GH_CONFIG_DIR".into(), gh_config.as_os_str().to_owned()),
-            ("GH_TOKEN".into(), "fixture-host-token".into()),
-        ];
-        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
-        options.env = Some(&environment);
-        let actual = executor.execute(options)?;
-        assert_eq!(actual.termination, Termination::Exit(0));
-        assert_eq!(actual.stdout.bytes, b"https\n");
+    if sandbox_effective {
+        assert!(gh_config.is_dir());
+        assert!(
+            publishing
+                .environment
+                .iter()
+                .any(|(key, value)| key == "GH_CONFIG_DIR" && value == gh_config.as_os_str())
+        );
+        assert_eq!(std::fs::read_dir(&gh_config)?.count(), 0);
+        assert!(gh_shim.contains(gh_config.to_str().ok_or("gh config path")?));
+        assert!(
+            !gh_shim.contains(
+                home.join(".config/gh")
+                    .to_str()
+                    .ok_or("host gh config path")?
+            )
+        );
+        // Exercise gh's real parser only with the attempt-private config. A
+        // native launch deliberately retains the caller's own config.
+        if let Ok(real_gh) = find_executable("gh") {
+            let argv = [
+                real_gh.into_os_string(),
+                "config".into(),
+                "get".into(),
+                "git_protocol".into(),
+            ];
+            let environment = [
+                ("HOME".into(), home.as_os_str().to_owned()),
+                ("GH_CONFIG_DIR".into(), gh_config.as_os_str().to_owned()),
+                ("GH_TOKEN".into(), "fixture-host-token".into()),
+            ];
+            let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+            options.env = Some(&environment);
+            let actual = executor.execute(options)?;
+            assert_eq!(actual.termination, Termination::Exit(0));
+            assert_eq!(actual.stdout.bytes, b"https\n");
+        }
+    } else {
+        assert!(!gh_config.exists());
+        assert!(
+            !publishing
+                .environment
+                .iter()
+                .any(|(key, _)| key == "GH_CONFIG_DIR")
+        );
+        assert!(
+            publishing
+                .environment
+                .iter()
+                .any(|(key, value)| key == "HOME" && value == home.as_os_str())
+        );
+        assert!(!gh_shim.contains("GH_CONFIG_DIR="));
     }
     let profile = &publishing
         .confinement
@@ -1609,11 +1625,13 @@ printf 'agy 1.0.0\n'
             "-l".into(),
             label.into(),
         ];
-        executor.execute(ExecOptions::new(
+        let mut options = ExecOptions::new(
             &argv,
             &attempt,
             std::time::Duration::from_secs(5),
-        ))
+        );
+        options.env = Some(&publishing.environment);
+        executor.execute(options)
     };
     let denied = run_shim("ci")?;
     assert_eq!(denied.termination, provenant_os::exec::Termination::Exit(1));

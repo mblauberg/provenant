@@ -933,10 +933,6 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
         let out = SystemExecutor::new(1)?.execute(options)?;
         assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
         assert!(!out.timed_out, "{out:?}");
-        assert!(
-            String::from_utf8_lossy(&out.stderr.bytes)
-                .contains("OpenCode login status is unverified")
-        );
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
@@ -1069,6 +1065,9 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
     )?;
     assert_eq!(prepared.route.provider.as_deref(), Some("opencode"));
     assert_eq!(prepared.route.account_key.as_deref(), Some("go"));
+    assert!(prepared.route.launch_warnings.iter().any(|warning| {
+        warning.contains("OpenCode login status is unverified")
+    }));
     Ok(())
 }
 

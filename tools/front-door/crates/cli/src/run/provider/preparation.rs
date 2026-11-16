@@ -2835,6 +2835,7 @@ pub(super) fn prepare_candidates(
     let timestamp = clock.unix_seconds();
     let diagnostic_records = crate::quota::read_cache(roots).unwrap_or_default();
     let mut availability = Vec::new();
+    let mut login_unverified = std::collections::BTreeSet::<(String, String)>::new();
     let mut reasons: Vec<SkippedRoute> = Vec::new();
     let mut reason_boundaries = std::collections::BTreeMap::new();
     let mut reason_resources = std::collections::BTreeMap::new();
@@ -2930,8 +2931,7 @@ pub(super) fn prepare_candidates(
                         if strategy == provenant_records::LoginReprobe::ExecutableOnly {
                             // The version probe established executable availability,
                             // not login health. Let the selected launch check auth.
-                            record.fixture_ref =
-                                format!("installed/{}/login-unverified", entry.adapter);
+                            login_unverified.insert((entry.adapter.clone(), entry.key.clone()));
                         } else {
                             let healthy = match strategy {
                                 provenant_records::LoginReprobe::Codex => {
@@ -4326,10 +4326,8 @@ pub(super) fn prepare_candidates(
         }
         if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
             spec.login_observation == provenant_records::LoginObservation::ExecutableOnly
-        }) && availability.iter().any(|record| {
-            record.adapter == route.adapter
-                && record.account_key == route.account_key
-                && record.fixture_ref == format!("installed/{}/login-unverified", route.adapter)
+        }) && route.account_key.as_ref().is_some_and(|account_key| {
+            login_unverified.contains(&(route.adapter.clone(), account_key.clone()))
         }) {
             push_launch_warning(
                 &mut route,

@@ -3868,7 +3868,7 @@ mod tests {
         const FIXTURE: &str = "PROVENANT_TEST_REPLAY_DIGEST_CONFIG_HOME";
         if let Some(config_home) = std::env::var_os(FIXTURE) {
             let config_home = std::path::PathBuf::from(config_home);
-            std::fs::create_dir_all(&config_home)?;
+            std::fs::create_dir_all(config_home.join("provenant/templates"))?;
         } else {
             use provenant_os::exec::{
                 ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
@@ -3877,7 +3877,7 @@ mod tests {
 
             let temp = tempfile::tempdir()?;
             let config_home = temp.path().join("config");
-            std::fs::create_dir(&config_home)?;
+            std::fs::create_dir_all(config_home.join("provenant/templates"))?;
             let mut environment: Vec<_> = std::env::vars_os()
                 .filter(|(key, _)| key != "XDG_CONFIG_HOME" && key != FIXTURE)
                 .collect();
