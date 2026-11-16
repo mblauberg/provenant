@@ -1485,6 +1485,7 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
 pub struct Session {
     pub store: run::RunStore,
     pub context: run::ExecutionContext,
+    pub chair: Option<Result<provenant_records::custody::Chair, String>>,
 }
 impl Session {
     pub fn service(&self) -> run::Service<'_> {
@@ -1511,14 +1512,34 @@ fn execution_context(edge: &Edge<'_>) -> Result<run::ExecutionContext, Fail> {
     })
 }
 fn open(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
-    let context = execution_context(edge)?;
+    let fabric = if crate::fabric::in_lane() {
+        crate::fabric::Context::open_read_only(edge.roots.clone(), edge.home, edge.cwd)
+    } else {
+        crate::fabric::Context::open(edge.roots.clone(), edge.home, edge.cwd)
+    }
+    .map_err(|error| match error {
+        crate::fabric::EdgeError::Config(error) => Fail::config(Status::Invalid, error),
+        error => Fail::new(Status::Error, ErrorKind::Identity, error.to_string()),
+    })?;
+    let context = run::ExecutionContext {
+        state_root: fabric.roots.state.clone(),
+        project_id: fabric.identity.project,
+        actor_id: fabric.identity.inbox.actor,
+        read_prompts: true,
+    };
+    let chair = (!fabric.in_lane)
+        .then(|| crate::fabric::current_chair(&fabric).map_err(|error| error.to_string()));
     let mut store =
         run::RunStore::open(&context, call)?.with_writer_registry(edge.roots.state.as_path());
     // Inside a lane the host binding may be unreadable; the trace then omits it.
     if let Ok(host) = provenant_config::bind_host(edge.roots) {
         store = store.with_host(host);
     }
-    Ok(Session { store, context })
+    Ok(Session {
+        store,
+        context,
+        chair,
+    })
 }
 fn open_read_only(
     edge: &Edge<'_>,

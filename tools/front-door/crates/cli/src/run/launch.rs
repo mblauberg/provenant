@@ -543,13 +543,12 @@ pub(super) fn launch_on_host_with_wait(
     // names none. The canonical request stays unchanged; custody owns identity.
     if request.chair.is_none() && request.parent.is_none() && !crate::fabric::in_lane() {
         let bind = || -> Result<(), Box<dyn std::error::Error>> {
-            let context = crate::fabric::Context::open(edge.roots.clone(), edge.home, edge.cwd)?;
-            if context.identity.project != session.context.project_id
-                || crate::workflow::session_actor(&context, None).map_err(std::io::Error::other)?
-                    != session.context.actor_id
-            {
-                return Err("direct run custody identity could not be verified".into());
-            }
+            let chair = session
+                .chair
+                .as_ref()
+                .ok_or("direct run chair unavailable")?
+                .as_ref()
+                .map_err(|error| std::io::Error::other(error.clone()))?;
             let graph = graph_for_attempt(session, attempt, call)
                 .map_err(|fail| std::io::Error::other(fail.message))?;
             let index_call = provenant_fabric_store::Request {
@@ -565,7 +564,7 @@ pub(super) fn launch_on_host_with_wait(
                 session.context.project_id,
                 &subject,
                 &provenant_records::custody::Holder::Chair {
-                    chair: crate::fabric::current_chair(&context)?,
+                    chair: chair.clone(),
                 },
                 provenant_records::custody::Origin::Provenant,
                 &index_call,
@@ -579,7 +578,9 @@ pub(super) fn launch_on_host_with_wait(
             )?;
             Ok(())
         };
-        if let Err(error) = bind() {
+        if let Err(error) = bind()
+            && (session.chair.is_some() || std::env::args_os().any(|arg| arg == "--full"))
+        {
             provenant_fabric_runtime::custody::warning(format_args!(
                 "direct run custody pending: {error}"
             ));

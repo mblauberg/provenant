@@ -309,7 +309,11 @@ fn session_inventory_page(
         out("{\"total\":0,\"next\":null}\n")?;
         return Ok((json!({}), String::new()));
     };
-    let session = Session { store, context };
+    let session = Session {
+        store,
+        context,
+        chair: None,
+    };
     // One bounded host census serves the entire read-only page. If unavailable,
     // rows remain Unknown and no read queues recovery or guesses from a PID.
     let census = provenant_supervisor::census::ProcessObserver::census(
@@ -487,7 +491,11 @@ pub fn review_attempt_facts(edge: &Edge<'_>, ids: &[AttemptId]) -> Result<Vec<At
 fn read_session(edge: &Edge<'_>, call: &run::Request<'_>) -> Result<Session, Fail> {
     let (context, store) = open_read_only(edge, call)?;
     let store = store.ok_or_else(|| Fail::from(run::RunError::NotFound))?;
-    Ok(Session { store, context })
+    Ok(Session {
+        store,
+        context,
+        chair: None,
+    })
 }
 
 fn facts_of(

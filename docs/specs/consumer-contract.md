@@ -177,7 +177,9 @@ locations may also differ from `HOME`.
 ## State root
 
 The state root is `~/.local/share/provenant/v2` unless `PROVENANT_STATE_DIR`
-names another. The 1.x root `~/.local/share/provenant/v1` is never written by
+names another. The default root does not warn merely because the working
+workspace is the home directory or its ancestor. An unusual root's advisory
+overlaps are reported once per state-root digest. The 1.x root `~/.local/share/provenant/v1` is never written by
 2.x, so reinstalling 1.x finds its state as it was left. This tier is evolving.
 
 - Why: two majors must be able to coexist and roll back without migration.

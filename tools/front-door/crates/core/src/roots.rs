@@ -199,6 +199,19 @@ impl StateRoot {
                 warnings.push(warning);
             }
         }
+        // The normal home-relative store remains normal even when the caller's
+        // working directory is HOME or an ancestor (as in scheduled ticks).
+        // Other advisory overlaps, including project configuration, still warn.
+        let default = resolve(&inputs.home.join(DEFAULT_STATE_SUFFIX)).ok();
+        if default.as_ref() == Some(&bound) {
+            let home = resolve(&inputs.home).unwrap_or_else(|_| inputs.home.clone());
+            warnings.retain(|warning| {
+                !((warning.source == "root inputs: workspace"
+                    || warning.source == "root inputs: checkout")
+                    && (home.starts_with(&warning.protected)
+                        || inputs.home.starts_with(&warning.protected)))
+            });
+        }
         Ok(Self {
             path: bound,
             warnings,
@@ -703,6 +716,18 @@ mod tests {
             input.state_dir = Some(allowed.into());
             assert!(input.resolve(&Resolver).is_ok());
         }
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/consumer-contract.md#state-root
+    fn default_root_ignores_home_ancestry_but_odd_root_warns() -> Result<(), RootError> {
+        let mut input = RootInputs::new("/fixture/home".into(), "/fixture/home".into());
+        input.workspaces.push("/".into());
+        input.environment_state_dir = Some(input.home.join(DEFAULT_STATE_SUFFIX));
+        assert!(input.resolve(&Resolver)?.state.warnings().is_empty());
+        input.environment_state_dir = Some(input.home.join("unusual-state"));
+        assert!(!input.resolve(&Resolver)?.state.warnings().is_empty());
         Ok(())
     }
 
