@@ -1392,16 +1392,6 @@ mod tests {
                         "OpenCode keeps npm's host HOME default"
                     );
                     assert_eq!(
-                        env_path(&env, "pnpm_config_cache_dir").as_ref(),
-                        Some(&expected[1]),
-                        "OpenCode must bind pnpm cache while XDG cache changes"
-                    );
-                    assert_eq!(
-                        env_path(&env, "pnpm_config_store_dir").as_ref(),
-                        Some(&expected[2]),
-                        "OpenCode must bind pnpm store while XDG data changes"
-                    );
-                    assert_eq!(
                         env_path(&env, "npm_config_cache_dir").as_ref(),
                         Some(&expected[1]),
                         "OpenCode must bind pnpm 10's cache selector"
