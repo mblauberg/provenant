@@ -11,7 +11,6 @@ use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
-    ffi::OsString,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -845,28 +844,13 @@ fn finish_seed_job_with_lock(
     }
 }
 
-fn seed_git_environment() -> Vec<(OsString, OsString)> {
-    [
-        ("HOME", "/nonexistent"),
-        ("XDG_CONFIG_HOME", "/nonexistent"),
-        ("GIT_CONFIG_NOSYSTEM", "1"),
-        ("GIT_CONFIG_GLOBAL", "/dev/null"),
-        ("GIT_CONFIG_SYSTEM", "/dev/null"),
-        ("GIT_NO_REPLACE_OBJECTS", "1"),
-        ("GIT_NO_LAZY_FETCH", "1"),
-        ("GIT_TERMINAL_PROMPT", "0"),
-        ("LC_ALL", "C"),
-    ]
-    .map(|(key, value)| (key.into(), value.into()))
-    .into()
-}
-
+/// Resolve registered projects through the utility's layout owner, which
+/// classifies local bare provenance; a bare common directory has no project.
 fn registered_seed_projects(
     bindings: &[provenant_config::ProjectBinding],
     retry_project_keys: &[String],
     executor: &dyn Executor,
-    git: &Path,
-    environment: &[(OsString, OsString)],
+    utility: &provenant_confinement::UtilityRuntime,
     cancel: &provenant_core::CancelToken,
 ) -> SeedDiscovery {
     let mut discovery = SeedDiscovery::default();
@@ -880,14 +864,10 @@ fn registered_seed_projects(
         if !retry_project_keys.is_empty() && !retry_project_keys.contains(&project_key) {
             continue;
         }
-        let layout = match provenant_confinement::worktrees::project_layout_for_binding(
-            executor,
-            binding,
-            git,
-            environment,
-            Duration::from_secs(5),
-            cancel,
-        ) {
+        let layout = match provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))
+            .and_then(|budget| {
+                utility.project_layout_for_binding(executor, binding, budget, cancel)
+            }) {
             Ok(layout) => layout,
             Err(error) => {
                 discovery.record_error(
@@ -951,12 +931,13 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
                     let git = provenant_os::git::git_executable()
                         .ok_or_else(|| "Git executable unavailable".to_owned())?;
                     let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
+                    let utility = provenant_confinement::UtilityRuntime::read_only(&git, state)
+                        .map_err(|error| error.to_string())?;
                     Ok(registered_seed_projects(
                         &selection.projects,
                         request.project_keys(),
                         &executor,
-                        &git,
-                        &seed_git_environment(),
+                        &utility,
                         &provenant_core::CancelToken::new(),
                     ))
                 },
@@ -1444,7 +1425,7 @@ mod tests {
             &executor,
             &stale_primary_hint,
             &git,
-            &seed_git_environment(),
+            &provenant_confinement::worktrees::project_layout_git_environment(),
             Duration::from_secs(5),
             &provenant_core::CancelToken::new(),
         )
@@ -1459,8 +1440,7 @@ mod tests {
             ],
             &[],
             &executor,
-            &git,
-            &seed_git_environment(),
+            &utility,
             &provenant_core::CancelToken::new(),
         );
         assert_eq!(
@@ -1483,8 +1463,7 @@ mod tests {
             &[primary_binding, invalid_binding, separate_binding],
             std::slice::from_ref(&primary_key),
             &executor,
-            &git,
-            &seed_git_environment(),
+            &utility,
             &provenant_core::CancelToken::new(),
         );
         assert_eq!(retry.projects.len(), 1);
