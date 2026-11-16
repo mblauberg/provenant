@@ -1755,27 +1755,29 @@ fn collect_impl(
                     )?;
                     Ok(())
                 };
-                let before_delete = |verified: &VerifiedWorktree, path: &Path, _archive| {
-                    if canonicalize(path)? != canonicalize(&lane.path)? {
-                        return Err(WorktreeError::IdentityChanged);
-                    }
-                    if let SelectedRetirement::Subsumed(evidence) = &action {
-                        validate_removal_evidence(context, lane.head, evidence, &refs, cancel)?;
-                        if let Some(branch) = branch.as_ref() {
-                            validate_forge_head(
-                                policy
-                                    .retirement_feeds
-                                    .ok_or(WorktreeError::RegistrationUnconfirmed)?,
-                                branch,
-                                evidence,
-                            )?;
+                let before_delete =
+                    |verified: &VerifiedWorktree, path: &Path, _archive: Option<&ArchiveInfo>| {
+                        if canonicalize(path)? != canonicalize(&lane.path)? {
+                            return Err(WorktreeError::IdentityChanged);
                         }
-                    }
-                    let retirement =
-                        begin_worktree_retirement(context, port, lane, verified, decision, cancel)?;
-                    active_retirement = Some(retirement);
-                    Ok(())
-                };
+                        if let SelectedRetirement::Subsumed(evidence) = &action {
+                            validate_removal_evidence(context, lane.head, evidence, &refs, cancel)?;
+                            if let Some(branch) = branch.as_ref() {
+                                validate_forge_head(
+                                    policy
+                                        .retirement_feeds
+                                        .ok_or(WorktreeError::RegistrationUnconfirmed)?,
+                                    branch,
+                                    evidence,
+                                )?;
+                            }
+                        }
+                        let retirement = begin_worktree_retirement(
+                            context, port, lane, verified, decision, cancel,
+                        )?;
+                        active_retirement = Some(retirement);
+                        Ok(())
+                    };
                 let mut removed = if policy.mode == CollectionMode::LandingCleanup {
                     remove_tree_when_before_delete_locked(
                         context,

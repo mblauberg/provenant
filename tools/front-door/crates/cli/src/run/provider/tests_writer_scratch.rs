@@ -1301,6 +1301,10 @@ printf 'agy 1.0.0\n'
     publishing_task
         .profile
         .knobs
+        .insert("lanes.sandbox".into(), serde_json::json!("on"));
+    publishing_task
+        .profile
+        .knobs
         .insert("lanes.publish".into(), serde_json::json!(true));
     let publishing = prepare_with(
         &registry,

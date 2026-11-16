@@ -693,6 +693,7 @@ pub(super) fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache
 }
 
 pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Result {
+    // Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
     use provenant_os::fs::Directory;
     use provenant_os::fs::LockMode;
     use std::ffi::OsStr;
@@ -847,12 +848,9 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
     assert!(cache.is_dir());
     assert!(dry["data"]["worktree_cleanup"][0]["dry_run"] == true);
     assert!(merged.join("target/artifact").is_file());
-    // Preview does not fetch the upstream proof needed to remove a tree.
     assert!(
-        dry["data"]["worktree_cleanup"][0]["worktrees"]["pruned_refs"]
-            .as_array()
-            .ok_or("refs")?
-            .is_empty()
+        has_branch(&rig, "merged")?,
+        "preview deleted the source ref"
     );
     // Alert failure must not block reclamation, including on a full disk.
     fs::write(
@@ -885,10 +883,11 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
     );
     let gc_report = &collected["data"]["worktree_cleanup"][0];
     assert!(
-        gc_report["worktrees"]["pruned_refs"]
+        gc_report["refs"]
             .as_array()
             .ok_or("refs")?
-            .contains(&serde_json::json!("merged")),
+            .iter()
+            .any(|entry| entry["name"] == "refs/heads/merged" && entry["outcome"] == "removed"),
         "GC did not prune merged lane; report: {gc_report}"
     );
     assert!(!merged.exists());
@@ -898,17 +897,22 @@ pub(super) fn gc_fetches_default_and_removes_only_clean_merged_worktrees() -> Re
     assert!(live.is_dir());
     assert!(unmerged.is_dir());
     assert!(queued_path.is_dir());
+    assert!(rig.project.join(".worktrees/locked").is_dir());
+    assert!(has_branch(&rig, "locked")?);
     for name in ["fresh-old", "fresh-tip", "unrecorded"] {
+        // Scheduled GC follows the retention class: clean subsumed tips are
+        // eligible even without unique work or a run registration.
         assert!(
-            rig.project.join(".worktrees").join(name).is_dir(),
-            "{name} was swept"
+            !rig.project.join(".worktrees").join(name).exists(),
+            "subsumed {name} was retained"
         );
-        assert!(has_branch(&rig, name)?);
+        assert!(!has_branch(&rig, name)?);
     }
     for (branch, reason) in [
-        ("fresh-old", "no_unique_commit"),
-        ("fresh-tip", "at_integration_tip"),
-        ("locked", "locked_or_prunable"),
+        ("dirty", "dirty"),
+        ("live", "lock_busy"),
+        ("locked", "unknown_writer"),
+        ("queued", "unknown_writer"),
     ] {
         let retained = collected["data"]["worktree_cleanup"][0]["worktrees"]["retained"]
             .as_array()

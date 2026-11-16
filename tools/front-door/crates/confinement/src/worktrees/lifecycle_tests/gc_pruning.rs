@@ -702,6 +702,7 @@ fn gc_dry_run_keeps_a_merged_foreign_worktree_when_foreign_cleanup_is_off()
 
 #[test]
 fn gc_dry_run_retains_preview_dirty_worktree() -> Result<(), Box<dyn Error>> {
+    // Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
     let fixture = Fixture::new()?;
     fs::write(fixture.root.join(".gitignore"), "cache/\n")?;
     fixture.run(&["add", ".gitignore"])?;

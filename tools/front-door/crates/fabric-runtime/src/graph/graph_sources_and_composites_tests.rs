@@ -479,6 +479,12 @@ fn settled_source_consumer_keeps_composite_export_when_member_retries() {
     let mut journal = MemoryJournal::default();
     let completed = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(completed.status, GraphStatus::Complete);
+    let sink_source = owner
+        .calls
+        .iter()
+        .zip(&owner.source_commits)
+        .find_map(|((key, _), source)| (key.node_id == "sink").then_some(source.as_deref()));
+    assert_eq!(sink_source, Some(Some(first_commit.as_str())));
     assert_eq!(
         completed
             .checkpoint

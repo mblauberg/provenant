@@ -1182,7 +1182,7 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
             "branch launch did not keep its new worktree: {response}"
         );
         if location == "branch" {
-            assert_eq!(node["worktree"], ".worktrees/writer-branch");
+            assert_eq!(node["worktree"].as_str(), tree.to_str());
         }
         assert_eq!(node["writer_binding"]["worktree"].as_str(), tree.to_str());
         if matches!(
@@ -1293,7 +1293,9 @@ fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
         .map_err(|e| format!("register account: {e}"))?;
     let args = [
         "task",
-        "remote writer",
+        "fixture uncatalogued refusal",
+        "--model",
+        "codex/uncatalogued-fixture-model",
         "--mode",
         "worktree-write",
         "--branch",
@@ -1311,7 +1313,7 @@ fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
     );
     assert!(
         code(&settled.launch) != 0 || settled.exit() != 0,
-        "the fixture provider should remain unavailable"
+        "the fixture provider should refuse the requested model"
     );
     let head = rig.execute(
         &git,

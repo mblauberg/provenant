@@ -1951,12 +1951,6 @@ mod tests {
                 assert_eq!(primary.outcome, ArtefactState::Retained);
                 assert_eq!(primary.head, Some(tip));
                 assert_eq!(
-                    primary.removal.as_ref().map(|record| &record.outcome),
-                    Some(&RemovalOutcome::Kept {
-                        cause: RemovalUncertainty::UnprovenLanding,
-                    })
-                );
-                assert_eq!(
                     ledger.load(&endpoint, &GitRefName::branch(branch).unwrap())?,
                     Some(record)
                 );

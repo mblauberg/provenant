@@ -106,6 +106,7 @@ fn gc_verdict(report: &WorktreeGcReport, lane: &WorktreeInfo) -> GcVerdict {
 /// runs a nested repository's Git filters.
 #[test]
 fn gc_preview_verdict_matches_apply_for_every_worktree_state() -> Result<(), Box<dyn Error>> {
+    // Spec: docs/specs/supervisor.md#pruning-and-gc-need-proof
     for state in ["clean", "untracked", "poisoned-gitlink"] {
         let fixture = Fixture::new()?;
         let test = TestContext::new(&fixture)?;

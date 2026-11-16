@@ -308,5 +308,7 @@ cache, and foreign, detached or idle worktree collection requires the declared
 retention policy and complete current custody, run and process evidence.
 Shallow history, conflicted comparisons, moved tips and unavailable evidence
 keep the candidate.
+Removal previews use the same cleanliness and ignored-output eligibility
+checks as apply; a preview never reports dirty user data as removable.
 - Why: GC runs unattended; pruning on a guess deletes the user's work.
 - Owner: `crates/confinement/src/worktrees.rs`, `crates/confinement/src/cache.rs`

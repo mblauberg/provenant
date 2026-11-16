@@ -724,10 +724,22 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             if Path::new("live-pr").exists() {
                 let live_head: serde_json::Value = serde_json::from_slice(&fs::read("head.json")?)?;
                 let base = fs::read_to_string("base-sha")?;
-                assert!(
-                    Some(commit) == live_head["headRefOid"].as_str() || commit == base,
-                    "{value}"
-                );
+                let head = live_head["headRefOid"].as_str().ok_or("head")?;
+                if commit != head && commit != base {
+                    // Landing checks its synthetic merge candidate, not only
+                    // the PR head. Bind its parents to this fixture's subject.
+                    provenant_core::GitOid::parse(commit)?;
+                    let parents = provenant_os::fixture::run_git(
+                        &std::env::current_dir()?,
+                        &["show", "-s", "--format=%P", commit],
+                    )?;
+                    let parents = std::str::from_utf8(&parents)?;
+                    assert_eq!(
+                        parents.split_whitespace().collect::<Vec<_>>(),
+                        [base.as_str(), head],
+                        "{value}"
+                    );
+                }
             } else {
                 assert!(commit == HEAD || commit == OTHER, "{value}");
             }
