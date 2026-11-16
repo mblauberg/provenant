@@ -37,6 +37,229 @@ pub(crate) struct BinaryRunOwner<'a> {
     /// Only the direct chair entry point supplies a verified origin.
     pub(crate) chair: Option<provenant_records::custody::Chair>,
 }
+
+fn output_lane_row(
+    record: &provenant_run::AttemptRecord,
+    root: &Path,
+    now: Option<provenant_core::WallTime>,
+    peer_output: bool,
+) -> provenant_records::wire::LaneRow {
+    // Output is a read-only point query. The unavailable-census projection
+    // preserves scoped sealed-exit evidence and keeps all other Running
+    // attempts unknown without starting a census or reaper.
+    if peer_output {
+        let mut record = record.clone();
+        provenant_fabric_runtime::runs::project_peer_attempt_diagnostics(&mut record);
+        provenant_cli::run::project_lane_with_census(&record, &[], root, now, true, Err(()))
+    } else {
+        provenant_cli::run::project_lane_with_census(record, &[], root, now, true, Err(()))
+    }
+}
+
+fn project_output_events_for_peer(
+    events: &mut [provenant_records::run::RunEvent],
+    peer_output: bool,
+) {
+    if peer_output {
+        for event in events {
+            provenant_fabric_runtime::runs::project_peer_run_event_diagnostics(event);
+        }
+    }
+}
+
+#[cfg(test)]
+mod output_projection_tests {
+    use super::*;
+    use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
+    use provenant_records::CanonicalV1;
+    use provenant_records::run::{AttemptState, Outcome, RunEvent, TerminalCause};
+
+    fn attempt(state: serde_json::Value) -> provenant_run::AttemptRecord {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "project_id": ProjectId::from_bytes([3; 16]),
+            "key": provenant_records::WorkKey::new(
+                ProjectId::from_bytes([3; 16]),
+                "graph",
+                "node",
+                1
+            ).unwrap(),
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+            "authority_digest": Digest::from_bytes([5; 32]),
+            "queued_at": WallTime::from_micros(1).unwrap(),
+            "state": state,
+            "usage": {},
+            "read_only_writable": [],
+            "protected_paths": [],
+            "trace": {},
+            "prompt": {
+                "path":{"encoding":"utf8","path":"prompt.txt"},
+                "digest":CanonicalV1::file_digest(b""),
+                "bytes":0,
+                "complete":true,
+                "redacted":false
+            }
+        }))
+        .unwrap()
+    }
+
+    fn event(sequence: u64, cause: TerminalCause, reason: String, note: String) -> RunEvent {
+        RunEvent {
+            extra: Default::default(),
+            schema_version: 1,
+            sequence,
+            project_id: ProjectId::from_bytes([3; 16]),
+            attempt_id: AttemptId::from_bytes([1; 16]),
+            revision: sequence,
+            change: AttemptState::Terminal {
+                extra: Default::default(),
+                terminal_cause: Some(cause),
+                terminal_note: Some(note),
+                stop: None,
+                outcome: Outcome::PermissionDenied,
+                exit_code: None,
+                finished_at: WallTime::from_micros(sequence).unwrap(),
+                reason: Some(reason),
+            },
+            trace: Default::default(),
+        }
+    }
+
+    #[test]
+    // Spec: docs/specs/state.md#config-never-widens-authority
+    fn peer_output_redacts_only_the_typed_binding_refusal() {
+        let private_path = "/private/host-state/projects/fixture";
+        let private_repair = "chmod 700 /private/host-state/projects/fixture";
+        let unsafe_binding = attempt(serde_json::json!({
+            "state":"terminal",
+            "outcome":"permission_denied",
+            "exit_code":null,
+            "finished_at":WallTime::from_micros(2).unwrap(),
+            "terminal_cause":"project_binding_directory_unsafe",
+            "terminal_note":private_repair,
+            "reason":format!("{private_path} has unsafe ownership or permissions")
+        }));
+        let local = output_lane_row(&unsafe_binding, Path::new("/"), None, false);
+        let peer = output_lane_row(&unsafe_binding, Path::new("/"), None, true);
+        assert!(local.reason.as_deref().is_some_and(|reason| {
+            reason.contains(private_path) && reason.contains(private_repair)
+        }));
+        let remote_reason = peer.reason.expect("peer diagnostic");
+        assert!(remote_reason.contains("project binding state directory is unsafe on the host"));
+        assert!(remote_reason.contains("ask the host owner"));
+        assert!(!remote_reason.contains(private_path));
+        assert!(!remote_reason.contains(private_repair));
+
+        // Text that merely looks like a private path is not classified by its
+        // contents and remains untouched when the sealed cause is unrelated.
+        let user_text = format!("user prompt contains {private_path}");
+        let unrelated = attempt(serde_json::json!({
+            "state":"terminal",
+            "outcome":"permission_denied",
+            "exit_code":null,
+            "finished_at":WallTime::from_micros(3).unwrap(),
+            "terminal_cause":"access_policy_refused",
+            "terminal_note":user_text.clone(),
+            "reason":user_text
+        }));
+        let remote_unrelated = output_lane_row(&unrelated, Path::new("/"), None, true);
+        assert!(
+            remote_unrelated
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains(&user_text))
+        );
+    }
+
+    #[test]
+    // Spec: docs/specs/state.md#config-never-widens-authority
+    fn peer_event_output_projects_typed_diagnostics_before_paging_without_text_scrubbing() {
+        let private_path = "/private/host-state/projects/fixture";
+        let private_repair = "chmod 700 /private/host-state/projects/fixture";
+        let user_prompt = "retain prompt text mentioning /private/prompt-data".to_owned();
+        let original = vec![
+            event(
+                1,
+                TerminalCause::ProjectBindingDirectoryUnsafe,
+                format!("{private_path} has unsafe ownership or permissions"),
+                private_repair.into(),
+            ),
+            event(
+                2,
+                TerminalCause::AccessPolicyRefused,
+                user_prompt.clone(),
+                user_prompt.clone(),
+            ),
+        ];
+        let mut local = original.clone();
+        project_output_events_for_peer(&mut local, false);
+        assert_eq!(local, original);
+
+        let mut remote = original;
+        project_output_events_for_peer(&mut remote, true);
+        let bytes = serde_json::to_vec(&remote).unwrap();
+        let projected = String::from_utf8(bytes.clone()).unwrap();
+        assert!(!projected.contains(private_path));
+        assert!(!projected.contains(private_repair));
+        assert!(projected.contains("project binding state directory is unsafe on the host"));
+        assert!(projected.contains("ask the host owner"));
+        assert!(projected.contains(&user_prompt));
+        assert!(matches!(
+            &remote[0].change,
+            AttemptState::Terminal {
+                terminal_cause: Some(TerminalCause::ProjectBindingDirectoryUnsafe),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &remote[1].change,
+            AttemptState::Terminal {
+                reason: Some(reason),
+                terminal_note: Some(note),
+                terminal_cause: Some(TerminalCause::AccessPolicyRefused),
+                ..
+            } if reason == &user_prompt && note == &user_prompt
+        ));
+    }
+
+    #[test]
+    // Spec: docs/specs/supervisor.md#read-only-writer-presence
+    fn peer_output_reports_unknown_without_proof_and_settling_on_a_sealed_exit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let record = attempt(serde_json::json!({"state":"running"}));
+        let temp = tempfile::tempdir()?;
+        let missing = output_lane_row(&record, temp.path(), None, true);
+        assert_eq!(missing.state, "unknown");
+        assert_eq!(
+            missing.presence,
+            Some(provenant_records::wire::LanePresence::Unknown)
+        );
+
+        let attempts = temp.path().join("attempts");
+        let attempt_dir = attempts.join(record.attempt_id.to_string());
+        std::fs::create_dir(&attempts)?;
+        std::fs::set_permissions(&attempts, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::create_dir(&attempt_dir)?;
+        std::fs::set_permissions(&attempt_dir, std::fs::Permissions::from_mode(0o700))?;
+        let exit = attempt_dir.join("process-exit.json");
+        std::fs::write(&exit, b"sealed exit evidence")?;
+        std::fs::set_permissions(&exit, std::fs::Permissions::from_mode(0o600))?;
+        let settling = output_lane_row(&record, temp.path(), None, true);
+        assert_eq!(settling.state, "settling");
+        assert_eq!(
+            settling.presence,
+            Some(provenant_records::wire::LanePresence::Settling)
+        );
+        Ok(())
+    }
+}
+
 /// Retain admitted preparation records when the CLI projects a launch refusal.
 /// Callers still classify the durable records with `BinaryRunOwner::receipt`.
 pub(crate) fn recover_accepted_launch(
@@ -1240,6 +1463,27 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<OutputResult, FacadeError> {
+        self.output_with_projection(input, budget, cancel, false)
+    }
+
+    /// Read output for peer serialization. The same typed owner that projects
+    /// status rows removes local repair details before they reach the peer.
+    pub(crate) fn output_for_peer(
+        &mut self,
+        input: OutputInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<OutputResult, FacadeError> {
+        self.output_with_projection(input, budget, cancel, true)
+    }
+
+    fn output_with_projection(
+        &mut self,
+        input: OutputInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        peer_output: bool,
+    ) -> Result<OutputResult, FacadeError> {
         let target = match &input {
             OutputInput::Read { target, .. } | OutputInput::Fetch { target, .. } => target.clone(),
         };
@@ -1263,12 +1507,11 @@ impl BinaryRunOwner<'_> {
             .service()
             .status(target.attempt, &call)
             .map_err(run_error)?;
-        let mut row = provenant_cli::run::project_lane(
+        let mut row = output_lane_row(
             &record,
-            &[],
             session.context.state_root.as_path(),
             self.factory.clock.wall_now().ok(),
-            false,
+            peer_output,
         );
         row.host = target.host.map(|host| host.to_string());
         row.provider_seconds = provenant_records::wire::provider_seconds(record.provider_ms);
@@ -1296,6 +1539,7 @@ impl BinaryRunOwner<'_> {
                         .service()
                         .events(offset, 64, Some(record.attempt_id), &call)
                         .map_err(run_error)?;
+                    project_output_events_for_peer(&mut events, peer_output);
                     let eof = events.len() < 64;
                     // Trim the page, never an event, so a caller can page on.
                     let kept = events_within(&events, max_bytes)?;
