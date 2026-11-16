@@ -75,7 +75,7 @@ impl<'a> Cli<'a> {
         let out = self
             .executor
             .execute(options)
-            .map_err(|_| "could not start".to_owned())?;
+            .map_err(|error| format!("could not start: {error}"))?;
         if out.timed_out {
             return Err("timed out".into());
         }
@@ -112,7 +112,7 @@ impl<'a> Cli<'a> {
         let out = self
             .executor
             .execute(options)
-            .map_err(|_| "could not start".to_owned())?;
+            .map_err(|error| format!("could not start: {error}"))?;
         parse_worktree_stream(&out.stdout.bytes).ok_or_else(|| {
             if out.timed_out {
                 "timed out".into()
@@ -143,7 +143,7 @@ impl<'a> Cli<'a> {
         let out = self
             .executor
             .execute(options)
-            .map_err(|_| "could not start".to_owned())?;
+            .map_err(|error| format!("could not start: {error}"))?;
         parse_lane_stream(&out.stdout.bytes, settled_after).ok_or_else(|| {
             if out.timed_out {
                 "timed out".into()
