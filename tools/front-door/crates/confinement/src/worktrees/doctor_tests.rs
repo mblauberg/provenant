@@ -315,10 +315,11 @@ fn doctor_reports_an_observed_bystander_in_a_free_worktree() -> Result<(), Box<d
 }
 
 #[test]
-fn a_read_only_probe_yields_busy_and_never_leaves_a_stale_lease() -> Result<(), Box<dyn Error>> {
+fn a_read_only_probe_yields_busy_without_publishing_a_reservation() -> Result<(), Box<dyn Error>> {
+    // Spec: docs/specs/supervisor.md#writer-reservation-and-settlement
     // Contract (Q4): an observation gate is tried once. A writer that meets a
     // probe is refused as busy at once and leaves no record; after the probe
-    // the same writer is admitted and its release frees the slot.
+    // the same writer is admitted. Its reservation then belongs to settlement.
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
@@ -359,11 +360,6 @@ fn a_read_only_probe_yields_busy_and_never_leaves_a_stale_lease() -> Result<(), 
         Occupancy::Held
     );
     drop(lease);
-    assert_eq!(
-        disk_writer_state(context.project_state, &path),
-        Occupancy::Available,
-        "a stale preparation record cannot substitute for a released lease"
-    );
     Ok(())
 }
 

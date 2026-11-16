@@ -1697,19 +1697,21 @@ fn collect_impl(
                     Ok(())
                 }
             };
+            let precheck = |verified: &VerifiedWorktree| {
+                let cleanliness = worktree_cleanliness_at(context, verified.repo(), cancel)?;
+                super::lifecycle::removal_verdict(&cleanliness, false, true)?;
+                precheck_removal(
+                    context,
+                    verified.repo(),
+                    policy.regenerable,
+                    policy.keep,
+                    cancel,
+                )
+            };
             if dry {
                 eligible(true)?;
+                precheck(&locked.verified)?;
                 if policy.mode == CollectionMode::LandingCleanup {
-                    let cleanliness =
-                        worktree_cleanliness_at(context, locked.verified.repo(), cancel)?;
-                    super::lifecycle::removal_verdict(&cleanliness, false, true)?;
-                    precheck_removal(
-                        context,
-                        locked.verified.repo(),
-                        policy.regenerable,
-                        policy.keep,
-                        cancel,
-                    )?;
                     output_bytes = collect_lane_output(
                         &lane.path,
                         locked.verified.repo(),
@@ -1741,15 +1743,7 @@ fn collect_impl(
                     .clone()
                     .ok_or(WorktreeError::RegistrationUnconfirmed)?;
                 let mut before_output = |verified: &VerifiedWorktree| {
-                    let cleanliness = worktree_cleanliness_at(context, verified.repo(), cancel)?;
-                    super::lifecycle::removal_verdict(&cleanliness, false, true)?;
-                    precheck_removal(
-                        context,
-                        verified.repo(),
-                        policy.regenerable,
-                        policy.keep,
-                        cancel,
-                    )?;
+                    precheck(verified)?;
                     output_bytes = collect_lane_output(
                         &lane.path,
                         verified.repo(),
