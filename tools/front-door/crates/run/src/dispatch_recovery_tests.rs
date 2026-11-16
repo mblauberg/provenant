@@ -1,5 +1,6 @@
 use super::*;
 
+// Spec: docs/specs/supervisor.md#read-only-writer-presence
 #[test]
 fn reboot_recovery_preserves_custody_across_boot_and_holder_states() -> TestResult {
     let base = RebootRecoveryCase::writer_after_reboot();
