@@ -148,6 +148,17 @@ An occupied concurrency threshold warns and proceeds unless its declared policy 
 - Why: a graph that starts must be able to finish within its bounds.
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
+### Implementation planning
+
+An `implement` or `implement.issue` brief is sized by a read-only plan node
+before its writer starts, unless the brief is bounded. `bounded=true` gives the
+writer the brief directly; `implement.plan` and `implement.fix` never add a
+plan node. `run implement --no-plan` is shorthand for `--set bounded=true` on
+any `implement` or `implement.*` template, and other templates ignore it.
+- Why: an open brief must be split before a junior writer takes it, while a
+  brief already sized as one slice should not pay for a planner.
+- Owner: `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`
+
 ### Composite settlement
 
 A composite's state, outputs and error summary derive from its members while its own `when` condition holds. A composite skipped by its own condition retains that state regardless of its members. An explicit `GraphPatch` skip of a composite remains authoritative until a later replacement or retry supersedes it; reconciliation still recomputes the other active composite boundaries in the same checkpoint. A patch that replaces or skips a member recomputes the affected active composite boundaries in the same checkpoint.
