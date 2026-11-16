@@ -737,7 +737,12 @@ fn gc_dry_run_retains_preview_dirty_worktree() -> Result<(), Box<dyn Error>> {
         &cancel(),
     )?;
     assert_eq!(report.worktrees.retained.len(), 1);
-    assert_eq!(report.worktrees.retained[0].reason, RetainReason::Dirty);
+    assert_eq!(
+        report.worktrees.retained[0].reason,
+        RetainReason::Dirty,
+        "{:?}",
+        report.worktrees.retained
+    );
     assert!(report.worktrees.removed.is_empty());
     assert!(lane.path.join("cache/artifact").is_file());
     Ok(())

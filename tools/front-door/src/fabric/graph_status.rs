@@ -341,6 +341,7 @@ pub(super) fn graph_snapshot(
 mod tests {
     #[test]
     fn selected_attempt_digest_preserves_graph_state_and_writer_presence() {
+        // Spec: docs/specs/cli.md#status-selection
         use super::node_digests;
         use provenant_core::ProjectId;
         use provenant_records::WorkKey;

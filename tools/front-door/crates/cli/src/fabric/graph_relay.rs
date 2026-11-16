@@ -3288,8 +3288,10 @@ mod panel_tests {
             launch_resolvers_with(&review, &document, empty_diff, |_, _| Ok("fixture".into()))
                 .unwrap();
         assert!(
-            !quick["review-advice-correctness-spec"][0]
-                .contains("configured unreadable-path floors were applied")
+            quick
+                .values()
+                .flatten()
+                .all(|value| !value.contains("configured unreadable-path floors were applied"))
         );
         assert!(!quick["review-panel"].iter().any(|lens| lens == "tests"));
     }

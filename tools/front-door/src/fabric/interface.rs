@@ -3930,7 +3930,7 @@ mod tests {
         named["name"] = json!("handle");
         assert_eq!(explain(&factory, task.clone())?, explain(&factory, named)?);
         let inline =
-            json!({"op":"run","document":{"prompt":"inline task","tier":"senior"},"explain":true});
+            json!({"op":"run","document":{"brief":"inline task","tier":"senior"},"explain":true});
         assert_eq!(
             explain(&factory, inline.clone())?,
             explain(&factory, inline)?

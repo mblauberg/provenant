@@ -500,6 +500,7 @@ fn credential_authority_never_follows_links_below_the_host_root()
 #[test]
 fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
 -> Result<(), Box<dyn std::error::Error>> {
+    // Spec: docs/specs/fabric.md#session-ready-steering
     use provenant_core::{AttemptId, Digest};
     use provenant_records::{
         FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
@@ -835,10 +836,29 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                 transcript
             );
         } else {
-            let error = result.unwrap_err().to_string();
-            assert!(error.contains("retained provider continuation is missing or expired"));
-            assert!(error.contains("attempt-private state"));
-            assert!(error.contains("start a new lane"));
+            let error = result.unwrap_err();
+            if AdapterSpec::get(adapter).is_some_and(|spec| {
+                spec.model_observation == provenant_records::ModelObservation::SessionDatabase
+            }) {
+                assert!(matches!(
+                    &error,
+                    ContinuationError::Provider(
+                        provenant_providers::ProviderError::UnknownIdentity
+                    )
+                ));
+                assert_eq!(
+                    error.boundary_class(),
+                    provenant_records::diagnostic::BoundaryClass::Authority
+                );
+            } else {
+                let error = error.to_string();
+                assert!(error.contains("retained provider continuation is missing or expired"));
+                assert_eq!(
+                    error.contains("attempt-private state"),
+                    AdapterSpec::get(adapter).is_some_and(|spec| spec.relocated_session_state)
+                );
+                assert!(error.contains("start a new lane"));
+            }
             if adapter == "opencode" {
                 let temp = tempfile::tempdir()?;
                 let root = temp.path().canonicalize()?;

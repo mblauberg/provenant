@@ -54,6 +54,7 @@ fn configured_grants_cannot_expose_host_indexes() -> Result<(), Box<dyn std::err
 #[test]
 fn registered_project_inventory_keeps_unsafe_directory_diagnostic_typed()
 -> Result<(), Box<dyn std::error::Error>> {
+    // Spec: docs/specs/fabric.md#projects-never-merge-by-guess
     use std::os::unix::fs::PermissionsExt;
 
     let temp = tempfile::tempdir()?;
@@ -65,6 +66,7 @@ fn registered_project_inventory_keeps_unsafe_directory_diagnostic_typed()
         std::fs::create_dir(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
+    provenant_os::fixture::run_git(&project, &["init", "--quiet"])?;
     let roots = provenant_core::RootInputs {
         state_dir: Some(state.clone()),
         ..provenant_core::RootInputs::new(home, project.clone())

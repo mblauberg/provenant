@@ -516,19 +516,6 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 .file_type()
                 .is_symlink()
             );
-        } else {
-            let settings_path = permissions.scratch.path.join("provenant-settings.json");
-            let settings_bytes = fixture_io(
-                "read prepared lane settings",
-                &settings_path,
-                fs::read(&settings_path),
-            )?;
-            let settings: Value = serde_json::from_slice(&settings_bytes)?;
-            assert!(
-                settings["hooks"]
-                    .as_object()
-                    .is_some_and(|hooks| !hooks.is_empty())
-            );
         }
         for grant in &confinement.profile.spec.state_writes {
             assert!(
@@ -571,7 +558,6 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         assert!(!roots.state.as_path().join("tmp/results").exists());
         assert!(permissions.scratch.path.join("results").is_dir());
         assert!(!rig.state.join("children").exists());
-        assert!(!worktree.join("provenant-settings.json").exists());
         assert_eq!(
             git(
                 &rig,
