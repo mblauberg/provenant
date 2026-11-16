@@ -1553,6 +1553,7 @@ pub(super) fn prepare_with(
     )
 }
 
+#[cfg(any(test, feature = "fixture"))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_with_wait(
     registry: &Registry<'_>,
