@@ -146,8 +146,10 @@ unconfirmed sync is `durability_unconfirmed`, never absent.
 The writer reservation is published before spawn and cleared only after
 quiescence and run's terminal commit, or an authorised reconcile; the worktree
 flock stays held through import and [publication](run.md#publication-order). A
-missing or malformed reservation refuses recovery of that attempt, and scratch
-deletion needs a verified settlement commit.
+missing or malformed reservation refuses automatic recovery of that attempt;
+[explicit abandonment](#explicit-abandonment) instead requires native exclusion
+and positive worktree non-occupancy. Scratch deletion needs a verified settlement
+commit.
 - Why: a writer must never be freed on a partial or forged settlement.
 
 ### Stable locks and atomic writes

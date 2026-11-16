@@ -1414,7 +1414,9 @@ mod reboot_tests {
     #[test]
     fn tick_reaping_queues_settling_and_unattended_but_never_live_attempts() -> TestResult {
         // Spec: docs/specs/supervisor.md#tick-driven-settlement
-        use provenant_supervisor::census::{Census, CensusError, ProcessFact, ProcessIdentity};
+        use provenant_supervisor::census::{
+            Census, CensusError, ProcessFact, ProcessIdentity, ProcessObservation,
+        };
         struct Observer(ProcessFact, Census);
         impl ProcessObserver for Observer {
             fn boot_identity(&self) -> std::result::Result<String, CensusError> {
@@ -4839,7 +4841,8 @@ impl RunStore {
         )
     }
     /// Queue recovery using one bounded host census shared by every attempt.
-    /// A failed or incomplete census leaves Running attempts untouched.
+    /// A failed or incomplete census cannot prove a writer unattended;
+    /// durable exit evidence still permits settlement recovery.
     pub fn reap_with_census(
         &self,
         call: &Request<'_>,
@@ -4853,7 +4856,8 @@ impl RunStore {
         )
     }
     /// Continue independent launcher/temporary recovery when host census is
-    /// unavailable. Running attempts remain Unknown and are not queued.
+    /// unavailable. Without durable exit evidence, Running attempts remain
+    /// Unknown and are not queued.
     pub fn reap_without_census(&self, call: &Request<'_>) -> Result<usize> {
         self.reap_with_census_and_spawn(
             call,

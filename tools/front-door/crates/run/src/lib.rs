@@ -663,7 +663,11 @@ impl RunError {
         let mut diagnostic = Diagnostic::new(kind.code()).category(kind.category());
         match self {
             Self::AbandonBlocked(evidence) => {
-                diagnostic = diagnostic.detail(evidence.to_string());
+                diagnostic = diagnostic.detail(if matches!(destination, provenant_records::diagnostic::Destination::Local) {
+                    evidence.to_string()
+                } else {
+                    "abandonment requires non-live presence, free exclusion and a free worktree census".into()
+                });
             }
             Self::ContinuationRefused { cause } => {
                 diagnostic = diagnostic.detail(cause.detail());
@@ -1207,18 +1211,39 @@ mod diagnostic_projection_tests {
 
     #[test]
     fn unknown_occupancy_diagnostics_name_local_scope_without_leaking_remote_evidence() {
-        for cause in [
-            provenant_confinement::worktrees::WorktreeError::CensusUnknown {
-                path: PathBuf::from("/checkout/tree"),
-                detail: "process 123: cwd unreadable at /private/other".into(),
-            },
-            provenant_confinement::worktrees::WorktreeError::UnknownOccupancy {
-                path: PathBuf::from("/checkout/tree"),
-                detail: "process 123: cwd unreadable at /private/other".into(),
-            },
+        use provenant_confinement::worktrees::{Occupancy, WorktreeError};
+        for (error, expected_kind) in [
+            (
+                RunError::Writer(WorktreeError::CensusUnknown {
+                    path: PathBuf::from("/checkout/tree"),
+                    detail: "process 123: cwd unreadable at /private/other".into(),
+                }),
+                ErrorKind::WriterUnknown,
+            ),
+            (
+                RunError::Writer(WorktreeError::UnknownOccupancy {
+                    path: PathBuf::from("/checkout/tree"),
+                    detail: "process 123: cwd unreadable at /private/other".into(),
+                }),
+                ErrorKind::WriterUnknown,
+            ),
+            (
+                RunError::AbandonBlocked(Box::new(settlement::AbandonmentRefusal::Occupancy {
+                    path: PathBuf::from("/checkout/tree"),
+                    state: Occupancy::census_unknown("/checkout/tree".into(), "partial"),
+                    evidence: "process 123: cwd unreadable at /private/other".into(),
+                })),
+                ErrorKind::AbandonBlocked,
+            ),
+            (
+                RunError::AbandonBlocked(Box::new(settlement::AbandonmentRefusal::WriterLease {
+                    evidence: "/checkout/tree: process 123: cwd unreadable at /private/other"
+                        .into(),
+                })),
+                ErrorKind::AbandonBlocked,
+            ),
         ] {
-            let error = RunError::Writer(cause);
-            assert_eq!(ErrorKind::from(&error), ErrorKind::WriterUnknown);
+            assert_eq!(ErrorKind::from(&error), expected_kind);
             let local = error.diagnostic(Destination::Local);
             let detail = local.detail.unwrap();
             assert!(detail.contains("/checkout/tree"));

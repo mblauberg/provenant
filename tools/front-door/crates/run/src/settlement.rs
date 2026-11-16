@@ -824,7 +824,7 @@ mod tests {
                     panic!("expected typed abandon refusal");
                 };
                 match (&*evidence, live, held) {
-                    (AbandonmentRefusal::Live, true, _)
+                    (AbandonmentRefusal::Live { .. }, true, _)
                     | (AbandonmentRefusal::WriterLease { .. }, _, true) => {}
                     (AbandonmentRefusal::Occupancy { state, .. }, false, false) => {
                         assert_eq!(state, &occupancy)
@@ -2213,8 +2213,8 @@ struct QueuedAbandonment {
 /// retained verbatim so the chair can resolve the particular census blocker.
 #[derive(Debug, thiserror::Error)]
 pub enum AbandonmentRefusal {
-    #[error("attempt presence is live")]
-    Live,
+    #[error("attempt {scope:?} presence is live")]
+    Live { scope: Scope },
     #[error("writer exclusion is unavailable: {evidence}")]
     WriterLease { evidence: String },
     #[error("worktree {path:?} is {state:?}: {evidence}")]
@@ -2312,7 +2312,11 @@ impl crate::RunStore {
         let reason = provenant_confinement::redact::bounded_line(reason, 4096);
         let mut record = self.record(id, call)?;
         let attempt = self.attempt_dir(id, false)?;
-        let _driver = try_progress_lock(&attempt, "settlement-driver.lock")?;
+        let _driver = try_progress_lock(&attempt, "settlement-driver.lock").map_err(|error| {
+            abandon_refused(AbandonmentRefusal::WriterLease {
+                evidence: format!("settlement-driver.lock: {error}"),
+            })
+        })?;
         let queued = matches!(record.state, crate::AttemptState::Queued { .. });
         // A cancelled, never-launched terminal row also permits retry after a
         // crash between withdrawal and the abandonment journal publication.
@@ -2386,7 +2390,7 @@ impl crate::RunStore {
             && provenant_supervisor::custody::observe_holder(&attempt, scope, observer)
                 == provenant_supervisor::custody::HolderPresence::Live
         {
-            return Err(abandon_refused(AbandonmentRefusal::Live));
+            return Err(abandon_refused(AbandonmentRefusal::Live { scope }));
         }
         // Exclude a still-starting submitter as well as a handed-off guardian.
         let mut launch_guards = Vec::new();
@@ -2474,7 +2478,7 @@ impl crate::RunStore {
             if provenant_supervisor::custody::observe_holder(&attempt, scope, observer)
                 == provenant_supervisor::custody::HolderPresence::Live
             {
-                return Err(abandon_refused(AbandonmentRefusal::Live));
+                return Err(abandon_refused(AbandonmentRefusal::Live { scope }));
             }
             let writer = self.request(id, call)?.task.writer;
             let path = writer
