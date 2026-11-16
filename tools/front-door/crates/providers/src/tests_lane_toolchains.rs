@@ -212,6 +212,12 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
         .or_else(|| {
             match crate::package_cache::pnpm_global_path(&home, &host_var, "storeDir", "store-dir")
             {
+                crate::package_cache::Setting::Missing
+                    if crate::package_cache::explicit_host_value(&host_var, &["PNPM_HOME"])
+                        .is_some() =>
+                {
+                    None
+                }
                 crate::package_cache::Setting::Missing => {
                     Some(crate::package_cache::pnpm_default_store(&home, &host_var))
                 }
