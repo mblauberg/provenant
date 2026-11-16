@@ -122,7 +122,7 @@ impl<'a> TestContext<'a> {
         provenant_os::fixture::private_state_dir(&binding_state)?;
         let mut inputs =
             provenant_core::RootInputs::new(fixture.home.clone(), fixture.root.clone());
-        inputs.state_dir = Some(binding_state);
+        inputs.state_dir = Some(binding_state.clone());
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         let binding = provenant_config::bind_project(
             &roots,
@@ -138,12 +138,12 @@ impl<'a> TestContext<'a> {
         let layout = if fixture.repo.private_git_dir() == fixture.repo.common_git_dir() {
             ProjectLayout::from_repo(&fixture.repo, true)?
         } else {
-            project_layout_for_binding(
+            let utility = crate::UtilityRuntime::new(&fixture.git, &fixture.home, &binding_state)?
+                .with_lane_roots(crate::utility::lane_state_roots(&binding_state));
+            utility.project_layout_for_binding(
                 &fixture.executor,
                 &binding,
-                &fixture.git,
-                &project_layout_git_environment(),
-                std::time::Duration::from_secs(5),
+                crate::UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
                 &CancelToken::new(),
             )?
         };

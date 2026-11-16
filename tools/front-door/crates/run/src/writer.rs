@@ -157,14 +157,12 @@ fn registered_project_layout(
         .ok_or(RunError::Validation(
             "writer custody project is not registered",
         ))?;
-    let layout = worktrees::project_layout_for_binding(
-        executor,
-        &binding,
-        utility.git_program_path(),
-        &worktrees::project_layout_git_environment(),
-        Duration::from_secs(5),
-        cancel,
-    )?;
+    let layout = utility
+        .project_layout_for_repository(executor, repo, budget()?, cancel)
+        .map_err(utility_error(
+            "resolve writer project layout",
+            Some(repo.common_git_dir()),
+        ))?;
     Ok((binding, layout))
 }
 
@@ -208,33 +206,34 @@ pub fn resolve_reader_source(state: &Path, cwd: &Path, path: &Path) -> Result<Pa
             .map_err(worktrees::WorktreeError::from)?;
     }
     let location = project_location(&repo)?;
-    let layout =
-        if let Some(binding) = provenant_config::lookup_project_at_state(state, &location).map_err(
-            error("read source project binding", Some(repo.common_git_dir())),
-        )? {
-            worktrees::project_layout_for_binding(
-                &executor,
-                &binding,
-                utility.git_program_path(),
-                &worktrees::project_layout_git_environment(),
-                Duration::from_secs(5),
-                &CancelToken::new(),
-            )?
-        } else {
-            let read_repo = utility
-                .open_read_repo(&executor, repo.root_path(), budget()?, &CancelToken::new())
-                .map_err(utility_error(
-                    "open read-only source repository",
-                    Some(repo.root_path()),
-                ))?;
-            worktrees::project_layout_for_checkout(
-                &executor,
-                &read_repo,
-                &utility,
-                budget()?,
-                &CancelToken::new(),
-            )?
-        };
+    let layout = if provenant_config::lookup_project_at_state(state, &location)
+        .map_err(error(
+            "read source project binding",
+            Some(repo.common_git_dir()),
+        ))?
+        .is_some()
+    {
+        utility
+            .project_layout_for_repository(&executor, &repo, budget()?, &CancelToken::new())
+            .map_err(utility_error(
+                "resolve source project layout",
+                Some(repo.common_git_dir()),
+            ))?
+    } else {
+        let read_repo = utility
+            .open_read_repo(&executor, repo.root_path(), budget()?, &CancelToken::new())
+            .map_err(utility_error(
+                "open read-only source repository",
+                Some(repo.root_path()),
+            ))?;
+        worktrees::project_layout_for_checkout(
+            &executor,
+            &read_repo,
+            &utility,
+            budget()?,
+            &CancelToken::new(),
+        )?
+    };
     let project = layout.project().unwrap_or_else(|| repo.root_path());
     let selected = project.join(path);
     let path = canonicalize(&selected).map_err(|error| {

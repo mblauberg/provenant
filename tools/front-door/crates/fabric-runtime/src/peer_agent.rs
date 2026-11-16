@@ -674,6 +674,10 @@ impl Projects {
                 let git = provenant_os::git::git_executable();
                 let executor = SystemExecutor::new(1)?;
                 let cancel = provenant_core::CancelToken::new();
+                let utility = git.as_deref().and_then(|git| {
+                    provenant_confinement::UtilityRuntime::read_only(git, roots.state.as_path())
+                        .ok()
+                });
                 for binding in bindings {
                     let common = binding.common_dir();
                     common_dirs.push(common.to_path_buf());
@@ -682,27 +686,30 @@ impl Projects {
                     if !is_git_dir {
                         continue;
                     }
-                    let Some(git) = git.as_deref() else {
+                    if git.is_none() {
                         eprintln!(
                             "note: peer agent PATH skips only Provenant worktrees: Git is unavailable for registered project layout {}",
                             common.display()
                         );
                         continue;
+                    }
+                    let Some(utility) = utility.as_ref() else {
+                        eprintln!(
+                            "note: peer agent PATH skips only Provenant worktrees: Git utility is unavailable for registered project layout {}",
+                            common.display()
+                        );
+                        continue;
                     };
-                    let environment = [
-                        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-                        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-                        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-                        ("GIT_DIR".into(), common.as_os_str().to_owned()),
-                    ];
-                    match provenant_confinement::worktrees::project_layout_for_common(
-                        &executor,
-                        common,
-                        git,
-                        &environment,
-                        Duration::from_secs(5),
-                        &cancel,
-                    ) {
+                    let budget =
+                        match provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))
+                        {
+                            Ok(budget) => budget,
+                            Err(error) => {
+                                eprintln!("note: peer agent PATH skips worktree layout: {error}");
+                                continue;
+                            }
+                        };
+                    match utility.project_layout_for_binding(&executor, &binding, budget, &cancel) {
                         Ok(layout) => {
                             if let Some(project) = layout.project() {
                                 project_roots.push(project.to_path_buf());

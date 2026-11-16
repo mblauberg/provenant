@@ -267,30 +267,26 @@ fn lane_roots(
                 }
                 Some(cwd.to_path_buf())
             } else {
-                let environment =
-                    provenant_confinement::worktrees::project_layout_git_environment();
-                let layout = match host_state {
-                    Some(host_state) => {
-                        provenant_confinement::worktrees::project_layout_for_common_at_state(
-                            executor,
-                            &common,
-                            host_state,
-                            git,
-                            &environment,
-                            Duration::from_secs(5),
-                            &provenant_core::CancelToken::new(),
-                        )
-                    }
-                    None => provenant_confinement::worktrees::project_layout_for_common(
-                        executor,
-                        &common,
-                        git,
-                        &environment,
-                        Duration::from_secs(5),
-                        &provenant_core::CancelToken::new(),
-                    ),
+                let utility = if let Some(state) = host_state {
+                    provenant_confinement::UtilityRuntime::read_only(git, state)
+                        .map_err(|_| transport::TransportError::Unreadable)?
+                        .with_lane_roots(provenant_confinement::utility::lane_state_roots(state))
+                } else {
+                    provenant_confinement::UtilityRuntime::read_only_without_host_state(git)
+                        .map_err(|_| transport::TransportError::Unreadable)?
+                };
+                let cancel = provenant_core::CancelToken::new();
+                let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))
+                    .map_err(|_| transport::TransportError::Unreadable)?;
+                let repo = utility
+                    .open_repo(executor, cwd, budget, &cancel)
+                    .map_err(|_| transport::TransportError::Unreadable)?;
+                if repo.common_git_dir() != common || repo.private_git_dir() != private {
+                    return Err(transport::TransportError::Unreadable);
                 }
-                .map_err(|_| transport::TransportError::Unreadable)?;
+                let layout = utility
+                    .project_layout_for_repository(executor, &repo, budget, &cancel)
+                    .map_err(|_| transport::TransportError::Unreadable)?;
                 layout.project().map(Path::to_path_buf)
             };
             transport::LaneRoots::for_repository(

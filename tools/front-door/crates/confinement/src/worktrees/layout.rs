@@ -15,6 +15,32 @@ pub struct ProjectLayout {
     directory: Directory,
 }
 
+/// One bounded, sanitised Git inventory context shared by owner resolution.
+struct LayoutQuery<'a> {
+    executor: &'a dyn Executor,
+    git: &'a Path,
+    environment: &'a [(std::ffi::OsString, std::ffi::OsString)],
+    timeout: Duration,
+    cancel: &'a CancelToken,
+}
+
+impl LayoutQuery<'_> {
+    fn entries(&self, common: &Path, bare: bool) -> Result<Vec<GitWorktree>, WorktreeError> {
+        let inventory = RepoFacts::default().discover_worktree_inventory(
+            WorktreeInventoryQuery::new(
+                common,
+                self.git,
+                self.environment,
+                self.executor,
+                self.timeout,
+                self.cancel,
+            )
+            .with_bare_setting(bare),
+        )?;
+        parse_worktree_list(&inventory)
+    }
+}
+
 /// Git environment for project-layout inventory and saved-hint verification.
 /// Keep host paths, global config, lazy fetch and replace refs out of layout evidence.
 pub fn project_layout_git_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
@@ -46,7 +72,7 @@ impl ProjectLayout {
         &self.directory
     }
 
-    pub(super) fn from_repo(repo: &VerifiedRepo, project: bool) -> Result<Self, WorktreeError> {
+    pub(crate) fn from_repo(repo: &VerifiedRepo, project: bool) -> Result<Self, WorktreeError> {
         let root = if project {
             repo.root_path().to_path_buf()
         } else {
@@ -84,8 +110,9 @@ impl ProjectLayout {
     }
 }
 
-/// Resolve a registered common Git directory to the project-layout owner using
-/// its verified Git inventory. A bare common directory has no project owner.
+/// Resolve a common Git directory to a verified project owner. Without
+/// independent bare provenance, an inventory that cannot identify a primary
+/// checkout is unresolved rather than common-only.
 pub fn project_layout_for_common(
     executor: &dyn Executor,
     common: &Path,
@@ -94,23 +121,14 @@ pub fn project_layout_for_common(
     inventory_timeout: Duration,
     cancel: &CancelToken,
 ) -> Result<ProjectLayout, WorktreeError> {
-    let common = provenant_os::fs::canonicalize(common)?;
-    let directory = Directory::open_anchor(&common)?;
-    let identity = directory.metadata()?;
-    let inventory =
-        RepoFacts::default().discover_worktree_inventory(WorktreeInventoryQuery::new(
-            &common,
-            git,
-            environment,
-            executor,
-            inventory_timeout,
-            cancel,
-        ))?;
-    let entries = parse_worktree_list(&inventory)?;
-    match verified_primary_from_inventory(&common, identity, &entries)? {
-        Some(repo) => ProjectLayout::from_repo(&repo, true),
-        None => ProjectLayout::from_common_identity(&common, identity),
-    }
+    let query = LayoutQuery {
+        executor,
+        git,
+        environment,
+        timeout: inventory_timeout,
+        cancel,
+    };
+    project_layout_for_common_with_hint_and_bare_setting(common, None, None, &query)
 }
 
 /// Resolve an unbound common directory during a linked checkout's utility
@@ -127,43 +145,35 @@ pub(crate) fn project_layout_for_common_with_bare_setting(
     inventory_timeout: Duration,
     cancel: &CancelToken,
 ) -> Result<ProjectLayout, WorktreeError> {
+    let query = LayoutQuery {
+        executor,
+        git,
+        environment,
+        timeout: inventory_timeout,
+        cancel,
+    };
+    project_layout_for_common_with_hint_and_bare_setting(common, None, trusted_bare, &query)
+}
+
+fn project_layout_for_common_with_hint_and_bare_setting(
+    common: &Path,
+    primary_hint: Option<&Path>,
+    trusted_bare: Option<bool>,
+    query: &LayoutQuery<'_>,
+) -> Result<ProjectLayout, WorktreeError> {
     let common = canonicalize(common).map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
     let directory = Directory::open_anchor(&common)?;
     let identity = directory.metadata()?;
-    let facts = RepoFacts::default();
-    let checkout_inventory = facts.discover_worktree_inventory(
-        WorktreeInventoryQuery::new(
-            &common,
-            git,
-            environment,
-            executor,
-            inventory_timeout,
-            cancel,
-        )
-        .with_bare_setting(false),
-    )?;
-    let checkout_entries = parse_worktree_list(&checkout_inventory)?;
-    match verified_primary_from_inventory(&common, identity, &checkout_entries) {
-        Ok(Some(repo)) => return ProjectLayout::from_repo(&repo, true),
-        Ok(None) | Err(WorktreeError::InvalidRequest) => {}
-        Err(error) => return Err(error),
+    if let Some(layout) =
+        verified_project_layout_for_common(&common, identity, primary_hint, query)?
+    {
+        return Ok(layout);
     }
 
     if trusted_bare != Some(true) {
         return Err(WorktreeError::ProjectLayoutUnresolved);
     }
-    let bare_inventory = facts.discover_worktree_inventory(
-        WorktreeInventoryQuery::new(
-            &common,
-            git,
-            environment,
-            executor,
-            inventory_timeout,
-            cancel,
-        )
-        .with_bare_setting(true),
-    )?;
-    let bare_entries = parse_worktree_list(&bare_inventory)?;
+    let bare_entries = query.entries(&common, true)?;
     let bare_common_registered = bare_entries.iter().any(|entry| {
         entry.bare && canonical_inventory_path(&entry.path).as_deref() == Some(&common)
     });
@@ -179,9 +189,27 @@ pub(crate) fn project_layout_for_common_with_bare_setting(
     }
 }
 
-/// Resolve a common Git directory using its registered checkout hint when one
-/// exists, otherwise using the verified Git inventory. Without a validated
-/// host-state root, callers should use `project_layout_for_common` directly.
+fn verified_project_layout_for_common(
+    common: &Path,
+    common_identity: provenant_os::fs::Metadata,
+    primary_hint: Option<&Path>,
+    query: &LayoutQuery<'_>,
+) -> Result<Option<ProjectLayout>, WorktreeError> {
+    let entries = query.entries(common, false)?;
+    match verified_primary_from_inventory(common, common_identity, &entries) {
+        Ok(Some(repo)) => return ProjectLayout::from_repo(&repo, true).map(Some),
+        Ok(None) | Err(WorktreeError::InvalidRequest) => {}
+        Err(error) => return Err(error),
+    }
+
+    primary_hint
+        .map(|hint| project_layout_from_saved_primary_hint(common, common_identity, hint))
+        .transpose()
+}
+
+/// Resolve a common Git directory using its verified inventory and saved
+/// primary hint. Without a validated host-state root, callers should use
+/// `project_layout_for_common` directly.
 /// Host transport safety checks use this before reading effective repository
 /// configuration, so the inventory command has its own sanitised environment
 /// and does not recurse through `UtilityRuntime`.
@@ -219,10 +247,9 @@ pub fn project_layout_for_common_at_state(
     }
 }
 
-/// Resolve a registered project using Git inventory first and its saved
-/// checkout hint only when Git cannot identify a conventional primary.
-/// The hint is re-proved from the checkout with Git and its common-directory
-/// identity before it can own project configuration or managed worktree paths.
+/// Resolve a registered project using a forced non-bare inventory first, then
+/// its saved primary hint. A bare common directory requires separately
+/// classified provenance and cannot be inferred from inventory alone.
 pub fn project_layout_for_binding(
     executor: &dyn Executor,
     binding: &provenant_config::ProjectBinding,
@@ -231,49 +258,80 @@ pub fn project_layout_for_binding(
     inventory_timeout: Duration,
     cancel: &CancelToken,
 ) -> Result<ProjectLayout, WorktreeError> {
-    match project_layout_for_common(
+    project_layout_for_binding_with_bare_setting(
         executor,
-        binding.common_dir(),
+        binding,
+        None,
         git,
         environment,
         inventory_timeout,
         cancel,
-    ) {
-        Ok(layout) => return Ok(layout),
-        // A valid inventory with no discoverable primary is the one case a
-        // saved checkout hint can resolve. Malformed output and Git failures
-        // remain fail-closed.
-        Err(WorktreeError::InvalidRequest) => {}
-        Err(error) => return Err(error),
-    }
+    )
+}
 
-    let Some(checkout_hint) = binding.primary_checkout_hint() else {
-        return Err(WorktreeError::ProjectLayoutUnresolved);
+/// Resolve a bound project's primary owner before consulting any local Git
+/// configuration. Utility bootstrap uses this to establish the project roots
+/// that decide whether a `core.bare` origin is lane-writable.
+pub(crate) fn project_layout_for_binding_primary(
+    executor: &dyn Executor,
+    binding: &provenant_config::ProjectBinding,
+    git: &Path,
+    environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    inventory_timeout: Duration,
+    cancel: &CancelToken,
+) -> Result<Option<ProjectLayout>, WorktreeError> {
+    let query = LayoutQuery {
+        executor,
+        git,
+        environment,
+        timeout: inventory_timeout,
+        cancel,
     };
-    let common = canonicalize(binding.common_dir())?;
+    let common =
+        canonicalize(binding.common_dir()).map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
+    let common_identity = Directory::open_anchor(&common)?.metadata()?;
+    verified_project_layout_for_common(
+        &common,
+        common_identity,
+        binding.primary_checkout_hint(),
+        &query,
+    )
+}
+
+/// Resolve a bound project's owner, accepting common-only only when local
+/// `core.bare` provenance was independently classified as trusted and Git's
+/// forced-bare inventory registers the common directory as bare.
+pub(crate) fn project_layout_for_binding_with_bare_setting(
+    executor: &dyn Executor,
+    binding: &provenant_config::ProjectBinding,
+    trusted_bare: Option<bool>,
+    git: &Path,
+    environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    inventory_timeout: Duration,
+    cancel: &CancelToken,
+) -> Result<ProjectLayout, WorktreeError> {
+    let query = LayoutQuery {
+        executor,
+        git,
+        environment,
+        timeout: inventory_timeout,
+        cancel,
+    };
+    project_layout_for_common_with_hint_and_bare_setting(
+        binding.common_dir(),
+        binding.primary_checkout_hint(),
+        trusted_bare,
+        &query,
+    )
+}
+
+fn project_layout_from_saved_primary_hint(
+    common: &Path,
+    common_identity: provenant_os::fs::Metadata,
+    checkout_hint: &Path,
+) -> Result<ProjectLayout, WorktreeError> {
     let checkout =
         canonicalize(checkout_hint).map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
-    let git_common = provenant_os::git::repository_path_with_cancel(
-        executor,
-        git,
-        &checkout,
-        provenant_os::git::RepositoryPath::CommonDir,
-        Some(cancel),
-    )
-    .map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
-    let git_root = provenant_os::git::repository_path_with_cancel(
-        executor,
-        git,
-        &checkout,
-        provenant_os::git::RepositoryPath::Toplevel,
-        Some(cancel),
-    )
-    .map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
-    if canonicalize(&git_common)? != common || canonicalize(&git_root)? != checkout {
-        return Err(WorktreeError::ProjectLayoutUnresolved);
-    }
-
-    let common_identity = Directory::open_anchor(&common)?.metadata()?;
     let repo = VerifiedRepo::open_structure_only(&checkout)
         .map_err(|_| WorktreeError::ProjectLayoutUnresolved)?;
     if repo.common_git_dir() != common

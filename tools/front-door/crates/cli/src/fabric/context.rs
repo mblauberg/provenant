@@ -52,22 +52,43 @@ fn has_git_common_layout(path: &Path) -> bool {
         || (path.join("HEAD").is_file() && path.join("objects").is_dir())
 }
 
-fn registered_project_roots(
+fn registered_project_roots_for_repository(
     binding: &provenant_config::ProjectBinding,
+    repo: &provenant_confinement::repo::VerifiedRepo,
     executor: &dyn Executor,
-    git: &Path,
+    utility: &provenant_confinement::UtilityRuntime,
     cancel: &CancelToken,
 ) -> Result<(PathBuf, Option<PathBuf>), EdgeError> {
     if !has_git_common_layout(binding.common_dir()) {
         let root = canonical(binding.common_dir())?;
         return Ok((root.clone(), Some(root)));
     }
-    let layout = provenant_confinement::worktrees::project_layout_for_binding(
+    let layout = utility.project_layout_for_repository(
+        executor,
+        repo,
+        provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
+        cancel,
+    )?;
+    Ok((
+        layout.root().to_path_buf(),
+        layout.project().map(Path::to_path_buf),
+    ))
+}
+
+fn registered_project_roots_from_binding(
+    binding: &provenant_config::ProjectBinding,
+    executor: &dyn Executor,
+    utility: &provenant_confinement::UtilityRuntime,
+    cancel: &CancelToken,
+) -> Result<(PathBuf, Option<PathBuf>), EdgeError> {
+    if !has_git_common_layout(binding.common_dir()) {
+        let root = canonical(binding.common_dir())?;
+        return Ok((root.clone(), Some(root)));
+    }
+    let layout = utility.project_layout_for_binding(
         executor,
         binding,
-        git,
-        &provenant_confinement::worktrees::project_layout_git_environment(),
-        Duration::from_secs(5),
+        provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
         cancel,
     )?;
     Ok((
@@ -361,10 +382,12 @@ impl Context {
             provenant_config::bind_project(&roots, discovered.location.clone())?
         };
         let (project_root, project_config_root) = if is_git {
-            registered_project_roots(
+            let repository = discovered.repository.as_ref().ok_or(EdgeError::Invalid)?;
+            registered_project_roots_for_repository(
                 &binding,
+                repository,
                 &executor,
-                runtime.git_program_path(),
+                &runtime,
                 &CancelToken::new(),
             )?
         } else {
@@ -427,10 +450,12 @@ impl Context {
         let binding = provenant_config::lookup_project(&roots, &discovered.location)?
             .ok_or(EdgeError::Invalid)?;
         let (project_root, project_config_root) = if is_git {
-            registered_project_roots(
+            let repository = discovered.repository.as_ref().ok_or(EdgeError::Invalid)?;
+            registered_project_roots_for_repository(
                 &binding,
+                repository,
                 &executor,
-                runtime.git_program_path(),
+                &runtime,
                 &CancelToken::new(),
             )?
         } else {
@@ -495,10 +520,11 @@ impl Context {
             None
         };
         let (project_root, project_config_root) = match (&binding, &discovered.repository) {
-            (Some(binding), Some(_)) => registered_project_roots(
+            (Some(binding), Some(repo)) => registered_project_roots_for_repository(
                 binding,
+                repo,
                 &executor,
-                runtime.git_program_path(),
+                &runtime,
                 &CancelToken::new(),
             )?,
             (None, Some(repo)) => {
@@ -521,10 +547,10 @@ impl Context {
                 )
             }
             (Some(binding), None) if has_git_common_layout(binding.common_dir()) => {
-                registered_project_roots(
+                registered_project_roots_from_binding(
                     binding,
                     &executor,
-                    runtime.git_program_path(),
+                    &runtime,
                     &CancelToken::new(),
                 )?
             }
@@ -596,8 +622,17 @@ impl Context {
     ) -> Result<Self, EdgeError> {
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let executor = SystemExecutor::new(1)?;
-        let (project_root, project_config_root) =
-            registered_project_roots(binding, &executor, &git, &CancelToken::new())?;
+        let runtime =
+            provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())?
+                .with_lane_roots(provenant_confinement::utility::lane_state_roots(
+                    roots.state.as_path(),
+                ));
+        let (project_root, project_config_root) = registered_project_roots_from_binding(
+            binding,
+            &executor,
+            &runtime,
+            &CancelToken::new(),
+        )?;
         // Git metadata has no checkout when inventory proves a bare repository.
         // Keep its context host-only instead of inventing one from the path.
         let cwd = project_root.clone();
@@ -656,7 +691,18 @@ impl Context {
         }
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let executor = SystemExecutor::new(1)?;
-        Ok(registered_project_roots(binding, &executor, &git, &CancelToken::new())?.0)
+        let runtime =
+            provenant_confinement::UtilityRuntime::read_only(&git, roots.state.as_path())?
+                .with_lane_roots(provenant_confinement::utility::lane_state_roots(
+                    roots.state.as_path(),
+                ));
+        Ok(registered_project_roots_from_binding(
+            binding,
+            &executor,
+            &runtime,
+            &CancelToken::new(),
+        )?
+        .0)
     }
 
     /// Resolve the allocation root and verified metadata boundary for a
@@ -1209,7 +1255,9 @@ mod tests {
     #[test]
     fn registered_project_root_uses_external_common_hint_and_keeps_bare_projects_host_only()
     -> Result<(), Box<dyn std::error::Error>> {
-        use super::registered_project_roots;
+        use super::{
+            registered_project_roots_for_binding, registered_project_roots_for_repository,
+        };
         use provenant_core::{CancelToken, RootInputs};
         use std::path::Path;
 
@@ -1263,16 +1311,35 @@ mod tests {
         assert_eq!(binding.primary_checkout_hint(), Some(checkout.as_path()));
         let git_program = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         let executor = provenant_os::exec::SystemExecutor::new(1)?;
-        let (root, project) =
-            registered_project_roots(&binding, &executor, &git_program, &CancelToken::new())?;
+        let utility = provenant_confinement::UtilityRuntime::new(
+            &git_program,
+            base.join("utility-home"),
+            roots.state.as_path(),
+        )?;
+        let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+        let primary_repo = utility.open_repo(&executor, &checkout, budget, &CancelToken::new())?;
+        let (root, project) = registered_project_roots_for_repository(
+            &binding,
+            &primary_repo,
+            &executor,
+            &utility,
+            &CancelToken::new(),
+        )?;
         assert_eq!(root, checkout);
         assert_eq!(project.as_deref(), Some(checkout.as_path()));
 
         // A hint is evidence only while Git re-proves the checkout/common pair.
         std::fs::remove_dir_all(&checkout)?;
         assert!(
-            registered_project_roots(&binding, &executor, &git_program, &CancelToken::new(),)
-                .is_err()
+            provenant_confinement::worktrees::project_layout_for_binding(
+                &executor,
+                &binding,
+                &git_program,
+                &provenant_confinement::worktrees::project_layout_git_environment(),
+                Duration::from_secs(5),
+                &CancelToken::new(),
+            )
+            .is_err()
         );
 
         let source = base.join("source");
@@ -1315,8 +1382,12 @@ mod tests {
         let bare_binding =
             provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&bare)?)?;
         assert_eq!(bare_binding.primary_checkout_hint(), None);
-        let (bare_root, bare_project) =
-            registered_project_roots(&bare_binding, &executor, &git_program, &CancelToken::new())?;
+        let (bare_root, bare_project) = registered_project_roots_for_binding(
+            &bare_binding,
+            &executor,
+            &utility,
+            &CancelToken::new(),
+        )?;
         assert_eq!(bare_root, bare);
         assert_eq!(bare_project, None);
         assert_ne!(bare_root, linked);
