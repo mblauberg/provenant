@@ -315,7 +315,7 @@ pub(super) fn apply_attempt_observation(
                     result_warning,
                     result_path,
                     branch,
-                    commit,
+                    commit.clone(),
                     &upstream_findings,
                 );
                 if !repair::may_report_items(node, plan) {

@@ -1099,6 +1099,9 @@ pub(super) fn remove_tree_when_before_delete(
     )
 }
 
+/// Hook run under the writer lease before removal walks declared output.
+type BeforeOutput<'a> = &'a mut dyn FnMut(&VerifiedWorktree) -> Result<(), WorktreeError>;
+
 /// Continue the same fenced removal while the caller retains its verified
 /// writer lease. Landing uses `before_output` to prune declared output only
 /// after removal eligibility is established, then rechecks eligibility before
@@ -1113,7 +1116,7 @@ pub(super) fn remove_tree_when_before_delete_locked(
     eligible: &dyn Fn(bool) -> Result<(), WorktreeError>,
     output: Option<&provenant_config::ProjectGcSettings>,
     repository: Repository,
-    mut before_output: Option<&mut dyn FnMut(&VerifiedWorktree) -> Result<(), WorktreeError>>,
+    before_output: Option<BeforeOutput<'_>>,
     before_delete: impl FnOnce(
         &VerifiedWorktree,
         &Path,
@@ -1143,7 +1146,7 @@ pub(super) fn remove_tree_when_before_delete_locked(
         expected_head,
     )?;
     eligible(true)?;
-    if let Some(before_output) = before_output.as_deref_mut() {
+    if let Some(before_output) = before_output {
         before_output(&locked.verified)?;
         // Output walking can take long enough for eligibility evidence to
         // change. Keep the same writer lease and revalidate before removal.
