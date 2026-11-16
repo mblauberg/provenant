@@ -57,12 +57,11 @@ omitted descendants, every tracked descendant absent, and a complete bounded
 host census with no remaining process in the recorded session or groups.
 Missing or malformed checkpoints, reused PIDs without that whole-tree proof,
 inaccessible processes and incomplete censuses are unknown. Status only
-projects these facts; the tick recovery owner queues scoped settlement for
-verified absence, and reconciliation rechecks custody before changing attempt
-state.
+projects these facts. Explicit reconciliation queues scoped settlement and
+rechecks custody before changing attempt state.
 - Why: a dead guardian or recycled PID cannot hide a surviving provider child,
   and uncertainty must not be turned into a running writer or an unsafe retry.
-- Owner: `crates/supervisor/src/custody.rs`, `crates/run/src/controls.rs`, `src/tick.rs`
+- Owner: `crates/supervisor/src/custody.rs`, `crates/run/src/controls.rs`
 
 ### Guardian holds custody past its owner
 
