@@ -42,6 +42,33 @@ enum Settle {
     Unsuccessful,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WaitMode {
+    All,
+    Any,
+    FailFast,
+}
+
+impl WaitMode {
+    fn from_command(command: &provenant_cli::Wait) -> Self {
+        if command.any {
+            Self::Any
+        } else if command.fail_fast {
+            Self::FailFast
+        } else {
+            Self::All
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Any => "any",
+            Self::FailFast => "fail_fast",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct Reading {
     settle: Settle,
@@ -585,13 +612,21 @@ fn settlement_verdict(digests: &[&Value]) -> Option<Settle> {
 
 /// Whether the wait is done: under `any`, once one target settled or needs
 /// input; otherwise once every target has.
-fn wait_done(latest: &[Option<Reading>], settled: &[usize], any: bool) -> bool {
-    if any {
-        !settled.is_empty()
-    } else {
-        latest
+fn wait_done(latest: &[Option<Reading>], settled: &[usize], mode: WaitMode) -> bool {
+    match mode {
+        WaitMode::Any => !settled.is_empty(),
+        WaitMode::All => latest
             .iter()
-            .all(|reading| reading.as_ref().is_some_and(Reading::done))
+            .all(|reading| reading.as_ref().is_some_and(Reading::done)),
+        WaitMode::FailFast => {
+            latest
+                .iter()
+                .flatten()
+                .any(|reading| reading.settle == Settle::Unsuccessful)
+                || latest
+                    .iter()
+                    .all(|reading| reading.as_ref().is_some_and(Reading::done))
+        }
     }
 }
 
@@ -610,7 +645,7 @@ fn observed(reading: &Reading) -> (Settle, &str, Value) {
 fn absorb(
     latest: &mut [Option<Reading>],
     settled: &mut Vec<usize>,
-    any: bool,
+    mode: WaitMode,
     mut update: Update,
     changed: &mut impl FnMut(usize, &Reading),
 ) {
@@ -634,11 +669,16 @@ fn absorb(
         .as_ref()
         .and_then(|previous| settlement_verdict(&new_settlements(Some(previous), &update.reading)));
     changed(index, &update.reading);
-    if any
-        && !update.reading.done()
+    if !update.reading.done()
         && let Some(verdict) = node_verdict
     {
-        update.reading.settle = verdict;
+        match mode {
+            WaitMode::Any => update.reading.settle = verdict,
+            WaitMode::FailFast if verdict == Settle::Unsuccessful => {
+                update.reading.settle = verdict;
+            }
+            WaitMode::All | WaitMode::FailFast => {}
+        }
     }
     if update.reading.done() && !settled.contains(&index) {
         settled.push(index);
@@ -653,11 +693,11 @@ fn collect(
     latest: &mut [Option<Reading>],
     settled: &mut Vec<usize>,
     deadline: Instant,
-    any: bool,
+    mode: WaitMode,
     changed: &mut impl FnMut(usize, &Reading),
 ) -> bool {
     loop {
-        if wait_done(latest, settled, any) {
+        if wait_done(latest, settled, mode) {
             return true;
         }
         let left = deadline.saturating_duration_since(Instant::now());
@@ -669,7 +709,7 @@ fn collect(
             }
             return false;
         };
-        absorb(latest, settled, any, update, changed);
+        absorb(latest, settled, mode, update, changed);
     }
 }
 
@@ -682,13 +722,13 @@ fn final_snapshot(
     sources: &[Source],
     latest: &mut [Option<Reading>],
     settled: &mut Vec<usize>,
-    any: bool,
+    mode: WaitMode,
     host: Option<&provenant_core::HostId>,
     mut read_local: impl FnMut(&provenant_cli::Target) -> Option<Reading>,
     changed: &mut impl FnMut(usize, &Reading),
 ) -> bool {
     for (index, source) in sources.iter().enumerate() {
-        if wait_done(latest, settled, any) {
+        if wait_done(latest, settled, mode) {
             break;
         }
         let Source::Graph(target) = source else {
@@ -705,7 +745,7 @@ fn final_snapshot(
             absorb(
                 latest,
                 settled,
-                any,
+                mode,
                 Update {
                     target: index,
                     reading,
@@ -714,7 +754,7 @@ fn final_snapshot(
             );
         }
     }
-    wait_done(latest, settled, any)
+    wait_done(latest, settled, mode)
 }
 
 /// One local graph target's final snapshot; `None` when the local store cannot
@@ -755,15 +795,32 @@ pub(crate) fn local_cadence(
 }
 
 /// How the wait ended: a timeout, else the worst of the targets that decided
-/// it. Under `any` only the first target to finish decides.
-fn outcome(latest: &[Option<Reading>], settled: &[usize], done: bool, any: bool) -> Outcome {
+/// it. Under `any` only the first target to finish decides; fail-fast returns
+/// on the first unsuccessful target, otherwise it reports all final results.
+fn outcome(latest: &[Option<Reading>], settled: &[usize], done: bool, mode: WaitMode) -> Outcome {
     if !done {
         return Outcome::Timeout;
     }
-    let deciding = if any {
-        &settled[..settled.len().min(1)]
-    } else {
-        settled
+    let deciding: Vec<_> = match mode {
+        WaitMode::Any => settled.iter().copied().take(1).collect(),
+        WaitMode::All => settled.to_vec(),
+        WaitMode::FailFast => {
+            let failures: Vec<_> = settled
+                .iter()
+                .copied()
+                .filter(|index| {
+                    latest[*index]
+                        .as_ref()
+                        .is_some_and(|reading| reading.settle == Settle::Unsuccessful)
+                })
+                .take(1)
+                .collect();
+            if failures.is_empty() {
+                settled.to_vec()
+            } else {
+                failures
+            }
+        }
     };
     let settles: Vec<_> = deciding
         .iter()
@@ -807,6 +864,7 @@ fn preflight_error(
 
 pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     use crate::roots::{Product, Workspace};
+    let mode = WaitMode::from_command(&command);
     let resolved = match crate::roots::resolve(globals, Workspace::Project, Product::Required) {
         Ok(resolved) => resolved,
         Err(error) => {
@@ -1335,7 +1393,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             &mut latest,
             &mut settled,
             deadline,
-            command.any,
+            mode,
             &mut transition,
         );
         stop.stop();
@@ -1348,7 +1406,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             &sources,
             &mut latest,
             &mut settled,
-            command.any,
+            mode,
             local_host.as_ref(),
             |target| final_read(target, &edge, &mut final_session),
             &mut transition,
@@ -1356,8 +1414,8 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     if let Some(error) = write_error {
         return crate::fail("wait", Outcome::Error, "IO", &error.to_string(), globals);
     }
-    let outcome = outcome(&latest, &settled, done, command.any);
-    let mut human = String::new();
+    let outcome = outcome(&latest, &settled, done, mode);
+    let mut human = format!("wait mode: {}\n", mode.as_str());
     let rows: Vec<_> = sources
         .iter()
         .zip(&latest)
@@ -1402,7 +1460,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         &provenant_records::CommandResult::new(
             "wait",
             outcome,
-            json!({"targets":rows,"timed_out":!done,"local_observation":if graph_indices.is_empty(){Value::Null}else{json!(observation)}}),
+            json!({"mode":mode.as_str(),"targets":rows,"timed_out":!done,"local_observation":if graph_indices.is_empty(){Value::Null}else{json!(observation)}}),
         ),
         globals,
         &human,
@@ -1630,7 +1688,7 @@ mod tests {
                 &mut latest,
                 &mut settled,
                 Instant::now(),
-                false,
+                WaitMode::All,
                 &mut |_, _| {}
             ));
             let last = latest[0].as_ref().unwrap();
@@ -1680,7 +1738,7 @@ mod tests {
                 &mut latest,
                 &mut settled,
                 Instant::now(),
-                false,
+                WaitMode::All,
                 &mut |_, _| {},
             );
             assert!(!done, "the blocking phase ends unsatisfied");
@@ -1689,7 +1747,7 @@ mod tests {
                 &sources,
                 &mut latest,
                 &mut settled,
-                false,
+                WaitMode::All,
                 Some(&host),
                 |target| {
                     reads.push(target.to_string());
@@ -1706,7 +1764,7 @@ mod tests {
                 latest[0].as_ref().map(|r| r.data["stale"].is_null()),
                 Some(true)
             );
-            assert_eq!(outcome(&latest, &settled, done, false), expected);
+            assert_eq!(outcome(&latest, &settled, done, WaitMode::All), expected);
         }
     }
 
@@ -1846,7 +1904,7 @@ mod tests {
         }
     }
 
-    fn wait_on(updates: &[(usize, Settle)], count: usize, any: bool) -> (Outcome, Vec<usize>) {
+    fn wait_on(updates: &[(usize, Settle)], count: usize, mode: WaitMode) -> (Outcome, Vec<usize>) {
         let (sender, receiver) = mpsc::channel();
         for (target, settle) in updates {
             assert!(
@@ -1865,10 +1923,10 @@ mod tests {
             &mut latest,
             &mut settled,
             Instant::now() + Duration::from_millis(20),
-            any,
+            mode,
             &mut |_, _| {},
         );
-        (outcome(&latest, &settled, done, any), settled)
+        (outcome(&latest, &settled, done, mode), settled)
     }
 
     #[test]
@@ -1882,12 +1940,12 @@ mod tests {
                 (0, Succeeded),
             ],
             2,
-            true,
+            WaitMode::Any,
         );
         assert_eq!(settled, [1], "the later settlement was never read");
         assert_eq!(outcome, Outcome::Failed);
         assert_eq!(
-            wait_on(&[(0, Pending), (1, NeedsInput)], 2, true).0,
+            wait_on(&[(0, Pending), (1, NeedsInput)], 2, WaitMode::Any).0,
             Outcome::Pending
         );
     }
@@ -1895,13 +1953,44 @@ mod tests {
     #[test]
     fn all_waits_for_every_target_and_a_timeout_is_124() {
         use Settle::*;
-        let (outcome, _) = wait_on(&[(0, Succeeded), (1, Pending)], 2, false);
+        let (outcome, _) = wait_on(&[(0, Succeeded), (1, Pending)], 2, WaitMode::All);
         assert_eq!(provenant_cli::exit_status(&outcome), 124);
-        let (outcome, _) = wait_on(&[(0, Succeeded), (1, Pending), (1, Succeeded)], 2, false);
+        let (outcome, _) = wait_on(
+            &[(0, Succeeded), (1, Pending), (1, Succeeded)],
+            2,
+            WaitMode::All,
+        );
         assert_eq!(provenant_cli::exit_status(&outcome), 0);
-        let (outcome, _) = wait_on(&[(0, NeedsInput), (1, Unsuccessful)], 2, false);
+        let (outcome, _) = wait_on(&[(0, NeedsInput), (1, Unsuccessful)], 2, WaitMode::All);
         assert_eq!(provenant_cli::exit_status(&outcome), 1);
-        assert_eq!(provenant_cli::exit_status(&wait_on(&[], 1, true).0), 124);
+        assert_eq!(
+            provenant_cli::exit_status(&wait_on(&[], 1, WaitMode::Any).0),
+            124
+        );
+    }
+
+    #[test]
+    fn fail_fast_waits_for_successes_but_returns_on_first_failure() {
+        use Settle::*;
+        let (outcome, settled) = wait_on(
+            &[
+                (0, Pending),
+                (1, Pending),
+                (1, Unsuccessful),
+                (0, Succeeded),
+            ],
+            2,
+            WaitMode::FailFast,
+        );
+        assert_eq!(settled, [1]);
+        assert_eq!(outcome, Outcome::Failed);
+        let (outcome, settled) = wait_on(
+            &[(0, Pending), (1, Pending), (1, Succeeded), (0, Succeeded)],
+            2,
+            WaitMode::FailFast,
+        );
+        assert_eq!(settled, [1, 0]);
+        assert_eq!(outcome, Outcome::Ok);
     }
 
     #[test]

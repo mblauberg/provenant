@@ -1280,9 +1280,15 @@ pub struct Wait {
     /// Pull request whose required checks, merge or close ends the wait (repeatable)
     #[arg(long = "pr", value_name = "NUMBER", catalog_u64_range = 1..)]
     pub prs: Vec<u64>,
+    /// Wait until every target settles (the default)
+    #[arg(long, conflicts_with_all = ["any", "fail_fast"])]
+    pub all: bool,
     /// Return at the first target to settle or need input
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["all", "fail_fast"])]
     pub any: bool,
+    /// Return when a target fails, or when all targets settle
+    #[arg(long = "fail-fast", conflicts_with_all = ["all", "any"])]
+    pub fail_fast: bool,
     /// Print one line per transition until the wait ends
     #[arg(long)]
     pub follow: bool,

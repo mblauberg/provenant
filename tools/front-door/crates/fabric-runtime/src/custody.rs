@@ -24,9 +24,36 @@ pub fn warn(changes: &[CustodyChange]) {
     for change in changes {
         if let Some(holder) = &change.previous_holder {
             warning(format_args!(
-                "{} was held by {holder:?}; custody changed and recorded",
-                change.record.subject
+                "{} was held by {}; custody changed and recorded",
+                change.record.subject,
+                holder_label(holder),
             ));
         }
+    }
+}
+
+fn holder_label(holder: &provenant_records::custody::Holder) -> String {
+    use provenant_records::custody::Holder;
+    match holder {
+        Holder::Chair { chair } => format!("chair {} on host {}", chair.actor, chair.host),
+        Holder::Attempt { attempt, .. } => format!("attempt {attempt}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::holder_label;
+    use provenant_core::AttemptId;
+    use provenant_records::custody::Holder;
+
+    #[test]
+    fn holder_attempt_id_uses_the_hex_display() {
+        let holder = Holder::Attempt {
+            attempt: AttemptId::from_bytes([0x14; 16]),
+            chair: None,
+        };
+        let label = holder_label(&holder);
+        assert!(label.contains(&"14".repeat(16)));
+        assert!(!label.contains("AttemptId("));
     }
 }
