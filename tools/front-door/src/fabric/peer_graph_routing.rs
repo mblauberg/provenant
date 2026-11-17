@@ -324,7 +324,11 @@ fn terminal_steer_refusal_settles_without_losing_private_text_or_graph_progress(
     );
     assert_eq!(
         status.cause,
-        Some(provenant_records::run::SteeringCause::SessionUnavailable)
+        // docs/specs/fabric.md: with no live session the default
+        // `fresh_with_handoff` fallback starts a successor; the fixture's
+        // successor never launches, so the terminal refusal is retained as
+        // the closed `continuation_refused` cause, not `session_unavailable`.
+        Some(provenant_records::run::SteeringCause::ContinuationRefused)
     );
     assert_eq!(status.operations.len(), 1);
     assert_eq!(
