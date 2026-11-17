@@ -2524,6 +2524,19 @@ pub fn run(
 mod tests {
     use super::*;
 
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
+    #[test]
+    fn probed_without_figures_does_not_prompt_another_probe() {
+        let probed = ReadinessRead::unknown(ReadinessReason::ProbedNoFigures);
+        let text = readiness_words(&probed);
+        assert!(text.contains("probed, provider reports no figures"));
+        assert!(!text.contains("quota tick"));
+        assert!(
+            readiness_words(&ReadinessRead::unknown(ReadinessReason::NotProbed))
+                .contains("quota tick")
+        );
+    }
+
     #[test]
     fn a_busy_quota_ledger_is_skipped_without_waiting() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
