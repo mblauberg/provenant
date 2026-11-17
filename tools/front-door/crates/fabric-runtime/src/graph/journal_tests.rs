@@ -2254,6 +2254,7 @@ fn persisted_launch_deadline_stops_preparation_without_stopping_recovery_reads()
     node.attempts[0].state = AttemptState::Starting;
     node.attempts[0].outcome = None;
     node.attempts[0].launched = false;
+    node.attempts[0].settled = 0;
     node.launch_retry = Some(LaunchRetry {
         extra: Default::default(),
         policy: LaunchRetryPolicy::default(),
@@ -2263,6 +2264,7 @@ fn persisted_launch_deadline_stops_preparation_without_stopping_recovery_reads()
         reason: None,
     });
     fixture.checkpoint.wake_at = Some(now);
+    fixture.checkpoint.settlements = 0;
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution).unwrap();
     journal.save(&fixture.checkpoint).unwrap();
