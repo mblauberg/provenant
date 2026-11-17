@@ -955,8 +955,18 @@ fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result 
         .as_array()
         .and_then(|nodes| nodes.first())
         .ok_or("graph node")?;
-    let attempts = node["attempts"].as_array().ok_or("attempts")?;
-    assert_eq!(attempts.len(), 2, "{checkpoint}");
+    // The checkpoint keeps the steered (superseded) attempt in
+    // previous_attempts and the resumed one in attempts; check both in order.
+    let previous = node["previous_attempts"]
+        .as_array()
+        .ok_or("previous attempts")?;
+    let current = node["attempts"].as_array().ok_or("attempts")?;
+    assert_eq!((previous.len(), current.len()), (1, 1), "{checkpoint}");
+    assert_eq!(
+        current[0]["key"]["previous_attempt_ref"], previous[0]["attempt_ref"],
+        "{checkpoint}"
+    );
+    let attempts: Vec<_> = previous.iter().chain(current).collect();
     assert_eq!(fs::read_to_string(worktree.join("before.txt"))?, "before\n");
     assert_eq!(fs::read_to_string(worktree.join("after.txt"))?, "after\n");
     let status = rig.execute(
