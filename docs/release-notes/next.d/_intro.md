@@ -1,1 +1,0 @@
-This release makes lanes settle, stop and steer reliably without the chair, and accepts handoffs that providers write in `json` fences. Lane stop and guardian records changed format, so let running lanes settle or stop them before upgrading.
