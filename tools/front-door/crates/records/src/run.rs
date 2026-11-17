@@ -1607,12 +1607,24 @@ pub struct SkippedRoute {
     pub guard_resource: Option<crate::diagnostic::ResourceFact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confinement_guard: Option<crate::diagnostic::ConfinementGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_guard: Option<crate::diagnostic::ContinuationGuard>,
     /// Typed readiness cause, when the router supplied one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<crate::RouteExclusionReason>,
     pub detail: String,
 }
 impl SkippedRoute {
+    pub fn set_continuation_guard(&mut self, guard: crate::diagnostic::ContinuationGuard) {
+        self.continuation_guard = Some(guard);
+        let diagnostic = self.diagnostic();
+        self.detail = format!(
+            "{}; {}",
+            diagnostic.detail.unwrap_or_default(),
+            diagnostic.next.unwrap_or_default()
+        );
+    }
+
     /// Attach a typed cause and persist only its bounded safe projection.
     pub fn set_cause(&mut self, cause: crate::RouteExclusionReason) {
         self.cause = Some(cause);
@@ -1674,6 +1686,9 @@ impl SkippedRoute {
         if let Some(failure) = self.plan_error {
             diagnostic.detail = Some(failure.detail().into());
         }
+        if let Some(guard) = self.continuation_guard {
+            diagnostic = guard.project(diagnostic);
+        }
         match self.guard_resource {
             Some(fact) => fact
                 .project(diagnostic)
@@ -1694,6 +1709,7 @@ impl Default for SkippedRoute {
             guard_boundary: None,
             guard_resource: None,
             confinement_guard: None,
+            continuation_guard: None,
             cause: None,
             detail: String::new(),
         }

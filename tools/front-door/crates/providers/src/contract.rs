@@ -2,6 +2,9 @@ use crate::{
     ExitObservation, LaunchSpec, PrepareInput, ProviderEvent, ProviderOutcome, StreamState,
 };
 use provenant_records::ResolvedRoute;
+use provenant_records::diagnostic::{
+    ContinuationField as F, ContinuationGuard, ContinuationIssue as I, ContinuationRule,
+};
 use provenant_records::policy::{Effect, Facts, Policy};
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +27,8 @@ pub enum ProviderError {
     Overflow,
     #[error("provider/session/account/host/model/controls or grant changed")]
     IdentityMismatch,
+    #[error("{0}")]
+    ContinuationRefused(ContinuationGuard),
     #[error("provider continuation identity is unknown")]
     UnknownIdentity,
     #[error("provider probe could not prepare its private directory: {0}")]
@@ -65,6 +70,7 @@ impl ProviderError {
     pub fn policy_code(&self) -> Option<&'static str> {
         match self {
             Self::PolicyActionUnsupported { code } => Some(code),
+            Self::ContinuationRefused(guard) => Some(guard.rule.code()),
             _ => None,
         }
     }
@@ -84,7 +90,8 @@ impl ProviderError {
     pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass as B;
         match self {
-            Self::IdentityMismatch
+            Self::ContinuationRefused(_)
+            | Self::IdentityMismatch
             | Self::UnknownIdentity
             | Self::InvalidPath
             | Self::UnsupportedPolicy => B::Authority,
@@ -287,11 +294,16 @@ pub struct Continuation {
     grant_digest: String,
 }
 impl Continuation {
-    fn authority_error(message: &str, error: ProviderError) -> ProviderError {
+    fn authority_error(field: F, issue: I) -> ProviderError {
+        let guard = ContinuationGuard {
+            rule: ContinuationRule::Contract,
+            field,
+            issue,
+        };
         provenant_records::policy::Policy::default().boundary_error(
-            "CONTRACT_CONTINUATION_VALIDATE_AUTHORITY",
-            provenant_records::policy::Facts::violation(message),
-            error,
+            guard.rule.code(),
+            provenant_records::policy::Facts::violation(&guard.to_string()),
+            ProviderError::ContinuationRefused(guard),
         )
     }
     pub(crate) fn from_outcome(
@@ -302,17 +314,11 @@ impl Continuation {
         model_on_wire: bool,
     ) -> Result<Self, ProviderError> {
         if outcome.adapter() != adapter || route.adapter != adapter {
-            return Err(Self::authority_error(
-                "provider outcome does not match the applied route adapter",
-                ProviderError::IdentityMismatch,
-            ));
+            return Err(Self::authority_error(F::Provider, I::Mismatch));
         }
-        let session = outcome.session().ok_or_else(|| {
-            Self::authority_error(
-                "provider outcome did not identify its session",
-                ProviderError::UnknownIdentity,
-            )
-        })?;
+        let session = outcome
+            .session()
+            .ok_or_else(|| Self::authority_error(F::Session, I::Missing))?;
         // Requested models cannot substitute for answering-model evidence.
         // Codex's exec stream has no model position; its resume argv pins the
         // same `-m`, and any model it does report must still match.
@@ -321,8 +327,12 @@ impl Continuation {
             None if !model_on_wire => {}
             _ => {
                 return Err(Self::authority_error(
-                    "provider outcome did not identify its applied model",
-                    ProviderError::UnknownIdentity,
+                    F::Model,
+                    if outcome.model().is_some() {
+                        I::Mismatch
+                    } else {
+                        I::Missing
+                    },
                 ));
             }
         }
@@ -339,16 +349,22 @@ impl Continuation {
     ) -> Result<Self, ProviderError> {
         if route.adapter != adapter || session.is_empty() {
             return Err(Self::authority_error(
-                "retained session does not match its applied route",
-                ProviderError::IdentityMismatch,
+                if session.is_empty() {
+                    F::Session
+                } else {
+                    F::Provider
+                },
+                if session.is_empty() {
+                    I::Missing
+                } else {
+                    I::Mismatch
+                },
             ));
         }
-        let account_key = route.account_key.clone().ok_or_else(|| {
-            Self::authority_error(
-                "applied route has no account identity",
-                ProviderError::UnknownIdentity,
-            )
-        })?;
+        let account_key = route
+            .account_key
+            .clone()
+            .ok_or_else(|| Self::authority_error(F::Account, I::Missing))?;
         Ok(Self {
             adapter: adapter.into(),
             session: session.into(),
@@ -365,10 +381,7 @@ impl Continuation {
         state: &mut StreamState,
     ) -> Result<(), ProviderError> {
         if self.adapter != adapter {
-            return Err(Self::authority_error(
-                "provider stream does not match the continuation adapter",
-                ProviderError::IdentityMismatch,
-            ));
+            return Err(Self::authority_error(F::Provider, I::Mismatch));
         }
         state.bind_identity(&self.session, &self.model);
         Ok(())
@@ -377,17 +390,21 @@ impl Continuation {
         &self.session
     }
     pub fn validate(&self, route: &ResolvedRoute, grant_digest: &str) -> Result<(), ProviderError> {
-        if self.adapter != route.adapter
-            || Some(&self.account_key) != route.account_key.as_ref()
-            || self.host != route.host
-            || self.model != route.model
-            || self.effort != route.effort
-            || self.grant_digest != grant_digest
-        {
-            return Err(Self::authority_error(
-                "continuation identity differs from the resolved route or write grant",
-                ProviderError::IdentityMismatch,
-            ));
+        let mismatch = [
+            (self.adapter != route.adapter, F::Provider),
+            (
+                Some(&self.account_key) != route.account_key.as_ref(),
+                F::Account,
+            ),
+            (self.host != route.host, F::Host),
+            (self.model != route.model, F::Model),
+            (self.effort != route.effort, F::Effort),
+            (self.grant_digest != grant_digest, F::GrantDigest),
+        ]
+        .into_iter()
+        .find_map(|(changed, field)| changed.then_some(field));
+        if let Some(field) = mismatch {
+            return Err(Self::authority_error(field, I::Mismatch));
         }
         Ok(())
     }

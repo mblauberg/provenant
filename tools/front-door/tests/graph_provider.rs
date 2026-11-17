@@ -467,12 +467,36 @@ fn fixture() -> Result {
     // prior launch's evidence.
     let fixture_session = std::env::var("PROVENANT_PARENT_ATTEMPT_ID")?;
     let session = fixture_session.as_str();
-    if prompt.contains("fixture public bounded steer continuation") {
-        const STEER_SESSION: &str = "fixture-steer-session";
-        let resumed = args
-            .windows(2)
-            .any(|pair| pair[0] == "resume" && pair[1] == STEER_SESSION);
+    const STEER_SESSION: &str = "fixture-steer-session";
+    let resumed = args
+        .windows(2)
+        .any(|pair| pair[0] == "resume" && pair[1] == STEER_SESSION);
+    if prompt.contains("fixture public steer continuation") || resumed {
+        let sessions = home.join("sessions/2026/11/17");
+        let rollout = sessions.join(format!("rollout-2026-11-17T00-00-00-{STEER_SESSION}.jsonl"));
+        if !resumed {
+            fs::create_dir_all(&sessions)?;
+            fs::write(
+                &rollout,
+                format!(
+                    "{}\n{}\n",
+                    json!({"type":"session_meta","payload":{"id":STEER_SESSION}}),
+                    json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
+                ),
+            )?;
+        }
         if resumed {
+            // Preparation and predecessor settlement must preserve the session
+            // in the exact same native home before the resumed CLI starts.
+            let turn = provenant_providers::codex_rollout::observe(&home, STEER_SESSION)?;
+            assert_eq!(turn.model, "gpt-6-luna");
+            assert_eq!(turn.effort.as_deref(), Some("low"));
+            assert!(rollout.is_file());
+            assert_eq!(
+                fs::read("fixture-steer-home.txt")?,
+                home.as_os_str().as_encoded_bytes()
+            );
+
             assert!(prompt.contains("STEER_NOTE: finish the interrupted task"));
             assert_eq!(fs::read_to_string("before.txt")?, "before\n");
             assert_eq!(
@@ -483,7 +507,7 @@ fn fixture() -> Result {
             let committed = std::process::Command::new("/bin/sh")
                 .args([
                     "-c",
-                    "git add before.txt after.txt fixture-steer-worktree.txt && git -c user.name='Fixture' -c user.email='fixture@example.test' commit -qm 'test: finish steered work'",
+                    "git add before.txt after.txt fixture-steer-worktree.txt fixture-steer-home.txt && git -c user.name='Fixture' -c user.email='fixture@example.test' commit -qm 'test: finish steered work'",
                 ])
                 .output()?;
             assert!(
@@ -500,6 +524,10 @@ fn fixture() -> Result {
             }
         } else {
             assert!(!args.iter().any(|arg| arg == "resume"));
+            fs::write(
+                "fixture-steer-home.txt",
+                home.as_os_str().as_encoded_bytes(),
+            )?;
             fs::write("before.txt", "before\n")?;
             fs::write(
                 "fixture-steer-worktree.txt",
@@ -802,7 +830,7 @@ fn policy_codex_fixture() -> Result<TestRig> {
 }
 
 // Spec: docs/specs/fabric.md#session-ready-steering
-fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() -> Result {
+fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
@@ -837,7 +865,7 @@ fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() ->
     let base = std::str::from_utf8(&base.stdout.bytes)?.trim().to_owned();
     let ready = rig.root.join("steer-session-ready");
     let brief = format!(
-        "fixture public bounded steer continuation\nSTEER_READY_FILE: {}\n",
+        "fixture public steer continuation\nSTEER_READY_FILE: {}\n",
         ready.display()
     );
     let (launch, value) = rig.launch(&[
@@ -850,6 +878,8 @@ fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() ->
         "public-steer-local",
         "--model",
         "codex/gpt-6-luna",
+        "--effort",
+        "low",
         "--account",
         "fixture",
         "--no-sandbox",
@@ -912,7 +942,7 @@ fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() ->
         "{receipt}"
     );
     assert_eq!(
-        receipt["data"]["receipts"][0]["support"], "continuation_only",
+        receipt["data"]["receipts"][0]["support"], "continuation",
         "{receipt}"
     );
     assert!(!receipt.to_string().contains("STEER_NOTE"), "{receipt}");
@@ -941,6 +971,11 @@ fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() ->
     )?;
     assert_eq!(code(&status), 0, "{status:?}");
     assert!(status.stdout.bytes.is_empty(), "{status:?}");
+
+    let native_home = rig.root.join("codex");
+    let turn = provenant_providers::codex_rollout::observe(&native_home, "fixture-steer-session")?;
+    assert_eq!(turn.model, "gpt-6-luna");
+    assert_eq!(turn.effort.as_deref(), Some("low"));
 
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
@@ -983,6 +1018,12 @@ fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() ->
             "{request:?}"
         );
         let route = record.applied_route.as_ref().ok_or("applied route")?;
+        assert_eq!(
+            record.session.as_deref(),
+            Some("fixture-steer-session"),
+            "{record:?}"
+        );
+        assert_eq!(route.effort.as_deref(), Some("low"), "{record:?}");
         assert_eq!(route.provider.as_deref(), Some("codex"), "{record:?}");
         assert_eq!(
             route.model.as_deref(),
@@ -5519,8 +5560,8 @@ fn main() -> ExitCode {
                 codex_capacity_settles_without_quota_refusal,
             ),
             (
-                "public_bounded_implement_steers_and_resumes_the_same_local_codex_session",
-                public_bounded_implement_steers_and_resumes_the_same_local_codex_session,
+                "public_implement_steers_and_resumes_the_same_local_codex_session",
+                public_implement_steers_and_resumes_the_same_local_codex_session,
             ),
         ];
         let names: Vec<_> = tests.iter().map(|(name, _)| *name).collect();

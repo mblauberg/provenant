@@ -27,6 +27,7 @@ fn a_nested_lane_reads_the_host_ledger_when_it_opens_read_only()
     Ok(())
 }
 #[test]
+// Spec: docs/specs/fabric.md#session-ready-steering
 fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn std::error::Error>>
 {
     struct Refusing {
@@ -41,10 +42,26 @@ fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn
             resume: Option<&run::AttemptRecord>,
         ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
             assert_eq!(resume.map(|prior| prior.attempt_id), self.prior);
-            Err(run::PrepareRefusal::boxed(
-                provenant_records::run::TerminalCause::HandoffRefused,
-                "fixture continuation refused; run provenant run",
-            ))
+            let guard = provenant_records::diagnostic::ContinuationGuard {
+                rule: provenant_records::diagnostic::ContinuationRule::NativeSession,
+                field: provenant_records::diagnostic::ContinuationField::Rollout,
+                issue: provenant_records::diagnostic::ContinuationIssue::Unavailable,
+            };
+            let mut skipped = run::SkippedRoute {
+                route: "codex/gpt-6-luna".into(),
+                kind: run::SkipKind::Refused,
+                ..Default::default()
+            };
+            skipped.set_continuation_guard(guard);
+            skipped.guard_boundary = Some(provenant_records::diagnostic::BoundaryClass::Authority);
+            let mut refusal = run::PrepareRefusal::boxed(
+                provenant_records::run::TerminalCause::AccessPolicyRefused,
+                skipped.describe(),
+            );
+            refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+            refusal.policy_code = Some(guard.rule.code().into());
+            refusal.skipped_routes.push(skipped);
+            Err(refusal)
         }
         fn decode(
             &self,
@@ -95,11 +112,30 @@ fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn
     assert_eq!(record.key.graph(), prior_key.graph());
     assert_eq!(record.key.node(), prior_key.node());
     assert_eq!(record.key.attempt(), prior_key.attempt() + 1);
-    assert!(matches!(
-        record.state,
-        run::AttemptState::Terminal { outcome: run::Outcome::Rejected, reason: Some(ref reason), .. }
-            if reason.contains("fixture continuation refused")
-    ));
+    let guard = record.skipped_routes[0]
+        .continuation_guard
+        .ok_or("persisted continuation fact")?;
+    assert_eq!(
+        guard.field,
+        provenant_records::diagnostic::ContinuationField::Rollout
+    );
+    assert_eq!(
+        guard.issue,
+        provenant_records::diagnostic::ContinuationIssue::Unavailable
+    );
+    let run::AttemptState::Terminal {
+        outcome: run::Outcome::Rejected,
+        reason: Some(reason),
+        terminal_note: Some(note),
+        ..
+    } = record.state
+    else {
+        return Err("continuation refusal was not settled".into());
+    };
+    for text in [&reason, &note] {
+        assert!(text.contains(guard.rule.code()));
+        assert!(text.contains(guard.field.name()));
+    }
     Ok(())
 }
 #[test]

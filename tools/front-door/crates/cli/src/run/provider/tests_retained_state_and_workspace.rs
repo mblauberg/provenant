@@ -272,7 +272,7 @@ fn native_session_location_round_trip_is_bound_to_route_and_account()
             "fixture-model",
             Some("different-account"),
         ),
-        Err(NativeSessionLocationError::Mismatch)
+        Err(NativeSessionLocationError::Mismatch(_))
     ));
     assert!(matches!(
         native_session_location_for_route(
@@ -281,7 +281,7 @@ fn native_session_location_round_trip_is_bound_to_route_and_account()
             "other-model",
             Some("selected-account-key"),
         ),
-        Err(NativeSessionLocationError::Mismatch)
+        Err(NativeSessionLocationError::Mismatch(_))
     ));
 
     let prior: run::AttemptRecord = serde_json::from_value(serde_json::json!({
@@ -302,14 +302,14 @@ fn native_session_location_round_trip_is_bound_to_route_and_account()
     assert!(matches!(
         verify_native_continuation(&prior, &route, &wrong_home, &state_root),
         Err(ContinuationError::NativeSessionLocation(
-            NativeSessionLocationError::Mismatch
+            NativeSessionLocationError::Mismatch(_)
         ))
     ));
     let mut other_account = route.clone();
     other_account.account_key = Some("other-account".into());
     assert!(matches!(
         verify_native_continuation(&prior, &other_account, &home, &state_root),
-        Err(ContinuationError::RouteMismatch)
+        Err(ContinuationError::RouteMismatch(_))
     ));
     Ok(())
 }
@@ -398,6 +398,9 @@ fn codex_terminal_observation_uses_final_route_bound_native_home()
 fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, Digest};
+    use provenant_records::diagnostic::{
+        ContinuationField as F, ContinuationIssue as I, ContinuationRule as R,
+    };
 
     let temp = tempfile::tempdir()?;
     let base = temp.path().canonicalize()?;
@@ -492,10 +495,41 @@ fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
     )?;
     let wrong_session_model =
         verify_native_continuation(&prior, &route, &native_home, &state).unwrap_err();
-    assert!(matches!(
-        wrong_session_model,
-        ContinuationError::NativeSessionUnavailable
-    ));
+    let guard = wrong_session_model.guard().ok_or("typed model refusal")?;
+    assert_eq!(guard.field, F::Model);
+    assert_eq!(guard.issue, I::Mismatch);
+    assert_eq!(guard.rule, R::NativeSession);
+    for (body, issue) in [
+        (
+            format!(
+                "{}\n{}\n{}\n",
+                serde_json::json!({"type":"session_meta","payload":{"id":session}}),
+                serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna"}}),
+                serde_json::json!({"type":"turn_context","payload":{"model":"other-model"}}),
+            ),
+            I::Mismatch,
+        ),
+        (
+            serde_json::json!({"type":"session_meta","payload":{}}).to_string(),
+            I::Invalid,
+        ),
+    ] {
+        std::fs::write(&rollout, body)?;
+        let error = verify_native_continuation(&prior, &route, &native_home, &state).unwrap_err();
+        let guard = error.guard().ok_or("typed rollout refusal")?;
+        assert_eq!(guard.field, F::Rollout);
+        assert_eq!(guard.issue, issue);
+    }
+    // A large retained rollout is unavailable for verification, not evidence
+    // that a particular session or model field changed. Sparse allocation
+    // reaches the reader's size boundary without a large fixture payload.
+    std::fs::File::create(&rollout)?
+        .set_len(provenant_providers::codex_rollout::MAX_ROLLOUT_BYTES + 1)?;
+    let oversized = verify_native_continuation(&prior, &route, &native_home, &state).unwrap_err();
+    let guard = oversized.guard().ok_or("typed oversized rollout refusal")?;
+    assert_eq!(guard.rule, R::NativeSession);
+    assert_eq!(guard.field, F::Rollout);
+    assert_eq!(guard.issue, I::Unavailable);
     std::fs::write(
         &rollout,
         format!(
@@ -507,11 +541,36 @@ fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
 
     let wrong_home = base.join("different-account-home");
     let refusal = verify_native_continuation(&prior, &route, &wrong_home, &state).unwrap_err();
-    assert!(matches!(
-        refusal,
-        ContinuationError::NativeSessionUnavailable
-    ));
+    let guard = refusal.guard().ok_or("typed home refusal")?;
+    assert_eq!(guard.field, F::NativeHome);
+    assert_eq!(guard.issue, I::Mismatch);
     assert!(!refusal.to_string().contains(session));
+
+    for field in [F::Provider, F::Model, F::Account, F::Effort] {
+        let mut changed = route.clone();
+        match field {
+            F::Provider => changed.adapter = "other".into(),
+            F::Model => changed.model = "other".into(),
+            F::Account => changed.account_key = Some("other".into()),
+            F::Effort => changed.effort = Some("high".into()),
+            _ => unreachable!(),
+        }
+        let error = continuation_for_policy(
+            &prior,
+            &changed,
+            "fixture",
+            ContinuationState {
+                state_root: &state,
+                config_root: &state,
+                private_state: &child_state,
+            },
+            &Default::default(),
+        )
+        .unwrap_err();
+        let guard = error.guard().ok_or("typed route refusal")?;
+        assert_eq!(guard.field, field);
+        assert_eq!(guard.rule, R::RetainedRoute);
+    }
 
     std::fs::remove_file(&rollout)?;
     let missing = verify_native_continuation(&prior, &route, &native_home, &state).unwrap_err();
