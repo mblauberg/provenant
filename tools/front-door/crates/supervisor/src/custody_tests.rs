@@ -1444,6 +1444,160 @@ fn spawned_reboot_recovery(
 }
 
 #[test]
+fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestResult {
+    // Spec: docs/specs/run-settlement.md#guardian-loss-proof
+    const BOOT: &str = "darwin:00000000-0000-0000-0000-000000000000";
+    for case in [
+        "free",
+        "guardian_held",
+        "custody_held",
+        "lease_missing",
+        "guardian_replaced",
+        "custody_replaced",
+        "writer_replaced",
+        "record_missing",
+        "wrong_scope",
+        "incomplete_census",
+        "live_provider",
+        "worktree_not_free",
+        "replaced_during_census",
+        "replaced_after_proof",
+        "drop_without_commit",
+    ] {
+        let root = tempfile::tempdir()?;
+        let attempt_root = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(attempt_root.path())?;
+        let mut recovery = spawned_reboot_recovery(root.path(), &attempt, BOOT, 10, 20)?;
+        let evidence = recovery.directory.try_clone()?;
+        let mut custody = Some(attempt.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)?);
+        let mut guardian = Some(liveness::hold_guardian_lifetime(
+            &evidence,
+            &attempt,
+            scope(),
+            recovery.lease.as_ref().ok_or(CustodyError::Fenced)?,
+            custody.as_ref().ok_or(CustodyError::Fenced)?,
+        )?);
+        let provider = recovery
+            .reservation
+            .provider
+            .clone()
+            .ok_or(CustodyError::InvalidRecord)?;
+        let mut world = HolderWorld {
+            boot: BOOT,
+            observations: [
+                (100, ProcessObservation::Absent),
+                (101, ProcessObservation::Absent),
+            ]
+            .into(),
+            census_facts: Vec::new(),
+            census_complete: case != "incomplete_census",
+        };
+        let replace_lock = |directory: &Directory, name: &str| -> Result<()> {
+            // Retain the old inode while creating its replacement.
+            let _old = directory.open_read(OsStr::new(name))?;
+            directory.unlink(OsStr::new(name))?;
+            drop(directory.try_lock(OsStr::new(name), LockMode::Exclusive)?);
+            Ok(())
+        };
+        match case {
+            "guardian_replaced" => replace_lock(&evidence, "guardian.lock")?,
+            "custody_replaced" => replace_lock(&attempt, "custody.lock")?,
+            "writer_replaced" => replace_lock(&recovery.lock_directory, "writer.lock")?,
+            "lease_missing" => drop(recovery.lease.take()),
+            "record_missing" => evidence.unlink(OsStr::new("guardian-lock.json"))?,
+            "wrong_scope" => {
+                let mut record: serde_json::Value =
+                    read_record(&evidence, "guardian-lock.json", RECORD_LIMIT)?;
+                record["scope"]["generation"] = (scope().generation + 1).into();
+                write_record(
+                    &evidence,
+                    "guardian-lock.json",
+                    &record,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
+            }
+            "live_provider" => world.census_facts.push(process_fact(provider)),
+            _ => {}
+        }
+        if case != "guardian_held" {
+            drop(guardian.take());
+        }
+        if case != "custody_held" {
+            drop(custody.take());
+        }
+        let proof = recovery.after_guardian_loss(&attempt, &world, || {
+            if case == "replaced_during_census" {
+                replace_lock(&evidence, "guardian.lock")?;
+            }
+            Ok(case != "worktree_not_free")
+        })?;
+        assert_eq!(
+            proof.is_some(),
+            matches!(
+                case,
+                "free" | "drop_without_commit" | "replaced_after_proof"
+            ),
+            "{case}"
+        );
+        if let Some(proof) = proof {
+            assert_eq!(proof.scope(), scope());
+            for (directory, name) in [(&evidence, "guardian.lock"), (&attempt, "custody.lock")] {
+                assert!(
+                    matches!(
+                        directory.try_lock_existing(OsStr::new(name), LockMode::Exclusive),
+                        Err(FsError::LockTimeout { .. })
+                    ),
+                    "{case}: {name}"
+                );
+            }
+            assert!(matches!(
+                Directory::open_anchor(root.path())?
+                    .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive),
+                Err(FsError::LockTimeout { .. })
+            ));
+            assert!(
+                evidence
+                    .metadata_at(OsStr::new("reservation.json"), false)
+                    .is_ok()
+            );
+            if case == "free" {
+                // The Run owner commits its terminal outcome before consuming
+                // the release capability. The proof itself changes no record.
+                attempt
+                    .atomic_write(
+                        OsStr::new("test-terminal.json"),
+                        ".terminal-",
+                        b"committed",
+                        PublishMode::NoReplace,
+                    )?
+                    .require_durable()?;
+                proof.release()?;
+                assert!(
+                    evidence
+                        .metadata_at(OsStr::new("reservation.json"), false)
+                        .is_err_and(|error| error.is_not_found())
+                );
+                continue;
+            }
+            if case == "replaced_after_proof" {
+                replace_lock(&evidence, "guardian.lock")?;
+                assert!(matches!(proof.release(), Err(CustodyError::Fenced)));
+            } else {
+                drop(proof);
+            }
+        }
+        assert!(
+            evidence
+                .metadata_at(OsStr::new("reservation.json"), false)
+                .is_ok(),
+            "{case}: proof failure/drop must retain the fence"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn reboot_recovery_requires_the_original_attempt_and_exclusive_custody() -> TestResult {
     #[derive(Clone, Copy)]
     enum Refusal {

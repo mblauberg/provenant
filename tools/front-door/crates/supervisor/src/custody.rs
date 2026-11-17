@@ -1,8 +1,10 @@
 //! Guardian channels and persistent writer reservations. A PID is never a handle.
+pub(crate) mod liveness;
 use crate::census::{
     CensusError, ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver,
 };
 use crate::machine::StopReason;
+pub use liveness::GuardianLossRecovery;
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, GitOid, WaitBudget};
 use provenant_os::{
     exec::{CapturedStream, Termination},

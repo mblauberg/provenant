@@ -85,6 +85,30 @@ A missing required writer handoff seals `handoff_missing` and goes to the chair;
 - Why: all readers need the same cause for the next decision; host stops must
   preserve valid handoffs and never count as negative provider-quality evidence.
 
+## Guardian loss proof
+
+`Recovery::after_guardian_loss` offers a separate same-boot recovery capability.
+It requires the original guardian lock and attempt custody lock to be free,
+holds both alongside the original writer lease, and takes a fresh complete
+process census under those locks. Recorded roots, descendants and their
+sessions or groups must have no surviving member. The trusted host must also
+prove worktree non-occupancy under exclusion; unknown or occupied is not free.
+For a read-only attempt there is no worktree to occupy.
+
+Missing, replaced or unreadable lock evidence never proves loss. The identities
+are rechecked after the host's worktree census. The capability retains all
+three locks while the Run owner commits its canonical Lost outcome and warning;
+only then may the owner consume it to release the reservation. Dropping or
+failing to obtain the capability leaves the durable fence intact. A process
+checkpoint, elapsed time or reused PID alone supplies no such authority.
+- Why: same-boot recovery needs positive death and non-occupancy evidence while
+  preserving the worktree fence until the outcome is committed.
+
+The capability itself neither commits a Run outcome nor changes read-only
+presence classification. The Run settlement driver owns its consumption and
+the separate EOF outcome and quiescent import/release transactions. Manual
+`reconcile --abandon` remains the explicit escape when proof is unavailable.
+
 ## Continuation
 
 A retry starts a fresh attempt with the original authority, not a provider

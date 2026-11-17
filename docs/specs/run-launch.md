@@ -14,6 +14,15 @@ the same captured project and actor identity as the run store. Uncertain custody
 keeps its ownership until release is proved.
 - Why: admission must not create duplicate writers or hold coordination locks across external work.
 
+Before acknowledging custody or spawning the provider, the guardian acquires an
+exclusive per-attempt `guardian.lock` and durably records its inode alongside
+the attempt, writer and custody identities. Only the guardian holds this lock;
+the provider and its descendants never inherit it. The guardian retains it
+through terminal publication and custody release. Kernel process teardown
+releases it even when the guardian cannot publish an exit.
+- Why: a stale process checkpoint cannot prove same-boot guardian death; the
+  original kernel lock can supply that evidence without PID-reuse heuristics.
+
 A launch is uncertain only once its reservation may record a handoff. A host
 that cannot hold provider custody refuses before that point: the attempt ends
 with `unsupported_platform` and its custody is withdrawn, never reported as an

@@ -960,6 +960,7 @@ fn live_provider_publishes_initial_checkpoint(root: &Path) -> Result<()> {
     Ok(())
 }
 fn held_custody_is_released_only_after_guardian_exit(root: &Path) -> Result<()> {
+    // Spec: docs/specs/run-launch.md#admission-and-custody
     for index in 0..3 {
         let name = format!("custody-{index}");
         let socket = root.join(format!("custody-{index}.sock"));
@@ -974,11 +975,28 @@ fn held_custody_is_released_only_after_guardian_exit(root: &Path) -> Result<()> 
         let mut provider = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
         byte(&mut provider, b'R')?;
         assert!(!handle.custody_released(&identity));
+        let evidence = Directory::open_anchor(&root.join(format!("{name}-writer")))?;
+        let evidence = attempt_evidence(&evidence, scope())?;
+        assert!(matches!(
+            evidence.try_lock_existing(
+                OsStr::new("guardian.lock"),
+                provenant_os::fs::LockMode::Exclusive
+            ),
+            Err(provenant_os::fs::FsError::LockTimeout { .. })
+        ));
         let guardian = reservation_identity(&root.join(format!("{name}-writer")), "guardian")?;
         stop(&handle, StopReason::ExplicitCancellation)?;
         exited(&handle)?;
         fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(5))?;
         assert!(handle.custody_released(&identity));
+        assert!(
+            evidence
+                .try_lock_existing(
+                    OsStr::new("guardian.lock"),
+                    provenant_os::fs::LockMode::Exclusive
+                )
+                .is_ok()
+        );
     }
     Ok(())
 }
@@ -2686,6 +2704,7 @@ fn retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive(root: &Path) -
 }
 
 fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> Result<()> {
+    // Spec: docs/specs/run-settlement.md#guardian-loss-proof
     let path = root.join("crash.sock");
     let listener = UnixListener::bind(&path)?;
     let (writer, _handle) = start(
@@ -2714,7 +2733,16 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
         fixture::recovery_observation(&locked),
         RecoveryState::Unknown
     );
-    drop(locked);
+    assert!(
+        locked
+            .after_guardian_loss(
+                &Directory::open_anchor(&root.join("crash-attempt"))?,
+                &fixture::RecordedBootObserver,
+                || Ok(true),
+            )?
+            .is_none(),
+        "a surviving provider prevents same-boot loss proof"
+    );
     assert!(!root.join("crash-attempt/process-exit.json").exists());
     drop(held);
     wait_for_identity_absence(&provider)?;
@@ -2736,7 +2764,16 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
             .verify_settlement(&Directory::open_anchor(unrelated.path())?)
             .is_err()
     );
-    drop(recovery);
+    let proof = recovery.after_guardian_loss(
+        &Directory::open_anchor(&root.join("crash-attempt"))?,
+        &fixture::RecordedBootObserver,
+        || Ok(true),
+    )?;
+    assert!(
+        proof.is_some(),
+        "the kernel releases the guardian life lock after its death"
+    );
+    drop(proof);
     assert!(
         root.join("crash-writer")
             .join(scope().attempt.to_string())

@@ -530,6 +530,16 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         _ => return Err(CustodyError::UnknownIdentity),
     };
     reservation.guardian = Some(guardian.clone());
+    // This description belongs only to the guardian, never to the launcher or
+    // provider. Keep it through the terminal transaction and custody release;
+    // the kernel releases it even when the guardian cannot publish its exit.
+    let _lifetime = crate::custody::liveness::hold_guardian_lifetime(
+        &evidence,
+        &inherited.attempt_directory,
+        message.scope,
+        &inherited.writer,
+        &inherited.custody,
+    )?;
     Publication::require_durable(write_record(
         &evidence,
         "reservation.json",
