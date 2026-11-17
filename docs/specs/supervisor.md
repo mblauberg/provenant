@@ -323,8 +323,11 @@ string delimiters. Escaped literals (including surrogate pairs) are matched afte
 decoding. Credential-named fields mask scalar values, including leaves in nested
 containers, while retaining keys and container structure. Literal matches in
 non-string scalars become JSON string masks. Keys are scanned after decoding and
-a matching key is replaced by the marker. Keys exceeding the bounded prefix stream through the escape-aware detector,
-preserving unmatched source bytes.
+matching spans in keys are masked. To preserve distinct object entries, every
+marker in a key receives a per-object ordinal, including occurrences of the
+reserved `[REDACTED` prefix already present in input keys. Marker-free keys retain
+their source bytes. Keys stream through the escape-aware detector, including
+beyond the bounded prefix; ordinals contain no secret-derived information.
 Strings stream in bounded pieces; no line-size fallback changes their grammar.
 Tokenizer memory is bounded by a 128-level nesting stack, a 4 KiB decoded piece
 and its source mappings, a 16 KiB scalar prefix, and the plain redactor's detector

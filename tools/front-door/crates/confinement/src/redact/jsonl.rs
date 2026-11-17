@@ -1,13 +1,15 @@
 //! JSON syntax owns the delimiters; the plain redactor sees decoded values only.
 use super::source::{self, SourceMap};
 use super::{
-    ASSIGNMENT_KEYS, ASSIGNMENT_RUN, FrameEmitter, MAX_SECRET_LENGTH, REDACTED, Redactor,
-    RedactorError,
+    ASSIGNMENT_KEYS, ASSIGNMENT_RUN, FrameEmitter, LiteralAutomaton, MAX_SECRET_LENGTH, REDACTED,
+    Redactor, RedactorError,
 };
 use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError, PROVIDER_LINE_LIMIT};
 
 const STRING_PIECE: usize = 4096;
 const MAX_DEPTH: usize = 128;
+// Reserving the prefix also covers already-numbered markers in input keys.
+const KEY_MARKER_PREFIX: &[u8] = b"[REDACTED";
 
 #[derive(Clone, Copy, PartialEq)]
 enum Position {
@@ -26,6 +28,7 @@ enum Position {
 struct Context {
     position: Position,
     sensitive: bool,
+    key_marker_ordinal: usize,
 }
 
 pub(super) fn credential_key(tail: &[u8]) -> bool {
@@ -115,10 +118,11 @@ pub struct JsonlRedactor {
 
 impl JsonlRedactor {
     /// Maximum output of a source-capped provider line. Unchanged spans retain
-    /// source encoding; masks coalesce. The worst per-byte growth is a one-byte
-    /// scalar becoming a quoted marker. Replay uses this bound only after the
-    /// provider filter has enforced the source cap and marked invalid frames.
-    pub const OUTPUT_LINE_LIMIT: usize = PROVIDER_LINE_LIMIT * (REDACTED.len() + 2);
+    /// source encoding; masks coalesce. Allow a numbered key marker per source
+    /// byte, with at most one decimal digit per bit in the ordinal. Replay uses
+    /// this bound only after the provider filter has enforced the source cap.
+    pub const OUTPUT_LINE_LIMIT: usize =
+        PROVIDER_LINE_LIMIT * (REDACTED.len() + 3 + usize::BITS as usize);
 
     pub fn new(secrets: impl IntoIterator<Item = Vec<u8>>) -> Result<Self, RedactorError> {
         let secrets: Vec<Vec<u8>> = secrets.into_iter().collect();
@@ -140,6 +144,7 @@ impl JsonlRedactor {
             positions: vec![Context {
                 position: Position::Root,
                 sensitive: false,
+                key_marker_ordinal: 0,
             }],
             string: None,
             scalar: None,
@@ -173,6 +178,26 @@ impl JsonlRedactor {
         Ok(())
     }
 
+    fn emit_key(
+        byte: u8,
+        count: usize,
+        masked: bool,
+        redaction_run: &mut bool,
+        ordinal: &mut usize,
+        out: &mut FrameEmitter<'_>,
+    ) -> Result<(), FilterError> {
+        if masked {
+            if !*redaction_run {
+                *ordinal = ordinal.checked_add(1).ok_or(FilterError)?;
+                out.push_bytes(format!("[REDACTED#{ordinal}]").as_bytes());
+            }
+        } else {
+            out.push_repeat(byte, count);
+        }
+        *redaction_run = masked;
+        Ok(())
+    }
+
     fn flush_string(
         &mut self,
         token: &mut StringToken,
@@ -182,13 +207,29 @@ impl JsonlRedactor {
             token.decoded.clear();
             return Ok(());
         }
+        let ordinal = &mut self
+            .positions
+            .last_mut()
+            .ok_or(FilterError)?
+            .key_marker_ordinal;
         self.inner
             .filter_decisions(&token.decoded, &mut |_, count, masked| {
                 token
                     .source
                     .decide(count, masked, &mut |byte, count, masked| {
-                        source::emit(byte, count, masked, &mut token.redaction_run, out);
-                        Ok(())
+                        if token.key {
+                            Self::emit_key(
+                                byte,
+                                count,
+                                masked,
+                                &mut token.redaction_run,
+                                ordinal,
+                                out,
+                            )
+                        } else {
+                            source::emit(byte, count, masked, &mut token.redaction_run, out);
+                            Ok(())
+                        }
                     })
             })?;
         token.decoded.clear();
@@ -202,12 +243,28 @@ impl JsonlRedactor {
     ) -> Result<(), FilterError> {
         self.flush_string(token, out)?;
         if !token.masked || token.key {
+            let ordinal = &mut self
+                .positions
+                .last_mut()
+                .ok_or(FilterError)?
+                .key_marker_ordinal;
             self.inner.finish_decisions(&mut |_, count, masked| {
                 token
                     .source
                     .decide(count, masked, &mut |byte, count, masked| {
-                        source::emit(byte, count, masked, &mut token.redaction_run, out);
-                        Ok(())
+                        if token.key {
+                            Self::emit_key(
+                                byte,
+                                count,
+                                masked,
+                                &mut token.redaction_run,
+                                ordinal,
+                                out,
+                            )
+                        } else {
+                            source::emit(byte, count, masked, &mut token.redaction_run, out);
+                            Ok(())
+                        }
                     })
             })?;
             token.source.finish()?;
@@ -480,6 +537,11 @@ impl JsonlRedactor {
             }
             (Position::ObjectFirst | Position::ObjectKey, b'"') => {
                 out.push_bytes(b"\"");
+                // Add the reserved prefix only to the decoded literal detector. The
+                // caller's secret count and byte limits still apply unchanged.
+                let mut key_literals = self.secrets.clone();
+                key_literals.push(KEY_MARKER_PREFIX.to_vec());
+                self.inner.literals = LiteralAutomaton::new(&key_literals);
                 self.string = Some(StringToken {
                     key: true,
                     masked: inherited,
@@ -517,6 +579,7 @@ impl JsonlRedactor {
                                 Position::ArrayFirst
                             },
                             sensitive: masked,
+                            key_marker_ordinal: 0,
                         });
                         out.push_bytes(&[b]);
                     }
@@ -577,6 +640,7 @@ impl JsonlRedactor {
         self.positions.push(Context {
             position: Position::Root,
             sensitive: false,
+            key_marker_ordinal: 0,
         });
         self.started = false;
         self.plain = false;
@@ -798,8 +862,44 @@ mod tests {
             let (output, changed) = filtered(input, seed);
             assert!(changed);
             let parsed: Value = serde_json::from_slice(&output).unwrap();
-            assert_eq!(parsed["[REDACTED]"], "safe");
+            assert_eq!(parsed["[REDACTED#1]"], "safe");
             assert_eq!(parsed["ordinary"], "value");
+        }
+    }
+
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    #[test]
+    fn redacted_object_keys_remain_distinct_across_chunk_splits() {
+        let input = br#"{"a secret-one":1,"a secret-two":2,"a [REDACTED]":3,"a [REDACTED#1]":4,"a \u005bREDACTED#2]":5,"plain":6,"nested":{"secret-one":7,"secret-two":8}}"#;
+        let original: Value = serde_json::from_slice(input).unwrap();
+        let mut expected = None;
+        for width in 1..=input.len() {
+            let mut filter =
+                JsonlRedactor::new([b"secret-one".to_vec(), b"secret-two".to_vec()]).unwrap();
+            let mut output = Vec::new();
+            for chunk in input.chunks(width) {
+                filter
+                    .filter(chunk, &mut |bytes| output.extend_from_slice(bytes))
+                    .unwrap();
+            }
+            filter
+                .finish(&mut |bytes| output.extend_from_slice(bytes))
+                .unwrap();
+            let parsed: Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(
+                parsed.as_object().unwrap().len(),
+                original.as_object().unwrap().len()
+            );
+            assert_eq!(parsed["nested"].as_object().unwrap().len(), 2);
+            assert_eq!(parsed["plain"], 6);
+            let rendered = String::from_utf8(output.clone()).unwrap();
+            assert!(!rendered.contains("secret-one"));
+            assert!(!rendered.contains("secret-two"));
+            if let Some(expected) = &expected {
+                assert_eq!(&output, expected);
+            } else {
+                expected = Some(output);
+            }
         }
     }
 
