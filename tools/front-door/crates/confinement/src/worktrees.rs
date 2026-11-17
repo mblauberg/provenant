@@ -113,7 +113,6 @@ pub fn lock_repository(
     cancel: &CancelToken,
     clock: &dyn Clock,
 ) -> Result<LockGuard, FsError> {
-    let _ = (budget, clock);
     if cancel.is_cancelled() {
         return Err(FsError::Cancelled {
             path: common.anchored_path().join(REPOSITORY_LOCK),
@@ -121,7 +120,7 @@ pub fn lock_repository(
     }
     // Protect creation/removal, registration, and coherent Git config snapshots.
     // Never retain this hold across provider work or network discovery.
-    common.try_lock(OsStr::new(REPOSITORY_LOCK), mode)
+    common.lock(OsStr::new(REPOSITORY_LOCK), mode, budget, cancel, clock)
 }
 const WRITER_LOCK: &str = "writer.lock";
 

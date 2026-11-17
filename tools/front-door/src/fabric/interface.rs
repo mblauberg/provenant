@@ -2425,14 +2425,18 @@ impl Factory {
             .load(&id)
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
-        if target.node.is_some() || brief_given {
+        let sole_node = match checkpoint.nodes.as_slice() {
+            [only] => Some(only.id.clone()),
+            _ => None,
+        };
+        if target.node.is_some() || brief_given || (extend.is_empty() && sole_node.is_some()) {
             // A brief belongs to one node. A graph of one node names it;
             // otherwise the chair must say which.
             let node = match target.node.clone() {
                 Some(node) => node,
-                None => match checkpoint.nodes.as_slice() {
-                    [only] => only.id.clone(),
-                    _ => {
+                None => match sole_node {
+                    Some(only) => only,
+                    None => {
                         return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
                             provenant_fabric_runtime::coordination::facade::GraphRelayCause::RetryBriefNeedsNode,
                         )));
