@@ -1518,6 +1518,39 @@ impl RunStore {
         Ok(())
     }
 
+    /// The non-exempt uncommitted work a succeeding writer left, or `None`
+    /// when it committed or its tree is clean. Shared by the full terminal pass
+    /// and the deferred delivery, so neither delivers a dirty worktree.
+    fn writer_uncommitted(
+        &self,
+        record: &AttemptRecord,
+        writer: &crate::WriterRequest,
+        attempt: &Directory,
+        scope: provenant_records::custody::Scope,
+        cancel: CancelToken,
+        recovery: Option<&custody::Recovery>,
+    ) -> Result<Option<String>> {
+        let launch = crate::prepare_writer_with_facts(
+            writer,
+            &self.writer_registry,
+            record.project_id,
+            &self.repo_facts,
+        )?;
+        let run_config = provenant_confinement::run_config::RunConfig::read(
+            self.context.state_root.as_path(),
+        )?;
+        let custody_project = crate::writer::writer_project_id(writer)?;
+        let review_exempt = run_config.review_exempt(&custody_project.to_string());
+        crate::settlement::with_cancellation(attempt, scope, &cancel, || {
+            launch.uncommitted(
+                &review_exempt,
+                self.context.state_root.as_path(),
+                recovery.ok_or(RunError::Validation("writer terminal custody missing"))?,
+                &cancel,
+            )
+        })
+    }
+
     fn retry_terminal_effects(
         &self,
         record: &AttemptRecord,
@@ -1639,6 +1672,45 @@ impl RunStore {
                     None => None,
                 };
                 drop(observation);
+                // An outcome-only commit never checked the worktree; a dirty
+                // writer's work stays put and is not delivered.
+                if let Some(custody) = completion.custody() {
+                    let left = self.writer_uncommitted(
+                        record,
+                        writer,
+                        attempt,
+                        Self::scope(record),
+                        CancelToken::new(),
+                        Some(custody),
+                    );
+                    let withheld = match left {
+                        Ok(None) => None,
+                        Ok(Some(reason)) => Some((reason, false)),
+                        Err(error) => Some((
+                            format!(
+                                "writer terminal check failed for {}: {error}",
+                                writer.worktree.display()
+                            ),
+                            true,
+                        )),
+                    };
+                    if let Some((reason, retryable)) = withheld {
+                        self.record_effect(
+                            record.attempt_id,
+                            record.generation,
+                            SettlementEffect::Delivery,
+                            EffectDisposition::Failed {
+                                reason: format!("delivery withheld: {reason}")
+                                    .chars()
+                                    .take(1024)
+                                    .collect(),
+                                retryable,
+                            },
+                            call,
+                        )?;
+                        return Ok(());
+                    }
+                }
                 let cancel = CancelToken::new();
                 let host = match completion {
                     Completion::Live {
@@ -2504,32 +2576,16 @@ impl RunStore {
                 }
                 Ok(_) if decoded.outcome == Outcome::Succeeded => {
                     // Edits with no commit are not a success, and nothing is delivered.
-                    let left = crate::prepare_writer_with_facts(
+                    let left = self.writer_uncommitted(
+                        &record,
                         writer,
-                        &self.writer_registry,
-                        record.project_id,
-                        &self.repo_facts,
-                    )
-                    .and_then(|launch| {
-                        let cancel = settlement
+                        attempt,
+                        exit.scope,
+                        settlement
                             .as_ref()
-                            .map_or_else(CancelToken::new, |driver| driver.cancellation());
-                        let run_config = provenant_confinement::run_config::RunConfig::read(
-                            self.context.state_root.as_path(),
-                        )?;
-                        let custody_project = crate::writer::writer_project_id(writer)?;
-                        let review_exempt = run_config.review_exempt(&custody_project.to_string());
-                        crate::settlement::with_cancellation(attempt, exit.scope, &cancel, || {
-                            launch.uncommitted(
-                                &review_exempt,
-                                self.context.state_root.as_path(),
-                                recovery.ok_or(RunError::Validation(
-                                    "writer terminal custody missing",
-                                ))?,
-                                &cancel,
-                            )
-                        })
-                    });
+                            .map_or_else(CancelToken::new, |driver| driver.cancellation()),
+                        recovery,
+                    );
                     let note = match left {
                         Ok(None) => None,
                         Ok(Some(reason)) => {
@@ -3071,13 +3127,6 @@ impl RunStore {
             session: decoded.session,
             partial_signals: partial,
         };
-        // A writer's success waits for the quiet pass: a live descendant can still change the worktree.
-        if outcome_only && task.writer.is_some() && decoded.outcome == Outcome::Succeeded {
-            return Ok(Finished {
-                record,
-                release_permitted: false,
-            });
-        }
         if let Some(raw) = read_sealed(attempt, "terminal-effects.json", RECORD_LIMIT)? {
             let saved: crate::store::TerminalEffects = crate::db::decode(&raw)?;
             if saved.schema_version != 1 || saved.scope != exit.scope {
@@ -4365,13 +4414,13 @@ mod writer_recovery_tests {
             ExplicitAfterSteer,
             DeliveredSteerUnavailable,
             Deadline,
+            // The outcome commits on the outcome-only pass; the worktree turns dirty before the quiet pass delivers.
+            LateDirty,
         }
         use Marker::{
             DeliveredSteer, DeliveredSteerUnavailable, ExplicitAfterSteer, ExplicitCancel,
         };
         for (changed, dirty, blocked, shared, budget, marker) in [
-            (true, true, false, true, false, Marker::None),
-            (true, false, false, true, true, Marker::None),
             (false, false, false, false, false, Marker::AdmissionSteer),
             (false, false, false, false, false, Marker::AdmissionCancel),
             (false, false, false, false, false, Marker::None),
@@ -4381,6 +4430,7 @@ mod writer_recovery_tests {
             (true, false, false, true, false, Marker::None),
             (true, true, false, true, false, ExplicitCancel),
             (true, true, false, true, false, Marker::Deadline),
+            (true, false, false, true, false, Marker::LateDirty),
             (true, false, false, true, false, DeliveredSteer),
             (true, false, false, true, false, DeliveredSteerUnavailable),
             (true, false, false, true, false, ExplicitCancel),
@@ -4393,6 +4443,8 @@ mod writer_recovery_tests {
                 DeliveredSteer | ExplicitAfterSteer | DeliveredSteerUnavailable
             );
             let explicit = matches!(marker, ExplicitCancel | ExplicitAfterSteer);
+            let late = marker == Marker::LateDirty;
+            let plain = matches!(marker, Marker::None | Marker::LateDirty);
             let fixture = PrepareFixture::new()?;
             let execution = registered_landed_writer_fixture(&fixture)?;
             let (mut clock, cancel) = (clock(), CancelToken::new());
@@ -4414,6 +4466,9 @@ mod writer_recovery_tests {
             .trim()
             .to_owned();
             run.request.task.head = Some(source.clone());
+            if late {
+                run.request.task.deliver = Some(fixture.request.clone());
+            }
             store.create(&run, &call)?;
             let id = run.attempt_id;
             let limits = provenant_records::LaneLimits::default();
@@ -4669,10 +4724,7 @@ mod writer_recovery_tests {
                 observed.stop_reason = Some(StopReason::ExplicitCancellation);
                 observed.cancel_delivered_before_exit = Some(true);
             }
-            // A dirty writer settles Uncommitted in the quiet pass; a failed (budget) writer commits in the outcome-only pass.
-            let early_failed = budget && shared && changed && !dirty && marker == Marker::None;
-            let deferred_outcome =
-                changed && shared && (!budget || early_failed) && marker == Marker::None;
+            let deferred_outcome = changed && shared && !dirty && !budget && plain;
             let mut first_exit = observed.clone();
             first_exit.unresolved_cleanup = deferred_outcome;
             crate::dispatch_tests::seal_exit(&store, &first_exit)?;
@@ -4684,7 +4736,7 @@ mod writer_recovery_tests {
             }
             let mut fake =
                 crate::dispatch_tests::Fake::with_observed(Some(route()), Some(Outcome::Succeeded));
-            if marker != Marker::None {
+            if !plain {
                 fake.session = Some("writer-session".into());
             }
             if budget {
@@ -4696,7 +4748,7 @@ mod writer_recovery_tests {
             } else {
                 "Acceptance remains unfinished"
             };
-            let status = if budget {
+            let status = if budget || late {
                 "done"
             } else if blocked {
                 "blocked"
@@ -4706,6 +4758,9 @@ mod writer_recovery_tests {
             fake.answer = Some(format!(
                 "```handoff\n{{\"schema_version\":2,\"status\":\"{status}\",\"note\":\"{note}\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}}\n```"
             ));
+            if late {
+                fake.answer = Some("```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"Delivered\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```".into());
+            }
             if budget {
                 fake.answer = Some("```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"Delivered\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```".into());
             }
@@ -4734,25 +4789,21 @@ mod writer_recovery_tests {
                     &fake,
                     &call,
                 )?;
-                if early_failed {
+                assert!(!store.import_release_permitted(&early.record, &call)?);
+                assert!(read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?.is_none());
+                if late {
                     assert!(matches!(
                         early.record.state,
                         AttemptState::Terminal {
-                            outcome: Outcome::Failed,
+                            outcome: Outcome::Succeeded,
                             ..
                         }
                     ));
-                    continue;
+                    std::fs::write(
+                        fixture.writer.worktree.join("late-dirty.txt"),
+                        "edited after the outcome committed",
+                    )?;
                 }
-                if dirty {
-                    // A writer's success is not decided until the quiet pass checks the worktree.
-                    assert!(!matches!(early.record.state, AttemptState::Terminal { .. }));
-                    assert!(
-                        read_sealed(&attempt, "terminal-effects.json", RECORD_LIMIT)?.is_none()
-                    );
-                }
-                assert!(!store.import_release_permitted(&early.record, &call)?);
-                assert!(read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?.is_none());
                 let mut resolved = serde_json::to_value(&observed)?;
                 resolved
                     .as_object_mut()
@@ -4804,7 +4855,41 @@ mod writer_recovery_tests {
                     "replay keeps the sealed pre-push/ahead summary"
                 );
             }
-            if deferred_outcome && !dirty {
+            if late {
+                // The committed outcome stands; the dirty worktree is not delivered.
+                assert!(store.import_release_permitted(&finished, &call)?);
+                assert!(matches!(
+                    store.record(id, &call)?.state,
+                    AttemptState::Terminal {
+                        outcome: Outcome::Succeeded,
+                        ..
+                    }
+                ));
+                let delivery = store
+                    .record(id, &call)?
+                    .settlement_receipts
+                    .ok_or("settlement receipts")?
+                    .delivery;
+                assert!(
+                    matches!(
+                        &delivery,
+                        EffectDisposition::Failed { reason, retryable: false }
+                            if reason.contains("late-dirty.txt")
+                    ),
+                    "{delivery:?}"
+                );
+                let remote = String::from_utf8(provenant_os::fixture::run_git(
+                    &fixture.writer.worktree,
+                    &["ls-remote", "origin", "refs/heads/lane"],
+                )?)?;
+                assert!(remote.trim().is_empty(), "dirty writer pushed: {remote}");
+                assert_eq!(
+                    std::fs::read_to_string(fixture.writer.worktree.join("late-dirty.txt"))?,
+                    "edited after the outcome committed"
+                );
+                continue;
+            }
+            if deferred_outcome {
                 assert!(store.import_release_permitted(&finished, &call)?);
                 assert!(store.custody_released(&finished, &call)?);
                 let receipt = WriterDeliveryReceipt {
@@ -4895,7 +4980,7 @@ mod writer_recovery_tests {
                 ));
                 continue;
             }
-            if marker != Marker::None {
+            if !plain {
                 assert!(matches!(
                     finished.state,
                     AttemptState::Terminal {

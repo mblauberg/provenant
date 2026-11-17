@@ -11,7 +11,7 @@ pub(super) struct PrepareFixture {
     root: std::path::PathBuf,
     environment: Vec<(OsString, OsString)>,
     pub(super) writer: WriterRequest,
-    request: WriterDeliveryRequest,
+    pub(super) request: WriterDeliveryRequest,
 }
 
 pub(super) fn registered_writer_project_id(
