@@ -521,6 +521,7 @@ enum Assignment {
         scheme: bool,
         quote: Option<u8>,
         quote_slashes: usize,
+        encoding_layer: usize,
         backslashes: usize,
     },
     /// Letters after `Authorization:`, held until the scheme is known.
@@ -530,6 +531,7 @@ enum Assignment {
     Value {
         quote: Option<u8>,
         quote_slashes: usize,
+        encoding_layer: usize,
         backslashes: usize,
         line: bool,
     },
@@ -542,12 +544,15 @@ struct AssignmentScanner {
     state: Assignment,
     run: Vec<u8>,
     after_backslash: bool,
+    encoding_depth: u32,
+    context_backslashes: usize,
     matched: bool,
 }
 
 impl AssignmentScanner {
     fn filter(&mut self, bytes: &[u8], output: &mut Vec<u8>) {
         for byte in bytes {
+            self.observe_context(*byte);
             self.step(*byte, output);
         }
     }
@@ -560,6 +565,33 @@ impl AssignmentScanner {
         self.state = Assignment::Scan;
         self.run.clear();
         self.after_backslash = false;
+        self.encoding_depth = 0;
+        self.context_backslashes = 0;
+    }
+
+    // JSON string delimiters at depth n carry 2^n - 1 source slashes.
+    // Credential quotes are handled separately and do not change that context.
+    fn observe_context(&mut self, byte: u8) {
+        if byte == b'"'
+            && !matches!(
+                self.state,
+                Assignment::Lead { .. } | Assignment::Value { .. }
+            )
+            && let Some(encoded) = self.context_backslashes.checked_add(1)
+            && encoded.is_power_of_two()
+        {
+            let level = encoded.trailing_zeros();
+            if level == self.encoding_depth {
+                self.encoding_depth = self.encoding_depth.saturating_add(1);
+            } else if level.checked_add(1) == Some(self.encoding_depth) {
+                self.encoding_depth -= 1;
+            }
+        }
+        self.context_backslashes = if byte == b'\\' {
+            self.context_backslashes.saturating_add(1)
+        } else {
+            0
+        };
     }
 
     fn mask(&mut self, output: &mut Vec<u8>) {
@@ -603,6 +635,7 @@ impl AssignmentScanner {
                             scheme,
                             quote: None,
                             quote_slashes: 0,
+                            encoding_layer: 1,
                             backslashes: 0,
                         };
                         return;
@@ -619,6 +652,7 @@ impl AssignmentScanner {
                     scheme,
                     quote,
                     quote_slashes,
+                    encoding_layer,
                     backslashes,
                 } => {
                     if byte.is_ascii_whitespace() || byte == b'\\' {
@@ -627,6 +661,7 @@ impl AssignmentScanner {
                             scheme,
                             quote,
                             quote_slashes,
+                            encoding_layer,
                             backslashes: if byte == b'\\' {
                                 backslashes.saturating_add(1)
                             } else {
@@ -641,6 +676,7 @@ impl AssignmentScanner {
                             self.state = Assignment::Value {
                                 quote,
                                 quote_slashes,
+                                encoding_layer,
                                 backslashes: 0,
                                 line: scheme,
                             };
@@ -648,13 +684,14 @@ impl AssignmentScanner {
                         }
                         // An empty quoted value has nothing to redact.
                         if quote == Some(byte) {
-                            if closing_quote(backslashes, quote_slashes) {
+                            if closing_quote(backslashes, quote_slashes, encoding_layer) {
                                 output.push(byte);
                             } else {
                                 self.mask(output);
                                 self.state = Assignment::Value {
                                     quote,
                                     quote_slashes,
+                                    encoding_layer,
                                     backslashes: 0,
                                     line: scheme,
                                 };
@@ -666,6 +703,10 @@ impl AssignmentScanner {
                             scheme,
                             quote: Some(byte),
                             quote_slashes: backslashes,
+                            encoding_layer: (1usize
+                                .checked_shl(self.encoding_depth)
+                                .unwrap_or(usize::MAX))
+                            .max(backslashes.saturating_add(1)),
                             backslashes: 0,
                         };
                         return;
@@ -681,6 +722,7 @@ impl AssignmentScanner {
                     self.state = Assignment::Value {
                         quote,
                         quote_slashes,
+                        encoding_layer,
                         backslashes: 0,
                         line: scheme,
                     };
@@ -701,6 +743,7 @@ impl AssignmentScanner {
                             scheme: false,
                             quote: None,
                             quote_slashes: 0,
+                            encoding_layer: 1,
                             backslashes: 0,
                         };
                         return;
@@ -709,6 +752,7 @@ impl AssignmentScanner {
                     self.state = Assignment::Value {
                         quote: None,
                         quote_slashes: 0,
+                        encoding_layer: 1,
                         backslashes: 0,
                         line: true,
                     };
@@ -717,11 +761,14 @@ impl AssignmentScanner {
                 Assignment::Value {
                     quote,
                     quote_slashes,
+                    encoding_layer,
                     backslashes,
                     line,
                 } => match quote {
                     Some(quote) => {
-                        if byte == quote && closing_quote(backslashes, quote_slashes) {
+                        if byte == quote
+                            && closing_quote(backslashes, quote_slashes, encoding_layer)
+                        {
                             output.extend(std::iter::repeat_n(b'\\', quote_slashes));
                             output.push(byte);
                             return;
@@ -729,6 +776,7 @@ impl AssignmentScanner {
                         self.state = Assignment::Value {
                             quote: Some(quote),
                             quote_slashes,
+                            encoding_layer,
                             backslashes: if byte == b'\\' {
                                 backslashes.saturating_add(1)
                             } else {
@@ -750,6 +798,7 @@ impl AssignmentScanner {
                         self.state = Assignment::Value {
                             quote: None,
                             quote_slashes: 0,
+                            encoding_layer: 1,
                             backslashes: 0,
                             line,
                         };
@@ -770,10 +819,9 @@ impl AssignmentScanner {
     }
 }
 
-// An encoded delimiter has N backslashes; a value-level escape adds N + 1.
-// Only an even number of those escapes leaves the delimiter unescaped.
-fn closing_quote(backslashes: usize, quote_slashes: usize) -> bool {
-    let layer = quote_slashes.saturating_add(1);
+// The delimiter has its own source slashes; each value-level backslash takes
+// one encoding layer. An even number leaves the delimiter unescaped.
+fn closing_quote(backslashes: usize, quote_slashes: usize, layer: usize) -> bool {
     backslashes % layer == quote_slashes && (backslashes / layer).is_multiple_of(2)
 }
 
@@ -1650,6 +1698,42 @@ mod tests {
                 "{input:?} byte by byte"
             );
             assert!(redactor.has_redaction(), "{input:?}");
+        }
+
+        // Encode the whole log repeatedly so the expected source span follows
+        // the same encoding as the credential, including its closing delimiter.
+        for quote in ['\'', '"'] {
+            for value in [
+                format!("abc\\{quote}LEAK_SENTINEL"),
+                "LEAK_SENTINEL\\\\".into(),
+            ] {
+                let mut input = format!("password={quote}{value}{quote} end");
+                let mut expected = format!("password={quote}[REDACTED]{quote} end");
+                for depth in 0..=2 {
+                    for split in 0..=input.len() {
+                        let mut redactor = Redactor::new([]).expect("empty secret set");
+                        assert_eq!(
+                            joined(
+                                &mut redactor,
+                                &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                            ),
+                            expected.as_bytes(),
+                            "depth {depth}, split {split}, {input:?}"
+                        );
+                    }
+                    let mut redactor = Redactor::new([]).expect("empty secret set");
+                    assert_eq!(
+                        joined(
+                            &mut redactor,
+                            &input.as_bytes().chunks(1).collect::<Vec<_>>()
+                        ),
+                        expected.as_bytes(),
+                        "depth {depth}, bytewise, {input:?}"
+                    );
+                    input = serde_json::to_string(&input).expect("encode input");
+                    expected = serde_json::to_string(&expected).expect("encode expected");
+                }
+            }
         }
     }
 
