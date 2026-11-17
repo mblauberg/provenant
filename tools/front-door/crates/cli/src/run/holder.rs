@@ -588,7 +588,7 @@ impl Holder for HostHolder<'_> {
             let continuation = store
                 .continuation_expectation(context.attempt_id, &call)
                 .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
-            let stream = match continuation.as_ref() {
+            let mut stream = match continuation.as_ref() {
                 Some(continuation) => {
                     let model =
                         super::stream_model(&route).ok_or(custody::CustodyError::InvalidRecord)?;
@@ -608,6 +608,7 @@ impl Holder for HostHolder<'_> {
                     stream
                 }
             };
+            stream.filtered_capture();
             let (configuration_root, _) = context.disk_roots();
             *self
                 .stdout_frames

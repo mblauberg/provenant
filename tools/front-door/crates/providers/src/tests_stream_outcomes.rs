@@ -661,6 +661,48 @@ fn final_incomplete_and_invalid_frames_keep_their_line_number() -> Result<(), Pr
     Ok(())
 }
 
+// Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+#[test]
+fn filtered_frames_preserve_dense_escapes_and_allow_bounded_mask_growth()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::redact::JsonlRedactor;
+    use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, PROVIDER_LINE_LIMIT};
+    // Roughly 400 KB of source short escapes must remain short escapes. The
+    // second case exceeds the source limit only after scalar masks expand it.
+    for (field, value, grows) in [
+        ("padding", format!("\"{}\"", r"\n".repeat(200_000)), false),
+        ("token", format!("[{}0]", "0,".repeat(200_000)), true),
+    ] {
+        let raw = format!(
+            "{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":2}},\"{field}\":{value}}}\n"
+        );
+        assert!(raw.len() < PROVIDER_LINE_LIMIT);
+        let mut filter = JsonlRedactor::provider([])?;
+        let mut filtered = Vec::new();
+        let mut sink = |frame: &[u8]| {
+            assert!(frame.len() <= FRAME_LIMIT);
+            filtered.extend_from_slice(frame);
+        };
+        for chunk in raw.as_bytes().chunks(4093) {
+            filter.filter(chunk, &mut sink)?;
+        }
+        filter.finish(&mut sink)?;
+        assert!(filtered.len() <= JsonlRedactor::OUTPUT_LINE_LIMIT);
+        if grows {
+            assert!(filtered.len() > PROVIDER_LINE_LIMIT);
+        } else {
+            assert_eq!(filtered, raw.as_bytes());
+        }
+        let mut stream = codex::Codex.stream(None)?;
+        stream.filtered_capture();
+        for chunk in filtered.chunks(8191) {
+            codex::Codex.observe(&mut stream, chunk)?;
+        }
+        assert_eq!(codex::Codex.finish(stream, EXIT)?.status(), OutcomeStatus::Success);
+    }
+    Ok(())
+}
+
 // Spec: docs/specs/fabric.md#session-ready-steering
 #[test]
 fn oversized_frames_are_line_numbered_and_never_success() -> Result<(), ProviderError> {

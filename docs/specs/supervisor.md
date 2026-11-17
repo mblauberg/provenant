@@ -306,32 +306,49 @@ from the opener's own up to the length of the backslash run, agrees is a close.
 No fixed depth cap applies, because a value can be escaped one layer deeper than
 any cap. Without a definite close, masking continues through the end of the raw line. Scanning resumes
 after a definite close or the line end.
+Raw streams detect credentials both in source bytes and in their JSON-unescaped
+view, including Unicode and short escapes. Each decoded match maps back to its
+source byte span; only matching spans are masked. Unmatched bytes, including
+backslashes, malformed fragments and trailing diagnostics, retain their original
+encoding. The two detector views merge source-aligned decisions without
+normalising unmatched text. Escape carry holds at most one surrogate pair;
+source mappings compress repeated withheld delimiters. Noncompressible pending
+mappings have an explicit bound and return `FilterError` on exhaustion, like
+undecided URL authorities; a resource failure never silently drops a tail or
+releases undecided bytes.
 Provider JSONL uses a streaming tokenizer: containers retain their structure,
-decoded string values pass through the plain redactor, and filtered
-bytes are JSON-escaped again. Escaped literals (including surrogate pairs) are
-matched after decoding. Credential-named fields mask scalar values, including leaves in nested
-containers, while retaining keys and container structure. The credential context
-survives malformed-input fallback and masks to the raw line boundary. Literal
-matches in non-string scalars become JSON string masks. Keys are scanned after decoding and a matching key is replaced by the marker.
-Keys exceeding the bounded prefix are conservatively masked as a whole.
+and decoded string values pass through the same detectors. Unmasked spans retain
+their original source bytes and escapes; masks are emitted inside the existing
+string delimiters. Escaped literals (including surrogate pairs) are matched after
+decoding. Credential-named fields mask scalar values, including leaves in nested
+containers, while retaining keys and container structure. Literal matches in
+non-string scalars become JSON string masks. Keys are scanned after decoding and
+a matching key is replaced by the marker. Keys exceeding the bounded prefix are
+conservatively masked as a whole.
 Strings stream in bounded pieces; no line-size fallback changes their grammar.
-Tokenizer memory is bounded by a 128-level nesting stack, a 4 KiB decoded piece,
-a 16 KiB scalar prefix, and the plain redactor's existing detector bounds.
-Excess nesting emits an invalid-JSON marker on the same line and discards the
-remainder, becoming a line-numbered `MalformedFrame`. A scalar longer than its
-prefix buffer is conservatively masked if a configured literal could occur in a JSON scalar,
-even if that literal does not actually occur. Without such a literal the scalar
-streams unchanged. This avoids either retaining unbounded numbers or leaking a
-prefix that cannot be retracted when a later literal matches. Masking may
-change lengths: source-aligned detector decisions are internal to the plain
-redactor, not a constraint on the push-based capture interface. Malformed JSON
-discards and masks the remainder through the raw line boundary, retaining an
-invalid-JSON sentinel so it cannot become successful protocol evidence.
-Non-JSON lines use the plain redactor. The adapter spec declares the stdout
-stream contract: provider JSONL has a 1 MiB source-line cap, with oversized and
-incomplete frames becoming line-numbered `MalformedFrame`; raw command output
-uses streaming line redaction without a line-length cap, preserving bounded
-tail diagnostics. In both cases filter memory and emitted frames stay bounded.
+Tokenizer memory is bounded by a 128-level nesting stack, a 4 KiB decoded piece
+and its source mappings, a 16 KiB scalar prefix, and the plain redactor's detector
+bounds. Excess nesting emits an invalid-JSON marker on the same line and discards
+the remainder, becoming a line-numbered `MalformedFrame`. A scalar longer than
+its prefix buffer is conservatively masked if a configured literal could occur
+in a JSON scalar, even if that literal does not actually occur. Without such a
+literal the scalar streams unchanged. This avoids either retaining unbounded
+numbers or leaking a prefix that cannot be retracted when a later literal
+matches. Malformed live protocol JSON masks and discards the remainder through
+the raw line boundary, retaining an invalid-JSON sentinel so it cannot become
+successful protocol evidence. Seekable session history validates each line in
+bounded pieces before filtering it: valid JSON uses the tokenizer; malformed
+lines use the escape-aware plain filter over the original bytes. Neither pass
+buffers a whole line, and malformed history never discards trailing bytes.
+The adapter spec declares the stdout stream contract: provider JSONL has a 1 MiB
+source-line cap, with oversized and incomplete frames becoming line-numbered
+`MalformedFrame`; raw command output uses streaming redaction without a
+line-length cap. Unfiltered protocol decoders retain the source-line cap.
+Decoders consuming provider-filtered capture allow the bounded marker growth
+from `JsonlRedactor::OUTPUT_LINE_LIMIT`: adjacent masks coalesce, unchanged spans
+do not grow, and the maximum per-source-byte replacement is a quoted scalar
+marker. The source filter preserves size failures even if masking shrinks the
+frame. In every path filter memory and emitted frames stay bounded.
 Host Git runs with
 hooks, filters, fsmonitor and external programs off, and refuses configuration
 from a lane-writable include. Host delivery pushes once, from the host, and

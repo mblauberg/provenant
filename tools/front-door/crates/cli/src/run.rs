@@ -901,6 +901,8 @@ impl Registry<'_> {
                 state
             }
         };
+        // Retained stdout has passed the adapter-selected capture filter.
+        state.filtered_capture();
         let (mut events, parse_error, identity_mismatch) = match adapter.observe(&mut state, stdout)
         {
             Ok(events) => (events, None, false),

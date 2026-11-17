@@ -6,9 +6,9 @@
 //! through unchanged and only the value is withheld, so no replay is needed.
 use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
 use provenant_os::fs::{Directory, FileHandle, FileKind, Metadata};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsStr;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
@@ -164,19 +164,11 @@ struct ActiveToken {
     // Withheld until the body length determines whether the marker belongs to
     // a credential. Generic/AWS markers are masked with a matching body.
     // Candidate body bytes are delayed only until the minimum credential
-    // length is known. The bytes remain in source form, including JSON escapes.
+    // length is known. Escape decoding and source mapping belong to the caller.
     marker: Vec<u8>,
     body: Vec<u8>,
     body_length: usize,
     emitted: bool,
-}
-
-#[derive(Default)]
-enum Escape {
-    #[default]
-    None,
-    Slash,
-    Unicode(u16, u8),
 }
 
 struct TokenScanner {
@@ -184,12 +176,10 @@ struct TokenScanner {
     // A possible marker or a partial Unicode token character at a chunk edge.
     tail: Vec<u8>,
     boundary: bool,
-    escape: Escape,
     // URL userinfo cannot be decided until the authority delimiter arrives.
     // This remains bounded by FRAME_LIMIT, as in the original scanner.
     url_authority: Option<Vec<u8>>,
     matched: bool,
-    replacements: Vec<(usize, usize)>,
 }
 
 impl Default for TokenScanner {
@@ -198,10 +188,8 @@ impl Default for TokenScanner {
             active: None,
             tail: Vec::with_capacity(MAX_MARKER_LENGTH - 1),
             boundary: true,
-            escape: Escape::None,
             url_authority: None,
             matched: false,
-            replacements: Vec::new(),
         }
     }
 }
@@ -222,7 +210,6 @@ impl TokenScanner {
             self.finish_authority(authority, output)?;
         }
         self.boundary = true;
-        self.escape = Escape::None;
         self.active = None;
         Ok(())
     }
@@ -257,27 +244,8 @@ impl TokenScanner {
             if let Some(kind) = self.active.as_ref().map(|active| active.kind) {
                 let byte = input[index];
                 let remaining = &input[index..];
-                if byte == b'\\'
-                    && !eof
-                    && remaining.len() < 6
-                    && (remaining.len() == 1
-                        || (remaining[1] == b'u'
-                            && remaining[2..].iter().all(u8::is_ascii_hexdigit)))
-                {
-                    self.tail.extend_from_slice(remaining);
-                    return Ok(());
-                }
-                let escaped = if remaining.len() >= 6 && remaining.starts_with(b"\\u") {
-                    std::str::from_utf8(&remaining[2..6])
-                        .ok()
-                        .and_then(|digits| u16::from_str_radix(digits, 16).ok())
-                        .filter(|value| *value <= 127 && token_byte(kind, *value as u8))
-                        .map(|_| 6)
-                } else {
-                    None
-                };
-                if token_byte(kind, byte) || escaped.is_some() {
-                    let width = escaped.unwrap_or(1);
+                if token_byte(kind, byte) {
+                    let width = 1;
                     let became_secret = if let Some(active) = self.active.as_mut() {
                         if active.emitted {
                             output.extend(remaining[..width].iter().copied().map(|b| (b, true)));
@@ -287,9 +255,6 @@ impl TokenScanner {
                             active.body_length += 1;
                             if active.body_length >= minimum_token_length(kind) {
                                 if matches!(kind, TokenKind::Bearer) {
-                                    if active.marker != b"Bearer " {
-                                        self.replacements.push((output.len(), active.marker.len()));
-                                    }
                                     output.extend(active.marker.drain(..).map(|b| (b, false)));
                                 } else {
                                     output.extend(active.marker.drain(..).map(|b| (b, true)));
@@ -331,9 +296,8 @@ impl TokenScanner {
                 return Ok(());
             }
 
-            // Only an escaped opening backslash disables a Unicode marker.
-            // Raw ASCII markers still match immediately after a backslash.
-            if self.boundary && !(input[index] == b'\\' && matches!(self.escape, Escape::Slash)) {
+            // Escape decoding belongs to the source-mapped parallel view.
+            if self.boundary {
                 if let Some((length, _kind)) = token_marker_at(&input[index..]) {
                     let marker = &input[index..index + length];
                     let marker = marker.to_vec();
@@ -368,28 +332,7 @@ impl TokenScanner {
     }
 
     fn observe(&mut self, byte: u8) {
-        match std::mem::take(&mut self.escape) {
-            Escape::None if byte == b'\\' => {
-                self.boundary = true;
-                self.escape = Escape::Slash;
-            }
-            Escape::Slash if byte == b'u' => {
-                self.boundary = false;
-                self.escape = Escape::Unicode(0, 0);
-            }
-            Escape::Slash if b"bfnrt\\\"/".contains(&byte) => self.boundary = true,
-            Escape::Unicode(value, count) if byte.is_ascii_hexdigit() => {
-                let digit = (byte as char).to_digit(16).unwrap_or_default() as u16;
-                let value = value * 16 + digit;
-                if count == 3 {
-                    self.boundary = value > 127 || !word_byte(value as u8);
-                } else {
-                    self.boundary = false;
-                    self.escape = Escape::Unicode(value, count + 1);
-                }
-            }
-            _ => self.boundary = !word_byte(byte),
-        }
+        self.boundary = !word_byte(byte);
     }
 
     fn finish_active(&mut self, output: &mut Vec<(u8, bool)>) {
@@ -410,13 +353,6 @@ impl TokenScanner {
         let mut decisions = Vec::new();
         scanner.process(&authority, true, &mut decisions)?;
         self.matched |= scanner.matched;
-        let offset = output.len();
-        self.replacements.extend(
-            scanner
-                .replacements
-                .into_iter()
-                .map(|(start, len)| (offset + start, len)),
-        );
         if let Some(userinfo_end) = authority.iter().rposition(|byte| *byte == b'@')
             && authority[..userinfo_end].contains(&b':')
         {
@@ -453,31 +389,13 @@ enum MarkerMatch {
 }
 
 fn marker_match(bytes: &[u8], marker: &[u8]) -> MarkerMatch {
-    let mut index = 0;
-    for expected in marker {
-        if index == bytes.len() {
-            return MarkerMatch::Partial;
-        }
-        if bytes[index] == b'\\' {
-            let remaining = &bytes[index..];
-            let encoded = format!("\\u{:04x}", expected);
-            let width = remaining.len().min(6);
-            if remaining[..width].get(1).is_some_and(|byte| *byte != b'u')
-                || !remaining[..width].eq_ignore_ascii_case(&encoded.as_bytes()[..width])
-            {
-                return MarkerMatch::Mismatch;
-            }
-            if width < 6 {
-                return MarkerMatch::Partial;
-            }
-            index += 6;
-        } else if bytes[index] == *expected {
-            index += 1;
-        } else {
-            return MarkerMatch::Mismatch;
-        }
+    if bytes.starts_with(marker) {
+        MarkerMatch::Complete(marker.len())
+    } else if marker.starts_with(bytes) {
+        MarkerMatch::Partial
+    } else {
+        MarkerMatch::Mismatch
     }
-    MarkerMatch::Complete(index)
 }
 
 fn token_marker_at(bytes: &[u8]) -> Option<(usize, TokenKind)> {
@@ -882,17 +800,24 @@ impl DecisionQueue {
         }
     }
     fn push(&mut self, (byte, masked): (u8, bool)) {
-        self.total += 1;
+        self.push_count(byte, 1, masked);
+    }
+    fn push_count(&mut self, byte: u8, count: usize, masked: bool) {
+        // Empty credential values insert a marker without consuming source.
+        if count == 0 {
+            return;
+        }
+        self.total += count;
         if let Some(last) = self.runs.back_mut()
             && last.byte == byte
             && last.masked == masked
         {
-            last.count += 1;
+            last.count += count;
         } else {
             self.runs.push_back(DecisionRun {
                 byte,
                 masked,
-                count: 1,
+                count,
             });
         }
     }
@@ -957,18 +882,20 @@ pub struct Redactor {
     tokens: TokenScanner,
     assignments: AssignmentScanner,
     failed: bool,
-    decisions: [DecisionQueue; 3],
+    decisions: Vec<DecisionQueue>,
+    escaped: Option<source::EscapedScanner>,
     redaction_run: bool,
     emitted_source: usize,
-    token_source: usize,
-    replacements: VecDeque<(usize, usize)>,
-    insertions: VecDeque<usize>,
+    insertions: BTreeSet<usize>,
     has_redacted: bool,
 }
 
 impl Redactor {
     pub fn new(secrets: impl IntoIterator<Item = Vec<u8>>) -> Result<Self, RedactorError> {
-        let mut secrets: Vec<Vec<u8>> = secrets.into_iter().collect();
+        Self::with_escapes(secrets.into_iter().collect(), true)
+    }
+
+    fn with_escapes(mut secrets: Vec<Vec<u8>>, escape_aware: bool) -> Result<Self, RedactorError> {
         if secrets.len() > MAX_SECRETS {
             return Err(RedactorError::TooManySecrets);
         }
@@ -995,12 +922,17 @@ impl Redactor {
             tokens: TokenScanner::default(),
             assignments: AssignmentScanner::default(),
             failed: false,
-            decisions: std::array::from_fn(|_| DecisionQueue::default()),
+            escaped: if escape_aware {
+                Some(source::EscapedScanner::new(secrets.clone())?)
+            } else {
+                None
+            },
+            decisions: (0..if escape_aware { 4 } else { 3 })
+                .map(|_| DecisionQueue::default())
+                .collect(),
             redaction_run: false,
             emitted_source: 0,
-            token_source: 0,
-            replacements: VecDeque::new(),
-            insertions: VecDeque::new(),
+            insertions: BTreeSet::new(),
             has_redacted: false,
         })
     }
@@ -1012,10 +944,10 @@ impl Redactor {
             || self.assignments.matched
     }
 
-    fn filter_frames(
+    fn filter_decisions(
         &mut self,
         bytes: &[u8],
-        sink: &mut dyn FnMut(&[u8]),
+        sink: &mut source::DecisionSink<'_>,
     ) -> Result<(), FilterError> {
         if self.failed {
             return Err(FilterError);
@@ -1023,7 +955,6 @@ impl Redactor {
         if bytes.len() > FRAME_LIMIT {
             return Err(FilterError);
         }
-        let mut emitter = FrameEmitter::new(sink);
         for chunk in bytes.chunks(FRAME_LIMIT) {
             let mut literals = Vec::new();
             let mut tokens = Vec::new();
@@ -1036,14 +967,20 @@ impl Redactor {
             self.insertions
                 .extend(self.assignments.insertions.drain(..));
             self.decisions[0].extend(literals);
-            self.queue_tokens(tokens);
-            self.emit_decided(&mut emitter)?;
+            self.decisions[1].extend(tokens);
+            if let Some(escaped) = &mut self.escaped {
+                escaped.filter(chunk, &mut self.decisions[3]).map_err(|_| {
+                    self.failed = true;
+                    FilterError
+                })?;
+                self.insertions.extend(escaped.insertions.drain(..));
+            }
+            self.emit_decided(sink)?;
         }
-        emitter.flush();
         Ok(())
     }
 
-    fn finish_frames(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+    fn finish_decisions(&mut self, sink: &mut source::DecisionSink<'_>) -> Result<(), FilterError> {
         if self.failed {
             return Err(FilterError);
         }
@@ -1058,10 +995,15 @@ impl Redactor {
         self.insertions
             .extend(self.assignments.insertions.drain(..));
         self.decisions[0].extend(literals);
-        self.queue_tokens(tokens);
-        let mut emitter = FrameEmitter::new(sink);
-        self.emit_decided(&mut emitter)?;
-        emitter.flush();
+        self.decisions[1].extend(tokens);
+        if let Some(escaped) = &mut self.escaped {
+            escaped.finish(&mut self.decisions[3]).map_err(|_| {
+                self.failed = true;
+                FilterError
+            })?;
+            self.insertions.extend(escaped.insertions.drain(..));
+        }
+        self.emit_decided(sink)?;
         if self.decisions.iter().any(|queue| !queue.runs.is_empty()) {
             self.failed = true;
             return Err(FilterError);
@@ -1069,67 +1011,12 @@ impl Redactor {
         Ok(())
     }
 
-    fn queue_tokens(&mut self, tokens: Vec<(u8, bool)>) {
-        for (start, len) in self.tokens.replacements.drain(..) {
-            self.replacements
-                .push_back((self.token_source + start, len));
-        }
-        self.token_source += tokens.len();
-        self.decisions[1].extend(tokens);
-    }
-
-    fn emit_decided(&mut self, emitter: &mut FrameEmitter<'_>) -> Result<(), FilterError> {
+    fn emit_decided(&mut self, sink: &mut source::DecisionSink<'_>) -> Result<(), FilterError> {
         while self.decisions.iter().all(|queue| !queue.runs.is_empty()) {
-            if self.insertions.front() == Some(&self.emitted_source) {
-                self.insertions.pop_front();
-                if !self.redaction_run {
-                    emitter.push_bytes(REDACTED);
-                }
+            if self.insertions.first() == Some(&self.emitted_source) {
+                self.insertions.pop_first();
+                sink(0, 0, true)?;
                 self.has_redacted = true;
-                self.redaction_run = true;
-            }
-            if let Some(&(start, len)) = self.replacements.front()
-                && start == self.emitted_source
-            {
-                // A replacement is safe only if all detectors have decided the
-                // entire marker and none masks any of its original bytes.
-                if self
-                    .decisions
-                    .iter()
-                    .any(|queue| queue.runs.iter().map(|run| run.count).sum::<usize>() < len)
-                {
-                    break;
-                }
-                let masked = self.decisions.iter().any(|queue| {
-                    let mut left = len;
-                    queue.runs.iter().any(|run| {
-                        if left == 0 {
-                            return false;
-                        }
-                        let used = left.min(run.count);
-                        left -= used;
-                        run.masked
-                    })
-                });
-                self.replacements.pop_front();
-                if !masked {
-                    for queue in &mut self.decisions {
-                        let mut left = len;
-                        while left > 0 {
-                            let Some(run) = queue.runs.front() else {
-                                self.failed = true;
-                                return Err(FilterError);
-                            };
-                            let count = left.min(run.count);
-                            queue.consume(count);
-                            left -= count;
-                        }
-                    }
-                    emitter.push_bytes(b"Bearer ");
-                    self.redaction_run = false;
-                    self.emitted_source += len;
-                    continue;
-                }
             }
             // Every decision queue must hold a run for the same source byte;
             // anything else is a broken invariant and fails the filter closed.
@@ -1151,27 +1038,38 @@ impl Redactor {
                     }
                 }
             }
-            if let Some(&(start, _)) = self.replacements.front() {
+            if let Some(&start) = self.insertions.first() {
                 count = count.min(start - self.emitted_source);
             }
-            if let Some(&start) = self.insertions.front() {
-                count = count.min(start - self.emitted_source);
-            }
-            if masked {
-                if !self.redaction_run {
-                    emitter.push_bytes(REDACTED);
-                }
-                self.has_redacted = true;
-            } else {
-                emitter.push_repeat(byte, count);
-            }
-            self.redaction_run = masked;
+            sink(byte, count, masked)?;
+            self.has_redacted |= masked;
             self.emitted_source += count;
             for queue in &mut self.decisions {
                 queue.consume(count);
             }
         }
         Ok(())
+    }
+
+    fn output_decisions(
+        &mut self,
+        bytes: Option<&[u8]>,
+        sink: &mut dyn FnMut(&[u8]),
+    ) -> Result<(), FilterError> {
+        let mut out = FrameEmitter::new(sink);
+        let mut redaction_run = self.redaction_run;
+        let mut emit = |byte, count, masked| {
+            source::emit(byte, count, masked, &mut redaction_run, &mut out);
+            Ok(())
+        };
+        let result = match bytes {
+            Some(bytes) => self.filter_decisions(bytes, &mut emit),
+            None => self.finish_decisions(&mut emit),
+        };
+        self.redaction_run = redaction_run;
+        self.failed |= result.is_err();
+        out.flush();
+        result
     }
 }
 
@@ -1451,11 +1349,14 @@ fn filter_pass(
     if !before.unchanged(&opened) {
         return Err(FilterError);
     }
-    let (mut redactor_plain, mut redactor_jsonl) = if is_jsonl(name) {
-        (None, Some(JsonlRedactor::new([]).map_err(|_| FilterError)?))
-    } else {
-        (Some(Redactor::new([]).map_err(|_| FilterError)?), None)
-    };
+    if is_jsonl(name) {
+        let matched = filter_history(&mut source, staged, text_only)?;
+        if !opened.unchanged(&source.metadata().map_err(|_| FilterError)?) {
+            return Err(FilterError);
+        }
+        return Ok(matched);
+    }
+    let mut redactor_plain = Redactor::new([]).map_err(|_| FilterError)?;
     let mut utf8_tail = Vec::new();
     let mut buffer = [0_u8; SESSION_CHUNK];
     loop {
@@ -1484,14 +1385,7 @@ fn filter_pass(
                 write_err = write_staged(staged.as_deref_mut(), frame);
             }
         };
-        if let Some(r) = &mut redactor_jsonl {
-            r.filter(&buffer[..read], &mut sink)?;
-        } else {
-            redactor_plain
-                .as_mut()
-                .ok_or(FilterError)?
-                .filter(&buffer[..read], &mut sink)?;
-        }
+        redactor_plain.filter(&buffer[..read], &mut sink)?;
         write_err?;
     }
     if !utf8_tail.is_empty() {
@@ -1503,25 +1397,113 @@ fn filter_pass(
             write_err = write_staged(staged.as_deref_mut(), frame);
         }
     };
-    if let Some(r) = &mut redactor_jsonl {
-        r.finish(&mut sink)?;
-    } else {
-        redactor_plain
-            .as_mut()
-            .ok_or(FilterError)?
-            .finish(&mut sink)?;
-    }
+    redactor_plain.finish(&mut sink)?;
     write_err?;
     let after = source.metadata().map_err(|_| FilterError)?;
     if !opened.unchanged(&after) {
         return Err(FilterError);
     }
-    let has_redaction = if let Some(r) = &redactor_jsonl {
-        r.has_redaction()
-    } else {
-        redactor_plain.as_ref().ok_or(FilterError)?.has_redaction()
+    Ok(redactor_plain.has_redaction())
+}
+
+/// Validate each history line before choosing its filter, then rewind only that
+/// line. Unlike live protocol capture, history is seekable: malformed records
+/// can use the byte-preserving plain filter without discarding their tail or
+/// retroactively changing bytes the tokenizer has already emitted. Neither pass
+/// buffers a line, including lines longer than the provider protocol limit.
+fn filter_history(
+    source: &mut FileHandle,
+    mut staged: Option<&mut FileHandle>,
+    text_only: bool,
+) -> Result<bool, FilterError> {
+    let mut reader = BufReader::with_capacity(SESSION_CHUNK, source);
+    let mut start = 0_u64;
+    let mut matched = false;
+    let mut utf8_tail = Vec::new();
+    loop {
+        let mut validator = JsonlRedactor::new([]).map_err(|_| FilterError)?;
+        let mut length = 0_u64;
+        loop {
+            let available = reader.fill_buf().map_err(|_| FilterError)?;
+            if available.is_empty() {
+                break;
+            }
+            let count = available
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(available.len(), |i| i + 1);
+            let part = &available[..count];
+            if text_only {
+                if part.contains(&0) {
+                    return Ok(false);
+                }
+                utf8_tail.extend_from_slice(part);
+                match std::str::from_utf8(&utf8_tail) {
+                    Ok(_) => utf8_tail.clear(),
+                    Err(e) if e.error_len().is_none() => {
+                        utf8_tail.drain(..e.valid_up_to());
+                    }
+                    Err(_) => return Ok(false),
+                }
+            }
+            validator.filter(part, &mut |_| {})?;
+            let end = part.last() == Some(&b'\n');
+            length = length.checked_add(count as u64).ok_or(FilterError)?;
+            reader.consume(count);
+            if end {
+                break;
+            }
+        }
+        if length == 0 {
+            break;
+        }
+        validator.finish(&mut |_| {})?;
+        reader
+            .seek(SeekFrom::Start(start))
+            .map_err(|_| FilterError)?;
+        if validator.valid() {
+            let mut redactor = JsonlRedactor::new([]).map_err(|_| FilterError)?;
+            filter_history_range(&mut reader, length, &mut redactor, staged.as_deref_mut())?;
+            matched |= redactor.has_redaction();
+        } else {
+            let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
+            filter_history_range(&mut reader, length, &mut redactor, staged.as_deref_mut())?;
+            matched |= redactor.has_redaction();
+        }
+        start = start.checked_add(length).ok_or(FilterError)?;
+    }
+    if !utf8_tail.is_empty() {
+        return Ok(false);
+    }
+    Ok(matched)
+}
+
+fn filter_history_range(
+    reader: &mut impl Read,
+    length: u64,
+    redactor: &mut dyn CaptureFilter,
+    mut staged: Option<&mut FileHandle>,
+) -> Result<(), FilterError> {
+    let mut limited = reader.take(length);
+    let mut buffer = [0; SESSION_CHUNK];
+    let mut write_err = Ok(());
+    let mut sink = |bytes: &[u8]| {
+        if write_err.is_ok() {
+            write_err = write_staged(staged.as_deref_mut(), bytes);
+        }
     };
-    Ok(has_redaction)
+    loop {
+        let count = limited.read(&mut buffer).map_err(|_| FilterError)?;
+        if count == 0 {
+            break;
+        }
+        redactor.filter(&buffer[..count], &mut sink)?;
+    }
+    if limited.limit() != 0 {
+        return Err(FilterError);
+    }
+    redactor.finish(&mut sink)?;
+    write_err
 }
 
 fn write_staged(staged: Option<&mut FileHandle>, bytes: &[u8]) -> Result<(), FilterError> {
@@ -1601,15 +1583,16 @@ pub fn bounded_line(text: &str, max_chars: usize) -> String {
 
 impl CaptureFilter for Redactor {
     fn filter(&mut self, bytes: &[u8], sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
-        self.filter_frames(bytes, sink)
+        self.output_decisions(Some(bytes), sink)
     }
 
     fn finish(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
-        self.finish_frames(sink)
+        self.output_decisions(None, sink)
     }
 }
 
 mod jsonl;
+mod source;
 pub use jsonl::JsonlRedactor;
 
 #[cfg(test)]
@@ -1696,6 +1679,70 @@ mod tests {
         let mut redactor =
             Redactor::new([b"abcde".to_vec(), b"cd".to_vec()]).expect("valid secrets");
         assert_eq!(joined(&mut redactor, &[b"ab", b"cd", b"e"]), REDACTED);
+    }
+
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    #[test]
+    fn escaped_matches_mask_only_their_source_spans_at_every_chunk_boundary() {
+        let cases: &[(&[u8], &[u8])] = &[
+            (
+                br"before \u0067hp_abcdefghijklmnopqrst! after \q \n",
+                br"before [REDACTED]! after \q \n",
+            ),
+            (
+                br"before li\u0074eral-\u0073ecret after \u12xz",
+                br"before [REDACTED] after \u12xz",
+            ),
+            (
+                br"pass\u0077ord=\u0073ecret after",
+                br"pass\u0077ord=[REDACTED] after",
+            ),
+            (
+                br"https:\/\/user:pass@example.invalid/path after",
+                br"https:\/\/[REDACTED]@example.invalid/path after",
+            ),
+            (br"before \ud83d\ude03 after", b"before [REDACTED] after"),
+            (br"before row\nsecret after", b"before [REDACTED] after"),
+            (
+                br"ordinary \q \u12xz \u123 \u \ \",
+                br"ordinary \q \u12xz \u123 \u \ \",
+            ),
+        ];
+        for &(input, expected) in cases {
+            for width in 1..=input.len() {
+                let mut redactor = Redactor::new([
+                    b"literal-secret".to_vec(),
+                    "😃".as_bytes().to_vec(),
+                    b"row\nsecret".to_vec(),
+                ])
+                .unwrap();
+                assert_eq!(
+                    checked_frames(&mut redactor, &input.chunks(width).collect::<Vec<_>>()),
+                    expected,
+                    "width {width}, input {input:?}"
+                );
+            }
+        }
+    }
+
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    #[test]
+    fn noncompressible_withheld_escape_runs_fail_closed_at_the_memory_bound() {
+        let mut redactor = Redactor::new([]).unwrap();
+        redactor.filter(b"password=\"value", &mut |_| {}).unwrap();
+        // These spellings decode to the same withheld delimiter, but their
+        // source bytes cannot be represented by one repeated-source run.
+        let chunk = br"\u005c\u005C".repeat(1024);
+        let mut failed = false;
+        for _ in 0..128 {
+            if redactor.filter(&chunk, &mut |_| {}).is_err() {
+                failed = true;
+                break;
+            }
+        }
+        assert!(failed, "adversarial pending mappings must remain bounded");
+        assert!(redactor.filter(b"tail", &mut |_| {}).is_err());
+        assert!(redactor.finish(&mut |_| {}).is_err());
     }
 
     #[test]
@@ -1840,6 +1887,11 @@ mod tests {
                 let expected = if prefix == r"\" {
                     // The Unicode marker's opening backslash is itself escaped.
                     input.clone()
+                } else if matches!(kind, TokenKind::Bearer) {
+                    format!(
+                        "{prefix}\\u{first:04x}{}[REDACTED]!",
+                        String::from_utf8_lossy(&marker[1..])
+                    )
                 } else {
                     format!("{prefix}{expected}")
                 };
@@ -2188,8 +2240,8 @@ mod tests {
                 "width {width}"
             );
         }
-        // An encoded Bearer prefix is canonicalised only when that cannot
-        // undo a literal redaction within the original marker.
+        // Source-preserving marker emission must not undo a literal match
+        // within an encoded Bearer prefix.
         let input = br"\u0042earer abcdefghijklmnopqrst!";
         for split in 0..=input.len() {
             let mut redactor = Redactor::new([br"\u0042".to_vec()]).expect("secret");
@@ -2549,6 +2601,44 @@ mod tests {
         }
         assert_eq!(std::fs::read(&binary)?, token.as_bytes());
         assert_eq!(std::fs::read(&outside)?, token.as_bytes());
+        Ok(())
+    }
+
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    #[test]
+    fn malformed_history_preserves_escaped_tails_and_recovers_following_lines()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().join("candidate-0/sessions");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("history.jsonl");
+        let malformed = br#"{"value":!"\u0067hp_abcdefghijklmnopqrst"} tail \q \n"#;
+        let expected = br#"{"value":!"[REDACTED]"} tail \q \n"#;
+        let valid = br#"{"value":"\u0067hp_abcdefghijklmnopqrst","keep":"\n\u0020\/"}"#;
+        let valid_expected = br#"{"value":"[REDACTED]","keep":"\n\u0020\/"}"#;
+        let mut input = malformed.to_vec();
+        input.push(b'\n');
+        input.extend_from_slice(valid);
+        input.push(b'\n');
+        // Also exercise streaming fallback beyond the protocol source cap and
+        // an unterminated final record. History has no provider line-size cap.
+        input.extend(std::iter::repeat_n(
+            b'x',
+            provenant_os::exec::PROVIDER_LINE_LIMIT + 1,
+        ));
+        input.extend_from_slice(br" \u0067hp_abcdefghijklmnopqrst! retained \q");
+        std::fs::write(&path, input)?;
+        assert_eq!(scrub_session_history(temp.path())?, 1);
+        let result = std::fs::read(&path)?;
+        let lines: Vec<_> = result.split(|b| *b == b'\n').collect();
+        assert_eq!(lines[0], expected);
+        assert_eq!(lines[1], valid_expected);
+        assert_eq!(
+            &lines[2][..provenant_os::exec::PROVIDER_LINE_LIMIT + 1],
+            vec![b'x'; provenant_os::exec::PROVIDER_LINE_LIMIT + 1]
+        );
+        assert!(lines[2].ends_with(br" [REDACTED]! retained \q"));
+        assert_eq!(scrub_session_history(temp.path())?, 0);
         Ok(())
     }
 

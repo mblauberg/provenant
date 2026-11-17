@@ -168,6 +168,7 @@ pub struct StreamState {
     adapter: &'static str,
     decoder: Decoder,
     pending: Vec<u8>,
+    line_limit: usize,
     retained_events: Vec<ProviderEvent>,
     session: Option<String>,
     expected_session: Option<String>,
@@ -196,6 +197,7 @@ impl StreamState {
             adapter,
             decoder,
             pending: Vec::new(),
+            line_limit: MAX_LINE_BYTES,
             retained_events: Vec::new(),
             session: None,
             expected_session: None,
@@ -218,6 +220,13 @@ impl StreamState {
             early_stop: false,
             turn_tool_activity: false,
         }
+    }
+    /// Decode bytes already processed by `JsonlRedactor::provider`. That filter
+    /// owns the source-size check and preserves failures with an invalid sentinel;
+    /// retained masks may be longer than their original values. Unfiltered
+    /// provider observations retain the strict source-line bound.
+    pub fn filtered_capture(&mut self) {
+        self.line_limit = provenant_confinement::redact::JsonlRedactor::OUTPUT_LINE_LIMIT;
     }
     pub(crate) fn bind_identity(&mut self, session: &str, model: &str) {
         self.expect_session(session);
@@ -300,7 +309,7 @@ impl StreamState {
                     }
                 }
             } else {
-                if self.pending.len() == MAX_LINE_BYTES {
+                if self.pending.len() == self.line_limit {
                     self.malformed = true;
                     self.pending.clear();
                     self.retained_events = events;
@@ -575,7 +584,7 @@ pub(crate) fn wire<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Pr
     // decoding does not apply: it rejects shapes (repeated members, wide integers,
     // deep or large nesting) inside frames the adapter ignores, and failing a
     // finished lane over them is wrong. The resource limit is the line bound
-    // (`MAX_LINE_BYTES`, enforced in `observe` before a line reaches here);
+    // (the source or filtered-capture limit enforced in `observe`);
     // `serde_json` adds its own recursion limit. Typed fields still refuse values
     // they cannot hold.
     serde_json::from_slice(bytes).map_err(|error| {

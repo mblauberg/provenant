@@ -1,4 +1,5 @@
 //! JSON syntax owns the delimiters; the plain redactor sees decoded values only.
+use super::source::{self, SourceMap};
 use super::{
     ASSIGNMENT_KEYS, ASSIGNMENT_RUN, FrameEmitter, MAX_SECRET_LENGTH, REDACTED, Redactor,
     RedactorError,
@@ -45,6 +46,8 @@ struct StringToken {
     utf8: Vec<u8>,
     key_source: Vec<u8>,
     key_overflow: bool,
+    source: SourceMap,
+    redaction_run: bool,
 }
 
 struct Scalar {
@@ -108,9 +111,16 @@ pub struct JsonlRedactor {
     mask_value: bool,
     scalar_secret: bool,
     has_redaction: bool,
+    invalid: bool,
 }
 
 impl JsonlRedactor {
+    /// Maximum output of a source-capped provider line. Unchanged spans retain
+    /// source encoding; masks coalesce. The worst per-byte growth is a one-byte
+    /// scalar becoming a quoted marker. Replay uses this bound only after the
+    /// provider filter has enforced the source cap and marked invalid frames.
+    pub const OUTPUT_LINE_LIMIT: usize = PROVIDER_LINE_LIMIT * (REDACTED.len() + 2);
+
     pub fn new(secrets: impl IntoIterator<Item = Vec<u8>>) -> Result<Self, RedactorError> {
         let secrets: Vec<Vec<u8>> = secrets.into_iter().collect();
         if secrets
@@ -142,6 +152,7 @@ impl JsonlRedactor {
             mask_value: false,
             scalar_secret,
             has_redaction: false,
+            invalid: false,
         })
     }
 
@@ -172,15 +183,49 @@ impl JsonlRedactor {
             return Ok(());
         }
         self.inner
-            .filter(&token.decoded, &mut |bytes| encode(bytes, out))?;
+            .filter_decisions(&token.decoded, &mut |_, count, masked| {
+                token
+                    .source
+                    .decide(count, masked, &mut |byte, count, masked| {
+                        source::emit(byte, count, masked, &mut token.redaction_run, out);
+                        Ok(())
+                    })
+            })?;
         token.decoded.clear();
         Ok(())
+    }
+
+    fn finish_string(
+        &mut self,
+        token: &mut StringToken,
+        out: &mut FrameEmitter<'_>,
+    ) -> Result<(), FilterError> {
+        self.flush_string(token, out)?;
+        if !token.key && !token.masked {
+            self.inner.finish_decisions(&mut |_, count, masked| {
+                token
+                    .source
+                    .decide(count, masked, &mut |byte, count, masked| {
+                        source::emit(byte, count, masked, &mut token.redaction_run, out);
+                        Ok(())
+                    })
+            })?;
+            token.source.finish()?;
+        } else {
+            self.inner.finish(&mut |_| {})?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn valid(&self) -> bool {
+        !self.invalid
     }
 
     fn decoded(
         &mut self,
         token: &mut StringToken,
         bytes: &[u8],
+        original: &[u8],
         out: &mut FrameEmitter<'_>,
     ) -> Result<(), FilterError> {
         if token.key {
@@ -194,6 +239,7 @@ impl JsonlRedactor {
                 token.tail.push(b.to_ascii_lowercase());
             }
         } else if !token.masked {
+            token.source.push(original, bytes.len())?;
             token.decoded.extend_from_slice(bytes);
             if token.decoded.len() >= STRING_PIECE {
                 self.flush_string(token, out)?;
@@ -213,22 +259,14 @@ impl JsonlRedactor {
         let _ = (remainder, sensitive);
         out.push_bytes(b"\0[REDACTED]");
         self.discard = true;
+        self.invalid = true;
         self.has_redaction = true;
         Ok(())
     }
 
     fn plain_bytes(&mut self, bytes: &[u8], out: &mut FrameEmitter<'_>) -> Result<(), FilterError> {
-        let end = bytes
-            .iter()
-            .position(|b| *b == b'\\')
-            .unwrap_or(bytes.len());
-        self.inner
-            .filter(&bytes[..end], &mut |b| out.push_bytes(b))?;
-        if end < bytes.len() {
-            // A JSON escape can hide a credential or literal in plain output.
-            self.malformed(&[], true, out)?;
-        }
-        Ok(())
+        self.invalid = true;
+        self.inner.filter(bytes, &mut |b| out.push_bytes(b))
     }
 
     fn string_byte(
@@ -252,8 +290,7 @@ impl JsonlRedactor {
                 Ok(_) => token.utf8.clear(),
                 Err(e) if e.error_len().is_none() && token.utf8.len() < 4 => {}
                 Err(_) => {
-                    self.flush_string(&mut token, out)?;
-                    self.inner.finish(&mut |b| encode(b, out))?;
+                    self.finish_string(&mut token, out)?;
                     self.reset_inner()?;
                     return self.malformed(&[b], token.masked || credential_key(&token.tail), out);
                 }
@@ -283,12 +320,12 @@ impl JsonlRedactor {
                 quoted.push(b'"');
                 match serde_json::from_slice::<String>(&quoted) {
                     Ok(decoded) => {
-                        self.decoded(&mut token, decoded.as_bytes(), out)?;
+                        let original = token.escape.clone();
+                        self.decoded(&mut token, decoded.as_bytes(), &original, out)?;
                         token.escape.clear();
                     }
                     Err(_) => {
-                        self.flush_string(&mut token, out)?;
-                        self.inner.finish(&mut |b| encode(b, out))?;
+                        self.finish_string(&mut token, out)?;
                         self.reset_inner()?;
                         return self.malformed(
                             &quoted[1..quoted.len() - 1],
@@ -317,19 +354,17 @@ impl JsonlRedactor {
                 out.push_bytes(b"\"");
                 self.positions.last_mut().ok_or(FilterError)?.position = Position::ObjectColon;
             } else {
-                self.flush_string(&mut token, out)?;
-                self.inner.finish(&mut |b| encode(b, out))?;
+                self.finish_string(&mut token, out)?;
                 self.reset_inner()?;
                 out.push_bytes(b"\"");
             }
             return Ok(());
         } else if b < 0x20 {
-            self.flush_string(&mut token, out)?;
-            self.inner.finish(&mut |b| encode(b, out))?;
+            self.finish_string(&mut token, out)?;
             self.reset_inner()?;
             return self.malformed(&[b], token.masked || credential_key(&token.tail), out);
         } else {
-            self.decoded(&mut token, &[b], out)?;
+            self.decoded(&mut token, &[b], &[b], out)?;
         }
         self.string = Some(token);
         Ok(())
@@ -465,6 +500,8 @@ impl JsonlRedactor {
                     utf8: Vec::new(),
                     key_source: Vec::new(),
                     key_overflow: false,
+                    source: SourceMap::default(),
+                    redaction_run: false,
                 });
             }
             (
@@ -511,6 +548,8 @@ impl JsonlRedactor {
                             utf8: Vec::new(),
                             key_source: Vec::new(),
                             key_overflow: false,
+                            source: SourceMap::default(),
+                            redaction_run: false,
                         });
                     }
                     b'-' | b'0'..=b'9' | b't' | b'f' | b'n' => {
@@ -533,9 +572,16 @@ impl JsonlRedactor {
         if let Some(scalar) = self.scalar.take() {
             self.finish_scalar(scalar, out)?;
         }
+        if self.started
+            && (self.plain
+                || self.string.is_some()
+                || self.positions.len() != 1
+                || self.positions[0].position != Position::Done)
+        {
+            self.invalid = true;
+        }
         if let Some(mut token) = self.string.take() {
-            self.flush_string(&mut token, out)?;
-            self.inner.finish(&mut |b| encode(b, out))?;
+            self.finish_string(&mut token, out)?;
             // Keep an incomplete final string incomplete, even if masking hid it.
             out.push_bytes(b"\0");
         } else {
@@ -553,27 +599,6 @@ impl JsonlRedactor {
         self.source_line_bytes = 0;
         self.mask_value = false;
         Ok(())
-    }
-}
-
-fn encode(bytes: &[u8], out: &mut FrameEmitter<'_>) {
-    for &b in bytes {
-        match b {
-            b'"' => out.push_bytes(b"\\\""),
-            b'\\' => out.push_bytes(b"\\\\"),
-            0..=0x1f => {
-                const HEX: &[u8] = b"0123456789abcdef";
-                out.push_bytes(&[
-                    b'\\',
-                    b'u',
-                    b'0',
-                    b'0',
-                    HEX[(b >> 4) as usize],
-                    HEX[(b & 15) as usize],
-                ]);
-            }
-            _ => out.push_bytes(&[b]),
-        }
     }
 }
 
@@ -694,6 +719,19 @@ mod tests {
                 assert_eq!(s, "[REDACTED]")
             }
             _ => assert_eq!(input, output),
+        }
+    }
+
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    #[test]
+    fn unmasked_string_spans_retain_original_source_escapes() {
+        let input = br#"{ "keep":"\n\r\t\b\f\/\u000a\u0041\ud83d\ude03\\\"", "value":"left\t\u006citeral-secret\nright" }"#;
+        let expected = br#"{ "keep":"\n\r\t\b\f\/\u000a\u0041\ud83d\ude03\\\"", "value":"left\t[REDACTED]\nright" }"#;
+        for seed in 1..32 {
+            let (output, changed) = filtered(input, seed);
+            assert!(changed);
+            assert_eq!(output, expected);
+            assert!(serde_json::from_slice::<Value>(&output).is_ok());
         }
     }
 
