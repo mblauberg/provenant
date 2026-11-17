@@ -13,6 +13,58 @@ pub(crate) fn credential_directories(
     std::iter::once(entry.directory.as_path()).chain(entry.directories.iter().map(PathBuf::as_path))
 }
 
+/// Resolve the registered account's credential stores from the adapter's
+/// declared file inventory. Account directories can be much broader than the
+/// stores they contain (notably an Agy account home), so they are not roots.
+pub(crate) fn credential_store_paths(
+    entry: &provenant_providers::accounts::Registration,
+) -> Result<Vec<PathBuf>, String> {
+    let account = format!("{}/{}", entry.adapter, entry.label);
+    let fail = |path: &Path, reason: &str| {
+        format!(
+            "account registry: {account} credential store at {} cannot be resolved precisely: {reason}",
+            path.display()
+        )
+    };
+    let spec = provenant_records::AdapterSpec::get(&entry.adapter)
+        .filter(|spec| spec.registered_account)
+        .ok_or_else(|| {
+            fail(
+                &entry.directory,
+                "adapter has no registered-account store declaration",
+            )
+        })?;
+    if spec.credential_files.is_empty() {
+        return Err(fail(
+            &entry.directory,
+            "adapter declares no precise credential files",
+        ));
+    }
+    let directories = credential_directories(entry).collect::<Vec<_>>();
+    let mut paths = Vec::new();
+    for directory in directories {
+        for relative in spec.credential_files {
+            let path = Path::new(relative);
+            if path.as_os_str().is_empty()
+                || path.is_absolute()
+                || path
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            {
+                return Err(fail(
+                    directory,
+                    "adapter credential path is not a precise relative file",
+                ));
+            }
+            paths.push(directory.join(path));
+        }
+        if spec.credential_profile_sibling {
+            paths.push(directory.with_extension("json"));
+        }
+    }
+    Ok(paths)
+}
+
 #[derive(Clone)]
 struct AccountDirectories {
     id: String,
@@ -785,6 +837,40 @@ mod tests {
             order: None,
             headline: None,
             settings: Default::default(),
+        }
+    }
+
+    // Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+    #[test]
+    fn account_store_resolution_uses_precise_files_and_refuses_unknown_adapters() {
+        let agy = registration("agy", "peer", "/Users/peer");
+        let paths = credential_store_paths(&agy).expect("Agy store declaration");
+        assert_eq!(
+            paths,
+            [
+                "/Users/peer/state.vscdb",
+                "/Users/peer/state.vscdb-wal",
+                "/Users/peer/Library/Keychains/login.keychain-db",
+            ]
+            .map(PathBuf::from)
+        );
+        let unknown = registration("unknown", "peer", "/Users/peer");
+        let error = credential_store_paths(&unknown).expect_err("unknown adapter must refuse");
+        assert!(error.contains("unknown/peer"), "{error}");
+        assert!(error.contains("/Users/peer"), "{error}");
+    }
+
+    // Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+    #[test]
+    fn account_store_resolution_covers_registered_aliases_and_sibling_profiles() {
+        let mut claude = registration("claude", "work", "/fixture/.claude-work");
+        claude.directories.push("/fixture/.claude-work-alt".into());
+        let paths = credential_store_paths(&claude).expect("Claude store declaration");
+        for directory in ["/fixture/.claude-work", "/fixture/.claude-work-alt"] {
+            for relative in [".credentials.json", "settings.json"] {
+                assert!(paths.contains(&PathBuf::from(directory).join(relative)));
+            }
+            assert!(paths.contains(&PathBuf::from(format!("{directory}.json"))));
         }
     }
 

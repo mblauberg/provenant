@@ -5657,8 +5657,20 @@ mod route_launch_boundary_regressions {
         let mut settings = provenant_providers::accounts::Settings::default();
         settings.entries.insert("work".into(), registered.clone());
         let roots = credential_roots(&Registry::default(), &home, &settings)?;
-        assert!(roots.entries().iter().any(|root| {
-            root.source == "account registry: agy/work" && root.path == registered.directory
+        for relative in [
+            "state.vscdb",
+            "state.vscdb-wal",
+            "Library/Keychains/login.keychain-db",
+        ] {
+            assert!(roots.entries().iter().any(|root| {
+                root.source == "account registry: agy/work credential file"
+                    && root.path == registered.directory.join(relative)
+                    && root.scope == provenant_core::CredentialScope::Exact
+            }));
+        }
+        assert!(!roots.entries().iter().any(|root| {
+            root.source.starts_with("account registry: agy/work")
+                && root.path == registered.directory
         }));
         assert!(
             !roots

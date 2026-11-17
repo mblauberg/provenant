@@ -703,9 +703,23 @@ pub(super) fn credential_roots(
     settings: &provenant_providers::accounts::Settings,
 ) -> Result<provenant_core::CredentialRoots, String> {
     use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
-    // An adapter's declared root kind (the Codex package exception, for one)
-    // belongs to its default account directory alone, whichever declaration
-    // names it; every other path is a plain store.
+    let mut roots = CredentialRoots::for_home(home);
+    for entry in settings.entries.values() {
+        let source = format!(
+            "account registry: {}/{} credential file",
+            entry.adapter, entry.label
+        );
+        for path in crate::accounts::credential_store_paths(entry)? {
+            roots.add(
+                path,
+                CredentialScope::Exact,
+                source.clone(),
+                CredentialKind::Store,
+            );
+        }
+    }
+    // Preserve each adapter's declared kind for its implicit default root;
+    // registered-account files above are always individual credential stores.
     let kind = |adapter: &str, path: &Path| {
         AdapterSpec::get(adapter)
             .and_then(|spec| {
@@ -714,37 +728,6 @@ pub(super) fn credential_roots(
             })
             .unwrap_or(CredentialKind::Store)
     };
-    let mut roots = CredentialRoots::for_home(home);
-    for entry in settings.entries.values() {
-        let source = format!("account registry: {}/{}", entry.adapter, entry.label);
-        for path in crate::accounts::credential_directories(entry) {
-            roots.add(
-                path.to_path_buf(),
-                CredentialScope::Subtree,
-                source.clone(),
-                kind(entry.adapter.as_str(), path),
-            );
-        }
-    }
-    // Claude declares a sibling JSON profile as well as files inside its
-    // account directory. Keep this exact endpoint for every registered
-    // spelling, including identities this attempt did not select.
-    for entry in settings.entries.values() {
-        if AdapterSpec::get(&entry.adapter).is_some_and(|spec| spec.credential_profile_sibling) {
-            let source = format!(
-                "account registry: {}/{} credential file",
-                entry.adapter, entry.label
-            );
-            for directory in crate::accounts::credential_directories(entry) {
-                roots.add(
-                    directory.with_extension("json"),
-                    CredentialScope::Exact,
-                    source.clone(),
-                    CredentialKind::Store,
-                );
-            }
-        }
-    }
     let default_directories = registry
         .host
         .map(|host| host.default_account_directories.clone())
