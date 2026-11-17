@@ -348,6 +348,7 @@ impl Frames {
             return;
         };
         self.retain_frames(policy, filter.filter(chunk), out);
+        self.drain_filter(policy, filter, out);
     }
 
     fn finish_filter(
@@ -361,6 +362,23 @@ impl Frames {
         }
         if let Some(filter) = filter.as_deref_mut() {
             self.retain_frames(policy, filter.finish(), out);
+            self.drain_filter(policy, filter, out);
+        }
+    }
+
+    fn drain_filter(
+        &mut self,
+        policy: &StreamPolicy<'_>,
+        filter: &mut dyn CaptureFilter,
+        out: &mut CapturedStream,
+    ) {
+        while !self.filter_disabled {
+            let result = filter.drain();
+            let empty = result.as_ref().is_ok_and(Vec::is_empty);
+            self.retain_frames(policy, result, out);
+            if empty {
+                break;
+            }
         }
     }
 

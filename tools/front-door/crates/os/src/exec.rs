@@ -123,9 +123,14 @@ pub trait FrameSink: Send + Sync {
 #[error("capture filter failed")]
 pub struct FilterError;
 /// A filter returns zero or more frames per call, each at most `FRAME_LIMIT` bytes.
-/// Capture retains frames in order, including those returned at EOF.
+/// Capture drains decided output before the next input and after EOF.
 pub trait CaptureFilter {
     fn filter(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, FilterError>;
+
+    /// Drain decided output before supplying more input or finishing.
+    fn drain(&mut self) -> Result<Vec<Vec<u8>>, FilterError> {
+        Ok(Vec::new())
+    }
 
     /// Flush bytes held until the end of the stream. Filters without buffered
     /// state can keep the default implementation.
