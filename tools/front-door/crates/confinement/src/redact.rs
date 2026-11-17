@@ -1406,10 +1406,142 @@ fn filter_pass(
     Ok(redactor_plain.has_redaction())
 }
 
+// Tolerate broken history syntax while retaining the one piece of JSON context
+// the plain detector cannot infer: a credential key introducing a container.
+struct HistoryScanner {
+    plain: Redactor,
+    unescape: source::Unescape,
+    tail: Vec<u8>,
+    in_string: bool,
+    escaped: bool,
+    candidate: u8, // 1: string closed, 2: credential key and colon seen
+    credential: bool,
+    depth: usize,
+    closes: [u8; 128],
+    overflow: bool,
+    matched: bool,
+}
+impl HistoryScanner {
+    fn new() -> Result<Self, RedactorError> {
+        Ok(Self {
+            plain: Redactor::new([])?,
+            unescape: source::Unescape::default(),
+            tail: Vec::new(),
+            in_string: false,
+            escaped: false,
+            candidate: 0,
+            credential: false,
+            depth: 0,
+            closes: [0; 128],
+            overflow: false,
+            matched: false,
+        })
+    }
+    fn has_redaction(&self) -> bool {
+        self.matched || self.plain.has_redaction()
+    }
+    fn step(&mut self, b: u8, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+        if self.depth != 0 {
+            if b == b'\n' {
+                self.depth = 0;
+                self.in_string = false;
+                sink(&[b]);
+                return Ok(());
+            }
+            if self.in_string {
+                if self.escaped {
+                    self.escaped = false;
+                } else if b == b'\\' {
+                    self.escaped = true;
+                } else if b == b'"' {
+                    self.in_string = false;
+                }
+            } else if b == b'"' {
+                self.in_string = true;
+            } else if b == b'{' || b == b'[' {
+                if self.depth == self.closes.len() {
+                    self.overflow = true;
+                } else if !self.overflow {
+                    self.closes[self.depth] = if b == b'{' { b'}' } else { b']' };
+                    self.depth += 1;
+                }
+            } else if !self.overflow && b == self.closes[self.depth - 1] {
+                self.depth -= 1;
+            }
+            return Ok(());
+        }
+        if !self.in_string && self.candidate == 2 && (b == b'{' || b == b'[') {
+            self.plain.finish(sink)?;
+            self.matched = true;
+            sink(REDACTED);
+            self.plain = Redactor::new([]).map_err(|_| FilterError)?;
+            self.candidate = 0;
+            self.depth = 1;
+            self.closes[0] = if b == b'{' { b'}' } else { b']' };
+            self.overflow = false;
+            return Ok(());
+        }
+        self.plain.filter(&[b], sink)?;
+        if self.in_string {
+            if !self.escaped && b == b'"' {
+                self.unescape.drain(true, &mut |_, decoded| {
+                    for &byte in decoded {
+                        if self.tail.len() == ASSIGNMENT_RUN {
+                            self.tail.remove(0);
+                        }
+                        self.tail.push(byte.to_ascii_lowercase());
+                    }
+                    Ok(())
+                })?;
+                self.credential = jsonl::credential_key(&self.tail);
+                self.in_string = false;
+                self.candidate = 1;
+            } else {
+                self.unescape.push(b, &mut |_, decoded| {
+                    for &byte in decoded {
+                        if self.tail.len() == ASSIGNMENT_RUN {
+                            self.tail.remove(0);
+                        }
+                        self.tail.push(byte.to_ascii_lowercase());
+                    }
+                    Ok(())
+                })?;
+                if self.escaped {
+                    self.escaped = false;
+                } else if b == b'\\' {
+                    self.escaped = true;
+                }
+            }
+        } else if b == b'"' {
+            self.in_string = true;
+            self.escaped = false;
+            self.tail.clear();
+            self.unescape = source::Unescape::default();
+            self.candidate = 0;
+        } else if self.candidate == 1 && b == b':' && self.credential {
+            self.candidate = 2;
+        } else if !b.is_ascii_whitespace() {
+            self.candidate = 0;
+        }
+        Ok(())
+    }
+}
+impl CaptureFilter for HistoryScanner {
+    fn filter(&mut self, bytes: &[u8], sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+        for &b in bytes {
+            self.step(b, sink)?;
+        }
+        Ok(())
+    }
+    fn finish(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+        self.plain.finish(sink)
+    }
+}
+
 /// Validate each history line before choosing its filter, then rewind only that
 /// line. Unlike live protocol capture, history is seekable: malformed records
-/// can use the byte-preserving plain filter without discarding their tail or
-/// retroactively changing bytes the tokenizer has already emitted. Neither pass
+/// use a tolerant scanner before the plain filter, without retroactively
+/// changing bytes the tokenizer has already emitted. Neither pass
 /// buffers a line, including lines longer than the provider protocol limit.
 fn filter_history(
     source: &mut FileHandle,
@@ -1466,7 +1598,7 @@ fn filter_history(
             filter_history_range(&mut reader, length, &mut redactor, staged.as_deref_mut())?;
             matched |= redactor.has_redaction();
         } else {
-            let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
+            let mut redactor = HistoryScanner::new().map_err(|_| FilterError)?;
             filter_history_range(&mut reader, length, &mut redactor, staged.as_deref_mut())?;
             matched |= redactor.has_redaction();
         }
@@ -1729,7 +1861,14 @@ mod tests {
     #[test]
     fn noncompressible_withheld_escape_runs_fail_closed_at_the_memory_bound() {
         let mut redactor = Redactor::new([]).unwrap();
-        redactor.filter(b"password=\"value", &mut |_| {}).unwrap();
+        // The decoded view must see a large run before the opening quote:
+        // quote_slashes bounds how many following slashes it withholds.
+        let mut prefix = b"password=".to_vec();
+        prefix.extend_from_slice(&br"\\".repeat(source::MAX_SOURCE_SPANS + 4096));
+        prefix.extend_from_slice(br#"\"value"#);
+        for part in prefix.chunks(4096) {
+            redactor.filter(part, &mut |_| {}).unwrap();
+        }
         // These spellings decode to the same withheld delimiter, but their
         // source bytes cannot be represented by one repeated-source run.
         let chunk = br"\u005c\u005C".repeat(1024);
@@ -2639,6 +2778,61 @@ mod tests {
         );
         assert!(lines[2].ends_with(br" [REDACTED]! retained \q"));
         assert_eq!(scrub_session_history(temp.path())?, 0);
+        Ok(())
+    }
+
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    #[test]
+    fn history_masks_credential_containers_even_when_malformed_or_too_deep()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().join("candidate-0/sessions");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("history.jsonl");
+        let prefix = " ".repeat(SESSION_CHUNK - 12);
+        let deep = format!(
+            "{}{{\"password\":[{{\"x\":\"secret-deep\"}}]}}{}",
+            "[".repeat(129),
+            "]".repeat(129)
+        );
+        let input = format!(
+            "{prefix}{{\"password\":[{{\"x\":\"secret-one\"}}]}}! tail\n{{\"password\":{{\"a\":[\"secret-two\"]}}}}! tail\n{{\"password\":[{{\"x\":\"secret-three\"}}\n{deep}\n"
+        );
+        std::fs::write(&path, input)?;
+        assert_eq!(scrub_session_history(temp.path())?, 1);
+        let result = std::fs::read_to_string(&path)?;
+        assert!(
+            !result.contains("secret-one")
+                && !result.contains("secret-two")
+                && !result.contains("secret-three")
+                && !result.contains("secret-deep")
+        );
+        assert_eq!(result.lines().count(), 4);
+        assert!(result.contains("! tail"));
+        Ok(())
+    }
+
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    #[test]
+    fn long_safe_key_survives_filtering_and_history_scrubbing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let key = "k".repeat(MAX_SECRET_LENGTH + 1);
+        let input = format!("{{\"{key}\":1}}\n");
+        let mut filter = JsonlRedactor::new([])?;
+        assert_eq!(
+            joined_jsonl(
+                &mut filter,
+                &input.as_bytes().chunks(4096).collect::<Vec<_>>()
+            ),
+            input.as_bytes()
+        );
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().join("candidate-0/sessions");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("history.jsonl");
+        std::fs::write(&path, &input)?;
+        assert_eq!(scrub_session_history(temp.path())?, 0);
+        assert_eq!(std::fs::read(&path)?, input.as_bytes());
         Ok(())
     }
 

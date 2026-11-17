@@ -323,8 +323,8 @@ string delimiters. Escaped literals (including surrogate pairs) are matched afte
 decoding. Credential-named fields mask scalar values, including leaves in nested
 containers, while retaining keys and container structure. Literal matches in
 non-string scalars become JSON string masks. Keys are scanned after decoding and
-a matching key is replaced by the marker. Keys exceeding the bounded prefix are
-conservatively masked as a whole.
+a matching key is replaced by the marker. Keys exceeding the bounded prefix stream through the escape-aware detector,
+preserving unmatched source bytes.
 Strings stream in bounded pieces; no line-size fallback changes their grammar.
 Tokenizer memory is bounded by a 128-level nesting stack, a 4 KiB decoded piece
 and its source mappings, a 16 KiB scalar prefix, and the plain redactor's detector
@@ -338,8 +338,10 @@ matches. Malformed live protocol JSON masks and discards the remainder through
 the raw line boundary, retaining an invalid-JSON sentinel so it cannot become
 successful protocol evidence. Seekable session history validates each line in
 bounded pieces before filtering it: valid JSON uses the tokenizer; malformed
-lines use the escape-aware plain filter over the original bytes. Neither pass
-buffers a whole line, and malformed history never discards trailing bytes.
+lines use a tolerant string-aware scanner and the escape-aware plain filter.
+Credential-named containers are masked through their matching close or line end,
+including on excess nesting; other unmatched bytes are preserved. Neither pass
+buffers a whole line.
 The adapter spec declares the stdout stream contract: provider JSONL has a 1 MiB
 source-line cap, with oversized and incomplete frames becoming line-numbered
 `MalformedFrame`; raw command output uses streaming redaction without a

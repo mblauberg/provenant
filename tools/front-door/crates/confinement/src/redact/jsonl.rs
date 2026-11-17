@@ -28,7 +28,7 @@ struct Context {
     sensitive: bool,
 }
 
-fn credential_key(tail: &[u8]) -> bool {
+pub(super) fn credential_key(tail: &[u8]) -> bool {
     ASSIGNMENT_KEYS.iter().any(|(key, _)| {
         let Some(start) = tail.len().checked_sub(key.len()) else {
             return false;
@@ -112,6 +112,7 @@ pub struct JsonlRedactor {
     scalar_secret: bool,
     has_redaction: bool,
     invalid: bool,
+    failed: bool,
 }
 
 impl JsonlRedactor {
@@ -153,6 +154,7 @@ impl JsonlRedactor {
             scalar_secret,
             has_redaction: false,
             invalid: false,
+            failed: false,
         })
     }
 
@@ -201,7 +203,9 @@ impl JsonlRedactor {
         out: &mut FrameEmitter<'_>,
     ) -> Result<(), FilterError> {
         self.flush_string(token, out)?;
-        if !token.key && !token.masked {
+        if token.key && token.key_overflow {
+            self.inner.finish(&mut |bytes| out.push_bytes(bytes))?;
+        } else if !token.key && !token.masked {
             self.inner.finish_decisions(&mut |_, count, masked| {
                 token
                     .source
@@ -275,11 +279,17 @@ impl JsonlRedactor {
         mut token: StringToken,
         out: &mut FrameEmitter<'_>,
     ) -> Result<(), FilterError> {
-        if token.key && !(token.escape.is_empty() && b == b'"') && !token.key_overflow {
-            if token.key_source.len() == MAX_SECRET_LENGTH {
-                token.key_source.clear();
-                token.decoded.clear();
+        if token.key && !(token.escape.is_empty() && b == b'"') {
+            if !token.key_overflow && token.key_source.len() == MAX_SECRET_LENGTH {
                 token.key_overflow = true;
+                token.decoded.clear();
+                self.inner
+                    .filter(&token.key_source, &mut |bytes| out.push_bytes(bytes))?;
+                token.key_source.clear();
+            }
+            if token.key_overflow {
+                self.inner
+                    .filter(&[b], &mut |bytes| out.push_bytes(bytes))?;
             } else {
                 token.key_source.push(b);
             }
@@ -340,15 +350,17 @@ impl JsonlRedactor {
         } else if b == b'"' {
             if token.key {
                 self.mask_value = credential_key(&token.tail);
-                if !token.key_overflow {
+                if token.key_overflow {
+                    self.inner.finish(&mut |bytes| out.push_bytes(bytes))?;
+                } else {
                     self.inner.filter(&token.decoded, &mut |_| {})?;
                     self.inner.finish(&mut |_| {})?;
-                }
-                if token.key_overflow || self.inner.has_redaction() {
-                    out.push_bytes(REDACTED);
-                    self.has_redaction = true;
-                } else {
-                    out.push_bytes(&token.key_source);
+                    if self.inner.has_redaction() {
+                        out.push_bytes(REDACTED);
+                        self.has_redaction = true;
+                    } else {
+                        out.push_bytes(&token.key_source);
+                    }
                 }
                 self.reset_inner()?;
                 out.push_bytes(b"\"");
@@ -602,8 +614,12 @@ impl JsonlRedactor {
     }
 }
 
-impl CaptureFilter for JsonlRedactor {
-    fn filter(&mut self, bytes: &[u8], sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+impl JsonlRedactor {
+    fn filter_inner(
+        &mut self,
+        bytes: &[u8],
+        sink: &mut dyn FnMut(&[u8]),
+    ) -> Result<(), FilterError> {
         if bytes.len() > FRAME_LIMIT {
             return Err(FilterError);
         }
@@ -657,7 +673,7 @@ impl CaptureFilter for JsonlRedactor {
         out.flush();
         Ok(())
     }
-    fn finish(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+    fn finish_inner(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
         let mut out = FrameEmitter::new(sink);
         self.end_line(&mut out)?;
         out.flush();
@@ -665,10 +681,52 @@ impl CaptureFilter for JsonlRedactor {
     }
 }
 
+impl CaptureFilter for JsonlRedactor {
+    fn filter(&mut self, bytes: &[u8], sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+        if self.failed {
+            return Err(FilterError);
+        }
+        let result = self.filter_inner(bytes, sink);
+        self.failed |= result.is_err();
+        result
+    }
+    fn finish(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+        if self.failed {
+            return Err(FilterError);
+        }
+        let result = self.finish_inner(sink);
+        self.failed |= result.is_err();
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    #[test]
+    fn source_map_exhaustion_is_sticky() {
+        let mut filter = JsonlRedactor::new([]).unwrap();
+        filter.filter(br#"{"v":""#, &mut |_| {}).unwrap();
+        let token = filter.string.as_mut().unwrap();
+        for i in 0..source::MAX_SOURCE_SPANS {
+            token
+                .source
+                .push(if i % 2 == 0 { b"a" } else { b"b" }, 1)
+                .unwrap();
+        }
+        assert!(filter.filter(b"x", &mut |_| {}).is_err());
+        let mut output = Vec::new();
+        assert!(
+            filter
+                .filter(b"tail", &mut |b| output.extend_from_slice(b))
+                .is_err()
+        );
+        assert!(filter.finish(&mut |b| output.extend_from_slice(b)).is_err());
+        assert!(output.is_empty());
+    }
 
     fn random(state: &mut u64) -> usize {
         *state ^= *state << 13;
