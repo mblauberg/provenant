@@ -4491,7 +4491,9 @@ mod tests {
                 .diagnostic()
                 .detail
                 .ok_or("template refusal")?
-                .contains("graph input could not be processed")
+                // docs/specs/cli.md#template-name-errors (#3350): the refusal names the
+                // supplied template; unclassified graph input keeps the generic text.
+                .contains("unknown template task.typo")
         );
         let error = factory
             .graph_document(

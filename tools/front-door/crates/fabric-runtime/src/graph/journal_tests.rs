@@ -796,7 +796,7 @@ fn rebuild_keeps_healthy_graph_pending_beside_oversized_checkpoint() {
     std::fs::remove_dir_all(directory.join("pending")).unwrap();
     std::fs::File::create(directory.join("graph-bad.json"))
         .unwrap()
-        .set_len(16_777_217)
+        .set_len(MAX_CHECKPOINT_BYTES + 1)
         .unwrap();
 
     assert_eq!(
