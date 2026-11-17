@@ -14,6 +14,23 @@ the same captured project and actor identity as the run store. Uncertain custody
 keeps its ownership until release is proved.
 - Why: admission must not create duplicate writers or hold coordination locks across external work.
 
+Before entering handoff or spawning a guardian, the launcher durably prepares
+the per-attempt `guardian.lock` inode alongside the attempt, writer and custody
+identities. The guardian acquires and verifies that original inode before
+acknowledging custody or spawning the provider, then records its native process
+identity. The prepared record is sufficient even if the guardian dies before
+publishing its own identity or updating the pre-handoff reservation: the
+original free writer and custody leases exclude a live launcher or guardian.
+Only the guardian holds the life lock after preparation;
+the provider and its descendants never inherit it. The guardian retains it
+through terminal publication and custody release. Kernel process teardown
+releases it even when the guardian cannot publish an exit.
+Tick's settlement driver consumes that proof under writer exclusion and a
+fresh worktree occupancy census. A retained or unknown process observation
+cannot substitute for the original free locks or positive non-occupancy.
+- Why: a stale process checkpoint cannot prove same-boot guardian death; the
+  original kernel lock can supply that evidence without PID-reuse heuristics.
+
 A launch is uncertain only once its reservation may record a handoff. A host
 that cannot hold provider custody refuses before that point: the attempt ends
 with `unsupported_platform` and its custody is withdrawn, never reported as an

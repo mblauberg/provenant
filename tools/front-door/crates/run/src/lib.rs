@@ -12,6 +12,7 @@ pub use completion::{
 mod verification;
 pub use verification::{VerificationResolution, conflict_cause};
 mod controls;
+pub use controls::release_progress;
 mod correlation;
 pub use correlation::{WorkCoverage, WorkSelector, validate_work};
 mod db;

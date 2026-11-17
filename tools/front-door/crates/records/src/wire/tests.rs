@@ -7,6 +7,7 @@ use serde_json::json;
 fn row() -> LaneRow {
     LaneRow {
         git_import_failure: None,
+        stop_work: None,
         terminal_cause: None,
         project_id: "9".repeat(32),
         graph: "g".into(),
@@ -128,6 +129,7 @@ fn lane_rows_validate_with_and_without_optional_members() {
         path: None,
     });
     full.steering = Some(crate::run::SteeringStatus {
+        fresh_session: false,
         state: crate::run::SteeringState::Resumed,
         operations: vec![crate::run::SteeringOperation {
             operation_id: "steer-op".parse().unwrap(),

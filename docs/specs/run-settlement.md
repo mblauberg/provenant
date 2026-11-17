@@ -9,7 +9,7 @@ Paths are relative to `tools/front-door/`.
 
 A settlement driver holds an exclusive lease. Journal locks do not span external
 commands, and terminal effects have separate exclusion. Import precedes
-publication, the terminal record is committed before custody release, and
+writer branch publication, the terminal record is committed before custody release, and
 import refusal retains private Git for recovery.
 - Why: recovery must resume durable effects without racing another driver or losing work.
 
@@ -22,6 +22,28 @@ its inputs do not change on retry, so settlement seals it like an exhausted
 import and never retries it. Refusals that depend on a moving branch stay retryable.
 - Why: rebasing a lane onto the branch it feeds is legitimate, and a refusal that
   cannot change must not leave a finished lane running.
+
+## Outcome before release
+
+The shared Run settlement driver commits the provider outcome, result and
+handoff once the provider has exited and its captures are durable. Descendant
+cleanup cannot withhold that decision. A terminal attempt can still be
+releasing: its reservation and writer exclusion remain until cleanup proves
+quiescence and Git import, publication and release receipts have settled.
+Result readers retain the committed outcome and report surviving processes;
+an early result supplies no permission to start a second writer.
+
+The outcome references an immutable provider-exit snapshot. Cleanup may update
+its own process-exit observation but cannot rewrite the provider's stop reason,
+delivery ordering or committed decision. A stop delivered only to descendants
+after provider exit does not cancel the provider's completed work. Deferred
+Git and delivery effects resume from the same committed decision after
+quiescence. Failed outcome publication is recorded in the scoped journal and
+retried while the guardian retains custody.
+- Why: a surviving helper, a late stop or interrupted cleanup must neither hide
+  a finished result nor change its evidence.
+- Owner: `crates/run/src/holder.rs`, `crates/run/src/store.rs`,
+  `crates/supervisor/src/guardian.rs`
 
 A launch with an unknown acknowledgement is not replayed while custody remains
 uncertain.
@@ -100,6 +122,37 @@ One settlement classification derives the terminal outcome, sealed stop and grap
 A missing required writer handoff seals `handoff_missing` and goes to the chair; graph dependants cannot treat it as success.
 - Why: all readers need the same cause for the next decision; host stops must
   preserve valid handoffs and never count as negative provider-quality evidence.
+
+## Guardian loss proof
+
+`Recovery::after_guardian_loss` offers a separate same-boot recovery capability.
+It requires the original guardian lock and attempt custody lock to be free,
+holds both alongside the original writer lease, and takes a fresh complete
+process census under those locks. Recorded roots, descendants and their
+sessions or groups must have no surviving member. The trusted host must also
+prove worktree non-occupancy under exclusion; unknown or occupied is not free.
+For a read-only attempt there is no worktree to occupy.
+
+Missing, replaced or unreadable lock evidence never proves loss. The identities
+are durable before any guardian can spawn, so a valid handoff with no recorded
+guardian identity can still be recovered under all three original locks.
+Identities are rechecked after the host's worktree census and before release.
+The capability retains all three locks while the Run owner commits its
+canonical Lost outcome and warning; only then may the owner consume it to
+release the reservation. If a durable provider exit already exists, the
+driver retains that outcome and carries the proof locks through its remaining
+effects and release instead. Tick queues unknown attempts for this proof-only
+recovery as well as sealed exits; an unknown observation alone never permits
+settlement. Dropping or
+failing to obtain the capability leaves the durable fence intact. A process
+checkpoint, elapsed time or reused PID alone supplies no such authority.
+- Why: same-boot recovery needs positive death and non-occupancy evidence while
+  preserving the worktree fence until the outcome is committed.
+
+The capability itself neither commits a Run outcome nor changes read-only
+presence classification. The Run settlement driver owns its consumption and
+the separate EOF outcome and quiescent import/release transactions. Manual
+`reconcile --abandon` remains the explicit escape when proof is unavailable.
 
 ## Continuation
 

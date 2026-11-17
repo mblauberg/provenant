@@ -830,10 +830,56 @@ impl RunStore {
             }
             record.settlement_receipts = Some(crate::db::decode_column(&raw)?);
         }
+        // Outcome-only terminal decisions are immutable. Once the deferred
+        // Git import finishes, the writer terminal artifact supplies the
+        // committed head and stop-work summary without republishing that
+        // decision. A disagreement means the artifact no longer belongs to
+        // this terminal outcome and must not be projected as current state.
+        if record.settlement_receipts.as_ref().is_some_and(|receipts| {
+            receipts.git_import == provenant_records::run::EffectDisposition::Done
+        }) && let Ok(attempt) = self.attempt_dir(id, false)
+            && let Some(raw) = match read {
+                RecordRead::Durable => {
+                    crate::artifacts::read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)?
+                }
+                RecordRead::Observed => crate::artifacts::read_sealed_observed(
+                    &attempt,
+                    "writer-terminal.json",
+                    RECORD_LIMIT,
+                )?,
+            }
+        {
+            let writer: crate::writer::WriterTerminal = crate::db::decode(&raw)?;
+            if record.head.is_some_and(|head| head != writer.head) {
+                // An early outcome may still name the launch head. Only its
+                // sealed deferred-import disposition permits the later head.
+                let raw =
+                    crate::artifacts::read_sealed(&attempt, "terminal-effects.json", RECORD_LIMIT)?
+                        .ok_or(RunError::Conflict)?;
+                let effects: crate::store::TerminalEffects = crate::db::decode(&raw)?;
+                if effects.scope != Self::scope(&record)
+                    || !effects.effects.iter().any(|(effect, disposition)| {
+                        *effect == SettlementEffect::GitImport
+                            && matches!(
+                                disposition,
+                                EffectDisposition::Pending
+                                    | EffectDisposition::Failed {
+                                        retryable: true,
+                                        ..
+                                    }
+                            )
+                    })
+                {
+                    return Err(RunError::Conflict);
+                }
+            }
+            record.head = Some(writer.head);
+            record.stop_work = writer.stop_work;
+        }
         if matches!(
             record.state,
             AttemptState::Terminal {
-                outcome: Outcome::Succeeded,
+                outcome: Outcome::Succeeded | Outcome::ReviewRequired,
                 ..
             }
         ) && let Ok(attempt) = self.attempt_dir(id, false)
@@ -852,6 +898,7 @@ impl RunStore {
                 record.delivery = Some(delivery);
             }
         }
+
         if let Ok(attempt) = self.attempt_dir(id, false)
             && let Some(raw) = crate::artifacts::read_sealed_observed(
                 &attempt,
@@ -1401,8 +1448,11 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
         }
         match &r.exit_evidence {
             Some(evidence)
-                if evidence.path
-                    != artifact_path(r.attempt_id, AttemptFile::ProcessExit.name())?
+                if ![AttemptFile::ProcessExit, AttemptFile::ProviderExit]
+                    .into_iter()
+                    .map(|file| artifact_path(r.attempt_id, file.name()))
+                    .collect::<Result<Vec<_>>>()?
+                    .contains(&evidence.path)
                     || evidence.bytes > RECORD_LIMIT
                     || !evidence.complete =>
             {

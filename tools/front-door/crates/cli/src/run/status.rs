@@ -316,6 +316,22 @@ fn project_lane_inner(
             ..Default::default()
         },
     );
+    if host_artifacts
+        && let Some(releasing) =
+            run::release_progress(root, lane, census.and_then(|census| census.ok()))
+    {
+        let outcome = state_and_reason(&lane.state).0;
+        projected.reason = Some(match projected.reason.take() {
+            Some(reason) => format!("{outcome}; {releasing}; {reason}"),
+            None => format!("{outcome}; {releasing}"),
+        });
+    }
+    if host_artifacts && let Some(blocked) = run::settlement::blocking_reason_for(root, lane) {
+        projected.reason = Some(match projected.reason.take() {
+            Some(reason) => format!("{reason}; settlement retry pending: {blocked}"),
+            None => format!("settlement retry pending: {blocked}"),
+        });
+    }
     if projected.reason == projected.waiting_for {
         projected.reason = projected.waiting_for.as_deref().map(full_wait_reason);
     }

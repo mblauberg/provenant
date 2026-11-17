@@ -478,6 +478,7 @@ host_refused_before_acceptance: false,
         extra: Default::default(),
         cancellation_request_receipt: None,
         pending_writer_provisioning: Default::default(),
+        pending_steers: Default::default(),
         expansions: Vec::new(),
         remaining: Some(RemainingBudgets {
             extra: Default::default(),
@@ -1250,4 +1251,122 @@ fn live_child_patch_keeps_the_planners_final_fragment_envelope_reserve() {
         fallback_bound < live_bound,
         "a fallback expansion also closes its producer"
     );
+}
+
+// Spec: docs/specs/fabric.md#session-ready-steering
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn pending_steer_replay_keeps_work_and_requester_identity_until_receipt_commit() {
+    let project = provenant_core::ProjectId::from_bytes([1; 16]);
+    let host = provenant_core::HostId::from_bytes([2; 16]);
+    let launch_actor = provenant_core::ActorId::from_bytes([3; 16]);
+    let operation_id = provenant_core::OperationId::parse("steer-operation").unwrap();
+    let work_key = provenant_records::WorkKey::new(project, "graph", "writer", 1).unwrap();
+    let requester = crate::identity::Address::new(host, "codex").unwrap();
+    let pending = PendingGraphSteer {
+        operation_id: operation_id.clone(),
+        caller_operation_id: Some(provenant_core::OperationId::parse("caller-operation").unwrap()),
+        work_key: work_key.clone(),
+        graph_context: crate::inbox::GraphSteerContext {
+            launch_actor,
+            launch_operation: operation_id.clone(),
+            origin_work_key: work_key.clone(),
+        },
+        requester_host: host,
+        requester_agent: requester.agent,
+        requester_actor: requester.actor,
+        text: "resume with the handoff".into(),
+        refusal: None,
+    };
+    let mut queue = PendingSteerQueue::default();
+    assert!(
+        queue
+            .enqueue(operation_id.to_string(), pending.clone())
+            .unwrap()
+    );
+    assert_eq!(
+        queue.get(operation_id.as_str()).unwrap(),
+        &pending,
+        "the graph WorkKey, authenticated launch context and original inbox actor remain bound",
+    );
+    assert!(
+        !queue
+            .enqueue(operation_id.to_string(), pending.clone())
+            .unwrap()
+    );
+    assert_eq!(
+        queue.len(),
+        1,
+        "an inbox replay cannot duplicate queued text"
+    );
+    let mut escaped = PendingSteerQueue::default();
+    for index in 0..MAX_PENDING_GRAPH_STEERS {
+        let mut entry = pending.clone();
+        entry.operation_id =
+            provenant_core::OperationId::parse(&format!("escaped-{index}")).unwrap();
+        entry.text = "\u{1}".repeat(provenant_records::control::CONTROL_TEXT_BYTES);
+        escaped
+            .enqueue(entry.operation_id.to_string(), entry)
+            .unwrap();
+    }
+    assert!(serde_json::to_vec(&escaped).unwrap().len() <= MAX_PENDING_GRAPH_STEER_ENCODED_BYTES);
+    queue.refuse(operation_id.as_str(), PendingSteerRefusal::Unsupported);
+    assert!(!queue.has_pending());
+    assert_eq!(queue.get(operation_id.as_str()).unwrap().text, pending.text);
+    assert!(
+        !queue
+            .enqueue(operation_id.to_string(), pending.clone())
+            .unwrap()
+    );
+    assert_eq!(
+        queue.get(operation_id.as_str()).unwrap().refusal,
+        Some(PendingSteerRefusal::Unsupported)
+    );
+
+    let removed = queue.remove(operation_id.as_str()).unwrap();
+    assert_eq!(removed.text, pending.text);
+    assert_eq!(removed.refusal, Some(PendingSteerRefusal::Unsupported));
+    assert!(
+        queue.is_empty(),
+        "the caller removes only after inbox receipt commit"
+    );
+}
+
+// Spec: docs/specs/fabric.md#session-ready-steering
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn graph_status_never_serializes_pending_steer_text() {
+    let document = mixed();
+    let plan = planned(&document);
+    let mut checkpoint = filled_checkpoint(&document, &plan);
+    let project = provenant_core::ProjectId::from_bytes([1; 16]);
+    let host = provenant_core::HostId::from_bytes([2; 16]);
+    let actor = provenant_core::ActorId::from_bytes([3; 16]);
+    let operation_id = provenant_core::OperationId::parse("steer-redaction").unwrap();
+    let work_key = provenant_records::WorkKey::new(project, "envelope-mixed", "writer", 1).unwrap();
+    let requester = crate::identity::Address::new(host, "codex").unwrap();
+    checkpoint
+        .pending_steers
+        .enqueue(
+            operation_id.to_string(),
+            PendingGraphSteer {
+                operation_id: operation_id.clone(),
+                caller_operation_id: None,
+                work_key: work_key.clone(),
+                graph_context: crate::inbox::GraphSteerContext {
+                    launch_actor: actor,
+                    launch_operation: provenant_core::OperationId::parse("launch-operation")
+                        .unwrap(),
+                    origin_work_key: work_key,
+                },
+                requester_host: host,
+                requester_agent: requester.agent,
+                requester_actor: requester.actor,
+                text: "private queued instruction".into(),
+                refusal: None,
+            },
+        )
+        .unwrap();
+    let status = serde_json::to_value(super::transitions::graph_run(checkpoint)).unwrap();
+    assert!(!status.to_string().contains("private queued instruction"));
 }

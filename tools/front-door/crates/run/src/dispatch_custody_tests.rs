@@ -531,7 +531,7 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     );
     let dir = store.attempt_dir(starting, false)?;
     let request: serde_json::Value = serde_json::from_slice(
-        &artifacts::read_sealed(&dir, "cancel.json", RECORD_LIMIT)?
+        &artifacts::read_sealed(&dir, "stop-intent.json", RECORD_LIMIT)?
             .ok_or("cancel request missing")?,
     )?;
     assert_eq!(request["scope"], serde_json::to_value(scope)?);

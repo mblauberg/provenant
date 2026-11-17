@@ -134,7 +134,7 @@ fn admission_admits_only_its_own_steer_marker_and_fails_closed_otherwise() -> Te
     let ids = writers(&store, [120, 121, 122, 123, 124, 125], &call)?;
     let marker = |id: AttemptId, case: usize| -> Result<Vec<u8>> {
         let scope = RunStore::scope(&store.record(id, &call)?);
-        let request_id = format!("{}.{}.cancel", scope.attempt, scope.generation);
+        let request_id = format!("{}.{}.stop", scope.attempt, scope.generation);
         let wrong_scope = provenant_records::custody::Scope {
             attempt: scope.attempt,
             generation: scope.generation + 1,
@@ -159,18 +159,23 @@ fn admission_admits_only_its_own_steer_marker_and_fails_closed_otherwise() -> Te
     for (case, id) in ids.into_iter().enumerate() {
         let attempt = store.attempt_dir(id, false)?;
         if case < 5 {
-            artifacts::seal(&attempt, "cancel.json", &marker(id, case)?, RECORD_LIMIT)?;
+            artifacts::seal(
+                &attempt,
+                "stop-intent.json",
+                &marker(id, case)?,
+                RECORD_LIMIT,
+            )?;
         }
         let scope = RunStore::scope(&store.record(id, &call)?);
         let expected = match case {
-            0..=3 => crate::store::CancelMarker::Stop,
-            4 => crate::store::CancelMarker::Steered {
+            0..=3 => crate::store::StopMarker::Stop,
+            4 => crate::store::StopMarker::Steered {
                 requester: context.actor_id,
             },
-            _ => crate::store::CancelMarker::Absent,
+            _ => crate::store::StopMarker::Absent,
         };
         assert_eq!(
-            crate::store::CancelMarker::read(&attempt, scope)?,
+            crate::store::StopMarker::read(&attempt, scope)?,
             expected,
             "case {case}"
         );

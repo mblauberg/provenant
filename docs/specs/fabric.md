@@ -188,8 +188,22 @@ requests an interrupt through the attempt's existing custody owner only after
 that readiness record is durable. If readiness is not yet available, the text
 stays queued while the provider continues. After settlement, the graph resumes
 the same provider, model, account and session with the saved instructions as
-the next user turn. It must preserve writer custody and must not fall back to a
-fresh session when retained provider state is missing or expired.
+the next user turn. It preserves writer custody. When the provider session is
+unavailable, steer.fallback defaults to fresh_with_handoff: settlement warns
+with the configuration source, then starts a fresh session using the original
+accepted brief, the previous bounded handoff and all queued steer text. Set
+domains.fabric.steer.fallback to "refuse" to retain the accepted steer without
+a successor. A route, account, session or process identity mismatch remains
+fatal and never takes the fresh fallback.
+
+When placement or the accepted run owner is temporarily unavailable, the graph
+journal persists a bounded steer intent for the exact work key before replying
+with a warning. Tick checks that work key, launch actor and operation again,
+then replays the original inbox operation under its original requester identity.
+A committed inbox receipt precedes removal from the queue; an ambiguous reply
+retries the same operation. Identity or lineage conflicts never take this path.
+A later safe refusal retains the accepted text in the private graph history
+without keeping an active retry. Generic graph status never echoes that text.
 For native provider launches, the host records one session root for the final
 prepared candidate and binds it to the selected provider, model and account.
 Terminal settlement and the next prepared launch check that host-owned selector
@@ -227,9 +241,11 @@ provider interrupt or resumed continuation; graph/run status owns those later
 outcomes. Status exposes `queued`, `resumed` or `not_continued`,
 the stable operation and message IDs, and the successor when known. A
 launcher’s typed `launched` receipt records admission but leaves the status
-`queued`. `resumed` requires the child's observed session to match the
-predecessor session and its sealed applied route to retain the provider, model
-and account. Optional model telemetry keeps the configured identity policy:
+`queued`. `resumed` requires the child's observed session to match the predecessor
+session and its sealed applied route to retain the provider, model and account.
+A fresh fallback instead records `fresh_session` and requires a conflict-free
+observed child session on that same authorised route; it never claims to have
+resumed the predecessor's provider session. Optional model telemetry keeps the configured identity policy:
 missing telemetry alone does not negate the session acknowledgement, while a
 known contradiction fences continuation. A later terminal session mismatch or
 incomplete session/capture proof changes that
@@ -257,13 +273,17 @@ the parent attempt's publication fence. A cancellation accepted before a child
 exists leaves a durable explicit-stop intent for the gate; if the child was
 already admitted, graph cancellation follows the validated continuation chain
 and targets its current leaf. The durable intent does not assert signal delivery.
-Steer and owner stops share one sealed cancel marker per attempt. Only a
-well-formed `Steered` request for exactly that attempt scope and its request ID
-leaves the marker non-stopping; admission, re-queue, import and continuation
-read any other present marker, including an undecodable or foreign one, as a
-stop.
-- Why: a marker Run cannot positively match must fail closed, as settlement
-  already does.
+Steer and owner stops use Supervisor's scoped `stop-intent.json` protocol;
+all readers share its interpretation. `cancel.json` accepts explicit
+cancellation only. Admission and ongoing work ignore only a valid steer for
+this scope and operation. Settlement may preserve committed work under an exact delivered steer or a
+current explicit owner cancellation. A later explicit cancellation preserves
+commits while vetoing continuation; it never rewrites the provider's earlier
+stop evidence. A replacement intent, foreign requester or malformed record
+vetoes the in-flight preservation token. The guardian validates the requester before
+acting and never interprets a steer stored as cancellation.
+- Why: stop meaning must not vary between admission, import, publication and
+  continuation. A request Run cannot positively match supplies no authority.
 
 This is continuation transport for #3318, not live input injection. Adapters
 advertise support as `continuation` only when their run path can retain and

@@ -316,6 +316,19 @@ fn resolve_writer_with(
     })
 }
 
+#[derive(Default)]
+pub(crate) struct TerminalPolicy<'a> {
+    pub preservation_stop: Option<crate::settlement::PreservationStop>,
+    pub budget_stop: bool,
+    pub work: Option<StopWorkPolicy<'a>>,
+}
+pub(crate) struct StopWorkPolicy<'a> {
+    pub trigger: provenant_records::run::StopWorkTrigger,
+    pub publish: Option<&'a crate::HostDeliveryContext>,
+    pub writer: &'a provenant_records::run::WriterRequest,
+    pub publish_granted: bool,
+}
+
 pub struct WriterLaunch {
     pub worktree: VerifiedWorktree,
     pub branch: GitRefName,
@@ -446,6 +459,41 @@ impl WriterLaunch {
             None,
         )?;
         status_paths(&output)
+    }
+
+    fn ahead_of_remote(&self, git: &Path, head: GitOid) -> Result<Option<u64>> {
+        let branch = self
+            .branch
+            .as_str()
+            .strip_prefix("refs/heads/")
+            .ok_or(RunError::Validation("writer needs a local branch"))?;
+        let upstream = format!("refs/remotes/origin/{branch}");
+        let revision = match crate::objects::resolve_ref(git, self.worktree.repo(), &upstream) {
+            Ok(base) => vec![format!("{base}..{head}").into()],
+            // A new lane branch has no remote counterpart. Count commits not
+            // reachable from any recorded origin ref rather than losing the
+            // evidence for the most common stopped-writer case.
+            Err(_) => vec![
+                head.to_string().into(),
+                "--not".into(),
+                "--remotes=origin".into(),
+            ],
+        };
+        let mut args = vec!["rev-list".into(), "--count".into()];
+        args.extend(revision);
+        let count = crate::objects::command(
+            git,
+            self.worktree.repo().common_git_dir(),
+            self.worktree.repo().root_path(),
+            &args,
+            None,
+        )?;
+        let count = std::str::from_utf8(&count)
+            .map_err(|_| RunError::Validation("remote ahead count"))?
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| RunError::Validation("remote ahead count"))?;
+        Ok(Some(count))
     }
 
     /// A budget clean point needs both no edits and a locally recorded push of
@@ -3249,50 +3297,24 @@ impl WriterLaunch {
         attempt: &Directory,
         custody: &provenant_supervisor::custody::Recovery,
         settlement: &mut crate::settlement::Driver,
-        budget_stop: bool,
+        policy: TerminalPolicy<'_>,
     ) -> Result<()> {
-        self.terminal_with_delivered_steer(state, attempt, custody, settlement, None, budget_stop)
-    }
-
-    pub(crate) fn terminal_after_delivered_steer(
-        &self,
-        state: &Path,
-        attempt: &Directory,
-        custody: &provenant_supervisor::custody::Recovery,
-        settlement: &mut crate::settlement::Driver,
-        stop: crate::settlement::DeliveredSteerStop,
-        budget_stop: bool,
-    ) -> Result<()> {
-        self.terminal_with_delivered_steer(
-            state,
-            attempt,
-            custody,
-            settlement,
-            Some(stop),
+        let TerminalPolicy {
+            preservation_stop,
             budget_stop,
-        )
-    }
-
-    fn terminal_with_delivered_steer(
-        &self,
-        state: &Path,
-        attempt: &Directory,
-        custody: &provenant_supervisor::custody::Recovery,
-        settlement: &mut crate::settlement::Driver,
-        delivered_steer: Option<crate::settlement::DeliveredSteerStop>,
-        budget_stop: bool,
-    ) -> Result<()> {
+            work,
+        } = policy;
         if custody.observe() != provenant_supervisor::custody::RecoveryState::Absent {
             return Err(RunError::Validation(
                 "writer object import requires absent custody",
             ));
         }
-        if let Some(stop) = delivered_steer {
+        if let Some(stop) = preservation_stop {
             if stop.marker_vetoes(attempt)? {
                 return Err(RunError::Validation("lane import cancelled"));
             }
-        } else if crate::artifacts::read_sealed(attempt, "cancel.json", crate::RECORD_LIMIT)?
-            .is_some()
+        } else if crate::store::StopMarker::read(attempt, custody.scope())?
+            != crate::store::StopMarker::Absent
         {
             return Err(RunError::Validation("lane import cancelled"));
         }
@@ -3413,10 +3435,11 @@ impl WriterLaunch {
             )?;
             settlement.advance(crate::settlement::Phase::Publish)?;
         }
-        let import_cancelled = if let Some(stop) = delivered_steer {
+        let import_cancelled = if let Some(stop) = preservation_stop {
             stop.marker_vetoes(attempt)?
         } else {
-            crate::artifacts::read_sealed(attempt, "cancel.json", crate::RECORD_LIMIT)?.is_some()
+            crate::store::StopMarker::read(attempt, custody.scope())?
+                != crate::store::StopMarker::Absent
         };
         if import_cancelled {
             return Err(RunError::Validation("lane import cancelled"));
@@ -3553,6 +3576,116 @@ impl WriterLaunch {
         } else {
             worktrees::check_writer_terminal(self.worktree.repo())?;
         }
+        // The remote ref and dirty census can change after the first pass.
+        // Once sealed, this attempt's summary is immutable even if its effect
+        // receipt transaction failed. Reuse it after revalidating the pinned head.
+        if let Some(raw) =
+            crate::artifacts::read_sealed(attempt, "writer-terminal.json", crate::RECORD_LIMIT)?
+        {
+            let saved: WriterTerminal = crate::db::decode(&raw)?;
+            if saved.schema_version != 1
+                || saved.head != verified_tip
+                || saved.stop_work.as_ref().is_some_and(|summary| {
+                    summary.schema_version != 1 || summary.head != Some(verified_tip)
+                })
+            {
+                return Err(RunError::Conflict);
+            }
+            return Ok(());
+        }
+        let stop_work = work.map(|policy| {
+            use provenant_records::run::StopWorkPush;
+            let dirty_paths = self
+                .uncommitted_paths(&git_executable)
+                .ok()
+                .and_then(|paths| u64::try_from(paths.len()).ok());
+            let ahead = self
+                .ahead_of_remote(&git_executable, verified_tip)
+                .ok()
+                .flatten();
+            let recovered = if policy.publish.is_none() && policy.publish_granted {
+                (|| -> Result<crate::HostDeliveryContext> {
+                    let branch = self
+                        .branch
+                        .as_str()
+                        .strip_prefix("refs/heads/")
+                        .ok_or(RunError::Validation("writer needs a local branch"))?;
+                    let request =
+                        crate::HostDeliveryContext::destination(crate::DeliveryMode::Push, branch)?
+                            .ok_or(RunError::Validation("stop publication destination missing"))?;
+                    crate::HostDeliveryContext::capture()
+                        .with_repo_facts(&self.facts)
+                        .with_host_state(state)
+                        .prepare_stop_publish_recovery(
+                            policy.writer,
+                            &request,
+                            attempt,
+                            custody.scope(),
+                            verified_tip,
+                            base,
+                        )
+                })()
+                .map_err(|error| {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: stopped work remains unpushed: {error}"
+                    );
+                    error
+                })
+                .ok()
+            } else {
+                None
+            };
+            let host = policy.publish.or(recovered.as_ref());
+            let push = if !policy.publish_granted {
+                StopWorkPush::NotGranted
+            } else if ahead == Some(0) {
+                StopWorkPush::NotNeeded
+            } else if let Some(host) = host {
+                let intent_still_matches = match preservation_stop {
+                    Some(stop) => !stop.marker_vetoes(attempt).unwrap_or(true),
+                    None => crate::store::StopMarker::read(attempt, custody.scope())
+                        .is_ok_and(|intent| intent == crate::store::StopMarker::Absent),
+                };
+                if !intent_still_matches || cancel.is_cancelled() {
+                    return provenant_records::run::StopWorkSummary {
+                        extra: Default::default(),
+                        schema_version: 1,
+                        trigger: policy.trigger,
+                        head: Some(verified_tip),
+                        ahead,
+                        dirty_paths,
+                        push: StopWorkPush::NotAttempted,
+                    };
+                }
+                match host.clone().cancellable(&cancel).push_stopped_head(
+                    policy.writer,
+                    attempt,
+                    custody.scope(),
+                    verified_tip,
+                ) {
+                    Ok(()) => StopWorkPush::Pushed,
+                    Err(error) => {
+                        let _ = writeln!(
+                            std::io::stderr().lock(),
+                            "warning: stopped work remains unpushed: {error}"
+                        );
+                        StopWorkPush::Failed
+                    }
+                }
+            } else {
+                StopWorkPush::NotAttempted
+            };
+            provenant_records::run::StopWorkSummary {
+                extra: Default::default(),
+                schema_version: 1,
+                trigger: policy.trigger,
+                head: Some(verified_tip),
+                ahead,
+                dirty_paths,
+                push,
+            }
+        });
         crate::artifacts::seal(
             attempt,
             "writer-terminal.json",
@@ -3561,6 +3694,7 @@ impl WriterLaunch {
                 // Replay may observe a later writer's descendant on the branch.
                 // Attribute only the head pinned for this attempt's settlement.
                 head: verified_tip,
+                stop_work,
             })?,
             crate::RECORD_LIMIT,
         )?;
@@ -3782,6 +3916,8 @@ mod uncommitted_tests {
 pub(crate) struct WriterTerminal {
     pub schema_version: u64,
     pub head: GitOid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_work: Option<provenant_records::run::StopWorkSummary>,
 }
 #[derive(serde::Serialize)]
 struct WriterManifest {

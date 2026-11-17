@@ -1,5 +1,59 @@
 use super::*;
 
+// Spec: docs/specs/run.md#stop-intent
+#[test]
+fn stopped_head_push_uses_launch_binding_and_keeps_dirty_paths()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let request = HostDeliveryContext::destination(DeliveryMode::Push, "lane")?
+        .ok_or("stop-publish destination")?;
+    let host = HostDeliveryContext::new(fixture.environment.clone())
+        .with_host_state(&fixture.root.join("state"))
+        .prepare_stop_publish(&fixture.writer, &request)?;
+    let attempt_path = fixture.root.join("attempt");
+    provenant_os::fixture::private_state_dir(&attempt_path)?;
+    let attempt = provenant_os::fs::Directory::open_anchor(&attempt_path)?;
+    let scope = provenant_records::custody::Scope {
+        attempt: provenant_core::AttemptId::from_bytes([0x53; 16]),
+        generation: 1,
+    };
+    host.seal_stop_publish_binding(&attempt, scope)?;
+
+    std::fs::write(fixture.writer.worktree.join("committed.txt"), "committed\n")?;
+    fixture.lane_git(&["add", "committed.txt"])?;
+    fixture.commit(&fixture.writer.worktree, "stopped writer commit")?;
+    let head = host.head(&fixture.writer)?;
+    std::fs::write(
+        fixture.writer.worktree.join("unfinished.txt"),
+        "keep dirty\n",
+    )?;
+
+    let stopped = CancelToken::new();
+    stopped.cancel();
+    assert!(
+        host.clone()
+            .cancellable(&stopped)
+            .push_stopped_head(&fixture.writer, &attempt, scope, head)
+            .is_err(),
+        "stop publication must propagate the settlement cancellation token"
+    );
+    host.push_stopped_head(&fixture.writer, &attempt, scope, head)?;
+
+    let remote = fixture.root.join("remote.git");
+    let remote = remote.to_str().ok_or("bare remote path")?;
+    let remote_head = String::from_utf8(provenant_os::fixture::run_git(
+        &fixture.writer.worktree,
+        &["--git-dir", remote, "rev-parse", "refs/heads/lane"],
+    )?)?;
+    assert_eq!(remote_head.trim(), head.to_string());
+    let status = String::from_utf8(provenant_os::fixture::run_git(
+        &fixture.writer.worktree,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )?)?;
+    assert!(status.contains("unfinished.txt"), "{status}");
+    Ok(())
+}
+
 #[test]
 fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -866,6 +920,7 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
+            stop_work: None,
         })?,
         RECORD_LIMIT,
     )?;

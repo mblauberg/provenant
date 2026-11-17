@@ -814,6 +814,7 @@ pub(super) fn initial_checkpoint(
         extra: Default::default(),
         cancellation_request_receipt: None,
         pending_writer_provisioning: Default::default(),
+        pending_steers: Default::default(),
         expansions: Vec::new(),
         remaining: None,
         instance_id,

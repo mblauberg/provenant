@@ -312,6 +312,19 @@ pub struct SourceIdentity {
     pub device: u64,
     pub inode: u64,
 }
+/// One reader for the persisted host publishing grant. A non-boolean or absent
+/// lane knob follows the registry default; restricted network always disables push.
+pub fn host_publishing_requested(
+    network: NetworkAccess,
+    knobs: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> bool {
+    network == NetworkAccess::Open
+        && knobs
+            .get("lanes.publish")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true)
+}
+
 impl LaneAccess {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
@@ -2180,6 +2193,46 @@ pub struct PeerGraphRoute {
     pub required_family: Option<String>,
 }
 
+/// Why the host stopped a writer while it still had lane work to preserve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopWorkTrigger {
+    WallDeadline,
+    TokenBudget,
+    ExplicitCancellation,
+    Steered,
+    ContextHandoff,
+}
+
+/// Result of the optional host push of an already committed lane head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopWorkPush {
+    NotGranted,
+    NotAttempted,
+    NotNeeded,
+    Pushed,
+    Failed,
+}
+
+/// Durable evidence of committed and dirty work present when a writer stopped.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopWorkSummary {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+    pub schema_version: u64,
+    pub trigger: StopWorkTrigger,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<GitOid>,
+    /// Commit count ahead of the last verified remote branch observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<u64>,
+    /// Uncommitted paths left untouched by host stop handling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_paths: Option<u64>,
+    pub push: StopWorkPush,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2245,6 +2298,9 @@ pub struct AttemptRecord {
     pub protected_paths: Vec<PathWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<WriterDeliveryReceipt>,
+    /// Host summary of committed and dirty writer work after a stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_work: Option<StopWorkSummary>,
     pub verified_owner: Option<ActorId>,
     pub session: Option<String>,
     pub queued_at: WallTime,
@@ -2367,6 +2423,9 @@ pub struct SteeringOperation {
 /// Safe status projection of the private steering ledger.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SteeringStatus {
+    /// The task continued in a new provider session after a warning fallback.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh_session: bool,
     pub state: SteeringState,
     pub operations: Vec<SteeringOperation>,
     pub successor: Option<AttemptId>,
@@ -3395,6 +3454,25 @@ mod tests {
         }))?;
         let binding = RepositoryAdmissionBinding::new(crate::PortSource::Project, &command);
         let field_values = [
+            (
+                "stop_work",
+                serde_json::json!({
+                    "schema_version":1,
+                    "trigger":"wall_deadline",
+                    "head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "ahead":2,
+                    "dirty_paths":3,
+                    "push":"not_granted"
+                }),
+                serde_json::json!({
+                    "schema_version":1,
+                    "trigger":"not_a_stop",
+                    "head":null,
+                    "ahead":-1,
+                    "dirty_paths":"many",
+                    "push":"unknown"
+                }),
+            ),
             (
                 "budget_overrun",
                 serde_json::json!({"schema_version":1,"tokens":101,"budget":100}),
