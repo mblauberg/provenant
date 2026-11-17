@@ -191,23 +191,11 @@ impl Approver<'_, '_> {
             return Ok(Decision::Approved(Approved::by("ci-only")));
         }
         let mut unusable = Vec::new();
-        let mut failures = Vec::new();
         let mut evidence_set = Vec::new();
         for source in approvals.sources {
             let candidates = match source {
                 ApprovalSource::ProvenantReview => match approvals.records.reviews(number, head) {
                     Ok(reviews) => {
-                        if let Some(warnings) = approvals.warnings {
-                            let mut warnings = warnings.borrow_mut();
-                            for source in &reviews.unusable {
-                                let warning = format!(
-                                    "pull request {number}: review source skipped: {source}"
-                                );
-                                if !warnings.contains(&warning) {
-                                    warnings.push(warning);
-                                }
-                            }
-                        }
                         unusable.extend(reviews.unusable);
                         reviews
                             .records
@@ -229,7 +217,7 @@ impl Approver<'_, '_> {
                             .collect::<Vec<_>>()
                     }
                     Err(error) => {
-                        failures.push(error.to_string());
+                        unusable.push(format!("{source:?}: {error}"));
                         Vec::new()
                     }
                 },
@@ -249,7 +237,7 @@ impl Approver<'_, '_> {
                         })
                         .collect(),
                     Err(error) => {
-                        failures.push(error.to_string());
+                        unusable.push(format!("{source:?}: {error}"));
                         Vec::new()
                     }
                 },
@@ -260,6 +248,15 @@ impl Approver<'_, '_> {
             {
                 if !evidence_set.contains(&evidence) {
                     evidence_set.push(evidence);
+                }
+            }
+        }
+        if let Some(warnings) = approvals.warnings {
+            let mut warnings = warnings.borrow_mut();
+            for source in &unusable {
+                let warning = format!("pull request {number}: review source skipped: {source}");
+                if !warnings.contains(&warning) {
+                    warnings.push(warning);
                 }
             }
         }
@@ -284,9 +281,6 @@ impl Approver<'_, '_> {
                 }),
                 ..Approved::by("accepted-delta")
             }));
-        }
-        if !failures.is_empty() {
-            return Err(LandingError::Failed(failures.join("; ")));
         }
         Ok(Decision::Refused(if unusable.is_empty() {
             "no independent approval for the current head".to_owned()
@@ -478,6 +472,39 @@ mod tests {
             ));
         };
         assert!(reason.contains(graph), "{reason}");
+
+        let unreadable = FakeReviews {
+            failure: Some("graph enumeration denied".into()),
+            ..FakeReviews::default()
+        };
+        let sources = [ApprovalSource::ProvenantReview, ApprovalSource::Forge];
+        for has_approval in [true, false] {
+            let mut forge = FakeForge::default();
+            if has_approval {
+                forge.approvals_at_head.insert(
+                    (1, "head".into()),
+                    vec![super::super::ports::Approval {
+                        reference: "forge-review".into(),
+                        reviewer: "independent-reviewer".into(),
+                    }],
+                );
+            }
+            let warnings = std::cell::RefCell::new(Vec::new());
+            let decision = Approvals::new(&sources, &unreadable)
+                .with_warnings(&warnings)
+                .at(&mut repo, "base")
+                .decide(&mut forge, 1, "head", "writer")?;
+            assert_eq!(matches!(decision, Decision::Approved(_)), has_approval);
+            assert!(
+                warnings
+                    .borrow()
+                    .iter()
+                    .any(|warning| warning.contains("graph enumeration denied"))
+            );
+            if let Decision::Refused(reason) = decision {
+                assert!(reason.contains("graph enumeration denied"));
+            }
+        }
         Ok(())
     }
 

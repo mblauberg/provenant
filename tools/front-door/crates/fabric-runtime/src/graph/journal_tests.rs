@@ -207,6 +207,34 @@ fn checkpoint_external_text_round_trips_for_generated_prompts() {
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
+fn landing_review_enumeration_failure_is_an_unusable_source() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    // A regular file in the directory position deterministically prevents
+    // enumeration even for a privileged test runner.
+    std::fs::create_dir_all(root.as_path().join("fabric/graphs")).unwrap();
+    std::fs::write(
+        root.as_path().join(format!("fabric/graphs/{project}")),
+        b"not a directory",
+    )
+    .unwrap();
+    let head = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
+    let found = landing_reviews(&root, project, head).unwrap();
+    assert!(found.reviews.is_empty());
+    assert!(
+        found
+            .unusable
+            .iter()
+            .any(|warning| warning.contains(&project.to_string()))
+    );
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
 fn landing_review_query_reads_typed_settlement_on_only_the_exact_head() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();

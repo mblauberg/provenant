@@ -406,7 +406,10 @@ Admission bounds the worst-case checkpoint before saving the plan.
 Graph text is normalised exactly once, at ingress, by schema path.
 `prompt_text::Context` enumerates identity positions (finding IDs, files and
 propagation markers, repair item IDs, node references, routes, template names
-and sources). Only declared scalar identity fields retain their bytes: a route
+and sources). Identity fields and all object keys are scanned across the whole
+new structured capture, including fields omitted by typed projections. A
+credential-shaped identity or key refuses that capture as invalid output; it is
+never rewritten. Only declared scalar identity fields retain their bytes: a route
 or source object does not exempt its extension values. Every other string is
 content, including flattened extension maps and template or parameter
 documentation. Content descendants cannot re-enter a schema context through
@@ -419,7 +422,10 @@ repair item extensions) is normalised once before becoming graph outputs.
 Raw transient captures remain available to parse new patches at their own
 ingress, and never become persisted graph text. Captured fragments are parsed,
 normalised and scanned before storage; retries parse stored fragments without
-normalising them again. Typed handoffs are normalised at capture before any
+normalising them again. Template substitutions are scanned after interpolation,
+and each new admission's compiled expansion is scanned before commit, since
+separately safe fragments can assemble a credential. This never rewrites stored
+nodes or prior expansions. Typed handoffs are normalised at capture before any
 consumer retains them. Checkpoints persist
 the normalised form. Compaction retains parsed, normalised findings as typed
 values in content-addressed storage. Resume never fills templates or rewrites a
@@ -432,7 +438,9 @@ publishing it. The strict checkpoint decoder verifies both the envelope digest
 and the base plan digest, so publication and landing review reads reject the same
 corrupt state. Landing skips unusable review sources and retains their graph
 identities in structured report warnings, including when another source
-supplies a valid approval.
+supplies a valid approval. Enumeration and source-read failures are warnings
+too; evaluation continues through the other configured sources, and refuses
+landing only when no independent approval remains.
 
 - Why: an accepted graph must be able to save its checkpoint.
 

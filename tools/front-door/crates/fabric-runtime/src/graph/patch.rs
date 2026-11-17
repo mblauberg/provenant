@@ -1506,6 +1506,14 @@ pub(super) fn prepare(
     if matches!(mode, Preparation::FinalFragment) {
         expansion.final_fragment = true;
     }
+    // Compilation, item expansion and namespacing can join separately safe
+    // fragments. Scan only this admission's final product, never the stored
+    // document or prior expansions, and never rewrite their digested bytes.
+    if retry.is_none() {
+        let text = serde_json::to_string(&expansion)
+            .map_err(|error| PatchError::invalid(error.to_string()))?;
+        (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))?;
+    }
     let mut preview = expanded.clone();
     plans::append(&mut preview, &expansion);
     let mut loop_writers = BTreeMap::new();

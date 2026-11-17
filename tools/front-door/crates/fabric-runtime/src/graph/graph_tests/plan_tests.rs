@@ -3389,6 +3389,62 @@ fn live_patch_normalises_docs_and_extensions_once() {
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
+fn split_credentials_are_refused_after_live_and_captured_patch_compilation() {
+    let secret = "AKIAIOSFODNN7EXAMPLE";
+    for nodes in [
+        json!([{"id":"child", "use":"joined", "with":{"prefix":"AKIA", "suffix":"IOSFODNN7EXAMPLE"}}]),
+        json!([{"id":"child", "use":"task", "prompt":"AKIA${item}", "over":["IOSFODNN7EXAMPLE"]}]),
+    ] {
+        let patch = json!({"schema_version":1,
+            "templates":{"joined":{"brief":"${prefix}${suffix}", "parameters":{
+                "prefix":{"type":"string"}, "suffix":{"type":"string"}
+            }}},
+            "nodes": nodes});
+        assert!(!patch.to_string().contains(secret));
+        let (document, mut checkpoint) = running_graph();
+        let before = checkpoint.clone();
+        let error = admit_with(
+            &document,
+            &mut checkpoint,
+            None,
+            patch.clone(),
+            &patch::scan_for_secrets,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("secret pattern"), "{error}");
+        assert!(!error.to_string().contains(secret));
+        assert_eq!(checkpoint, before, "live refusal is atomic");
+
+        let document = planner(8);
+        let output = format!("```fragment\n{patch}\n```");
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut fixture_owner(&[&output]), &mut journal).unwrap();
+        assert_eq!(run.status, GraphStatus::Paused);
+        assert!(run.checkpoint.expansions.is_empty());
+        assert!(
+            run.checkpoint.nodes[0]
+                .outputs
+                .as_ref()
+                .unwrap()
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("secret pattern"))
+        );
+        assert!(
+            !serde_json::to_string(&run.checkpoint)
+                .unwrap()
+                .contains(secret)
+        );
+        let replay = advance(&document, &mut fixture_owner(&[]), &mut journal).unwrap();
+        assert_eq!(
+            replay.checkpoint, run.checkpoint,
+            "stored refusal replays unchanged"
+        );
+    }
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
 fn captured_patch_normalises_once_before_storage_and_replays_unchanged() {
     let prompt = "captured patch prompt AKIAIOSFODNN7EXAMPLE";
     let doc = "captured template doc AKIAIOSFODNN7EXAMPLE";

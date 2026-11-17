@@ -1627,7 +1627,16 @@ pub fn landing_reviews(
     head: provenant_core::GitOid,
 ) -> Result<LandingReviews, JournalError> {
     let mut result = LandingReviews::default();
-    for id in FileJournal::graph_ids(root, project)? {
+    let ids = match FileJournal::graph_ids(root, project) {
+        Ok(ids) => ids,
+        Err(error) => {
+            result.unusable.push(format!(
+                "project {project}: cannot enumerate graph review sources: {error}"
+            ));
+            return Ok(result);
+        }
+    };
+    for id in ids {
         let checkpoint = match FileJournal::read_checkpoint(root, project, &id) {
             Ok(Some(checkpoint)) => checkpoint,
             Ok(None) => continue,
