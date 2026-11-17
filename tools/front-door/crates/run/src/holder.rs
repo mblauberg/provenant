@@ -4970,13 +4970,17 @@ mod writer_recovery_tests {
                 );
             }
             if marker == Marker::Deadline {
-                assert!(matches!(
-                    finished.state,
-                    AttemptState::Terminal {
-                        outcome: Outcome::TimedOut,
-                        ..
-                    }
-                ));
+                assert!(
+                    matches!(
+                        finished.state,
+                        AttemptState::Terminal {
+                            outcome: Outcome::TimedOut,
+                            ..
+                        }
+                    ),
+                    "{:?}",
+                    finished.state
+                );
                 continue;
             }
             if !plain {

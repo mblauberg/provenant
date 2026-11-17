@@ -20,6 +20,18 @@ use std::{
     time::Duration,
 };
 
+/// Launch delivery fields a test compares across stop-publish preparation:
+/// git, gh, the launch binding digest, the stop binding digest and the
+/// environment.
+#[cfg(test)]
+pub(crate) type LaunchStateForTest = (
+    Option<PathBuf>,
+    Option<PathBuf>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Vec<(Vec<u8>, Vec<u8>)>,
+);
+
 /// Transport-only context. Debug deliberately omits all environment values.
 #[derive(Serialize, Deserialize)]
 pub struct HostDeliveryContext {
@@ -378,15 +390,7 @@ impl HostDeliveryContext {
         Ok(self)
     }
     #[cfg(test)]
-    pub(crate) fn launch_state_for_test(
-        &self,
-    ) -> (
-        Option<PathBuf>,
-        Option<PathBuf>,
-        Option<Vec<u8>>,
-        Option<Vec<u8>>,
-        Vec<(Vec<u8>, Vec<u8>)>,
-    ) {
+    pub(crate) fn launch_state_for_test(&self) -> LaunchStateForTest {
         let scope = provenant_records::custody::Scope {
             attempt: provenant_core::AttemptId::from_bytes([0x54; 16]),
             generation: 1,
