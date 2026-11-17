@@ -6,7 +6,7 @@
 #                                   delete the fragments, keeping _intro.md
 # Each fragment is <topic>.md whose first line is one of the section headings
 # below, followed by its bullets, with no later ## heading. An optional second
-# line, "### <Area>", names one of the areas below. The collated notes render
+# nonblank line, "### <Area>", names one of the areas below. The collated notes render
 # "### Area" sub-headings only in a section with more than 12 entries; smaller
 # sections list their entries flat, in area order. Untagged entries come last.
 # Links in fragments are relative to next.d/;
@@ -44,8 +44,13 @@ section_of() {
   esac
 }
 
+# The first nonblank line after the section heading, where an area may sit.
+area_line() {
+  awk 'NR > 1 && NF { print; exit }' "$1"
+}
+
 area_of() {
-  second=$(sed -n 2p "$1")
+  second=$(area_line "$1")
   case "$second" in
     '### '*) value=${second#\#\#\# } ;;
     *) return ;;
@@ -87,7 +92,7 @@ check() {
     elif ! printf '%s\n' "$sections" | grep -qxF -- "$(section_of "$f")"; then
       echo "collate-release-notes: $f: malformed section heading; using Additions" >&2
     fi
-    second=$(sed -n 2p "$f")
+    second=$(area_line "$f")
     case "$second" in '### '*)
       if [ -z "$(area_of "$f")" ]; then
         echo "collate-release-notes: $f: unknown area; leaving untagged" >&2
@@ -119,8 +124,8 @@ section_part() {
     [ "$f" = "$dir/_intro.md" ] && continue
     [ "$(section_of "$f")" = "$1" ] || continue
     [ "$(area_of "$f")" = "$2" ] || continue
-    skip=0
-    [ -z "$(sed -n 2p "$f" | sed -n '/^### /p')" ] || skip=2
+    skip=$(awk 'NR > 1 && NF { if (/^### /) print NR; exit }' "$f")
+    skip=${skip:-0}
     # Drop the heading, the area line, any later section heading (ignored, as
     # --check warns) and any blank lines around the bullets.
     awk -v skip="$skip" 'NR > 1 && NR != skip && !/^## / { if ($0 == "") { held = held "\n"; next } if (started) printf "%s", held; held = ""; started = 1; print }' "$f"
