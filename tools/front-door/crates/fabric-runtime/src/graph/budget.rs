@@ -117,12 +117,14 @@ pub(super) fn apply_extension(
         .split_once('=')
         .ok_or_else(|| BudgetExtensionError {
             kind: refusal::ExtensionKind::Budget,
+            loop_id: None,
             limit,
             rule: refusal::ExtensionRule::Syntax,
         })?;
     let key = key.strip_prefix("budget.").unwrap_or(key);
     let (scope, field) = key.split_once('.').ok_or_else(|| BudgetExtensionError {
         kind: refusal::ExtensionKind::Budget,
+        loop_id: None,
         limit,
         rule: refusal::ExtensionRule::Key,
     })?;
@@ -132,6 +134,7 @@ pub(super) fn apply_extension(
         _ => {
             return Err(BudgetExtensionError {
                 kind: refusal::ExtensionKind::Budget,
+                loop_id: None,
                 limit,
                 rule: refusal::ExtensionRule::Key,
             });
@@ -141,6 +144,7 @@ pub(super) fn apply_extension(
         "tokens" | "wall_time_seconds" => {
             let number: u64 = value.parse().map_err(|_| BudgetExtensionError {
                 kind: refusal::ExtensionKind::Budget,
+                loop_id: None,
                 limit,
                 rule: refusal::ExtensionRule::Value,
             })?;
@@ -152,6 +156,7 @@ pub(super) fn apply_extension(
             if number == 0 {
                 return Err(BudgetExtensionError {
                     kind: refusal::ExtensionKind::Budget,
+                    loop_id: None,
                     limit,
                     rule: refusal::ExtensionRule::Value,
                 });
@@ -161,6 +166,7 @@ pub(super) fn apply_extension(
             } else if !replay {
                 return Err(BudgetExtensionError {
                     kind: refusal::ExtensionKind::Budget,
+                    loop_id: None,
                     limit,
                     rule: refusal::ExtensionRule::Unconfigured,
                 });
@@ -169,12 +175,14 @@ pub(super) fn apply_extension(
         "cost_usd" => {
             let number: f64 = value.parse().map_err(|_| BudgetExtensionError {
                 kind: refusal::ExtensionKind::Budget,
+                loop_id: None,
                 limit,
                 rule: refusal::ExtensionRule::Value,
             })?;
             if !number.is_finite() || number <= 0.0 {
                 return Err(BudgetExtensionError {
                     kind: refusal::ExtensionKind::Budget,
+                    loop_id: None,
                     limit,
                     rule: refusal::ExtensionRule::Value,
                 });
@@ -184,6 +192,7 @@ pub(super) fn apply_extension(
             } else if !replay {
                 return Err(BudgetExtensionError {
                     kind: refusal::ExtensionKind::Budget,
+                    loop_id: None,
                     limit,
                     rule: refusal::ExtensionRule::Unconfigured,
                 });
@@ -192,6 +201,7 @@ pub(super) fn apply_extension(
         _ => {
             return Err(BudgetExtensionError {
                 kind: refusal::ExtensionKind::Budget,
+                loop_id: None,
                 limit,
                 rule: refusal::ExtensionRule::Key,
             });

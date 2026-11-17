@@ -182,7 +182,7 @@ bounded_input! {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DispatchRefusalFact {
     DetachedWriter,
@@ -192,6 +192,11 @@ pub enum DispatchRefusalFact {
     GraphComposite,
     GraphPlan,
     GraphStructuralLimit(crate::graph::GraphStructuralLimit),
+    GraphExtension(crate::graph::refusal::ExtensionCause),
+    GraphNodeLimit {
+        node: String,
+        limit: crate::graph::GraphStructuralLimit,
+    },
     GraphEnvelope,
     GraphOutputKind(crate::graph::GraphOutputField),
     Resource(provenant_records::diagnostic::ResourceFact),
@@ -683,7 +688,7 @@ fn dispatch_refused_wire<S: serde::Serializer>(
     let diagnostic = FacadeError::DispatchRefused {
         reason: reason.to_owned(),
         disk: disk.clone(),
-        fact: *fact,
+        fact: fact.clone(),
     }
     .diagnostic();
     let mut wire = serializer.serialize_struct("DispatchRefused", 3)?;
@@ -881,6 +886,16 @@ impl FacadeError {
                     rule: cause.rule,
                 },
             )),
+            CandidateError::Extension(cause) => Self::DispatchRefused {
+                reason: cause.to_string(),
+                fact: Some(DispatchRefusalFact::GraphExtension(cause)),
+                disk: None,
+            },
+            CandidateError::NodeStructural { node, limit } => Self::DispatchRefused {
+                reason: format!("node {node}: {limit}"),
+                fact: Some(DispatchRefusalFact::GraphNodeLimit { node, limit }),
+                disk: None,
+            },
             CandidateError::Structural(limit) => {
                 Self::graph_admission(crate::graph::AdmissionError::StructuralLimit(limit))
             }
@@ -993,6 +1008,12 @@ impl FacadeError {
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphStructuralLimit(limit)), .. } => {
                 projected = projected.detail(limit.to_string()).next("reduce the graph or adjust the named graph limit");
             }
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphNodeLimit { node, limit }), .. } => {
+                projected = projected.detail(format!("node {node}: {limit}")).next("reduce the node input or adjust the named graph limit");
+            }
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphExtension(cause)), .. } => {
+                projected = projected.detail(cause.to_string()).next(cause.next_action());
+            }
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphPlan), .. } => {
                 projected = projected.detail("graph plan schema or topology is invalid")
                     .next("inspect the graph schema and dependencies, then retry");
@@ -1009,6 +1030,8 @@ impl FacadeError {
                     DispatchRefusalFact::GraphComposite => ("graph composite or loop expansion is invalid", "inspect the composite or loop definition"),
                     DispatchRefusalFact::GraphPlan => unreachable!(),
                     DispatchRefusalFact::GraphStructuralLimit(_) => unreachable!(),
+                    DispatchRefusalFact::GraphExtension(_) => unreachable!(),
+                    DispatchRefusalFact::GraphNodeLimit { .. } => unreachable!(),
                     DispatchRefusalFact::Resource(_) => unreachable!(),
                     DispatchRefusalFact::GraphEnvelope => ("graph checkpoint would exceed its size limit", "split the graph into smaller runs"),
                     DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::Input) => ("graph inputs[].outputs selects an unavailable output kind", "select an output supplied by the source node"),

@@ -1059,6 +1059,27 @@ fn loop_default_host_allows_one_to_two_round_extension() {
     assert!(run.checkpoint.successful());
 }
 
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn loop_extension_refusals_keep_the_rule_and_identifier() {
+    let mut document = fixture("extend");
+    document.nodes[0].loop_body.as_mut().unwrap().max_extension_rounds = 1;
+    let limits = crate::config::GraphLimits::default();
+    let mut journal = MemoryJournal::default();
+    advance_with_budget(&document, &mut reviews(&["VERDICT: FAIL"]), &mut journal, &limits, &Default::default()).unwrap();
+    let mut checkpoint = journal.0.clone().unwrap();
+    checkpoint.extensions.push("loop.revise.rounds=2".into());
+    for (value, rule) in [("loop.revise.rounds=02", refusal::ExtensionRule::NonIncreasing), ("loop.revise.rounds=4", refusal::ExtensionRule::MaxExtensionRounds)] {
+        let before = checkpoint.clone();
+        let error = match admit_candidate(&document, Some(&checkpoint), &[value.into()], &limits, &Default::default(), None) { Ok(_) => panic!("expected refusal"), Err(error) => error };
+        let CandidateError::Extension(cause) = error else { panic!("expected extension refusal") };
+        assert_eq!(cause.rule, rule);
+        assert_eq!(cause.loop_id.as_deref(), Some("revise"));
+        assert!(!cause.next_action().is_empty());
+        assert_eq!(checkpoint, before);
+    }
+}
+
 #[test]
 fn loop_host_ceiling_rejects_third_round_before_saving_and_can_accept() {
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes

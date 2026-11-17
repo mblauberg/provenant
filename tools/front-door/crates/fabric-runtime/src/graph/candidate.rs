@@ -17,11 +17,19 @@ pub enum CandidateError {
     Extension(ExtensionCause),
     #[error("{0}")]
     Structural(GraphStructuralLimit),
+    #[error("node {node}: {limit}")]
+    NodeStructural {
+        node: String,
+        limit: GraphStructuralLimit,
+    },
     #[error("{0}")]
     Envelope(GraphEnvelopeLimit),
 }
 
 pub struct AdmittedCandidate {
+    pub(super) source: GraphDocument,
+    pub(super) checkpoint: Option<GraphCheckpoint>,
+    pub(super) extensions: Vec<String>,
     pub(super) expanded: GraphDocument,
     pub(super) plan: PlannedGraph,
     pub(super) effective_budget: crate::config::GraphBudget,
@@ -104,12 +112,7 @@ pub fn admit_candidate(
         for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
             for view in [&restored, &prospective] {
                 loops::validate_resume_extension(document, view, extension, &generous).map_err(
-                    |_| {
-                        CandidateError::Extension(ExtensionCause::loop_rule(
-                            extension,
-                            ExtensionRule::Exhaustion,
-                        ))
-                    },
+                    |rule| CandidateError::Extension(ExtensionCause::loop_rule(extension, rule)),
                 )?;
             }
             if !prospective.extensions.contains(extension) {
@@ -124,6 +127,22 @@ pub fn admit_candidate(
     validate_output_kinds(&expanded).map_err(|_| CandidateError::Plan)?;
     scan(&serde_json::to_value(&expanded).map_err(|_| CandidateError::Plan)?)?;
     if let Some(limit) = structural_limit(&expanded, &plan, limits) {
+        let node = expanded.nodes.iter().find(|node| match limit.key {
+            GraphLimitKey::NodePromptBytes => node.content_bytes() > limit.max,
+            GraphLimitKey::RoutesPerNode => {
+                node.routes
+                    .as_ref()
+                    .map_or(usize::from(node.route.is_some()), Vec::len)
+                    > limit.max
+            }
+            _ => false,
+        });
+        if let Some(node) = node.filter(|node| valid_node_identifier(&node.id)) {
+            return Err(CandidateError::NodeStructural {
+                node: node.id.clone(),
+                limit,
+            });
+        }
         return Err(CandidateError::Structural(limit));
     }
     let bound = graph_envelope_bound(document, expansions, &all, &plan).saturating_add(
@@ -133,6 +152,9 @@ pub fn admit_candidate(
         return Err(CandidateError::Envelope(GraphEnvelopeLimit { bound }));
     }
     Ok(AdmittedCandidate {
+        source: document.clone(),
+        checkpoint: checkpoint.cloned(),
+        extensions: extensions.to_vec(),
         expanded,
         plan,
         effective_budget,

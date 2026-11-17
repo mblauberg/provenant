@@ -196,6 +196,9 @@ pub enum ExtensionRule {
     Unconfigured,
     HostOwned,
     Exhaustion,
+    TerminalDecision,
+    NonIncreasing,
+    MaxExtensionRounds,
     Envelope,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,12 +285,13 @@ impl fmt::Display for ExtensionLimit {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[error("extend: {kind:?} extension {limit} refused (rule {rule:?})")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[error("extend: {kind:?} extension {limit}{identifier} refused (rule {rule:?})", identifier = .loop_id.as_ref().map(|id| format!(" for loop {id}")).unwrap_or_default())]
 pub struct ExtensionCause {
     pub kind: ExtensionKind,
     pub rule: ExtensionRule,
     pub limit: ExtensionLimit,
+    pub loop_id: Option<String>,
 }
 impl ExtensionCause {
     pub fn host_limits(extension: &str) -> Self {
@@ -295,6 +299,7 @@ impl ExtensionCause {
             kind: ExtensionKind::Limits,
             rule: ExtensionRule::HostOwned,
             limit: ExtensionLimit::parse(extension),
+            loop_id: None,
         }
     }
     pub fn loop_rule(extension: &str, rule: ExtensionRule) -> Self {
@@ -302,6 +307,34 @@ impl ExtensionCause {
             kind: ExtensionKind::Loop,
             rule,
             limit: ExtensionLimit::parse(extension),
+            loop_id: extension
+                .split_once('=')
+                .map_or(extension, |(key, _)| key)
+                .strip_prefix("loop.")
+                .and_then(|key| key.rsplit_once('.'))
+                .map(|(name, _)| name)
+                .filter(|name| super::valid_node_identifier(name))
+                .map(str::to_owned),
+        }
+    }
+
+    pub fn next_action(&self) -> &'static str {
+        match self.rule {
+            ExtensionRule::NonIncreasing => {
+                "choose a loop allowance greater than the current allowance"
+            }
+            ExtensionRule::MaxExtensionRounds => {
+                "choose an increase within max_extension_rounds, then extend again after exhaustion"
+            }
+            ExtensionRule::TerminalDecision => {
+                "the loop already has a terminal decision; start a new graph to change it"
+            }
+            ExtensionRule::Exhaustion => {
+                "wait until the loop is exhausted before extending or deciding it"
+            }
+            ExtensionRule::HostOwned => "adjust the host graph limit in configuration",
+            ExtensionRule::Unconfigured => "configure the budget before extending it",
+            _ => "correct the named extension and retry",
         }
     }
 }

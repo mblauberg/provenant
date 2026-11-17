@@ -2289,6 +2289,7 @@ impl Factory {
                 .map(|_| budget),
             announce,
             Some(&mut replayed),
+            None,
         )?;
         let (run, wait_observation, observation_wait, remote_read_allowed) = if replayed {
             (run, None, None, true)
@@ -2456,30 +2457,29 @@ impl Factory {
             )));
         }
         let id = target.graph.clone();
-        let brief_given = input.get("brief").is_some_and(|value| !value.is_null());
-        // Fail before opening the retry transaction. A capture error leaves
-        // the last valid requester PATH binding untouched.
-        let requester_path = self.requester_lane_path()?;
-        let mut journal = FileJournal::open(
-            &self.context.roots.state,
-            self.context.identity.project,
-            &id,
+        let run = self.graph_retry(
+            GraphInput::Resume {
+                extra: Default::default(),
+                document: id.into(),
+                extend,
+            },
             budget,
             cancel,
-            &self.clock,
-        )
-        .map_err(graph_journal_error)?;
-        let execution = FileJournal::execution(
-            &self.context.roots.state,
-            self.context.identity.project,
-            &id,
-        )
-        .map_err(graph_journal_error)?
-        .ok_or(FacadeError::NotFound)?;
-        let mut checkpoint = journal
-            .load(&id)
-            .map_err(graph_journal_error)?
-            .ok_or(FacadeError::NotFound)?;
+            &mut target,
+            input,
+        )?;
+        target.attempt = None;
+        self.control_receipt(run, &target, input, budget, cancel, false)
+    }
+
+    pub(super) fn prepare_retry(
+        &self,
+        target: &mut super::unified::GraphTarget,
+        input: &Value,
+        document: &GraphDocument,
+        checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+    ) -> Result<(), FacadeError> {
+        let brief_given = input.get("brief").is_some_and(|value| !value.is_null());
         if target.node.is_some() || brief_given {
             // A brief belongs to one node. A graph of one node names it;
             // otherwise the chair must say which.
@@ -2528,11 +2528,11 @@ impl Factory {
                 }
             } else {
                 let library = self.template_library(None)?;
-                let resolver = self.launch_resolvers(Some(&encode(&execution.document)?))?;
+                let resolver = self.launch_resolvers(Some(&encode(document)?))?;
                 patch::retry_node_and_dependants(
                     &mut LiveGraph {
-                        document: &execution.document,
-                        checkpoint: &mut checkpoint,
+                        document: document,
+                        checkpoint: checkpoint,
                     },
                     &node,
                     input.get("brief").and_then(Value::as_str),
@@ -2549,34 +2549,7 @@ impl Factory {
             }
             target.node = Some(node);
         }
-        provenant_fabric_runtime::graph::admit_candidate(
-            &execution.document,
-            Some(&checkpoint),
-            &extend,
-            &self.context.config.graph.limits,
-            &self.context.config.graph.budget,
-            Some(&requester_path),
-        )
-        .map_err(FacadeError::graph_candidate)?;
-        // Publish the requester's PATH with any retry patch under the same
-        // journal lock, including graph-wide retries with no node patch. A
-        // concurrent tick cannot launch pending work with stale PATH.
-        journal
-            .set_requester_path(requester_path)
-            .map_err(graph_journal_error)?;
-        journal.save(&checkpoint).map_err(graph_journal_error)?;
-        drop(journal);
-        let run = self.graph(
-            GraphInput::Resume {
-                extra: Default::default(),
-                document: id.into(),
-                extend,
-            },
-            budget,
-            cancel,
-        )?;
-        target.attempt = None;
-        self.control_receipt(run, &target, input, budget, cancel, false)
+        Ok(())
     }
 
     fn control_receipt(
@@ -3749,6 +3722,78 @@ mod tests {
             FileJournal::read_checkpoint(&factory.context.roots.state, project, "g-test")?,
             Some(checkpoint)
         );
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    #[test]
+    fn tightened_retry_limit_preserves_the_checkpoint_envelope() -> Result {
+        let rig = TestRig::new()?;
+        let mut factory = factory(&rig)?;
+        let project = factory.context.identity.project;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
+        ))?;
+        let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(fixture["checkpoint"].clone())?;
+        let document: GraphDocument =
+            serde_json::from_value(fixture["execution"]["document"].clone())?;
+        let mut journal = FileJournal::open(
+            &factory.context.roots.state,
+            project,
+            &document.graph_id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+            requester_path: None,
+            extra: Default::default(),
+            bases: None,
+            directory: factory.cwd.clone(),
+            document: document.clone(),
+        })?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let path = factory
+            .context
+            .roots
+            .state
+            .as_path()
+            .join("fabric/graphs")
+            .join(project.to_string())
+            .join("graph-g-test.json");
+        let before = std::fs::read(&path)?;
+        // A candidate that passed under the old policy must be checked again
+        // after the host tightens its limit, before publishing the retry.
+        let request = json!({"op":"retry", "id":"g-test/reader", "brief":"new work"});
+        let mut staged = checkpoint.clone();
+        let mut target = factory
+            .graph_target("g-test/reader")?
+            .ok_or("retry target")?;
+        factory.prepare_retry(&mut target, &request, &document, &mut staged)?;
+        provenant_fabric_runtime::graph::admit_candidate(
+            &document,
+            Some(&staged),
+            &[],
+            &factory.context.config.graph.limits,
+            &factory.context.config.graph.budget,
+            None,
+        )?;
+        factory.context.config.graph.limits.node_prompt_bytes = 1;
+        let error = factory
+            .graph_document(
+                json!({"op":"retry", "id":"g-test/reader", "brief":"new work"}),
+                budget,
+                &cancel,
+            )
+            .expect_err("tightened limit must refuse");
+        assert!(error.to_string().contains("node_prompt_bytes"));
+        assert_eq!(std::fs::read(path)?, before);
         Ok(())
     }
 

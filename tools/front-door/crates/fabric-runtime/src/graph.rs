@@ -24,7 +24,7 @@ pub use ci::{CiFailedCheck, CiTarget};
 mod budget;
 mod candidate;
 pub mod refusal;
-pub use candidate::{CandidateError, admit_candidate};
+pub use candidate::{AdmittedCandidate, CandidateError, admit_candidate};
 mod cancellation_intent;
 #[cfg(test)]
 #[path = "graph/checkpoint_tests.rs"]
@@ -1109,6 +1109,7 @@ pub fn advance_with_budget<R: AttemptOwner, J: GraphJournal>(
         false,
         &[],
         &mut Default::default(),
+        None,
     )
 }
 
@@ -1129,6 +1130,30 @@ pub fn resume_with_budget<R: AttemptOwner, J: GraphJournal>(
         true,
         extensions,
         &mut Default::default(),
+        None,
+    )
+}
+
+/// Resume with the candidate admitted while holding the same journal lock.
+pub fn resume_admitted<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    owner: &mut R,
+    journal: &mut J,
+    limits: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+    extensions: &[String],
+    candidate: AdmittedCandidate,
+) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
+    advance_inner(
+        document,
+        owner,
+        journal,
+        limits,
+        budget,
+        true,
+        extensions,
+        &mut Default::default(),
+        Some(candidate),
     )
 }
 
@@ -1386,6 +1411,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     mut resume: bool,
     extensions: &[String],
     observed_ci: &mut std::collections::BTreeSet<String>,
+    admitted_candidate: Option<AdmittedCandidate>,
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
     let worktree_layout = owner.worktree_layout();
     let mut admission_policy = None::<provenant_records::policy::Policy>;
@@ -1416,15 +1442,28 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     } else {
         limits
     };
-    let admitted = admit_candidate(
-        document,
-        stored.as_ref(),
-        extensions,
-        admission_limits,
-        budget,
-        None,
-    )
-    .map_err(GraphError::Candidate)?;
+    let admitted = match admitted_candidate {
+        Some(candidate) => {
+            if candidate.source != *document
+                || candidate.checkpoint != stored
+                || candidate.extensions != extensions
+            {
+                return Err(GraphError::Invalid(
+                    "admitted candidate does not match the execution state".into(),
+                ));
+            }
+            candidate
+        }
+        None => admit_candidate(
+            document,
+            stored.as_ref(),
+            extensions,
+            admission_limits,
+            budget,
+            None,
+        )
+        .map_err(GraphError::Candidate)?,
+    };
     if let Some(checkpoint) = &stored {
         plans::validate_persisted_topology(
             document,
@@ -1665,6 +1704,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 false,
                 &[],
                 observed_ci,
+                None,
             );
         }
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -1879,6 +1919,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 true,
                                 &[extension],
                                 observed_ci,
+                                None,
                             );
                         }
                     }
@@ -3254,6 +3295,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         false,
                         &[],
                         observed_ci,
+                        None,
                     );
                 }
                 let appended = if settled_result.is_some() || node.plan.is_some() {
@@ -3377,6 +3419,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 false,
                 &[],
                 observed_ci,
+                None,
             );
         }
         if document.delivery == Some(provenant_records::run::DeliveryMode::Pr)

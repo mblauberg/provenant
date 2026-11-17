@@ -1517,7 +1517,9 @@ pub(super) fn prepare(
             _ => PatchError::invalid(error.to_string()),
         };
         refusal.cause = match &error {
-            CandidateError::Structural(limit) => Some(PlanFailureFact::Structural(*limit)),
+            CandidateError::Structural(limit) | CandidateError::NodeStructural { limit, .. } => {
+                Some(PlanFailureFact::Structural(*limit))
+            }
             CandidateError::Envelope(limit) => Some(PlanFailureFact::Envelope(*limit)),
             _ => None,
         };

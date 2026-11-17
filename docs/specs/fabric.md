@@ -182,8 +182,9 @@ candidate leaves the checkpoint and execution binding unchanged. The pure
 `admit_candidate` gate owns admission; entry points do not maintain separate
 resume validators.
 
-Admission refusals disclose host-owned rule identifiers and schema positions,
-never caller text. `SchemaPath` and `SecretRule` are closed types. Arbitrary
+Admission refusals may name node IDs, loop keys and field paths that passed the
+identifier grammar, and host-owned rule identifiers and schema positions. They
+never echo free-form caller text such as prompt or brief bodies. `SchemaPath` and `SecretRule` are closed types. Arbitrary
 map keys become `[<key>]`; array positions may use indices. Both original
 strings and object keys are scanned. Extension causes carry a closed extension
 kind and rule; limit causes name the host limit, never the supplied value.
