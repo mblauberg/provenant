@@ -179,6 +179,94 @@ fn failed_settlement_does_not_advance_unrelated_graphs() -> Result<(), Box<dyn s
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#session-ready-steering
+#[test]
+fn unavailable_steer_session_with_refuse_setting_has_no_successor()
+-> Result<(), Box<dyn std::error::Error>> {
+    if host_test(
+        "fabric::peer_tests::peer_graph_routing::unavailable_steer_session_with_refuse_setting_has_no_successor",
+    )? {
+        return Ok(());
+    }
+    let fixture = SettlementFixture::for_node("steer-explicit-refuse", "seed")?;
+    std::fs::write(
+        fixture.roots.state.as_path().join("config.toml"),
+        "schema_version = 1\n[domains.fabric.steer]\nfallback = 'refuse'\n",
+    )?;
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let (record, head) = fixture.dispatch_keyed(
+        "steer-refuse-setting",
+        "steer-explicit-refuse",
+        "one",
+        &call,
+    )?;
+    let route = provenant_run::RouteRecord {
+        provider: Some("fixture".into()),
+        model: Some("fixture/model".into()),
+        ..Default::default()
+    };
+    fixture
+        .store
+        .mark_starting_for_fixture(record.attempt_id, &route, &call)?;
+    let attempt = provenant_os::fs::Directory::open_anchor(
+        &fixture
+            .rig
+            .state
+            .join("attempts")
+            .join(record.attempt_id.to_string()),
+    )?;
+    fixture.store.admit(
+        record.attempt_id,
+        &attempt,
+        &crate::worktree_tests::FixtureResources,
+        &clock,
+        &cancel,
+    )?;
+    fixture.store.steer(
+        record.attempt_id,
+        "steer-refuse-setting".parse()?,
+        "Continue the task.",
+        &call,
+    )?;
+    let running = fixture.store.record(record.attempt_id, &call)?;
+    publish_success(&fixture.rig, &fixture.store, &running, head, &call)?;
+    let mut settled = fixture.settled.clone();
+    settled.attempt_id = record.attempt_id;
+    settled.launch = Some(provenant_run::HostLaunchContext {
+        graph_directory: None,
+        configuration_root: fixture.rig.state.clone(),
+        cwd: fixture.rig.project.clone(),
+        executable_search_path: Vec::new(),
+        lane_path: None,
+        git: provenant_os::git::git_executable().ok_or("git")?,
+        default_account_directories: Default::default(),
+        credential_roots: Default::default(),
+        github_roots: Default::default(),
+        provider_path_environment: Default::default(),
+        cargo_build_jobs: None,
+        fixture_state_write: false,
+    });
+    advance_graphs_after_settlement(&settled, &FreeWorkers)?;
+    let parent = fixture.store.record(record.attempt_id, &call)?;
+    let steering = parent.steering.ok_or("steering status")?;
+    assert_eq!(
+        steering.state,
+        provenant_records::run::SteeringState::NotContinued
+    );
+    assert_eq!(
+        steering.cause,
+        Some(provenant_records::run::SteeringCause::SessionUnavailable)
+    );
+    assert_eq!(steering.successor, None);
+    assert_eq!(parent.superseded_by, None);
+    Ok(())
+}
+
 #[test]
 fn terminal_steer_refusal_settles_without_losing_private_text_or_graph_progress()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -235,7 +323,11 @@ fn terminal_steer_refusal_settles_without_losing_private_text_or_graph_progress(
         .store
         .mark_starting_for_fixture(record.attempt_id, &route, &call)?;
     let attempt = provenant_os::fs::Directory::open_anchor(
-        &fixture.rig.state.join("attempts").join(record.attempt_id.to_string()),
+        &fixture
+            .rig
+            .state
+            .join("attempts")
+            .join(record.attempt_id.to_string()),
     )?;
     let running = fixture.store.admit(
         record.attempt_id,
@@ -339,7 +431,12 @@ fn terminal_steer_refusal_settles_without_losing_private_text_or_graph_progress(
         !serde_json::to_string(status)?.contains("Keep this private instruction."),
         "the public status must not disclose accepted steering text"
     );
-    assert!(fixture.store.steer_intent(record.attempt_id, &call)?.is_empty());
+    assert!(
+        fixture
+            .store
+            .steer_intent(record.attempt_id, &call)?
+            .is_empty()
+    );
     assert!(matches!(
         fixture.store.steer(
             record.attempt_id,
