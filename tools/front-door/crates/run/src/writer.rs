@@ -71,10 +71,24 @@ fn utility_error(
             ),
             UtilityError::InvalidExecutable { .. }
             | UtilityError::InvalidHome
+            | UtilityError::InvalidBudget
+            | UtilityError::InvalidOperationValue
+            | UtilityError::UnreadableGitConfiguration
             | UtilityError::LaneConfiguration { .. }
+            | UtilityError::AttributeSourceUnsupported
             | UtilityError::UnprobedRepository
             | UtilityError::Path(_) => true,
-            _ => false,
+            UtilityError::Truncated { .. }
+            | UtilityError::TimedOut
+            | UtilityError::Cancelled
+            | UtilityError::Signalled { .. }
+            | UtilityError::Incomplete
+            | UtilityError::FetchFailed { .. }
+            | UtilityError::ConfigFailed { .. }
+            | UtilityError::ConfigLockTimedOut { .. }
+            | UtilityError::Transport(_)
+            | UtilityError::Filesystem(_)
+            | UtilityError::Execution(_) => false,
         };
         if refusal {
             RunError::Writer(worktrees::WorktreeError::Utility(source))
