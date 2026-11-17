@@ -51,6 +51,7 @@ fn retired_owner_lock_refuses_stale_and_shared_guards() {
     let stale = LockGuard {
         _file: waiting,
         exclusive: true,
+        permission_facts: None,
     };
     assert!(directory.verify_held_lock(name, &stale).is_err());
     assert!(directory.verify_held_lock(name, &replacement).is_ok());

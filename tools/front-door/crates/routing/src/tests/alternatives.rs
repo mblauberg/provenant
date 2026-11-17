@@ -191,7 +191,11 @@ fn resolves_an_available_provider_supplied_only_by_the_registry()
         fn prepare(&self, _: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError> {
             Err(ProviderError::UnsupportedPolicy)
         }
-        fn stream(&self, _: Option<&Continuation>) -> Result<StreamState, ProviderError> {
+        fn stream(
+            &self,
+            _: Option<&Continuation>,
+            _: &provenant_records::policy::Policy,
+        ) -> Result<StreamState, ProviderError> {
             Err(ProviderError::UnsupportedPolicy)
         }
         fn observe(

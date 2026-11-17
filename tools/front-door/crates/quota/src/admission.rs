@@ -607,12 +607,6 @@ mod admission_tests {
         );
     }
 
-    fn test_policy() -> &'static provenant_records::policy::Policy {
-        static POLICY: std::sync::OnceLock<provenant_records::policy::Policy> =
-            std::sync::OnceLock::new();
-        POLICY.get_or_init(Default::default)
-    }
-
     use super::*;
     fn route() -> ResolvedRoute {
         ResolvedRoute {
@@ -681,7 +675,7 @@ mod admission_tests {
         };
         let pools = vec!["pool-a".into()];
         let admission = |records| Admission {
-            policy: test_policy(),
+            policy: crate::source::test_policy(),
             policies: crate::source::TEST_POLICIES,
             now_unix_seconds: 1000,
             records,
@@ -711,7 +705,7 @@ mod admission_tests {
         record.last_error = Some(ProbeFailure::AccountMismatch);
         let check = |record: &AccountRecord, now| {
             Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: now,
                 records: std::slice::from_ref(record),
@@ -724,7 +718,7 @@ mod admission_tests {
         for now in [1000, 9000] {
             assert_eq!(
                 Admission {
-                    policy: test_policy(),
+                    policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: now,
                     records: std::slice::from_ref(&record),
@@ -782,7 +776,7 @@ mod admission_tests {
         let raw = [record];
         let check = |records: &[AccountRecord], now| {
             Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: now,
                 records,
@@ -877,7 +871,7 @@ mod admission_tests {
             route.account_key = Some(key.into());
             assert_eq!(
                 Admission {
-                    policy: test_policy(),
+                    policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: 1000,
                     records: std::slice::from_ref(&record),
@@ -892,7 +886,7 @@ mod admission_tests {
         route.model.clone_from(&refusal.model);
         assert!(
             Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
                 records: &[record],
@@ -920,7 +914,7 @@ mod admission_tests {
         };
         let block = |record: &AccountRecord, key: &str, model: &str, pools: &[String]| {
             Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
                 records: std::slice::from_ref(record),
@@ -963,7 +957,7 @@ mod admission_tests {
         }];
         assert!(
             Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
                 records: &[record],
@@ -979,7 +973,7 @@ mod admission_tests {
         record.last_error = Some(ProbeFailure::Auth);
         assert!(matches!(
             Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
                 records: &[record],
@@ -1014,7 +1008,7 @@ mod admission_tests {
         for (now, allowed) in [(1000, false), (4599, false), (4600, true)] {
             assert_eq!(
                 Admission {
-                    policy: test_policy(),
+                    policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: now,
                     records: std::slice::from_ref(&record),
@@ -1045,7 +1039,7 @@ mod admission_tests {
             for (now, allowed) in [(1000, false), (until - 1, false), (until, true)] {
                 assert_eq!(
                     Admission {
-                        policy: test_policy(),
+                        policy: crate::source::test_policy(),
                         policies: crate::source::TEST_POLICIES,
                         now_unix_seconds: now,
                         records: std::slice::from_ref(&record),
@@ -1092,7 +1086,7 @@ mod admission_tests {
         refused.snapshot = None;
         for (now, allowed) in [(1_000, false), (29_999, false), (30_000, true)] {
             let admission = Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: now,
                 records: std::slice::from_ref(&refused),
@@ -1144,7 +1138,7 @@ mod admission_tests {
             snapshot.authority_ref = Some("configured-local-quota".into());
             fresh.snapshot = Some(snapshot);
             let admission = Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1_600,
                 records: std::slice::from_ref(&fresh),
@@ -1169,7 +1163,7 @@ mod admission_tests {
                 // this readiness file from the same account replacement.
                 let mut readiness = crate::ReadinessFile::default();
                 let prior = Admission {
-                    policy: test_policy(),
+                    policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: 1_000,
                     records: std::slice::from_ref(&refused),
@@ -1199,7 +1193,7 @@ mod admission_tests {
             let mut failed = fresh.clone();
             failed.last_error = Some(ProbeFailure::Network);
             let admission = Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1_600,
                 records: std::slice::from_ref(&failed),
@@ -1239,7 +1233,7 @@ mod admission_tests {
         assert!(capacity.refusals.is_empty());
         let admit = |record: &AccountRecord, now| {
             Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: now,
                 records: std::slice::from_ref(record),
@@ -1258,7 +1252,7 @@ mod admission_tests {
             assert!(admit(&both, now).is_err());
             assert_eq!(
                 Admission {
-                    policy: test_policy(),
+                    policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: now,
                     records: std::slice::from_ref(&both),
@@ -1302,7 +1296,7 @@ mod admission_tests {
                 resets_unix_seconds: None,
             });
             let admission = Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 5000,
                 records: std::slice::from_ref(&record),
@@ -1331,7 +1325,7 @@ mod admission_tests {
             resets_unix_seconds: None,
         });
         let admission = Admission {
-            policy: test_policy(),
+            policy: crate::source::test_policy(),
             policies: crate::source::TEST_POLICIES,
             now_unix_seconds: 1300,
             records: std::slice::from_ref(&record),
@@ -1355,7 +1349,7 @@ mod admission_tests {
             let records = [record(status)];
             let pools = ["pool-a".into()];
             let context = Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: now,
                 records: &records,
@@ -1371,7 +1365,7 @@ mod admission_tests {
         let r = route();
         assert!(
             Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
                 records: &records,
@@ -1383,7 +1377,7 @@ mod admission_tests {
         pools[0] = "pool-a".into();
         assert!(
             Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
                 records: &records,
@@ -1395,7 +1389,7 @@ mod admission_tests {
         records[0].snapshot.as_mut().unwrap().windows[0].resets_unix_seconds = Some(999);
         assert!(
             Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
                 records: &records,
@@ -1415,7 +1409,7 @@ mod admission_tests {
         records[0].snapshot.as_mut().unwrap().status = QuotaStatus::Unknown;
         assert!(
             Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
                 records: &records,
@@ -1426,7 +1420,7 @@ mod admission_tests {
         );
         assert!(
             Admission {
-                policy: test_policy(),
+                policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 4550,
                 records: &records,
@@ -1519,7 +1513,7 @@ mod refusal_scope_tests {
             let records = [record];
             assert_eq!(
                 Admission {
-                    policy: test_policy(),
+                    policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: now,
                     records: &records,
@@ -1571,7 +1565,7 @@ mod refusal_scope_tests {
             record.snapshot.as_mut().unwrap().windows[0].used_basis_points = weekly;
             assert_eq!(
                 Admission {
-                    policy: test_policy(),
+                    policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: 1000,
                     records: &[record.clone()],
@@ -1644,7 +1638,7 @@ mod refusal_scope_tests {
         ] {
             assert!(
                 Admission {
-                    policy: test_policy(),
+                    policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: 1000,
                     records: &[record.clone()],
@@ -1677,7 +1671,7 @@ mod refusal_scope_tests {
                 ("claude-sonnet-4-6", "claude"),
             ] {
                 let admitted = Admission {
-                    policy: test_policy(),
+                    policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: 1000,
                     records: &[record.clone()],

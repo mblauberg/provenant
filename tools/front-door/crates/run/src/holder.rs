@@ -1436,7 +1436,7 @@ impl RunStore {
                 .transpose()?
                 .ok_or(RunError::SteerSessionMismatch)?;
             if ready.conflict
-                || ready.generation != Self::scope(&record).generation
+                || ready.generation != Self::scope(record).generation
                 || ready.route_digest != route_digest
                 || matches!((ready.session.as_deref(), session), (Some(observed), Some(expected)) if observed != expected)
             {

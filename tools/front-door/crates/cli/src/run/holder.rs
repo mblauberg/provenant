@@ -524,7 +524,7 @@ impl Holder for HostHolder<'_> {
                 .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
             let (configuration_root, _) = context.disk_roots();
             let policy = provenant_config::policy::for_task(
-                &configuration_root,
+                configuration_root,
                 &context.project_id.to_string(),
                 &request.task,
             );
