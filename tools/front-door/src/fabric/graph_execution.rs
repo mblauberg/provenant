@@ -559,7 +559,7 @@ impl Factory {
                     }
                     document
                 };
-                if document.submission_patch.is_none() {
+                if !resume && document.submission_patch.is_none() {
                     let submission_key = document
                         .provenance
                         .as_ref()

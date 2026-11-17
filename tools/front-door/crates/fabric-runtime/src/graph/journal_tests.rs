@@ -312,6 +312,7 @@ fn round_2_checkpoint_with_identity_key_in_parameters_resumes_and_lands() {
         }]
     }))
     .unwrap();
+    assert!(document.nodes[0].template.is_none());
     let limits = plans::generous();
     let (base_plan, _) = validate_replay_plan(&document, &limits).unwrap();
     let plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &base_plan)
@@ -356,6 +357,10 @@ fn round_2_checkpoint_with_identity_key_in_parameters_resumes_and_lands() {
     let found = landing_reviews(&root, project, head).unwrap();
     assert_eq!(found.reviews, vec![review]);
     assert!(found.unusable.is_empty());
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        CanonicalV1::bytes(&fixture).unwrap().as_bytes()
+    );
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

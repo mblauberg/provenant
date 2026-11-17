@@ -426,7 +426,7 @@ fn findings_and_verdict_at_the_end_of_a_large_result_are_parsed() {
     assert!(outputs.warnings.is_empty());
 
     let finding = serde_json::json!({
-        "id": "F1", "severity": "high", "file": "a.rs", "line": 1,
+        "id": "AKIAIOSFODNN7EXAMPLE", "severity": "high", "file": "a.rs", "line": 1,
         "summary": "issue", "status": "open"
     });
     let many = vec![finding.clone(); MAX_FINDINGS + 1];
@@ -437,6 +437,10 @@ fn findings_and_verdict_at_the_end_of_a_large_result_are_parsed() {
     compact_findings(&mut outputs, Some(&captured), &[]);
     assert!(!outputs.findings.is_empty());
     assert!(canonical_len(&outputs.findings) <= FINDINGS_BYTES);
+    assert_eq!(outputs.full_artifact_findings.as_ref().unwrap().len(), MAX_FINDINGS + 1);
+    let stored = serde_json::to_vec(&outputs).unwrap();
+    let restored: NodeOutputs = serde_json::from_slice(&stored).unwrap();
+    assert_eq!(restored.full_artifact_findings.unwrap()[0].id, "AKIAIOSFODNN7EXAMPLE");
 
     let oversized = serde_json::json!({
         "schema_version": 1,

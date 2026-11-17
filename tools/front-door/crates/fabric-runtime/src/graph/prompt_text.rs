@@ -20,13 +20,15 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
         Schema,
         Content,
         Finding,
+        RepairItem,
+        Node,
+        Template,
+        TemplateMap,
     }
 
     fn visit(value: &mut serde_json::Value, context: Context) -> Result<(), &'static str> {
         match value {
-            serde_json::Value::String(value) if !matches!(context, Context::Schema) => {
-                *value = normalise_prompt_text(value)?
-            }
+            serde_json::Value::String(value) => *value = normalise_prompt_text(value)?,
             serde_json::Value::Array(values) => {
                 for value in values {
                     visit(value, context)?;
@@ -49,77 +51,79 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
                         }
                         continue;
                     }
-                    let identity = matches!(
-                        key.as_str(),
-                        "id" | "graph_id"
-                            | "node"
-                            | "source"
-                            | "reference"
-                            | "file"
-                            | "path"
-                            | "branch"
-                            | "commit"
-                            | "digest"
-                            | "route"
-                            | "routes"
-                            | "worktree"
-                            | "depends_on"
-                            | "after"
-                            | "after_settled"
-                            | "after_expansion"
-                            | "lens"
-                            | "template"
-                            | "use"
-                            | "propagates"
-                    );
+                    if matches!(context, Context::RepairItem) {
+                        if key != "id" {
+                            visit(value, Context::Content)?;
+                        }
+                        continue;
+                    }
+                    if key == "repair_items" {
+                        visit(value, Context::RepairItem)?;
+                        continue;
+                    }
+                    if matches!(context, Context::TemplateMap) {
+                        visit(value, Context::Template)?;
+                        continue;
+                    }
+                    // Only known schema positions carry identities. Unknown
+                    // extension maps are visited as content below.
+                    let identity = match context {
+                        Context::Node => matches!(
+                            key.as_str(),
+                            "id" | "template"
+                                | "use"
+                                | "route"
+                                | "routes"
+                                | "source"
+                                | "depends_on"
+                                | "after"
+                                | "after_settled"
+                                | "after_expansion"
+                        ),
+                        Context::Template => key == "name",
+                        Context::Schema => matches!(
+                            key.as_str(),
+                            "graph_id"
+                                | "node"
+                                | "route"
+                                | "routes"
+                                | "source"
+                                | "template"
+                                | "use"
+                                | "depends_on"
+                                | "after"
+                                | "after_settled"
+                                | "after_expansion"
+                                | "reference"
+                                | "branch"
+                                | "commit"
+                                | "digest"
+                                | "worktree"
+                                | "skip"
+                                | "idempotency_key"
+                        ),
+                        _ => false,
+                    };
                     if identity {
                         continue;
                     }
-                    if key == "findings" {
-                        visit(value, Context::Finding)?;
-                        continue;
-                    }
-                    let content = matches!(
-                        key.as_str(),
-                        "prompt"
-                            | "brief"
-                            | "spec"
-                            | "fragment"
-                            | "excerpt"
-                            | "_artifact_findings"
-                            | "_compact_disposition_findings"
-                            | "acceptance_checks"
-                            | "parameters"
-                            | "with"
-                            | "spec_concerns"
-                            | "failed_checks"
-                            | "summary"
-                            | "description"
-                            | "detail"
-                            | "reason"
-                            | "question"
-                            | "expected"
-                            | "required_verdict"
-                            | "verdict_error"
-                            | "note"
-                            | "remaining"
-                            | "decisions"
-                            | "verify"
-                            | "warnings"
-                            | "criterion"
-                            | "claim"
-                            | "evidence"
-                            | "proposed_change"
-                            | "alternative"
-                    ) || value.as_str().is_some_and(|text| text.len() > 4096);
-                    visit(
-                        value,
-                        if content {
-                            Context::Content
-                        } else {
+                    let child = match key.as_str() {
+                        "findings" => Context::Finding,
+                        "repair_items" => Context::RepairItem,
+                        "nodes" | "replace" => Context::Node,
+                        "node" if matches!(context, Context::Template) => Context::Node,
+                        "templates" | "template_library" => Context::TemplateMap,
+                        "parameters" | "with" => Context::Content,
+                        // These are structural schema containers, not arbitrary
+                        // user-defined extension maps.
+                        "provenance" | "submission_patch" | "composite" | "loop" | "body"
+                        | "inputs" | "plan" | "condition" | "when" | "context" | "review"
+                        | "extensions" | "template_layers" | "template_resolvers" => {
                             Context::Schema
-                        },
-                    )?;
+                        }
+                        _ => Context::Content,
+                    };
+                    visit(value, child)?;
                 }
             }
             _ => {}
@@ -127,7 +131,19 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
         Ok(())
     }
     let mut value = serde_json::to_value(input).map_err(|_| "cannot encode graph text")?;
-    visit(&mut value, Context::Schema)?;
+    let is_node = |value: &serde_json::Value| {
+        value.get("id").is_some() && value.get("access").is_some() && value.get("prompt").is_some()
+    };
+    let root = if is_node(&value)
+        || value
+            .as_array()
+            .is_some_and(|values| values.first().is_some_and(is_node))
+    {
+        Context::Node
+    } else {
+        Context::Schema
+    };
+    visit(&mut value, root)?;
     serde_json::from_value(value).map_err(|_| "cannot decode normalised graph text")
 }
 
@@ -176,7 +192,8 @@ mod tests {
             "provenance": {"parameters": {"source": identity,
                 "nested": {"file": identity, "findings": [{"id": identity}]}}},
             "with": {"source": identity, "path": [identity], "template": identity},
-            "repair_items": [{"id": identity, "reason": identity}]
+            "repair_items": [{"id": identity, "reason": identity, "comment": {"id": identity}}],
+            "templates": {"test": {"doc": identity, "parameters": {"value": {"type": "string", "doc": identity}}}}
         });
         let safe: serde_json::Value = normalise(&value).unwrap();
         assert_eq!(safe["graph_id"], identity);
@@ -190,6 +207,12 @@ mod tests {
         assert_ne!(safe["findings"][0]["summary"], identity);
         assert_eq!(safe["repair_items"][0]["id"], identity);
         assert_ne!(safe["repair_items"][0]["reason"], identity);
+        assert_ne!(safe["repair_items"][0]["comment"]["id"], identity);
+        assert_ne!(safe["templates"]["test"]["doc"], identity);
+        assert_ne!(
+            safe["templates"]["test"]["parameters"]["value"]["doc"],
+            identity
+        );
         for pointer in [
             "/provenance/parameters/source",
             "/provenance/parameters/nested/file",

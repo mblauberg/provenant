@@ -323,7 +323,11 @@ pub(super) fn apply_attempt_observation(
                     commit.clone(),
                     &upstream_findings,
                 );
+                // Findings are normalised as they are parsed, before stored
+                // upstream evidence is merged into them.
+                let findings = std::mem::take(&mut outputs.findings);
                 outputs = prompt_text::normalise(&outputs)?;
+                outputs.findings = findings;
                 if !repair::may_report_items(node, plan) {
                     outputs.repair_items = None;
                 }
@@ -624,7 +628,7 @@ pub(super) fn apply_attempt_observation(
                         .cloned();
                 }
                 compact_findings(&mut outputs, result.as_deref(), &upstream_findings);
-                progress.outputs = Some(prompt_text::normalise(&outputs)?);
+                progress.outputs = Some(outputs);
                 let node_outcome = settlement_reason
                     .map(|reason| reason.node_outcome(attempt.stop))
                     .unwrap_or(provenant_records::run::SettlementNodeOutcome::Failed);

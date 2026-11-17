@@ -404,14 +404,15 @@ checkpoint missing launch evidence or its actor is refused.
 
 Admission bounds the worst-case checkpoint before saving the plan.
 Graph text is normalised exactly once, at ingress, by field type. Each schema
-field is either an identity (IDs, file paths, repair item IDs, propagation
-markers, template and source names at their schema paths) or content (prose, and
-every value inside a parameter map). Live patches, retry briefs and CI
+schema identity retains its bytes; every other string is content, including
+extension fields and template documentation. Parameter map values are content. Live patches, retry briefs and CI
 observations use the same representation at ingress before planning or hashing.
 Captured findings, handoffs and result excerpts are parsed and normalised
 through the field-typed walker before becoming graph outputs or subsequent
 prompts; propagation markers are preserved as identities. Checkpoints persist
-the normalised form. Every strict read and every digest check verifies the
+the normalised form. Compaction retains parsed, normalised findings as typed
+values in content-addressed storage. Resume never fills templates or rewrites a
+sealed submission. Every strict read and every digest check verifies the
 stored bytes as stored and never normalises again. Normalising is idempotent.
 Content-addressed storage only externalises bytes and never rewrites digested
 content. The journal strictly validates the stored representation before

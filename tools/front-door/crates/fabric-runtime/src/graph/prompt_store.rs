@@ -42,6 +42,8 @@ fn text_paths(value: &Value, path: &str, found: &mut Vec<String>) {
                                 | "fragment"
                                 | "excerpt"
                                 | "_artifact_findings"
+                                | "full_artifact_findings"
+                                | "full_disposition_findings"
                         ) || text.len() > 4096)
                 }) {
                     found.push(path);

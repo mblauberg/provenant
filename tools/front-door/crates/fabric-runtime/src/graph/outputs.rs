@@ -79,7 +79,7 @@ pub(super) fn make_outputs_with_upstream(
         .ok_or("field findings: block missing")
         .and_then(findings_block)
         .map_err(str::to_owned)
-        .and_then(|block| parse_findings(block, upstream));
+        .and_then(|block| parse_findings_ingress(block, upstream));
     let findings_available = Some(
         result.is_some_and(|capture| !capture.source_truncated)
             && parsed
@@ -301,7 +301,9 @@ pub(super) fn make_outputs_with_upstream(
         spec_concern_count: (spec_concern_count > 0).then_some(spec_concern_count),
         spec_defect_count: (spec_defect_count > 0).then_some(spec_defect_count),
         artifact_findings: None,
+        full_artifact_findings: None,
         compact_disposition_findings: None,
+        full_disposition_findings: None,
         verdict_error,
         schema_version: 2,
         decide_outcome: None,
@@ -367,6 +369,21 @@ fn parse_findings(
     block: &str,
     upstream: &[Finding],
 ) -> Result<(Vec<Finding>, Vec<String>, usize), String> {
+    parse_findings_mode(block, upstream, false)
+}
+
+fn parse_findings_ingress(
+    block: &str,
+    upstream: &[Finding],
+) -> Result<(Vec<Finding>, Vec<String>, usize), String> {
+    parse_findings_mode(block, upstream, true)
+}
+
+fn parse_findings_mode(
+    block: &str,
+    upstream: &[Finding],
+    ingress: bool,
+) -> Result<(Vec<Finding>, Vec<String>, usize), String> {
     let block: serde_json::Value = serde_json::from_str(block).map_err(|error| {
         format!(
             "field findings: invalid JSON at line {} column {}",
@@ -420,6 +437,15 @@ fn parse_findings(
                 continue;
             }
             entry.insert("id".into(), key.clone().into());
+        }
+        if ingress {
+            let wrapper = serde_json::json!({"findings": [entry]});
+            let mut wrapper = prompt_text::normalise(&wrapper).map_err(str::to_owned)?;
+            entry = wrapper["findings"][0]
+                .take()
+                .as_object()
+                .cloned()
+                .ok_or("invalid normalised finding")?;
         }
         let Some(id) = entry
             .get("id")
@@ -732,8 +758,11 @@ pub(super) fn compact_findings(
         || (oversized_block && canonical_len(&outputs.findings) > cap)
     {
         let count = outputs.findings.len();
-        if let Some(block) = capture.and_then(|capture| findings_block(capture).ok()) {
-            outputs.artifact_findings = Some(block.to_owned());
+        if capture
+            .and_then(|capture| findings_block(capture).ok())
+            .is_some()
+        {
+            outputs.full_artifact_findings = Some(outputs.findings.clone());
         }
         summarise_findings(&mut outputs.findings, cap);
         outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
@@ -743,15 +772,16 @@ pub(super) fn compact_findings(
     if upstream.is_empty() || canonical_len(&outputs.findings) <= DISPOSITION_FINDINGS_BYTES - 512 {
         return;
     }
-    if let Some(block) = capture.and_then(|capture| findings_block(capture).ok()) {
-        outputs.compact_disposition_findings = Some(block.to_owned());
+    if capture
+        .and_then(|capture| findings_block(capture).ok())
+        .is_some()
+    {
+        outputs.full_disposition_findings = Some(outputs.findings.clone());
         let count = outputs.findings.len();
         outputs.findings.clear();
         outputs.warnings.truncate(MAX_WARNINGS - 1);
         outputs.warnings.push(bounded(
-            &format!(
-                "findings compacted: {count} entries reconstructed from block and upstream inputs"
-            ),
+            &format!("findings compacted: {count} entries retained in typed storage"),
             WARNING_BYTES,
         ));
     }
@@ -833,6 +863,15 @@ pub(super) fn valid_compacted_findings(
     let Some(outputs) = checkpoint.nodes[index].outputs.as_ref() else {
         return true;
     };
+    if outputs.full_artifact_findings.is_some() {
+        return true;
+    }
+    if let Some(findings) = outputs.full_disposition_findings.as_ref() {
+        return outputs.findings.is_empty()
+            && !findings.is_empty()
+            && (!plan.nodes[index].dispositions.is_empty()
+                || template::review_verifier(&plan.nodes[index]));
+    }
     if let Some(value) = outputs.artifact_findings.as_ref() {
         let upstream: Vec<_> = selected_findings(&plan.nodes[index], plan, checkpoint, positions)
             .into_iter()
@@ -871,6 +910,13 @@ pub(super) fn materialised_findings(
     let Some(outputs) = checkpoint.nodes[index].outputs.as_ref() else {
         return Vec::new();
     };
+    if let Some(findings) = outputs
+        .full_artifact_findings
+        .as_ref()
+        .or(outputs.full_disposition_findings.as_ref())
+    {
+        return findings.clone();
+    }
     if let Some(block) = outputs.artifact_findings.as_deref() {
         let node = &plan.nodes[index];
         let upstream: Vec<_> = selected_findings(node, plan, checkpoint, positions)
@@ -914,7 +960,10 @@ pub(super) fn materialise_checkpoint_findings(
 ) -> Result<(), String> {
     if !checkpoint.nodes.iter().any(|node| {
         node.outputs.as_ref().is_some_and(|outputs| {
-            outputs.compact_disposition_findings.is_some() || outputs.artifact_findings.is_some()
+            outputs.compact_disposition_findings.is_some()
+                || outputs.artifact_findings.is_some()
+                || outputs.full_artifact_findings.is_some()
+                || outputs.full_disposition_findings.is_some()
         })
     }) {
         return Ok(());
@@ -1451,7 +1500,9 @@ pub(super) fn render_input(
                 }
             }
         }
-        if input.outputs.contains(&OutputKind::Findings) && outputs.artifact_findings.is_some() {
+        if input.outputs.contains(&OutputKind::Findings)
+            && (outputs.artifact_findings.is_some() || outputs.full_artifact_findings.is_some())
+        {
             let section = format!(
                 "{} findings are summarised below; read the staged full result artifact for every finding and its complete evidence.\n",
                 input.node
@@ -1484,7 +1535,7 @@ pub(super) fn render_input(
                         selected.iter().filter(|(source, _)| source == &input.node)
                             .map(|(_, finding)| finding.clone()).collect::<Vec<_>>()
                     });
-                    if outputs.artifact_findings.is_some()
+                    if (outputs.artifact_findings.is_some() || outputs.full_artifact_findings.is_some())
                         && let Some(findings) = &mut projection
                     {
                         summarise_findings(findings, FINDINGS_BYTES);
