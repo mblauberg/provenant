@@ -1204,7 +1204,7 @@ pub(crate) fn run(
                 .stack_size(8 * 1024 * 1024)
                 .spawn_scoped(scope, move || {
                 let mut session = None;
-                let mut retry_tick: Option<mpsc::Receiver<Result<crate::tick::Graphs, String>>> = None;
+                let mut retry_ticks = std::collections::BTreeMap::<String, mpsc::Receiver<Result<crate::tick::Graphs, String>>>::new();
                 let mut observation_history = observation_history;
                 let mut pending = pending;
                 // Read once for rows that arrived after preflight or were not
@@ -1274,9 +1274,10 @@ pub(crate) fn run(
                             };
                             let delay = Duration::from_micros(wake.as_micros().saturating_sub(now.as_micros()).max(0) as u64);
                             if delay.is_zero() {
-                                // At most one scheduler task per waiter. It owns its
-                                // cancellation and deadline; this worker only observes.
-                                if let Some(receipt) = retry_tick.as_ref() {
+                                // Each selected graph owns its in-flight receipt, so
+                                // one preparation cannot starve another graph's retry.
+                                let retry_key = format!("{project}/{graph}");
+                                if let Some(receipt) = retry_ticks.get(&retry_key) {
                                     match mpsc::Receiver::try_recv(receipt) {
                                         Ok(result) => {
                                             if let Ok(mut warnings) = warnings.lock() {
@@ -1288,15 +1289,15 @@ pub(crate) fn run(
                                                     Err(error) => warnings.push(format!("launch retry could not advance: {error}")),
                                                 }
                                             }
-                                            retry_tick = None;
+                                            retry_ticks.remove(&retry_key);
                                         }
-                                        Err(mpsc::TryRecvError::Disconnected) => retry_tick = None,
+                                        Err(mpsc::TryRecvError::Disconnected) => { retry_ticks.remove(&retry_key); },
                                         Err(mpsc::TryRecvError::Empty) => {}
                                     }
                                 }
-                                if retry_tick.is_none() {
+                                if !retry_ticks.contains_key(&retry_key) {
                                     match crate::fabric::tick_launch_retry(resolved, project, &graph, workers) {
-                                        Ok(receipt) => retry_tick = Some(receipt),
+                                        Ok(receipt) => { retry_ticks.insert(retry_key, receipt); },
                                         Err(error) => if let Ok(mut warnings) = warnings.lock() {
                                             warnings.push(format!("launch retry for {graph} could not start: {error}"));
                                         },

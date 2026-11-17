@@ -2083,6 +2083,7 @@ mod diagnostic_tests {
         Ok(())
     }
 
+    // Spec: docs/specs/run-launch.md#admission-and-custody
     #[test]
     fn filesystem_diagnostic_omits_paths_with_unknown_anchors() {
         let error = provenant_os::fs::FsError::Io {
@@ -2097,11 +2098,16 @@ mod diagnostic_tests {
                 delivery_stage: None,
                 resource: None,
                 input_failure: None,
-                cause: None,
+                cause: Some(Box::new(IoCause::Filesystem(
+                    "openat read (filesystem entry): NotFound; errno None".into(),
+                ))),
                 operation: "openat read".into(),
                 path: None,
             }
         );
+        let projected = FacadeError::filesystem(&error);
+        assert!(!projected.diagnostic().detail.unwrap().contains("HEAD"));
+        assert!(!serde_json::to_string(&projected).unwrap().contains("HEAD"));
     }
 
     #[test]
