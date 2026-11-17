@@ -688,8 +688,8 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             } else {
                 HEAD.to_owned()
             };
-            let draft = Path::new("draft").exists()
-                || head_value["isDraft"].as_bool().unwrap_or(false);
+            let draft =
+                Path::new("draft").exists() || head_value["isDraft"].as_bool().unwrap_or(false);
             let body = serde_json::json!({"state":if merged {"closed"} else {"open"}, "head":{"sha":next,"ref":"feature","repo":{"full_name":"owner/repo"}}, "base":{"sha":base,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":mergeable,"mergeable_state":"clean","merged_at":if merged {Some("2020-01-01T00:00:00Z")} else {None},"merge_commit_sha":null,"title":"fixture","user":{"login":"fixture-author"},"draft":draft});
             io::stdout().write_all(&serde_json::to_vec(&body)?)?;
         }

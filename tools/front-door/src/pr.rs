@@ -568,10 +568,7 @@ fn merge_failure_from_output(
                 })
         });
     if status == Some(409) {
-        return wait::failure(
-            "HEAD_MOVED",
-            format!("pull request head moved from {head}"),
-        );
+        return wait::failure("HEAD_MOVED", format!("pull request head moved from {head}"));
     }
     if status == Some(405) {
         let message = match extract_github_message(output) {
