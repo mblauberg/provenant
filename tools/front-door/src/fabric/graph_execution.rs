@@ -353,14 +353,19 @@ impl Factory {
 
     /// The one selector resolver for graph status, cancel and resume: a graph
     /// ID, a project-local document path or a document SHA-256 hash (prefix)
-    /// becomes the graph ID and, when one is retained or named, its document.
+    /// becomes the graph ID and its document or the retained read error.
+    /// Status and cancel can use the identity of an unreadable graph; resume
+    /// must propagate its read error rather than treat it as an absent document.
     pub(crate) fn resolve_graph(
         &self,
         selector: &str,
     ) -> Result<
         (
             String,
-            Option<provenant_fabric_runtime::graph::GraphDocument>,
+            Result<
+                provenant_fabric_runtime::graph::GraphDocument,
+                provenant_fabric_runtime::graph::JournalError,
+            >,
         ),
         FacadeError,
     > {
@@ -386,9 +391,9 @@ impl Factory {
                 {
                     return Err(refused());
                 }
-                return Ok((selector.to_owned(), Some(execution.document)));
+                return Ok((selector.to_owned(), Ok(execution.document)));
             }
-            Err(error) if error.is_unreadable() => return Ok((selector.to_owned(), None)),
+            Err(error) if error.is_unreadable() => return Ok((selector.to_owned(), Err(error))),
             _ => {}
         }
         // Then a document path: any path-shaped selector, or a bare name of an
@@ -409,7 +414,7 @@ impl Factory {
                 local
             };
             return match self.read_graph_document(&path) {
-                Ok(document) => Ok((document.graph_id.clone(), Some(document))),
+                Ok(document) => Ok((document.graph_id.clone(), Ok(document))),
                 Err(FacadeError::Io { .. }) => Err(refused()),
                 Err(error) => Err(error),
             };
@@ -423,7 +428,7 @@ impl Factory {
             return Err(refused());
         };
         match <[_; 1]>::try_from(found) {
-            Ok([document]) => Ok((document.graph_id.clone(), Some(document))),
+            Ok([document]) => Ok((document.graph_id.clone(), Ok(document))),
             Err(found) if found.is_empty() => Err(FacadeError::NotFound),
             Err(_) => Err(refused()),
         }
@@ -534,11 +539,7 @@ impl Factory {
                 let mut document = if resume {
                     self.resolve_graph(&document.to_string_lossy())?
                         .1
-                        .ok_or_else(|| FacadeError::DispatchRefused {
-                            fact: None,
-                            disk: None,
-                            reason: graph_selector_forms(),
-                        })?
+                        .map_err(graph_journal_error)?
                 } else {
                     let path = if document.is_absolute() {
                         document.clone()
@@ -1473,6 +1474,7 @@ pub(super) fn graph_operation(
 mod tests {
     use super::*;
 
+    // Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
     #[test]
     fn nested_graph_selectors_refuse_symlinked_scratch_directories()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1508,8 +1510,37 @@ mod tests {
             for selector in ["plan.json", source.to_str().ok_or("graph path")?, &digest] {
                 let (id, graph) = factory.resolve_graph(selector)?;
                 assert_eq!(id, "nested-selector");
-                assert_eq!(graph.ok_or("resolved document")?.graph_id, id);
+                assert_eq!(graph?.graph_id, id);
             }
+            // A corrupt exact ID remains resolved, with its typed error intact
+            // for resume; status/cancel still have the graph identity.
+            let mut corrupt: serde_json::Value = serde_json::from_slice(include_bytes!(
+                "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
+            ))?;
+            let corrupt_id = "broken-checkpoint";
+            corrupt["checkpoint"]["graph_id"] = corrupt_id.into();
+            corrupt["execution"]["document"]["graph_id"] = corrupt_id.into();
+            corrupt["digest"] = format!("sha256:{}", "0".repeat(64)).into();
+            let retained = factory
+                .context
+                .roots
+                .state
+                .as_path()
+                .join("fabric/graphs")
+                .join(factory.context.identity.project.to_string());
+            std::fs::create_dir_all(&retained)?;
+            std::fs::write(
+                retained.join(format!("graph-{corrupt_id}.json")),
+                serde_json::to_vec(&corrupt)?,
+            )?;
+            let (id, resolved_document) = factory.resolve_graph(corrupt_id)?;
+            assert_eq!(id, corrupt_id);
+            let error = resolved_document.unwrap_err();
+            assert_eq!(error.code(), "bad_digest");
+            assert!(error.to_string().contains(corrupt_id));
+            let resume_error = graph_journal_error(error);
+            assert!(format!("{resume_error:?}").contains(corrupt_id));
+
             // The exception grants the scratch graph directory, not sibling
             // documents elsewhere in the enclosing checkout.
             let sibling = rig.project.join("sibling.json");
