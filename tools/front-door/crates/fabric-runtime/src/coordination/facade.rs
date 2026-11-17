@@ -369,7 +369,10 @@ impl InvalidInputDetail {
             // text. They are not approved facts, even when a secret scanner
             // does not recognise their contents.
             Self::OperationFailed => Some("graph operation failed".into()),
-            Self::GraphReason(_) => Some("graph input could not be processed".into()),
+            Self::GraphReason(reason) => Some(
+                safe_template_name_error(reason)
+                    .unwrap_or_else(|| "graph input could not be processed".into()),
+            ),
             Self::Parameter(refusal) => Some(refusal.redacted().to_string()),
             Self::GraphRelayCause(cause) => Some(cause.text().into()),
             Self::UpgradeDrainRequired => Some("Finish or cancel old pending graphs and drain live lanes with the previous release before admitting new work.".into()),
@@ -399,6 +402,34 @@ impl InvalidInputDetail {
             Self::FieldTitle(field) => safe_input_field(field).map(|path| format!("invalid input field `{path}`: task title must be 1 to 256 bytes and contain no control characters")),
         }
     }
+}
+
+/// Template lookup failures are safe to disclose only in the exact form the
+/// resolver constructs, with every name still inside its declared grammar.
+fn safe_template_name_error(reason: &str) -> Option<String> {
+    let message = reason
+        .find("unknown template ")
+        .map(|offset| &reason[offset..])?;
+    let (unknown, remainder) = message
+        .strip_prefix("unknown template ")?
+        .split_once("; known ")?;
+    if !crate::graph::template::valid_template_name(unknown) {
+        return None;
+    }
+    let (known, names) = remainder.split_once(": ")?;
+    let known = known.strip_suffix(" flavours").unwrap_or(known);
+    if known != "templates" && !crate::graph::template::valid_template_name(known) {
+        return None;
+    }
+    let names = names.split(", ").collect::<Vec<_>>();
+    if names.is_empty()
+        || names
+            .iter()
+            .any(|name| !crate::graph::template::valid_template_name(name))
+    {
+        return None;
+    }
+    Some(message.to_owned())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
@@ -870,10 +901,16 @@ impl FacadeError {
             Self::GraphRelayRefused { detail: Some(InvalidInputDetail::CutoverFindings(findings)), .. } => {
                 projected = projected.detail(findings.clone()).next("finish or cancel pending graphs and drain live lanes with the previous release, then retry");
             }
-            Self::InvalidInput { detail: Some(InvalidInputDetail::GraphReason(_)) }
-            | Self::GraphRelayRefused { detail: Some(InvalidInputDetail::GraphReason(_)), .. } => {
-                projected = projected.detail("graph input could not be processed")
-                    .next("inspect the graph definition and template fields");
+            Self::InvalidInput { detail: Some(InvalidInputDetail::GraphReason(reason)) }
+            | Self::GraphRelayRefused { detail: Some(InvalidInputDetail::GraphReason(reason)), .. } => {
+                let detail = safe_template_name_error(reason)
+                    .unwrap_or_else(|| "graph input could not be processed".into());
+                let next = if detail.starts_with("unknown template ") {
+                    "use one of the listed template names and retry"
+                } else {
+                    "inspect the graph definition and template fields"
+                };
+                projected = projected.detail(detail).next(next);
             }
             Self::InvalidInput { detail: Some(InvalidInputDetail::Parameter(refusal)) } => {
                 let refusal = refusal.redacted();
@@ -1264,9 +1301,9 @@ mod invalid_detail_wire {
         {
             map.serialize_entry("detail", &text)?;
             let safe_fact = match fact {
-                InvalidInputDetail::GraphReason(_) => {
-                    InvalidInputDetail::GraphReason(String::new())
-                }
+                InvalidInputDetail::GraphReason(reason) => InvalidInputDetail::GraphReason(
+                    super::safe_template_name_error(reason).unwrap_or_default(),
+                ),
                 fact => fact.redacted(),
             };
             map.serialize_entry("detail_fact", &safe_fact)?;
@@ -1523,6 +1560,7 @@ mod diagnostic_tests {
 
     #[test]
     fn graph_reason_wire_contains_only_disclosed_text() -> Result<(), Box<dyn std::error::Error>> {
+        // Spec: docs/specs/cli.md#template-name-errors
         for reason in [
             "sk-abcdefghijklmnopqrstuvwx".to_owned(),
             "PROMPT_SENTINEL unclassified source text".to_owned(),
@@ -1540,6 +1578,22 @@ mod diagnostic_tests {
             assert!(!serde_json::to_string(&wire)?.contains("sk-abcdefghijklmnopqrstuvwx"));
             assert!(!serde_json::to_string(&wire)?.contains("PROMPT_SENTINEL"));
         }
+        let error = FacadeError::invalid(super::InvalidInputDetail::graph_reason(
+            "node review: unknown template review.reliability; known review flavours: review.adversarial, review.correctness, review.contract, review.design, review.security, review.synthesis, review.tests, review.verify",
+        ));
+        let wire = serde_json::to_value(&error)?;
+        assert_eq!(
+            wire["detail"],
+            "unknown template review.reliability; known review flavours: review.adversarial, review.correctness, review.contract, review.design, review.security, review.synthesis, review.tests, review.verify"
+        );
+        assert!(
+            error
+                .diagnostic()
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("review.reliability")
+        );
         Ok(())
     }
 

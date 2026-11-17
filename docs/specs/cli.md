@@ -69,6 +69,15 @@ command catalogue owns the list of codes and their meanings.
 
 - Why: consumers can act on a refusal without depending on prose.
 
+### Template name errors
+
+An unknown template or flavour names the supplied template and lists known
+matching template names or flavours. Only validated template identifiers are
+disclosed; unclassified graph input errors keep their generic message.
+
+- Why: a mistyped flavour should be repairable from the refusal without exposing
+  arbitrary graph input.
+
 ### Waits are readers
 
 Waiting observes work; timeout or cancellation does not stop it. A target
