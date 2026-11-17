@@ -3738,6 +3738,14 @@ mod tests {
         let docs_head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
 
         let factory = factory(&rig)?;
+        // Protected paths resolve to the `crucial` shape; derive the panel size
+        // from the resolved defaults rather than a literal lens count.
+        let review = provenant_routing::RoutingConfig::default().review;
+        let crucial_reviewers: usize = review.shapes[&review.select.by_risk["crucial"]]
+            .reviewers
+            .iter()
+            .map(|group| group.count)
+            .sum();
         let cancel = CancelToken::new();
         let caller_brief = "REVIEW_PANEL_CALLER_BRIEF_SENTINEL";
         let explain = |subject: &str, review_base: &str| -> Result<GraphDocument> {
@@ -3757,7 +3765,7 @@ mod tests {
         let protected = explain(&protected_head, &base)?;
         assert_eq!(protected.review_base.as_deref(), Some(base.as_str()));
         let protected_lenses = &protected.template_resolvers["review-panel"];
-        assert!(protected_lenses.len() >= 8, "{protected_lenses:?}");
+        assert!(protected_lenses.len() >= crucial_reviewers, "{protected_lenses:?}");
         for lens in ["correctness-spec", "reliability", "security-privacy"] {
             assert!(
                 protected_lenses.iter().any(|selected| selected == lens),
@@ -3783,7 +3791,7 @@ mod tests {
             .filter(|node| node.review_lens.is_some())
             .collect();
         assert!(
-            review_leaves.len() >= 8,
+            review_leaves.len() >= crucial_reviewers,
             "{} review leaves",
             review_leaves.len()
         );
@@ -3834,7 +3842,7 @@ mod tests {
             crate::worktree_tests::git(&rig, &["commit-tree", &tree, "-m", "disconnected head"])?;
         let incomplete = explain(&disconnected_head, &disconnected_base)?;
         let incomplete_lenses = &incomplete.template_resolvers["review-panel"];
-        assert!(incomplete_lenses.len() >= 8, "{incomplete_lenses:?}");
+        assert!(incomplete_lenses.len() >= crucial_reviewers, "{incomplete_lenses:?}");
         for lens in ["correctness-spec", "reliability", "security-privacy"] {
             assert!(
                 incomplete_lenses.iter().any(|selected| selected == lens),

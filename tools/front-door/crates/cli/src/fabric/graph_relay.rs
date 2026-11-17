@@ -2958,6 +2958,11 @@ mod panel_tests {
         root_inputs.state_dir = Some(root.path().join("state"));
         let roots = root_inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         let review = provenant_routing::RoutingConfig::default().review;
+        let crucial_reviewers: usize = review.shapes[&review.select.by_risk["crucial"]]
+            .reviewers
+            .iter()
+            .map(|group| group.count)
+            .sum();
         let library = TemplateLibrary::bundled();
         let limits = provenant_fabric_runtime::config::GraphLimits::default();
         let worktree_layout = provenant_config::PortTable::builtin().worktree_layout;
@@ -3033,7 +3038,7 @@ mod panel_tests {
             )?;
             let lenses = &resolvers["review-panel"];
             if deep {
-                assert!(lenses.len() >= 8, "{lenses:?}");
+                assert!(lenses.len() >= crucial_reviewers, "{lenses:?}");
                 for lens in ["correctness-spec", "reliability", "security-privacy"] {
                     assert!(lenses.iter().any(|selected| selected == lens), "{lenses:?}");
                 }
@@ -3072,7 +3077,7 @@ mod panel_tests {
                 .filter(|node| node.review_lens.is_some())
                 .collect();
             assert_eq!(
-                review_leaves.len() >= 8,
+                review_leaves.len() >= crucial_reviewers,
                 deep,
                 "{} leaves",
                 review_leaves.len()
@@ -3166,7 +3171,7 @@ mod panel_tests {
                 &checkpoint,
                 subjects,
             )?;
-            assert!(resolvers["review-panel"].len() >= 8);
+            assert!(resolvers["review-panel"].len() >= crucial_reviewers);
             for stage in ["review-frame", "review-verify", "review-synthesis"] {
                 assert_eq!(resolvers[stage], vec!["true".to_owned()]);
             }
@@ -3205,7 +3210,7 @@ mod panel_tests {
             &checkpoint,
             &mixed_subjects,
         )?;
-        assert!(mixed_resolvers["review-panel"].len() >= 8);
+        assert!(mixed_resolvers["review-panel"].len() >= crucial_reviewers);
         assert!(
             mixed_resolvers["review-advice-correctness-spec"][0]
                 .contains("configured unreadable-path floors were applied")
@@ -3297,6 +3302,13 @@ mod panel_tests {
             .flat_map(|floor| floor.lenses.iter().cloned())
             .collect::<std::collections::BTreeSet<_>>();
         assert!(configured_floor_lenses.contains("tests"));
+        // Protected paths resolve to the `crucial` shape; its reviewer total is
+        // the coverage minimum the floors must enforce.
+        let crucial_reviewers: usize = review.shapes[&review.select.by_risk["crucial"]]
+            .reviewers
+            .iter()
+            .map(|group| group.count)
+            .sum();
         let document = serde_json::from_value(json!({
             "schema_version": 1, "graph_id": "incomplete-review-context",
             "nodes": [{"id": "anchor", "access": "read_only", "prompt": "Review", "route": {"alias": "senior"}}],
@@ -3368,7 +3380,7 @@ mod panel_tests {
         .unwrap();
         let floor: Value = serde_json::from_str(&protected["review-coverage-floor"][0]).unwrap();
         assert_eq!(floor["hard"], true);
-        assert_eq!(floor["minimum"], 8);
+        assert_eq!(floor["minimum"], crucial_reviewers);
         assert!(
             floor["required_lenses"]
                 .as_array()
@@ -3394,7 +3406,7 @@ mod panel_tests {
         .unwrap();
         let floor: Value = serde_json::from_str(&mixed_paths["review-coverage-floor"][0]).unwrap();
         assert_eq!(floor["hard"], true);
-        assert_eq!(floor["minimum"], 8);
+        assert_eq!(floor["minimum"], crucial_reviewers);
         assert!(
             !floor["required_lenses"]
                 .as_array()
@@ -3422,7 +3434,7 @@ mod panel_tests {
         let lens_floor = lenses.composite.as_ref().unwrap();
         assert!(lens_floor.soft_review_coverage);
         assert!(lens_floor.hard_review_coverage);
-        assert_eq!(lens_floor.min_successful, Some(8));
+        assert_eq!(lens_floor.min_successful, Some(crucial_reviewers));
         assert!(
             lens_floor
                 .required_review_lenses

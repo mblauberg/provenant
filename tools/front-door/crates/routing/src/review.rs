@@ -1740,7 +1740,14 @@ mod tests {
         assert!(names.contains(&"tests"));
         assert!(names.contains(&"security-privacy"));
         assert!(names.contains(&"correctness-spec"));
-        assert!(names.len() >= 8);
+        // Floors raise the shape to the one `crucial` resolves to; the panel
+        // holds at least that shape's reviewer slots, plus floor lenses.
+        let crucial_reviewers: usize = review.shapes[&review.select.by_risk["crucial"]]
+            .reviewers
+            .iter()
+            .map(|group| group.count)
+            .sum();
+        assert!(names.len() >= crucial_reviewers, "{names:?}");
         assert!(
             review
                 .path_floors(&paths)
