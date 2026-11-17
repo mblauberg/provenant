@@ -2248,8 +2248,8 @@ fn simultaneous_repository_lock_contention_retries_both_launches() -> Result {
     Ok(())
 }
 
-/// A held registry preserves a typed, durable retry without creating a writer.
-fn writer_registry_contention_is_durable_without_creating_a_writer() -> Result {
+/// A held repository lock preserves a typed, durable retry without creating a writer.
+fn repository_lock_contention_is_durable_without_creating_a_writer() -> Result {
     use provenant_core::{Clock, RootInputs, WaitBudget};
     use provenant_os::{
         clock::SystemClock,
@@ -2301,7 +2301,10 @@ fn writer_registry_contention_is_durable_without_creating_a_writer() -> Result {
     ])?;
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
     let node = &response["data"]["checkpoint"]["nodes"][0];
-    assert_eq!(node["advance_owner_code"], "writer_lock_busy", "{response}");
+    assert_eq!(
+        node["advance_owner_code"], "repository_lock_busy",
+        "{response}"
+    );
     assert!(
         node["attempts"].as_array().is_some_and(Vec::is_empty),
         "{response}"
@@ -2331,21 +2334,21 @@ fn writer_registry_contention_is_durable_without_creating_a_writer() -> Result {
     let graph = response["data"]["checkpoint"]["graph_id"]
         .as_str()
         .ok_or("graph id")?;
-    // Reading contention must not reacquire the held registry.
+    // Reading contention must not reacquire the held repository lock.
     let output = rig.command(&["status", graph, "--json"])?;
     assert_eq!(code(&output), 0, "{output:?}");
     let reading: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert!(
         reading["data"]["rows"].as_array().is_some_and(|rows| rows
             .iter()
-            .any(|row| row["kind"] == "node" && row["cause_code"] == "writer_lock_busy")),
+            .any(|row| row["kind"] == "node" && row["cause_code"] == "repository_lock_busy")),
         "{reading}"
     );
     Ok(())
 }
 
 /// Expanded writers preserve contention as a durable retry without waiting.
-fn expanded_writer_registry_contention_remains_retryable() -> Result {
+fn expanded_repository_lock_contention_remains_retryable() -> Result {
     use provenant_core::{Clock, RootInputs, WaitBudget};
     use provenant_os::{
         clock::SystemClock,
@@ -2419,7 +2422,7 @@ fn expanded_writer_registry_contention_remains_retryable() -> Result {
         &clock,
     )?;
     // An edit only records the patch; the scheduler tick launches the added
-    // writer. With Git's repository lock held, it records retryable writer
+    // writer. With Git's repository lock held, it records typed repository
     // contention without creating an attempt.
     let tick = rig.command(&["tick", "--json"])?;
     assert_eq!(code(&tick), 0, "{tick:?}");
@@ -3244,32 +3247,62 @@ fn retry_fences_retired_dynamic_descendant_against_launcher() -> Result {
                 cancel: &cancel,
             };
             let launch_cancel = cancel.clone();
+            let violations = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let observer_violations = violations.clone();
             let store = provenant_run::RunStore::open(&launcher_context, &call)
                 .map_err(|error| error.to_string())?
                 .with_launch_observer(move |stage, record| {
-                    assert_eq!(record.attempt_id, attempt_id);
+                    if record.attempt_id != attempt_id {
+                        observer_violations
+                            .borrow_mut()
+                            .push("unexpected attempt observed");
+                        launch_cancel.cancel();
+                        return;
+                    }
                     if stage == pause_at {
-                        observed_tx.send(record.clone()).expect("retry observer");
-                        resume_rx
-                            .recv_timeout(timeout)
-                            .expect("retry releases launcher");
+                        if observed_tx.send(record.clone()).is_err() {
+                            observer_violations
+                                .borrow_mut()
+                                .push("retry observer disconnected");
+                            launch_cancel.cancel();
+                            return;
+                        }
+                        if resume_rx.recv_timeout(timeout).is_err() {
+                            observer_violations
+                                .borrow_mut()
+                                .push("retry did not release launcher");
+                            launch_cancel.cancel();
+                            return;
+                        }
                         if stage == provenant_run::LaunchObservation::Claimed {
                             launch_cancel.cancel();
                         }
                     } else if pause_at == provenant_run::LaunchObservation::Queued {
-                        panic!("withdrawn attempt must never be claimed");
+                        observer_violations
+                            .borrow_mut()
+                            .push("withdrawn attempt was claimed");
+                        launch_cancel.cancel();
                     }
                 });
             // Cancellation after the claim observation lets this fixture stop before
             // provider preparation. The stale queued launcher must lose its claim
             // without relying on cancellation.
-            store
-                .start(
-                    attempt_id,
-                    &provenant_cli::run::Registry::default(),
-                    &|_, _| panic!("no provider may be handed off in this race"),
-                    &call,
-                )
+            let started = store.start(
+                attempt_id,
+                &provenant_cli::run::Registry::default(),
+                &|_, _| {
+                    violations
+                        .borrow_mut()
+                        .push("provider handoff requested in retry race");
+                    Err(provenant_run::RunError::Cancelled)
+                },
+                &call,
+            );
+            let violations = violations.borrow();
+            if !violations.is_empty() {
+                return Err(violations.join("; "));
+            }
+            started
                 .map(|started| started.is_empty())
                 .map_err(|error| error.to_string())
         });
@@ -5739,16 +5772,16 @@ fn main() -> ExitCode {
                 provider_checks_preserve_routes_and_settlement_causes,
             ),
             (
-                "expanded_writer_registry_contention_remains_retryable",
-                expanded_writer_registry_contention_remains_retryable,
+                "expanded_repository_lock_contention_remains_retryable",
+                expanded_repository_lock_contention_remains_retryable,
             ),
             (
                 "pending_graph_reports_pre_attempt_writer_failure",
                 pending_graph_reports_pre_attempt_writer_failure,
             ),
             (
-                "writer_registry_contention_is_durable_without_creating_a_writer",
-                writer_registry_contention_is_durable_without_creating_a_writer,
+                "repository_lock_contention_is_durable_without_creating_a_writer",
+                repository_lock_contention_is_durable_without_creating_a_writer,
             ),
             (
                 "simultaneous_writer_launches_are_admitted_or_scheduled_for_retry",
