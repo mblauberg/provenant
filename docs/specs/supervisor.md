@@ -321,6 +321,12 @@ it deletes a branch only with current landing evidence or explicit discard.
 A persisted writer reservation remains a custody fence when its kernel lock is
 absent: read-only occupancy is unknown until run-owned reconciliation settles
 the attempt, and cache guards refuse the slot without clearing its evidence.
+Named removal without current landing or subsumption proof returns
+`WorktreeError::UnprovenLanding`, naming the branch and missing proof, with an
+explicit-discard recovery command. `IdentityChanged` remains a changed-identity
+or changed-observation refusal, not a substitute for missing landing proof.
+Landing cleanup refreshes stale run observations before evaluating current
+writer custody; a failed refresh or a live writer still keeps the tree.
 - Why: removing a tree under a live writer destroys its work.
 - Owner: `crates/confinement/src/worktrees.rs`
 
@@ -347,6 +353,16 @@ cache, and foreign, detached or idle worktree collection requires the declared
 retention policy and complete current custody, run and process evidence.
 Shallow history, conflicted comparisons, moved tips and unavailable evidence
 keep the candidate.
+Settlement chooses worktree-only retirement for retained-ref subsumption,
+preserving the local branch; integration evidence may also retire the branch.
+A pruning receipt is a locator, not removal authority. If the checkout is absent
+and no durable retirement owns the receipt's reference, an applied GC sweep
+retires the orphaned operation receipt with the typed
+`missing_retirement_owner` cause and custody-unknown retention evidence. It
+never certifies deletion from path absence. Existing checkouts are reconsidered
+under fresh ownership and landing proof, and reference cleanup remains subject
+to its normal independent proof checks. `provenant gc --apply` performs this
+recovery without an absent owner holding the receipt in an endless retry.
 Removal previews use the same cleanliness and ignored-output eligibility
 checks as apply; a preview never reports dirty user data as removable.
 - Why: GC runs unattended; pruning on a guess deletes the user's work.

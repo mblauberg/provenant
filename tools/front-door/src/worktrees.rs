@@ -137,6 +137,7 @@ impl Error {
                 WorktreeError::Dirty(_)
                 | WorktreeError::DetachedPrimary
                 | WorktreeError::DetachedUnmerged { .. }
+                | WorktreeError::UnprovenLanding { .. }
                 | WorktreeError::IgnoredPaths(_)
                 | WorktreeError::GitOperationInProgress
                 | WorktreeError::LockBusy
@@ -1390,12 +1391,24 @@ pub(crate) fn land_cleanup(
             if !regenerable.iter().any(|name| name == "target") {
                 regenerable.push("target".into());
             }
-            let snapshot = crate::gc_support::lane_states(&roots, &home, &assets, project_id).ok();
-            // A branch landed by hand may never have had a lane, so unlike a
-            // sweep this accepts a worktree no lane used. A live or unobservable
-            // lane, or a stale scan, still refuses.
+            let snapshot = RefCell::new(
+                crate::gc_support::lane_states(&roots, &home, &assets, project_id).ok(),
+            );
+            let rescan_failed = std::cell::Cell::new(false);
+            // Repair and cancellation can advance the run store while landing
+            // is in flight. Refresh current custody rather than treating the
+            // old attempt snapshot as an unknown writer forever. A failed
+            // refresh still holds cleanup, as does any current live lane.
+            // A branch landed by hand may never have had a lane.
             let idle = |path: &Path| {
+                crate::gc_support::refresh_if_stale(
+                    &snapshot,
+                    &rescan_failed,
+                    |snapshot| snapshot.is_current(),
+                    || crate::gc_support::lane_states(&roots, &home, &assets, project_id).ok(),
+                );
                 snapshot
+                    .borrow()
                     .as_ref()
                     .is_some_and(|snapshot| snapshot.no_live_lanes(path))
             };

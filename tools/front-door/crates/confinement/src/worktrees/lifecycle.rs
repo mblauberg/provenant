@@ -2025,7 +2025,13 @@ fn remove_with_owner(
                                 removal_evidence(context, tip, &refs, cancel)?,
                                 LandingAssessment::Proven(_)
                             ) {
-                                return Err(WorktreeError::IdentityChanged);
+                                return Err(WorktreeError::UnprovenLanding {
+                                    branch: entry
+                                        .branch
+                                        .as_ref()
+                                        .map(|branch| branch.as_str().to_owned())
+                                        .unwrap_or_else(|| "detached HEAD".into()),
+                                });
                             }
                         }
                         if let Some(operation) = operation {
@@ -2230,7 +2236,11 @@ fn remove_with_owner(
                     let refs = retained_refs(context, Some(branch), None, &[], cancel)?;
                     let evidence = match removal_evidence(context, tip, &refs, cancel)? {
                         LandingAssessment::Proven(evidence) => evidence,
-                        _ => return Err(WorktreeError::IdentityChanged),
+                        _ => {
+                            return Err(WorktreeError::UnprovenLanding {
+                                branch: branch.as_str().to_owned(),
+                            });
+                        }
                     };
                     Some((false, Some(evidence)))
                 };
