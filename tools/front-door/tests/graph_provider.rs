@@ -800,14 +800,13 @@ fn policy_codex_fixture() -> Result<TestRig> {
 }
 
 // Spec: docs/specs/fabric.md#session-ready-steering
-#[test]
 fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    use provenant_core::{CancelToken, Clock, RootInputs};
+    use provenant_core::{CancelToken, RootInputs};
 
-    let mut rig = policy_codex_fixture()?;
+    let rig = policy_codex_fixture()?;
     let cleanup = rig.process_cleanup();
     let auth = br#"{"tokens":{"account_id":"fixture-one"}}"#;
     let account_key = provenant_providers::identity::codex_account(auth).ok_or("account key")?;
@@ -981,18 +980,19 @@ fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() ->
             Some(u32::try_from(ordinal + 1)?),
             "{request:?}"
         );
+        let route = record.applied_route.as_ref().ok_or("applied route")?;
         assert_eq!(
-            record.route.provider.as_deref(),
+            route.provider.as_deref(),
             Some("codex"),
             "{record:?}"
         );
         assert_eq!(
-            record.route.model.as_deref(),
+            route.model.as_deref(),
             Some("codex/gpt-6-luna"),
             "{record:?}"
         );
         assert_eq!(
-            record.route.account_label.as_deref(),
+            route.account_label.as_deref(),
             Some("fixture"),
             "{record:?}"
         );
@@ -5296,6 +5296,20 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
     rig.assert_v1_root_untouched()
 }
 
+/// Test functions are the zero-argument `fn name() -> Result {` items that are
+/// not fixtures. This binary has no harness, so a test function missing from the
+/// list in `main` would never run; `main` refuses to start instead.
+fn undispatched<'a>(source: &'a str, names: &[&str]) -> Vec<&'a str> {
+    source
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("fn ")?
+                .strip_suffix("() -> Result {")
+                .filter(|name| !name.ends_with("fixture") && !names.contains(name))
+        })
+        .collect()
+}
+
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     #[cfg(target_os = "macos")]
@@ -5503,8 +5517,20 @@ fn main() -> ExitCode {
                 "codex_capacity_settles_without_quota_refusal",
                 codex_capacity_settles_without_quota_refusal,
             ),
+            (
+                "public_bounded_implement_steers_and_resumes_the_same_local_codex_session",
+                public_bounded_implement_steers_and_resumes_the_same_local_codex_session,
+            ),
         ];
         let names: Vec<_> = tests.iter().map(|(name, _)| *name).collect();
+        let missing = undispatched(include_str!("graph_provider.rs"), &names);
+        if !missing.is_empty() {
+            let _ = writeln!(
+                io::stderr(),
+                "dispatch fixture: test functions missing from the list in main: {missing:?}"
+            );
+            return ExitCode::FAILURE;
+        }
         provenant_supervisor::fixture::run_libtest(&args, &names, |name| {
             let (_, test) = tests
                 .iter()
