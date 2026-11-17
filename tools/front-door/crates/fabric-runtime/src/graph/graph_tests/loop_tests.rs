@@ -85,6 +85,7 @@ fn settled_loop_dependency_does_not_inherit_entry_inputs() {
                  {"id":"second","access":"read_only","prompt":"second","route":{"alias":"senior"},
                   "after_settled":["first"],"inputs":[{"node":"first","outputs":["findings"]}]},
                  {"id":"accepted","kind":"gate","access":"read_only","depends_on":["second"],
+                  "inputs":[{"node":"second","outputs":["verdict"]}],
                   "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
              ]}}
         ]
