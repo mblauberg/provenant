@@ -510,7 +510,42 @@ fn named_removal_reports_unproven_landing_without_claiming_identity_changed()
     assert!(message.contains("unlanded") && message.contains("proof"));
     assert!(message.contains("provenant worktree remove NAME --discard"));
     assert!(info.path.exists());
-    assert!(read_branch_tips(&context, &cancel())?.contains_key(&GitRefName::branch("unlanded")?));
+    let branch = GitRefName::branch("unlanded")?;
+    let tip = *read_branch_tips(&context, &cancel())?
+        .get(&branch)
+        .ok_or("missing branch")?;
+    fixture.run(&["branch", "proof", &tip.to_string()])?;
+    let evidence = provenant_records::custody::LandedEvidence {
+        predicate: provenant_records::custody::LandingPredicate::Landed,
+        source: provenant_records::custody::LandingSource::IntegrationTarget {
+            reference: "refs/heads/proof".into(),
+            commit: tip,
+        },
+    };
+    super::super::lifecycle::revalidate_named_landing_evidence(
+        &context,
+        Some(&branch),
+        tip,
+        &evidence,
+        &cancel(),
+    )?;
+    // Keep the checkout and its tip fixed while invalidating the selected proof.
+    fixture.run(&["update-ref", "refs/heads/proof", &info.head.to_string()])?;
+    assert!(matches!(
+        super::super::lifecycle::revalidate_named_landing_evidence(
+            &context,
+            Some(&branch),
+            tip,
+            &evidence,
+            &cancel(),
+        ),
+        Err(WorktreeError::UnprovenLanding { .. })
+    ));
+    assert!(info.path.exists());
+    assert_eq!(
+        read_branch_tips(&context, &cancel())?.get(&branch),
+        Some(&tip)
+    );
     Ok(())
 }
 

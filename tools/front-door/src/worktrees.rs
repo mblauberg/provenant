@@ -1391,24 +1391,12 @@ pub(crate) fn land_cleanup(
             if !regenerable.iter().any(|name| name == "target") {
                 regenerable.push("target".into());
             }
-            let snapshot = RefCell::new(
-                crate::gc_support::lane_states(&roots, &home, &assets, project_id).ok(),
-            );
-            let rescan_failed = std::cell::Cell::new(false);
-            // Repair and cancellation can advance the run store while landing
-            // is in flight. Refresh current custody rather than treating the
-            // old attempt snapshot as an unknown writer forever. A failed
-            // refresh still holds cleanup, as does any current live lane.
-            // A branch landed by hand may never have had a lane.
+            let snapshot = crate::gc_support::lane_states(&roots, &home, &assets, project_id).ok();
+            // A branch landed by hand may never have had a lane, so unlike a
+            // sweep this accepts a worktree no lane used. A live or unobservable
+            // lane, or a stale scan, still refuses.
             let idle = |path: &Path| {
-                crate::gc_support::refresh_if_stale(
-                    &snapshot,
-                    &rescan_failed,
-                    |snapshot| snapshot.is_current(),
-                    || crate::gc_support::lane_states(&roots, &home, &assets, project_id).ok(),
-                );
                 snapshot
-                    .borrow()
                     .as_ref()
                     .is_some_and(|snapshot| snapshot.no_live_lanes(path))
             };
@@ -2034,7 +2022,12 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                         append_gc_subpass_removals(&mut report, recovered);
                     }
                     report.upstream_error = upstream_error;
-                    if !unsettled.removals.is_empty() {
+                    if unsettled.removals.iter().any(|removal| {
+                        matches!(
+                            removal.outcome,
+                            provenant_records::custody::RemovalOutcome::Removed { .. }
+                        )
+                    }) {
                         report.byte_errors.push(provenant_config::RetentionIssue {
                             path: project.path.clone(),
                             operation: "account recovered settlement".into(),

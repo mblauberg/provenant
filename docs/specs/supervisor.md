@@ -325,8 +325,6 @@ Named removal without current landing or subsumption proof returns
 `WorktreeError::UnprovenLanding`, naming the branch and missing proof, with an
 explicit-discard recovery command. `IdentityChanged` remains a changed-identity
 or changed-observation refusal, not a substitute for missing landing proof.
-Landing cleanup refreshes stale run observations before evaluating current
-writer custody; a failed refresh or a live writer still keeps the tree.
 - Why: removing a tree under a live writer destroys its work.
 - Owner: `crates/confinement/src/worktrees.rs`
 
