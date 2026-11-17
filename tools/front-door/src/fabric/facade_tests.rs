@@ -568,6 +568,42 @@ fn writer_io_keeps_bounded_operation_metadata_without_private_values() {
     }
 }
 
+// Spec: docs/specs/run-launch.md#admission-and-custody
+#[test]
+fn run_io_and_database_failures_keep_safe_classification() {
+    for io in [
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "/private/TOKEN_SENTINEL"),
+        std::io::Error::from_raw_os_error(13),
+    ] {
+        let errno = io.raw_os_error();
+        let error = run_error(provenant_run::RunError::Io(io));
+        let diagnostic = error.diagnostic();
+        assert_eq!(diagnostic.code, "io");
+        let detail = diagnostic.detail.unwrap();
+        for value in ["run I/O", "run state", "PermissionDenied"] {
+            assert!(detail.contains(value), "{detail}");
+        }
+        if let Some(errno) = errno {
+            assert!(detail.contains(&errno.to_string()), "{detail}");
+        }
+        assert!(detail.len() <= 256);
+        assert!(!detail.contains("TOKEN_SENTINEL"));
+        assert!(!detail.contains("/private"));
+        let wire = serde_json::to_string(&error).unwrap();
+        assert!(!wire.contains("TOKEN_SENTINEL"));
+        let decoded: FacadeError = serde_json::from_str(&wire).unwrap();
+        assert!(decoded.diagnostic().detail.is_none());
+    }
+    let error = run_error(provenant_run::RunError::Sqlite(rusqlite::Error::InvalidParameterName(
+        "/private/TOKEN_SENTINEL".into(),
+    )));
+    assert!(matches!(&error, FacadeError::Io { operation, .. } if operation == "run database"));
+    assert_eq!(error.diagnostic().code, "io");
+    let wire = serde_json::to_string(&error).unwrap();
+    assert!(!wire.contains("TOKEN_SENTINEL"));
+    assert!(!wire.contains("/private"));
+}
+
 #[test]
 fn process_limit_retains_io_code_and_safe_resource_facts() {
     let failure = || {

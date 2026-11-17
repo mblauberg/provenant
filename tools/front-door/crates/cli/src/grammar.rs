@@ -1085,6 +1085,11 @@ pub enum Internal {
     },
     ProviderUpdates,
     TickGc,
+    /// Advance a due graph launch retry independently of its observer.
+    TickGraph {
+        project_id: provenant_core::ProjectId,
+        graph: String,
+    },
     /// Collect a terminal lane after settlement publishes its cleanup intent.
     LaneCleanup {
         request: String,

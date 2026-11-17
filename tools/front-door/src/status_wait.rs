@@ -1204,6 +1204,7 @@ pub(crate) fn run(
                 .stack_size(8 * 1024 * 1024)
                 .spawn_scoped(scope, move || {
                 let mut session = None;
+                let mut retry_tick: Option<mpsc::Receiver<Result<crate::tick::Graphs, String>>> = None;
                 let mut observation_history = observation_history;
                 let mut pending = pending;
                 // Read once for rows that arrived after preflight or were not
@@ -1273,17 +1274,33 @@ pub(crate) fn run(
                             };
                             let delay = Duration::from_micros(wake.as_micros().saturating_sub(now.as_micros()).max(0) as u64);
                             if delay.is_zero() {
-                                let budget = provenant_core::WaitBudget::up_to(clock.mono_now(), provenant_core::DurationMicros::from_micros(
-                                    u64::try_from(deadline.saturating_duration_since(Instant::now()).as_micros()).unwrap_or(u64::MAX),
-                                ));
-                                match crate::fabric::tick_launch_retry(resolved, project, &graph, workers, budget, &stop.cancel) {
-                                    Ok(report) => if let Ok(mut warnings) = warnings.lock() {
-                                        warnings.extend(report.warnings);
-                                        warnings.extend(report.errors.into_iter().map(|error| format!("launch retry could not advance: {error}")));
-                                    },
-                                    Err(error) => if let Ok(mut warnings) = warnings.lock() {
-                                        warnings.push(format!("launch retry for {graph} could not advance: {error}"));
-                                    },
+                                // At most one scheduler task per waiter. It owns its
+                                // cancellation and deadline; this worker only observes.
+                                if let Some(receipt) = retry_tick.as_ref() {
+                                    match mpsc::Receiver::try_recv(receipt) {
+                                        Ok(result) => {
+                                            if let Ok(mut warnings) = warnings.lock() {
+                                                match result {
+                                                    Ok(report) => {
+                                                        warnings.extend(report.warnings);
+                                                        warnings.extend(report.errors.into_iter().map(|error| format!("launch retry could not advance: {error}")));
+                                                    }
+                                                    Err(error) => warnings.push(format!("launch retry could not advance: {error}")),
+                                                }
+                                            }
+                                            retry_tick = None;
+                                        }
+                                        Err(mpsc::TryRecvError::Disconnected) => retry_tick = None,
+                                        Err(mpsc::TryRecvError::Empty) => {}
+                                    }
+                                }
+                                if retry_tick.is_none() {
+                                    match crate::fabric::tick_launch_retry(resolved, project, &graph, workers) {
+                                        Ok(receipt) => retry_tick = Some(receipt),
+                                        Err(error) => if let Ok(mut warnings) = warnings.lock() {
+                                            warnings.push(format!("launch retry for {graph} could not start: {error}"));
+                                        },
+                                    }
                                 }
                                 // A concurrent owner may hold the journal. Retry promptly without spinning.
                                 until_retry = until_retry.min(Duration::from_millis(250));
@@ -1751,6 +1768,62 @@ mod tests {
             due + interval >= next_remote_poll,
         );
         assert_eq!(second_due_reads, pending);
+    }
+
+    // Spec: docs/specs/cli.md#waits-are-readers
+    #[test]
+    fn ending_observation_leaves_scheduler_preparation_running()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for mode in [WaitMode::All, WaitMode::Any] {
+            let stop = Stop::default();
+            let (preparing, entered) = mpsc::channel();
+            let (release, resume) = mpsc::channel();
+            // Hold the execution at preparation, using the exact scheduler
+            // lifetime factory used by tick_launch_retry, until observation ends.
+            let receipt = crate::fabric::scheduler_task(move |cancel| {
+                preparing.send(()).unwrap();
+                resume.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert!(
+                    !cancel.is_cancelled(),
+                    "observation cannot withdraw preparation"
+                );
+                "launch accepted"
+            })?;
+            entered.recv_timeout(Duration::from_secs(5))?;
+            let (sender, receiver) = mpsc::channel();
+            let mut latest = vec![Some(reading(Settle::Pending)); 2];
+            let deadline = if mode == WaitMode::Any {
+                // Another target settles while this one is still preparing.
+                sender.send(Update {
+                    target: 1,
+                    reading: reading(Settle::Succeeded),
+                })?;
+                Instant::now() + Duration::from_secs(5)
+            } else {
+                Instant::now()
+            };
+            let mut settled = Vec::new();
+            let done = collect(
+                &receiver,
+                &mut latest,
+                &mut settled,
+                deadline,
+                mode,
+                &mut |_, _| {},
+            );
+            assert_eq!(done, mode == WaitMode::Any);
+            stop.stop();
+            assert!(stop.cancel.is_cancelled());
+            assert!(!latest[0].as_ref().unwrap().done());
+            // Preparation is not joined by observation, and still completes
+            // after timeout or --any has stopped the observing workers.
+            release.send(())?;
+            assert_eq!(
+                receipt.recv_timeout(Duration::from_secs(5))?,
+                "launch accepted"
+            );
+        }
+        Ok(())
     }
 
     #[test]

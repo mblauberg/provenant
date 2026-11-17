@@ -1205,6 +1205,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             tick::gc_worker(globals, process.workers())
         }
         Command::Internal(provenant_cli::Internal::TickSeed) => tick::seed_worker(globals),
+        Command::Internal(provenant_cli::Internal::TickGraph { project_id, graph }) => {
+            fabric::launch_retry_worker(globals, project_id, &graph, process.workers())
+        }
         Command::Internal(provenant_cli::Internal::Launch {
             attempt,
             provider_lease_wait,

@@ -188,6 +188,7 @@ pub(super) fn apply_route(progress: &mut NodeProgress, applied_route: Option<Gra
 /// Owner facts collected before applying an attempt observation. In particular,
 /// a failed range lookup cannot leave a partly settled attempt to be saved.
 pub(super) struct ObservationFacts {
+    pub observed_at: Option<provenant_core::WallTime>,
     pub route_index: usize,
     pub usage: Option<AttemptUsage>,
     pub fallback_evidence: Option<PreparationFallbackEvidence>,
@@ -231,6 +232,7 @@ pub(super) fn apply_attempt_observation(
         })
         .collect();
     let ObservationFacts {
+        observed_at,
         route_index,
         usage,
         fallback_evidence,
@@ -277,13 +279,29 @@ pub(super) fn apply_attempt_observation(
             .attempts
             .last_mut()
             .ok_or("an observed attempt must have a checkpoint row")?;
-        // Pending and Unknown answer only this wake. Keep the attempt's
-        // original admission deadline so a detached queued launch cannot
-        // renew its budget when repository contention appears later.
-        // Terminal observation ends the launch allowance altogether.
+        // A queued, unlaunched attempt still owes the scheduler a wake.
+        // Observation is not launch acceptance: retain its identity and original
+        // deadline, without charging a transport failure or renewing allowance.
         retry_was_pending = if matches!(&observation, AttemptObservation::Terminal { .. }) {
             progress.launch_retry.take().is_some()
+        } else if matches!(&observation, AttemptObservation::Queued { .. }) {
+            if let Some(retry) = progress.launch_retry.as_mut() {
+                let now = observed_at.ok_or("queued launch observation needs a wall clock")?;
+                let deadline = retry
+                    .deadline
+                    .ok_or("queued launch needs its original deadline")?;
+                let wake = DurationMicros::from_seconds(retry.policy.first_seconds.max(1))
+                    .ok()
+                    .and_then(|delay| now.checked_add(delay).ok())
+                    .map_or(deadline, |wake| wake.min(deadline));
+                retry.wake_at = Some(wake);
+                true
+            } else {
+                false
+            }
         } else {
+            // Pending/Unknown no longer prove the attempt is queued, but retain
+            // the sealed allowance if later observation finds it requeued.
             progress
                 .launch_retry
                 .as_mut()
@@ -2018,6 +2036,7 @@ mod tests {
                     settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 },
                 ObservationFacts {
+                    observed_at: None,
                     route_index: 0,
                     usage: None,
                     fallback_evidence: None,
@@ -2100,6 +2119,7 @@ mod tests {
                     settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
                 },
                 ObservationFacts {
+                    observed_at: None,
                     route_index: 0,
                     usage: None,
                     fallback_evidence: None,
@@ -2141,6 +2161,7 @@ mod tests {
                 settlement_reason: Some(provenant_records::run::SettlementReason::HandoffMissing),
             },
             ObservationFacts {
+                observed_at: None,
                 route_index: 0,
                 usage: None,
                 fallback_evidence: None,

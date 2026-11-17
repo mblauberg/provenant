@@ -1394,7 +1394,12 @@ mod tests {
             [Started::Refused { attempt, reason, .. }]
                 if *attempt == request.attempt_id && reason == "cancelled before launch"
         ));
-        let record = store.record(request.attempt_id, &call)?;
+        let read_cancel = CancelToken::new();
+        let read_call = Request {
+            cancel: &read_cancel,
+            ..call
+        };
+        let record = store.record(request.attempt_id, &read_call)?;
         assert!(matches!(
             record.state,
             AttemptState::Terminal {

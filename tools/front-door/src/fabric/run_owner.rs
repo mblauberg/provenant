@@ -602,7 +602,11 @@ pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
     }
     // A nested OS error must not reclassify an authority, integrity or input
     // refusal as transport. Only existing I/O outcomes follow the source chain.
-    if error.code() != "io" {
+    if matches!(&error, provenant_run::RunError::Sqlite(_)) {
+        // Database displays may contain SQL, paths or private values.
+        return FacadeError::io("run database");
+    }
+    if provenant_run::ErrorKind::from(&error) != provenant_run::ErrorKind::Io {
         return fail_error(error.into());
     }
     // Walk typed sources, including nested CreateFailed and repository errors.
@@ -617,7 +621,7 @@ pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
         }
         source = current.source();
     }
-    fail_error(error.into())
+    FacadeError::io("run I/O")
 }
 pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
     use provenant_records::diagnostic::DiagnosticFact;

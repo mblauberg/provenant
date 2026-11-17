@@ -92,38 +92,134 @@ pub(crate) fn tick_graphs(
     now: provenant_core::WallTime,
     workers: &'static dyn WorkerObserver,
 ) -> Result<crate::tick::Graphs, Box<dyn std::error::Error>> {
-    tick_graphs_selected(resolved, now, workers, None)
+    tick_graphs_selected(resolved, now, workers, None, &CancelToken::new())
 }
 
-/// Advance only the requested local graph when its persisted launch retry is due.
-/// The journal is re-read under custody before any launch.
+/// Run a scheduler operation independently of an observing command. Dropping
+/// its receipt neither cancels the operation nor lends it observation authority.
+pub(crate) fn scheduler_task<T: Send + 'static>(
+    work: impl FnOnce(&CancelToken) -> T + Send + 'static,
+) -> std::io::Result<std::sync::mpsc::Receiver<T>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("graph-retry-scheduler".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let cancel = CancelToken::new();
+            let _ = sender.send(work(&cancel));
+        })?;
+    Ok(receiver)
+}
+
+/// Advance only the requested local graph under scheduler-owned authority.
+/// The journal is re-read under custody before any launch. A wait may stop
+/// observing this receipt while admitted preparation continues independently.
 pub(crate) fn tick_launch_retry(
     resolved: &crate::roots::Resolved,
     project: provenant_core::ProjectId,
     graph: &str,
     workers: &'static dyn WorkerObserver,
-    budget: WaitBudget,
-    cancel: &CancelToken,
-) -> Result<crate::tick::Graphs, Box<dyn std::error::Error>> {
-    tick_graphs_selected(
-        resolved,
-        SystemClock::new().wall_now()?,
-        workers,
-        Some((project, graph, budget, cancel)),
-    )
+) -> std::io::Result<std::sync::mpsc::Receiver<Result<crate::tick::Graphs, String>>> {
+    let resolved = resolved.clone();
+    let graph = graph.to_owned();
+    scheduler_task(move |cancel| {
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+        let argv = [
+            executable.into_os_string(),
+            "--state-dir".into(),
+            resolved.roots.state.as_path().as_os_str().to_owned(),
+            "--json".into(),
+            "internal".into(),
+            "tick-graph".into(),
+            project.to_string().into(),
+            graph.clone().into(),
+        ];
+        let receipt = provenant_os::exec::detached_receipt(
+            &argv,
+            &resolved.project,
+            std::time::Duration::from_secs(5),
+        );
+        // A libtest executable cannot re-enter the CLI; exercise the same
+        // scheduler authority in process. Production always uses a worker.
+        #[cfg(any(test, feature = "fixture"))]
+        if matches!(receipt, Err(provenant_os::exec::ExecError::TestHarness)) {
+            let now = SystemClock::new()
+                .wall_now()
+                .map_err(|error| error.to_string())?;
+            return tick_graphs_selected(&resolved, now, workers, Some((project, &graph)), cancel)
+                .map_err(|error| error.to_string());
+        }
+        let _ = (workers, cancel);
+        let Some(receipt) = receipt.map_err(|error| error.to_string())? else {
+            // Receipt expiry is observation only. The worker retains custody;
+            // its journal result is observable by this or a later waiter.
+            return Ok(crate::tick::Graphs::default());
+        };
+        let result: serde_json::Value =
+            serde_json::from_slice(&receipt).map_err(|error| error.to_string())?;
+        if let Some(error) = result.get("error").filter(|error| !error.is_null()) {
+            return Err(error.to_string());
+        }
+        serde_json::from_value(result["data"].clone()).map_err(|error| error.to_string())
+    })
+}
+
+pub(crate) fn launch_retry_worker(
+    globals: &provenant_cli::Globals,
+    project: provenant_core::ProjectId,
+    graph: &str,
+    workers: &'static dyn WorkerObserver,
+) -> u8 {
+    let result = (|| -> Result<crate::tick::Graphs, Box<dyn std::error::Error>> {
+        if provenant_cli::fabric::in_lane() {
+            return Err("graph retry requires host custody".into());
+        }
+        let resolved = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Project,
+            crate::roots::Product::Required,
+        )?;
+        tick_graphs_selected(
+            &resolved,
+            SystemClock::new().wall_now()?,
+            workers,
+            Some((project, graph)),
+            &CancelToken::new(),
+        )
+    })();
+    match result {
+        Ok(report) => crate::emit(
+            &provenant_records::CommandResult::new(
+                "internal tick-graph",
+                provenant_records::Outcome::Ok,
+                report,
+            ),
+            globals,
+            "graph retry advanced",
+            false,
+        ),
+        Err(error) => crate::fail(
+            "internal tick-graph",
+            provenant_records::Outcome::Error,
+            "GRAPH_RETRY",
+            &error.to_string(),
+            globals,
+        ),
+    }
 }
 
 fn tick_graphs_selected(
     resolved: &crate::roots::Resolved,
     now: provenant_core::WallTime,
     workers: &'static dyn WorkerObserver,
-    selected: Option<(provenant_core::ProjectId, &str, WaitBudget, &CancelToken)>,
+    selected: Option<(provenant_core::ProjectId, &str)>,
+    cancel: &CancelToken,
 ) -> Result<crate::tick::Graphs, Box<dyn std::error::Error>> {
     use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, advance_with_budget};
     let mut report = crate::tick::Graphs::default();
     for binding in provenant_config::registered_projects(&resolved.roots)? {
         let project = binding.project_id();
-        if selected.is_some_and(|(wanted, _, _, _)| wanted != project) {
+        if selected.is_some_and(|(wanted, _)| wanted != project) {
             continue;
         }
         let ids = match FileJournal::pending_graph_ids(&resolved.roots.state, project) {
@@ -134,7 +230,7 @@ fn tick_graphs_selected(
             }
         };
         for id in ids {
-            if selected.is_some_and(|(_, wanted, _, _)| wanted != id) {
+            if selected.is_some_and(|(_, wanted)| wanted != id) {
                 continue;
             }
             let result = (|| -> Result<bool, Box<dyn std::error::Error>> {
@@ -167,8 +263,6 @@ fn tick_graphs_selected(
                 };
                 let due_at_start = checkpoint.cancelled || graph_wake_due(&checkpoint, now);
                 let clock = SystemClock::new();
-                let tick_cancel = CancelToken::new();
-                let cancel = selected.map_or(&tick_cancel, |(_, _, _, cancel)| cancel);
                 if cancel.is_cancelled() {
                     return Ok(false);
                 }
@@ -238,12 +332,10 @@ fn tick_graphs_selected(
                 if context.identity.project != project || context.in_lane {
                     return Err(EdgeError::Invalid.into());
                 }
-                // Ordinary ticks use the configured launch allowance. A waiter
-                // supplies its remaining budget and cancellation token.
-                let budget = selected.map_or_else(
-                    || WaitBudget::cli(clock.mono_now(), context.config.graph.launch_wait_seconds),
-                    |(_, _, budget, _)| Ok(budget),
-                )?;
+                // Observation cannot shorten execution's allowance. begin_launch
+                // restores each attempt's persisted deadline within this tick.
+                let budget =
+                    WaitBudget::cli(clock.mono_now(), context.config.graph.launch_wait_seconds)?;
                 let mut factory = Factory {
                     project_attribution: crate::usage::attribution_enabled(&context.roots),
                     context,

@@ -27,7 +27,8 @@ An already-referenced queued attempt is relaunched under the same host authority
 key and persisted retry allowance; a late preparation result cannot strand it as
 an indefinitely pending observation. The owner reports a custody-free, never-started
 attempt as `AttemptObservation::Queued`; the graph retains `AttemptState::Starting`
-and its reference. `Pending` represents active work and transitions to `Running`.
+and its reference, and persists a bounded next wake within the original launch
+deadline without charging a launch failure. `Pending` represents active work and transitions to `Running`.
 A missing observation reference never erases a previously saved reference.
 - Why: one sibling's short repository mutation must not fail another writer or
   monopolise custody while waiting for it.

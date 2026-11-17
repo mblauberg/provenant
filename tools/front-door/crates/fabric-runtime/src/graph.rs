@@ -3309,6 +3309,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     limits,
                     observation,
                     transitions::ObservationFacts {
+                        observed_at: owner.wall_now(),
                         route_index,
                         usage,
                         fallback_evidence,

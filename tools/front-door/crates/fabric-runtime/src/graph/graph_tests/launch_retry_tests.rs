@@ -873,9 +873,27 @@ fn late_repository_lock_contention_retries_the_stored_attempt_with_its_original_
     let first_attempt = first.checkpoint.nodes[0].attempts[0].clone();
     assert_eq!(first_attempt.attempt_ref.as_deref(), Some("host/queued"));
     assert_eq!(retry_of(&first.checkpoint).deadline, Some(at(60)));
-    assert_eq!(retry_of(&first.checkpoint).wake_at, None);
+    assert_eq!(retry_of(&first.checkpoint).wake_at, Some(at(5)));
 
+    assert_eq!(first.checkpoint.wake_at, Some(at(5)));
+    // A second queued observation must retain the wake and the same attempt.
+    owner.errors = [(3, repository_lock_busy())].into();
+    owner.observations.push_front(AttemptObservation::Queued {
+        attempt_ref: Some("host/queued".into()),
+    });
     owner.now = Some(at(5));
+    let queued = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(retry_of(&queued.checkpoint).wake_at, Some(at(10)));
+    assert_eq!(queued.checkpoint.wake_at, Some(at(10)));
+    assert_eq!(retry_of(&queued.checkpoint).deadline, Some(at(60)));
+    assert_eq!(retry_of(&queued.checkpoint).failures, 0);
+    assert_eq!(queued.checkpoint.nodes[0].attempts[0].key, first_attempt.key);
+    assert_eq!(queued.checkpoint.nodes[0].attempts[0].attempt_ref, first_attempt.attempt_ref);
+    owner.now = Some(at(9));
+    advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.calls.len(), 2, "no launch before the saved wake");
+
+    owner.now = Some(at(10));
     let waiting = advance(&document, &mut owner, &mut journal).unwrap();
     let progress = &waiting.checkpoint.nodes[0];
     let retry = progress.launch_retry.as_ref().expect("persisted retry");
@@ -884,21 +902,22 @@ fn late_repository_lock_contention_retries_the_stored_attempt_with_its_original_
     assert_eq!(progress.attempts[0].key, first_attempt.key);
     assert_eq!(progress.attempts[0].attempt_ref, first_attempt.attempt_ref);
     assert_eq!(retry.deadline, Some(at(60)), "retry must not renew budget");
-    assert_eq!(retry.wake_at, Some(at(10)));
+    assert_eq!(retry.wake_at, Some(at(15)));
     assert_eq!(retry.failures, 1);
 
-    owner.now = Some(at(10));
+    owner.now = Some(at(15));
     let done = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(done.status, GraphStatus::Complete);
     assert_eq!(done.checkpoint.nodes[0].attempts.len(), 1);
     assert_eq!(done.checkpoint.nodes[0].attempts[0].key, first_attempt.key);
     assert_eq!(done.checkpoint.nodes[0].attempts[0].attempt_ref, first_attempt.attempt_ref);
-    assert_eq!(owner.calls.len(), 3);
+    assert_eq!(owner.calls.len(), 4);
     assert_eq!(owner.calls[0], owner.calls[1]);
     assert_eq!(owner.calls[1], owner.calls[2]);
+    assert_eq!(owner.calls[2], owner.calls[3]);
     assert_eq!(
         owner.stored_refs,
-        vec![None, Some("host/queued".into()), Some("host/queued".into())]
+        vec![None, Some("host/queued".into()), Some("host/queued".into()), Some("host/queued".into())]
     );
 }
 
