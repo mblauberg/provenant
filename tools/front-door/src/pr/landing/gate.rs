@@ -2,7 +2,68 @@
 use super::{LandingError, model::*, ports::Forge};
 use crate::pr::status::{CiCheck, CiCompletion, Required, ci_completion};
 use provenant_cli::domains::{GateKind, PrCiMode, PrCiSettings};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Reports independently of forge reads and stops promptly when the wait ends.
+pub(super) struct ProgressReporter {
+    stop: std::sync::mpsc::Sender<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    state: std::sync::Arc<std::sync::Mutex<String>>,
+}
+impl ProgressReporter {
+    pub(super) fn new(subject: String, interval: Duration) -> Self {
+        Self::with_sink(
+            subject,
+            interval,
+            Box::new(|line| {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "{line}");
+            }),
+        )
+    }
+
+    #[allow(clippy::disallowed_methods, reason = "wall-clock progress boundary")]
+    fn with_sink(subject: String, interval: Duration, sink: Box<dyn Fn(String) + Send>) -> Self {
+        let started = Instant::now();
+        sink(format!("land: waiting on {subject}, state pending"));
+        let (stop, receiver) = std::sync::mpsc::channel();
+        let state = std::sync::Arc::new(std::sync::Mutex::new("pending".to_owned()));
+        let worker_state = std::sync::Arc::clone(&state);
+        let interval = interval.max(Duration::from_millis(1));
+        let worker = std::thread::spawn(move || {
+            while matches!(
+                receiver.recv_timeout(interval),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ) {
+                let state = worker_state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                sink(format!(
+                    "land: waiting on {subject} for {}s, state {state}",
+                    started.elapsed().as_secs()
+                ));
+            }
+        });
+        Self {
+            stop,
+            worker: Some(worker),
+            state,
+        }
+    }
+
+    pub(super) fn set_state(&self, state: &GateResult) {
+        *self.state.lock().unwrap_or_else(|error| error.into_inner()) = format!("{state:?}");
+    }
+}
+impl Drop for ProgressReporter {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
 
 fn failed(message: impl Into<String>) -> LandingError {
     LandingError::Failed(message.into())
@@ -488,6 +549,7 @@ pub fn await_pr_ci(
     required_names: &[String],
     poll_seconds: u64,
     patience_seconds: u64,
+    progress_interval: Duration,
 ) -> Result<(), LandingError> {
     #[allow(clippy::disallowed_methods, reason = "polling boundary")]
     await_pr_ci_with(
@@ -497,6 +559,7 @@ pub fn await_pr_ci(
         required_names,
         (poll_seconds, patience_seconds),
         &std::thread::sleep,
+        &|number| ProgressReporter::new(format!("pull request #{number} CI"), progress_interval),
     )
 }
 
@@ -507,11 +570,16 @@ fn await_pr_ci_with(
     required_names: &[String],
     (poll_seconds, patience_seconds): (u64, u64),
     sleep: &dyn Fn(Duration),
+    progress: &dyn Fn(u64) -> ProgressReporter,
 ) -> Result<(), LandingError> {
     let poll = Duration::from_secs(poll_seconds);
     let patience = Duration::from_secs(patience_seconds);
     let mut waited = Duration::ZERO;
     for pr in prs {
+        if policy.mode == PrCiMode::None {
+            break;
+        }
+        let _progress = progress(pr.number);
         loop {
             match ci_outstanding(forge, pr, policy, required_names) {
                 Ok(false) => break,
@@ -670,6 +738,43 @@ mod tests {
             .insert("h1".into(), vec![evidence(GateResult::Pending, None)]);
         forge
     }
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
+    #[test]
+    fn pending_pr_ci_reports_repeatedly_while_waiting() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let progress = |number| {
+            ProgressReporter::with_sink(
+                format!("pull request #{number} CI"),
+                Duration::from_millis(1),
+                Box::new({
+                    let tx = tx.clone();
+                    move |line| {
+                        tx.send(line).unwrap();
+                    }
+                }),
+            )
+        };
+        let mut forge = pending_forge();
+        let first = Cell::new(true);
+        let result = await_pr_ci_with(
+            &mut forge,
+            &[pr(1, "h1")],
+            &PrCiSettings {
+                mode: PrCiMode::Always,
+                label: None,
+            },
+            &[],
+            (1, 2),
+            &|_| {
+                if first.replace(false) {
+                    rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                }
+                rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            },
+            &progress,
+        );
+        assert!(matches!(result, Err(LandingError::Pending(_))));
+    }
     fn waits(mode: PrCiMode, label: Option<&str>, labelled: bool, runs: bool) -> u32 {
         let mut forge = pending_forge();
         if !runs {
@@ -691,6 +796,7 @@ mod tests {
             &[],
             (3600, 7200),
             &|_| slept.set(slept.get() + 1),
+            &|number| ProgressReporter::new(format!("PR #{number}"), Duration::from_secs(60)),
         );
         if slept.get() > 0 {
             // An unfinished run is pending at the bound, never a failure.
@@ -731,6 +837,7 @@ mod tests {
             &[],
             (3, 1),
             &|pause| pauses.borrow_mut().push(pause),
+            &|number| ProgressReporter::new(format!("PR #{number}"), Duration::from_secs(60)),
         );
         assert!(matches!(result, Err(LandingError::Pending(_))));
         let pauses = pauses.borrow();
@@ -760,6 +867,7 @@ mod tests {
             &required,
             (3600, 7200),
             &|_| slept.set(slept.get() + 1),
+            &|number| ProgressReporter::new(format!("PR #{number}"), Duration::from_secs(60)),
         );
         assert!(matches!(result, Err(LandingError::Pending(_))));
         assert!(slept.get() > 0);

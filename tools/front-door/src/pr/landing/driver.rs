@@ -348,6 +348,7 @@ fn run_inner(
             &required_ci,
             request.settings.poll_seconds,
             request.gate.timeout_seconds,
+            std::time::Duration::from_secs(request.settings.progress_seconds),
         )?;
         let mut rebuilds = 0;
         loop {
