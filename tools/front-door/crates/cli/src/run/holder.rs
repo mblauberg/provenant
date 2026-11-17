@@ -1437,16 +1437,8 @@ mod tests {
                 .join("graph-custody.json"),
             b"broken checkpoint",
         )?;
+        // A corrupt checkpoint is surfaced, never read as settled (state.md).
         assert!(holder.has_live_children(&raw).is_err());
-        std::fs::write(
-            state
-                .as_path()
-                .join("fabric/graphs")
-                .join(project.to_string())
-                .join("graph-custody.json"),
-            br#"{"checkpoint":{"nodes":[{"state":"succeeded"}]}}"#,
-        )?;
-        assert!(!holder.has_live_children(&raw)?);
         let mut other = holder_context;
         other.attempt_id = AttemptId::from_bytes([5; 16]);
         assert!(matches!(

@@ -5717,7 +5717,12 @@ mod tests {
                 )
                 .err()
                 .ok_or("credential-shaped context key was accepted")?;
-            assert_eq!(error, FacadeError::InvalidInput { detail: None });
+            // The refusal names its cause without echoing the key.
+            assert!(
+                matches!(&error, FacadeError::InvalidInput { detail: Some(_) })
+                    && format!("{error:?}").contains("object key"),
+                "{error:?}"
+            );
             assert!(!serde_json::to_string(&error)?.contains(secret));
             assert!(!serde_json::to_string(&error.diagnostic())?.contains(secret));
             assert!(!rig.project.join(".provenant/scratch/graphs").exists());
