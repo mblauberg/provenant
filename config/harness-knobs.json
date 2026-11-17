@@ -246,6 +246,13 @@
       "tiers.{tier}.*": {"type": "table", "allowed": "partial land settings", "default": "empty", "effect": "Risk-tier landing overrides."}
     }
   },
+  "host_implement_settings": {
+    "path": "domains.fabric.implement",
+    "settings": {
+      "plan": {"type": "bool", "default": "false", "effect": "Add a planner before implementation writers unless a template parameter overrides it."},
+      "warn_unbounded_junior": {"type": "bool", "default": "true", "effect": "Warn when a junior implementation writer has an unbounded brief."}
+    }
+  },
   "host_graph_settings": {
     "path": "domains.fabric.graph",
     "settings": {

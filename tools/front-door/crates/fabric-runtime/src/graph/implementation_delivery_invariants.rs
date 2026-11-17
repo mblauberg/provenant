@@ -3,7 +3,7 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn unplanned_delivery_links_resolve_to_its_exported_writer() {
+fn planned_delivery_links_resolve_to_its_exported_writer() {
     let library = TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::from([
         ("review-frame".into(), vec!["false".into()]),
@@ -14,7 +14,7 @@ fn unplanned_delivery_links_resolve_to_its_exported_writer() {
         ("review-advice-correctness".into(), vec![String::new()]),
     ]);
     let node = Compiler { library:&library, resolvers:&resolvers }.compile(&json!({
-        "id":"delivery", "use":"deliver", "with":{"worktree":"/fixture/writer","write_scope":["src"]}
+        "id":"delivery", "use":"deliver", "with":{"worktree":"/fixture/writer","write_scope":["src"],"plan":true}
     })).unwrap();
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":2,"graph_id":"planned-delivery","nodes":[node]

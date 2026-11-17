@@ -535,11 +535,10 @@ fn run_input(
     request: GraphRunArgs,
 ) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
     (|| {
-        let no_plan = request.no_plan;
-        let implementation = request
-            .template
-            .as_deref()
-            .is_some_and(implementation_template);
+        let plan = request.plan;
+        let implementation = request.template.as_deref().is_some_and(|name| {
+            implementation_template(name) || name == "deliver" || name == "batch"
+        });
         let sandbox = request.sandbox_override();
         let brief_source = select_brief_source([
             request.brief.map(BriefSource::Text),
@@ -607,8 +606,8 @@ fn run_input(
         if let Some(sandbox) = sandbox {
             parameters["attempt.sandbox"] = json!(sandbox);
         }
-        if no_plan && implementation {
-            parameters["bounded"] = json!(true);
+        if plan && implementation {
+            parameters["plan"] = json!(true);
         }
         let mut policy_inputs = Vec::new();
         if let Some(BriefSource::File(path)) = &brief_source {
@@ -804,7 +803,7 @@ mod tests {
             write_scope: Vec::new(),
             over: Vec::new(),
             set: Vec::new(),
-            no_plan: false,
+            plan: false,
             file: None,
             detached: false,
             sandbox: false,
@@ -814,18 +813,18 @@ mod tests {
     }
 
     #[test]
-    fn no_plan_sets_bounded_for_implementation_templates() {
+    fn plan_sets_parameter_for_implementation_templates() {
         let mut request = run_request();
         request.template = Some("implement".into());
-        request.no_plan = true;
+        request.plan = true;
         let input = run_input(request).unwrap();
-        assert_eq!(input["set"]["bounded"], true);
+        assert_eq!(input["set"]["plan"], true);
 
         let mut task = run_request();
         task.template = Some("task".into());
-        task.no_plan = true;
+        task.plan = true;
         let input = run_input(task).unwrap();
-        assert!(input["set"].get("bounded").is_none());
+        assert!(input["set"].get("plan").is_none());
     }
 
     #[test]
