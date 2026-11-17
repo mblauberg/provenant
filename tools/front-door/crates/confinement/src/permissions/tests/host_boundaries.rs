@@ -222,6 +222,22 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
     let external_secret = external.join("nested/secret");
     std::fs::write(&external_secret, b"external credential\n")?;
     let executor = SystemExecutor::new(2)?;
+    // Apple's platform signature constrains bash to its system location.
+    // Re-sign this copied fixture so AMFI does not kill it before Seatbelt
+    // can exercise the shared-store boundary. Keep it inside the store to
+    // cover provider runtime and executable carve-outs.
+    let sign = [
+        OsString::from("/usr/bin/codesign"),
+        "--force".into(),
+        "--sign".into(),
+        "-".into(),
+        provider.as_os_str().to_owned(),
+    ];
+    let signed = executor.execute(ExecOptions::new(&sign, &root, Duration::from_secs(30)))?;
+    assert!(
+        successful_probe(&signed),
+        "sign provider fixture: {signed:?}"
+    );
     for store in [
         home.clone(),
         home.join("relocated-codex"),
