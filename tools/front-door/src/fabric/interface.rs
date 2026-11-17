@@ -2439,25 +2439,59 @@ impl Factory {
                     }
                 },
             };
-            let library = self.template_library(None)?;
-            let resolver = self.launch_resolvers(Some(&encode(&execution.document)?))?;
-            patch::retry_node_and_dependants(
-                &mut LiveGraph {
-                    document: &execution.document,
-                    checkpoint: &mut checkpoint,
-                },
-                &node,
-                input.get("brief").and_then(Value::as_str),
-                &PatchContext {
-                    library: &library,
-                    resolvers: &resolver,
-                    scan: &patch::scan_for_secrets,
-                    journal: None,
-                    limits: &self.context.config.graph.limits,
-                    worktree_layout: self.context.port_table.worktree_layout.clone(),
-                },
-            )
-            .map_err(retry_patch_error)?;
+            // A previous retry may have committed its reset before its resume
+            // failed. Resume that already admitted retry rather than archive
+            // its predecessor a second time.
+            let interrupted = !brief_given
+                && checkpoint.nodes.iter().any(|progress| {
+                    progress.id == node
+                        && progress.state == provenant_fabric_runtime::graph::NodeState::Pending
+                        && progress.attempts.is_empty()
+                        && progress.retry_generation.is_some()
+                        && !progress.previous_attempts.is_empty()
+                })
+                && checkpoint
+                    .expansions
+                    .iter()
+                    .rev()
+                    .find_map(|expansion| expansion.patch.as_ref())
+                    .is_some_and(|patch| {
+                        patch.reason.as_deref() == Some(format!("retry node {node}").as_str())
+                    });
+            if interrupted {
+                // A pre-fix retry could remove the owner of an expansion
+                // pause while leaving the graph pause behind. Preserve any
+                // other pause for the normal resume path.
+                if checkpoint.pause_cause()
+                    == Some(provenant_records::pause::PauseCause::InvalidPlanExpansion)
+                    && !checkpoint.nodes.iter().any(|progress| {
+                        matches!(&progress.expansion_cause,
+                            Some(provenant_fabric_runtime::graph::NodeDecisionCause::PlanExpansionPaused { active: true, .. }))
+                    })
+                {
+                    checkpoint.pause = None;
+                }
+            } else {
+                let library = self.template_library(None)?;
+                let resolver = self.launch_resolvers(Some(&encode(&execution.document)?))?;
+                patch::retry_node_and_dependants(
+                    &mut LiveGraph {
+                        document: &execution.document,
+                        checkpoint: &mut checkpoint,
+                    },
+                    &node,
+                    input.get("brief").and_then(Value::as_str),
+                    &PatchContext {
+                        library: &library,
+                        resolvers: &resolver,
+                        scan: &patch::scan_for_secrets,
+                        journal: None,
+                        limits: &self.context.config.graph.limits,
+                        worktree_layout: self.context.port_table.worktree_layout.clone(),
+                    },
+                )
+                .map_err(retry_patch_error)?;
+            }
             target.node = Some(node);
         }
         // Publish the requester's PATH with any retry patch under the same
