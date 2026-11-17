@@ -396,11 +396,16 @@ impl Owner<'_> {
     /// Fill each member's unset head and base from the forge.
     fn pin(&mut self, members: &mut [LandMember]) -> Result<(), LandingError> {
         for member in members.iter_mut() {
-            if member.head.is_none() || member.base.is_none() {
-                let info = self.forge.pull_request(member.pr)?;
-                member.head.get_or_insert(info.head);
-                member.base.get_or_insert(info.base_branch);
+            let info = self.forge.pull_request(member.pr)?;
+            if info.draft {
+                return Err(LandingError::RefusedWith {
+                    cause: "PR_DRAFT",
+                    message: format!("pull request #{} is a draft", member.pr),
+                    repair: format!("gh pr ready {}", member.pr),
+                });
             }
+            member.head.get_or_insert(info.head);
+            member.base.get_or_insert(info.base_branch);
         }
         Ok(())
     }

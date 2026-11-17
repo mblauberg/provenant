@@ -247,6 +247,8 @@ struct RestPull {
     user: Option<RestUser>,
     #[serde(default)]
     stack: Option<RestStack>,
+    #[serde(default)]
+    pub(crate) draft: bool,
 }
 #[derive(Deserialize)]
 struct RestStack {
@@ -480,6 +482,114 @@ fn watch(project: &Path, state: &Path, number: &str, head: GitOid, repository: &
     }
     Ok(())
 }
+fn extract_github_message(output: &provenant_os::exec::ExecOutcome) -> Option<String> {
+    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout.bytes)
+        && let Some(msg) = val.get("message").and_then(|m| m.as_str())
+        && !msg.trim().is_empty()
+    {
+        return Some(msg.trim().to_owned());
+    }
+    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stderr.bytes)
+        && let Some(msg) = val.get("message").and_then(|m| m.as_str())
+        && !msg.trim().is_empty()
+    {
+        return Some(msg.trim().to_owned());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    for line in stderr.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('{')
+            && trimmed.ends_with('}')
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
+            && let Some(msg) = val.get("message").and_then(|m| m.as_str())
+            && !msg.trim().is_empty()
+        {
+            return Some(msg.trim().to_owned());
+        }
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout.bytes);
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('{')
+            && trimmed.ends_with('}')
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
+            && let Some(msg) = val.get("message").and_then(|m| m.as_str())
+            && !msg.trim().is_empty()
+        {
+            return Some(msg.trim().to_owned());
+        }
+    }
+    let text_lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("HTTP"))
+        .collect();
+    if !text_lines.is_empty() {
+        let text = text_lines.join(" ");
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+    None
+}
+
+fn merge_failure_from_output(
+    output: &provenant_os::exec::ExecOutcome,
+    head: GitOid,
+) -> Box<dyn std::error::Error> {
+    let error = format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stderr.bytes),
+        String::from_utf8_lossy(&output.stdout.bytes)
+    );
+    let status = error
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|words| {
+            (words[0] == "HTTP")
+                .then(|| {
+                    words[1]
+                        .trim_end_matches(|ch: char| !ch.is_ascii_digit())
+                        .parse::<u16>()
+                        .ok()
+                })
+                .flatten()
+        })
+        .or_else(|| {
+            serde_json::from_slice::<serde_json::Value>(&output.stdout.bytes)
+                .ok()
+                .and_then(|val| {
+                    val.get("status").and_then(|s| {
+                        s.as_str()
+                            .and_then(|s| s.parse::<u16>().ok())
+                            .or_else(|| s.as_u64().map(|n| n as u16))
+                    })
+                })
+        });
+    if status == Some(409) {
+        return wait::failure(
+            "HEAD_MOVED",
+            format!("pull request head moved from {head}"),
+        );
+    }
+    if status == Some(405) {
+        let message = match extract_github_message(output) {
+            Some(msg)
+                if msg
+                    .to_ascii_lowercase()
+                    .starts_with("pull request is not mergeable") =>
+            {
+                msg
+            }
+            Some(msg) => format!("pull request is not mergeable: {msg}"),
+            None => "pull request is not mergeable".to_owned(),
+        };
+        return wait::failure("MERGE_NOT_ALLOWED", message);
+    }
+    format!("merge request failed: {error}").into()
+}
+
 /// Merge a pull request pinned to `head` with `method`, returning the commit
 /// GitHub created. A moved head (409) and a refused merge (405) are named.
 fn merge_with(
@@ -502,38 +612,7 @@ fn merge_with(
         true,
     )?;
     if output.termination != Termination::Exit(0) {
-        let error = format!(
-            "{} {}",
-            String::from_utf8_lossy(&output.stderr.bytes),
-            String::from_utf8_lossy(&output.stdout.bytes)
-        );
-        let status = error
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .windows(2)
-            .find_map(|words| {
-                (words[0] == "HTTP")
-                    .then(|| {
-                        words[1]
-                            .trim_end_matches(|ch: char| !ch.is_ascii_digit())
-                            .parse::<u16>()
-                            .ok()
-                    })
-                    .flatten()
-            });
-        if status == Some(409) {
-            return Err(wait::failure(
-                "HEAD_MOVED",
-                format!("pull request head moved from {head}"),
-            ));
-        }
-        if status == Some(405) {
-            return Err(wait::failure(
-                "MERGE_NOT_ALLOWED",
-                "pull request is not mergeable",
-            ));
-        }
-        return Err(format!("merge request failed: {error}").into());
+        return Err(merge_failure_from_output(&output, head));
     }
     let response: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
     if response
@@ -869,5 +948,55 @@ mod unreported_checks_tests {
             .downcast_ref::<wait::Failure>()
             .expect("typed failure");
         assert_eq!(failure.code, "RATE_LIMITED");
+    }
+
+    fn test_outcome(stdout: &[u8], stderr: &[u8]) -> provenant_os::exec::ExecOutcome {
+        provenant_os::exec::ExecOutcome {
+            termination: Termination::Exit(1),
+            stdout: provenant_os::exec::CapturedStream {
+                bytes: stdout.to_vec(),
+                ..Default::default()
+            },
+            stderr: provenant_os::exec::CapturedStream {
+                bytes: stderr.to_vec(),
+                ..Default::default()
+            },
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        }
+    }
+
+    #[test]
+    fn merge_405_carries_github_message_to_refusal() {
+        let output = test_outcome(
+            br#"{"message":"Pull Request is still a draft","status":"405"}"#,
+            b"HTTP 405\n",
+        );
+        let head = GitOid::parse("0123456789abcdef0123456789abcdef01234567").unwrap();
+        let err = merge_failure_from_output(&output, head);
+        let failure = err.downcast_ref::<wait::Failure>().expect("typed failure");
+        assert_eq!(failure.code, "MERGE_NOT_ALLOWED");
+        assert!(
+            failure.message.contains("Pull Request is still a draft"),
+            "message was: {}",
+            failure.message
+        );
+    }
+
+    #[test]
+    fn merge_405_carries_stderr_text_to_refusal() {
+        let output = test_outcome(b"", b"HTTP 405\nPull Request is still a draft\n");
+        let head = GitOid::parse("0123456789abcdef0123456789abcdef01234567").unwrap();
+        let err = merge_failure_from_output(&output, head);
+        let failure = err.downcast_ref::<wait::Failure>().expect("typed failure");
+        assert_eq!(failure.code, "MERGE_NOT_ALLOWED");
+        assert!(
+            failure.message.contains("Pull Request is still a draft"),
+            "message was: {}",
+            failure.message
+        );
     }
 }

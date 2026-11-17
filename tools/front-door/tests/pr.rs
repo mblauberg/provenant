@@ -225,6 +225,75 @@ fn land_refuses_a_rest_merge_405_with_a_next_step() -> Result {
     rest_merge_refusal("merge-not-allowed", "MERGE_NOT_ALLOWED", "not mergeable")
 }
 
+// Spec: docs/specs/cli.md#merge-guard
+fn land_refuses_a_rest_merge_405_carrying_github_message() -> Result {
+    let rig = self::rig()?;
+    let head = live_pr_origin(&rig)?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.pr.land]\napproval_tier='none'\npublish='rest_ordered'\n",
+    )?;
+    fs::write(rig.project.join("merge-not-allowed"), "")?;
+    fs::write(
+        rig.project.join("merge-refusal-message"),
+        "Pull Request is still a draft",
+    )?;
+    let output = rig.command(&["land", "1668", "--head", &head, "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_ne!(code(&output), 0, "{report}");
+    assert_eq!(report["error"]["code"], "LAND_REFUSED", "{report}");
+    assert_eq!(report["error"]["cause"], "MERGE_NOT_ALLOWED", "{report}");
+    assert!(
+        report["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Pull Request is still a draft")),
+        "{report}"
+    );
+    assert_eq!(merge_calls(&rig)?, 1);
+    assert!(!rig.project.join("merged").exists());
+    Ok(())
+}
+
+// Spec: docs/specs/cli.md#merge-guard
+fn land_refuses_a_draft_pull_request_before_gate_step() -> Result {
+    let rig = self::rig()?;
+    let head = live_pr_origin(&rig)?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.pr.land]\napproval_tier='none'\npublish='rest_ordered'\n",
+    )?;
+    fs::write(rig.project.join("draft"), "")?;
+    let output = rig.command(&["land", "1668", "--head", &head, "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_ne!(code(&output), 0, "{report}");
+    assert_eq!(report["error"]["code"], "LAND_REFUSED", "{report}");
+    assert_eq!(report["status"], "refused", "{report}");
+    assert_eq!(report["data"]["merged"], false, "{report}");
+    assert_eq!(report["data"]["steps"], serde_json::json!([]));
+    assert_eq!(report["error"]["cause"], "PR_DRAFT", "{report}");
+    assert_eq!(report["error"]["repair"], "gh pr ready 1668", "{report}");
+    assert!(
+        report["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("draft")),
+        "{report}"
+    );
+    assert_eq!(merge_calls(&rig)?, 0);
+    assert!(!rig.project.join("merged").exists());
+    let gh_calls = fs::read_to_string(rig.project.join("gh-calls"))?;
+    assert!(!gh_calls.contains("pr checks"));
+    assert!(!gh_calls.contains("/check-runs"));
+    assert!(!gh_calls.contains("/statuses"));
+
+    let output_human = rig.command(&["land", "1668", "--head", &head])?;
+    let text = String::from_utf8_lossy(&output_human.stdout.bytes);
+    assert!(
+        text.contains("next: gh pr ready 1668"),
+        "expected next-step line in output: {text}"
+    );
+    Ok(())
+}
+
 fn land_plain_singleton_uses_batch_driver() -> Result {
     let rig = self::rig()?;
     let git = provenant_os::git::git_executable().ok_or("Git executable")?;
@@ -615,7 +684,9 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             } else {
                 HEAD.to_owned()
             };
-            let body = serde_json::json!({"state":if merged {"closed"} else {"open"}, "head":{"sha":next,"ref":"feature","repo":{"full_name":"owner/repo"}}, "base":{"sha":base,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":mergeable,"mergeable_state":"clean","merged_at":if merged {Some("2020-01-01T00:00:00Z")} else {None},"merge_commit_sha":null,"title":"fixture","user":{"login":"fixture-author"}});
+            let draft = Path::new("draft").exists()
+                || head_value["isDraft"].as_bool().unwrap_or(false);
+            let body = serde_json::json!({"state":if merged {"closed"} else {"open"}, "head":{"sha":next,"ref":"feature","repo":{"full_name":"owner/repo"}}, "base":{"sha":base,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":mergeable,"mergeable_state":"clean","merged_at":if merged {Some("2020-01-01T00:00:00Z")} else {None},"merge_commit_sha":null,"title":"fixture","user":{"login":"fixture-author"},"draft":draft});
             io::stdout().write_all(&serde_json::to_vec(&body)?)?;
         }
         "pr view 1668 --json headRefOid" | "pr view 1668 --json headRefOid,mergeable" => {
@@ -841,9 +912,15 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             fs::write("merge-args", args.join("\n") + "\n")?;
             for (flag, status) in [("merge-conflict", 409), ("merge-not-allowed", 405)] {
                 if Path::new(flag).exists() {
+                    let body = if Path::new("merge-refusal-message").exists() {
+                        let msg = fs::read_to_string("merge-refusal-message")?;
+                        format!(r#"{{"message":"{}","status":"{}"}}"#, msg.trim(), status)
+                    } else {
+                        "{}".to_owned()
+                    };
                     writeln!(
                         io::stdout(),
-                        "HTTP/2 {status}\r\nX-RateLimit-Remaining: 0\r\n\r\n{{}}"
+                        "HTTP/2 {status}\r\nX-RateLimit-Remaining: 0\r\n\r\n{body}"
                     )?;
                     writeln!(io::stderr(), "HTTP {status}")?;
                     return Ok(1);
@@ -944,6 +1021,14 @@ fn main() -> ExitCode {
             (
                 "land_refuses_a_rest_merge_405_with_a_next_step",
                 land_refuses_a_rest_merge_405_with_a_next_step,
+            ),
+            (
+                "land_refuses_a_rest_merge_405_carrying_github_message",
+                land_refuses_a_rest_merge_405_carrying_github_message,
+            ),
+            (
+                "land_refuses_a_draft_pull_request_before_gate_step",
+                land_refuses_a_draft_pull_request_before_gate_step,
             ),
             (
                 "pr_external_failures_and_invalid_arguments_fail_closed",

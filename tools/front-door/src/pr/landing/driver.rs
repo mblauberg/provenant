@@ -270,6 +270,13 @@ fn run_inner(
     let mut open = Vec::new();
     for number in unique {
         let info = forge.pull_request(number)?;
+        if info.draft {
+            return Err(LandingError::RefusedWith {
+                cause: "PR_DRAFT",
+                message: format!("pull request #{number} is a draft"),
+                repair: format!("gh pr ready {number}"),
+            });
+        }
         if let Some(reason) = request
             .pins
             .get(&number)
@@ -3776,6 +3783,42 @@ pub(super) mod tests {
             receipt::pending(state.path(), "fake-repository", "main")?.len(),
             1
         );
+        Ok(())
+    }
+
+    #[test]
+    fn driver_refuses_draft_pull_request_before_gate() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+        let state = tempfile::tempdir()?;
+        forge.pull_requests.get_mut(&1).unwrap().draft = true;
+        let result = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1],
+            false,
+            state.path(),
+        );
+        let error = result.expect_err("draft pull request must be refused");
+        let cause = match error {
+            LandingError::RunFailed { cause, .. } => *cause,
+            other => other,
+        };
+        let LandingError::RefusedWith {
+            cause,
+            repair,
+            message,
+        } = cause
+        else {
+            panic!("expected RefusedWith, got {cause:?}");
+        };
+        assert_eq!(cause, "PR_DRAFT");
+        assert_eq!(repair, "gh pr ready 1");
+        assert!(message.contains("draft"), "{message}");
+        assert_eq!(gate.observed.len(), 0, "candidate gate must not run");
+        assert_eq!(repo.pushes.len(), 0, "no candidate pushed");
         Ok(())
     }
 }

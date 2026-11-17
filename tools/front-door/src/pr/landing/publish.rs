@@ -296,6 +296,7 @@ mod tests {
                     state: PullRequestState::Open,
                     merged_commit: None,
                     stack: None,
+                    draft: false,
                 },
             );
             forge.approvals_at_head.insert(
