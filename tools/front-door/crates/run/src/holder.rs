@@ -2535,7 +2535,9 @@ impl RunStore {
                 Err(error) if crate::writer::worktree_removed(writer) || manifest_conflicted => {
                     Err(error)
                 }
-                Err(RunError::Writer(_) | RunError::WriterProjectMismatch { .. }) => {
+                Err(error @ (RunError::Writer(_) | RunError::WriterProjectMismatch { .. }))
+                    if !error.is_repository_lock_busy() =>
+                {
                     Err(RunError::ObjectImportLimit(
                         "writer preconditions refused; private Git retained for host recovery",
                     ))
@@ -2674,7 +2676,11 @@ impl RunStore {
                         ),
                     );
                 }
-                Ok(_) if decoded.outcome == Outcome::Succeeded => {
+                Ok(_) if !import_failed && decoded.outcome == Outcome::Succeeded => {
+                    // Inspect the published worktree only after import succeeds.
+                    // Pending import retains the lane's private head, so checking
+                    // the host worktree here could both reacquire a busy repository
+                    // lock and misclassify work that has not been imported yet.
                     // Edits with no commit are not a success, and nothing is delivered.
                     let left = self.writer_uncommitted(
                         &record,

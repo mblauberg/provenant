@@ -785,6 +785,17 @@ impl WriteGrantLimit {
     }
 }
 
+/// Deterministic observation points in the real launcher for race fixtures.
+#[cfg(feature = "fixture")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaunchObservation {
+    Queued,
+    Claimed,
+}
+
+#[cfg(feature = "fixture")]
+pub(crate) type LaunchObserver = Box<dyn Fn(LaunchObservation, &AttemptRecord)>;
+
 pub trait Providers {
     /// Host cap for the encoded applied write-grant ledger.
     fn write_grant_limit(&self, _policy: &provenant_records::policy::Policy) -> WriteGrantLimit {
@@ -1863,6 +1874,10 @@ impl RunStore {
             if !matches!(record.state, AttemptState::Queued { .. }) {
                 continue;
             }
+            #[cfg(feature = "fixture")]
+            if let Some(observe) = &self.launch_observer {
+                observe(LaunchObservation::Queued, &record);
+            }
             let now = || {
                 call.clock
                     .wall_now()
@@ -1941,6 +1956,10 @@ impl RunStore {
                 Err(RunError::Conflict) => continue,
                 Err(error) => return Err(error),
             };
+            #[cfg(feature = "fixture")]
+            if let Some(observe) = &self.launch_observer {
+                observe(LaunchObservation::Claimed, &record);
+            }
             if self.cancel_preparation_if_requested(id, &record, &attempt_dir, now()?, call)? {
                 started.push(Started::Refused {
                     attempt: id,

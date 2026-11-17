@@ -2437,7 +2437,7 @@ fn expanded_writer_registry_contention_remains_retryable() -> Result {
     assert!(writer.attempts.is_empty());
     assert_eq!(
         writer.advance_owner_code.as_deref(),
-        Some("writer_lock_busy")
+        Some("repository_lock_busy")
     );
     let retry = writer
         .launch_retry
@@ -3165,107 +3165,176 @@ fn append_owned_expansion_child(rig: &TestRig, graph_id: &str, owner: &str, chil
 fn retry_fences_retired_dynamic_descendant_against_launcher() -> Result {
     use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
     use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
-    use provenant_os::{
-        clock::SystemClock,
-        fs::{Directory, LockMode, SystemPathResolver},
-    };
+    use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
     if !graph_fixture_available()? {
         return Ok(());
     }
-    let (rig, queued) = persisted_attempt_with(
-        "codex",
-        "gpt-6-luna",
-        ("fixture", "fixture"),
-        b"",
-        b"",
-        0,
-        PersistedAttemptOptions {
-            dynamic_queued: true,
-            ..Default::default()
-        },
-    )?;
-    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
-    inputs.state_dir = Some(rig.state.clone());
-    let roots = inputs.resolve(&SystemPathResolver)?;
-    let identity =
-        provenant_cli::fabric::Context::open(roots.clone(), &rig.home, &rig.project)?.identity;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let budget = WaitBudget::cli(clock.mono_now(), 30)?;
-    let mut journal = FileJournal::open(
-        &roots.state,
-        identity.project,
-        PERSISTED_GRAPH,
-        budget,
-        &cancel,
-        &clock,
-    )?;
-    let mut checkpoint = journal.load(PERSISTED_GRAPH)?.ok_or("checkpoint")?;
-    let parent = &mut checkpoint.nodes[0];
-    let mut child = parent.clone();
-    child.id = "review--child".into();
-    child.state = provenant_fabric_runtime::graph::NodeState::Blocked;
-    child.advance_error_code = Some("launch_retry_exhausted".into());
-    child.advance_owner_code = Some("repository_lock_busy".into());
-    child.last_launch_retry = Some(serde_json::from_value(
-        json!({"policy":{"limit":1,"limit_source":"host","first_seconds":5,"max_seconds":60},"failures":2}),
-    )?);
-    child.attempts[0].key.node_id = child.id.clone();
-    child.attempts[0].state = provenant_fabric_runtime::graph::AttemptState::Starting;
-    child.attempts[0].launched = false;
-    parent.attempts.clear();
-    parent.state = provenant_fabric_runtime::graph::NodeState::Blocked;
-    checkpoint.nodes.push(child);
-    checkpoint.expansions.push(serde_json::from_value(json!({"source":"review", "nodes":[{"id":"review--child","kind":"task","access":"read_only","prompt":"child","route":{"alias":"senior"}}]}))?);
-    journal.save(&checkpoint)?;
-    drop(journal);
-    // A concurrent launcher holds exclusion after observing the queued attempt.
-    let dir = Directory::open_anchor(
-        &rig.state
-            .join("attempts")
-            .join(queued.attempt_id.to_string()),
-    )?;
-    let launcher = dir.try_lock(std::ffi::OsStr::new("launcher.lock"), LockMode::Exclusive)?;
-    let blocked = rig.command(&["retry", "persisted-graph/review", "--json"])?;
-    assert_ne!(code(&blocked), 0, "{blocked:?}");
-    assert_eq!(
-        FileJournal::read_checkpoint(&roots.state, identity.project, PERSISTED_GRAPH)?
-            .ok_or("checkpoint")?,
-        checkpoint
-    );
-    drop(launcher);
-    let _ = rig.command(&["retry", "persisted-graph/review", "--json"])?;
-    let after = FileJournal::read_checkpoint(&roots.state, identity.project, PERSISTED_GRAPH)?
-        .ok_or("checkpoint")?;
-    let retired = after
-        .expansions
-        .iter()
-        .filter_map(|e| e.retired.as_ref())
-        .flat_map(|e| &e.progress)
-        .find(|row| row.id == "review--child")
-        .ok_or("retired child")?;
-    assert_eq!(
-        retired.attempts[0].state,
-        provenant_fabric_runtime::graph::AttemptState::Terminal
-    );
-    let context = provenant_run::ExecutionContext {
-        state_root: roots.state,
-        project_id: identity.project,
-        actor_id: identity.inbox.actor,
-        read_prompts: false,
-    };
-    let call = provenant_run::Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let store = provenant_run::RunStore::open(&context, &call)?;
-    assert!(matches!(
-        store.record(queued.attempt_id, &call)?.state,
-        provenant_run::AttemptState::Terminal {
-            outcome: provenant_run::Outcome::Cancelled,
-            ..
+    for pause_at in [
+        provenant_run::LaunchObservation::Claimed,
+        provenant_run::LaunchObservation::Queued,
+    ] {
+        let (rig, queued) = persisted_attempt_with(
+            "codex",
+            "gpt-6-luna",
+            ("fixture", "fixture"),
+            b"",
+            b"",
+            0,
+            PersistedAttemptOptions {
+                dynamic_queued: true,
+                ..Default::default()
+            },
+        )?;
+        let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+        inputs.state_dir = Some(rig.state.clone());
+        let roots = inputs.resolve(&SystemPathResolver)?;
+        let identity =
+            provenant_cli::fabric::Context::open(roots.clone(), &rig.home, &rig.project)?.identity;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+        let mut journal = FileJournal::open(
+            &roots.state,
+            identity.project,
+            PERSISTED_GRAPH,
+            budget,
+            &cancel,
+            &clock,
+        )?;
+        let mut checkpoint = journal.load(PERSISTED_GRAPH)?.ok_or("checkpoint")?;
+        let parent = &mut checkpoint.nodes[0];
+        let mut child = parent.clone();
+        child.id = "review--child".into();
+        child.state = provenant_fabric_runtime::graph::NodeState::Blocked;
+        child.advance_error_code = Some("launch_retry_exhausted".into());
+        child.advance_owner_code = Some("repository_lock_busy".into());
+        child.last_launch_retry = Some(serde_json::from_value(
+            json!({"policy":{"limit":1,"limit_source":"host","first_seconds":5,"max_seconds":60},"failures":2}),
+        )?);
+        child.attempts[0].key.node_id = child.id.clone();
+        child.attempts[0].state = provenant_fabric_runtime::graph::AttemptState::Starting;
+        child.attempts[0].launched = false;
+        parent.attempts.clear();
+        parent.state = provenant_fabric_runtime::graph::NodeState::Blocked;
+        checkpoint.nodes.push(child);
+        checkpoint.expansions.push(serde_json::from_value(json!({"source":"review", "nodes":[{"id":"review--child","kind":"task","access":"read_only","prompt":"child","route":{"alias":"senior"}}]}))?);
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let context = provenant_run::ExecutionContext {
+            state_root: roots.state.clone(),
+            project_id: identity.project,
+            actor_id: identity.inbox.actor,
+            read_prompts: false,
+        };
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let store = provenant_run::RunStore::open(&context, &call)?;
+        let (observed_tx, observed_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+        let launcher_context = context.clone();
+        let attempt_id = queued.attempt_id;
+        let timeout = std::time::Duration::from_secs(30);
+        let launcher = std::thread::spawn(move || {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = provenant_run::Request {
+                clock: &clock,
+                cancel: &cancel,
+            };
+            let launch_cancel = cancel.clone();
+            let store = provenant_run::RunStore::open(&launcher_context, &call)
+                .map_err(|error| error.to_string())?
+                .with_launch_observer(move |stage, record| {
+                    assert_eq!(record.attempt_id, attempt_id);
+                    if stage == pause_at {
+                        observed_tx.send(record.clone()).expect("retry observer");
+                        resume_rx
+                            .recv_timeout(timeout)
+                            .expect("retry releases launcher");
+                        if stage == provenant_run::LaunchObservation::Claimed {
+                            launch_cancel.cancel();
+                        }
+                    } else if pause_at == provenant_run::LaunchObservation::Queued {
+                        panic!("withdrawn attempt must never be claimed");
+                    }
+                });
+            // Cancellation after the claim observation lets this fixture stop before
+            // provider preparation. The stale queued launcher must lose its claim
+            // without relying on cancellation.
+            store
+                .start(
+                    attempt_id,
+                    &provenant_cli::run::Registry::default(),
+                    &|_, _| panic!("no provider may be handed off in this race"),
+                    &call,
+                )
+                .map(|started| started.is_empty())
+                .map_err(|error| error.to_string())
+        });
+        let observed = observed_rx.recv_timeout(timeout)?;
+        assert_eq!(observed.key, queued.key);
+        let retry = rig.command(&["retry", "persisted-graph/review", "--json"])?;
+        let after = FileJournal::read_checkpoint(&roots.state, identity.project, PERSISTED_GRAPH)?
+            .ok_or("checkpoint")?;
+        if pause_at == provenant_run::LaunchObservation::Claimed {
+            assert!(matches!(
+                observed.state,
+                provenant_run::AttemptState::Starting { .. }
+            ));
+            assert!(observed.generation > queued.generation);
+            assert_ne!(code(&retry), 0, "{retry:?}");
+            assert_eq!(
+                after, checkpoint,
+                "a claimed descendant refuses the graph reset"
+            );
+            assert_eq!(store.record(attempt_id, &call)?, observed);
+            resume_tx.send(())?;
+            assert!(!launcher.join().map_err(|_| "launcher panicked")??);
+            let cancelled = store.record(attempt_id, &call)?;
+            assert!(matches!(
+                cancelled.state,
+                provenant_run::AttemptState::Terminal {
+                    outcome: provenant_run::Outcome::Cancelled,
+                    ..
+                }
+            ));
+            assert_ne!(cancelled.provider_launched, Some(true));
+        } else {
+            assert!(matches!(
+                observed.state,
+                provenant_run::AttemptState::Queued { .. }
+            ));
+            let retired = after
+                .expansions
+                .iter()
+                .filter_map(|e| e.retired.as_ref())
+                .flat_map(|e| &e.progress)
+                .find(|row| row.id == "review--child")
+                .ok_or("retired child")?;
+            assert_eq!(
+                retired.attempts[0].state,
+                provenant_fabric_runtime::graph::AttemptState::Terminal
+            );
+            let withdrawn = store.record(attempt_id, &call)?;
+            assert!(matches!(
+                withdrawn.state,
+                provenant_run::AttemptState::Terminal {
+                    outcome: provenant_run::Outcome::Cancelled,
+                    ..
+                }
+            ));
+            assert_eq!(withdrawn.generation, queued.generation);
+            assert!(withdrawn.started_at.is_none());
+            assert_ne!(withdrawn.provider_launched, Some(true));
+            // Resume the actual launcher with its stale queued observation. Its
+            // compare-and-swap must fail before preparation or guardian handoff.
+            resume_tx.send(())?;
+            assert!(launcher.join().map_err(|_| "launcher panicked")??);
+            assert_eq!(store.record(attempt_id, &call)?, withdrawn);
         }
-    ));
+    }
     Ok(())
 }
 

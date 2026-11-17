@@ -52,9 +52,22 @@ pub struct RunStore {
     pub(crate) sealed_parent_network: Option<NetworkAccess>,
     /// This host's ID, stamped on new attempts when the edge supplies it.
     pub(crate) host: Option<provenant_core::HostId>,
+    #[cfg(feature = "fixture")]
+    pub(crate) launch_observer: Option<crate::launch::LaunchObserver>,
     _owner: PhantomData<Rc<()>>,
 }
 impl RunStore {
+    /// Pause a real launcher at its queued observation or successful claim.
+    /// Only fixture builds expose this seam; production launch uses no callback.
+    #[cfg(feature = "fixture")]
+    pub fn with_launch_observer(
+        mut self,
+        observe: impl Fn(crate::launch::LaunchObservation, &AttemptRecord) + 'static,
+    ) -> Self {
+        self.launch_observer = Some(Box::new(observe));
+        self
+    }
+
     /// Bound child launches by the network sealed for their parent.
     pub fn with_sealed_parent_network(mut self, network: NetworkAccess) -> Self {
         self.sealed_parent_network = Some(network);
@@ -176,6 +189,8 @@ impl RunStore {
             policy: Default::default(),
             sealed_parent_network: None,
             host: None,
+            #[cfg(feature = "fixture")]
+            launch_observer: None,
             _owner: PhantomData,
         }))
     }
@@ -194,6 +209,8 @@ impl RunStore {
             policy: Default::default(),
             sealed_parent_network: None,
             host: None,
+            #[cfg(feature = "fixture")]
+            launch_observer: None,
             _owner: PhantomData,
         })
     }

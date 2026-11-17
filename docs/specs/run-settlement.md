@@ -20,6 +20,9 @@ After three contention retries, automatic recovery stops with the pending
 private Git retained; an explicit reconcile starts a fresh retry budget.
 Cancellation remains authoritative while each retry runs. Contention never
 creates an import refusal or restores the worktree to its older host ref.
+Typed repository contention survives writer-error classification, and worktree
+completion checks wait until import succeeds so they cannot turn the pending
+private head into a terminal failure.
 - Why: failure to acquire the repository lock proves no import or publication
   failed, and must not roll back a lane's committed work.
 

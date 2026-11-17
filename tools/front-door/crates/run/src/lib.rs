@@ -75,6 +75,8 @@ pub use holder::{
     writer_base,
 };
 pub use identity::ProviderIdentityEvidence;
+#[cfg(feature = "fixture")]
+pub use launch::LaunchObservation;
 #[cfg(test)]
 pub(crate) use launch::fixture_refusal;
 pub use launch::{
