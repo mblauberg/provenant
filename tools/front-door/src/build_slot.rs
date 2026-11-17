@@ -16,14 +16,16 @@
 //! The slot directory and count come from the environment the host
 //! wrote into the shim script, never from arguments a lane chooses. Slot files
 //! live under the host state directory shared by every project, so
-//! `max_concurrent_builds` observes occupancy across the host. Busy slots warn
-//! and proceed immediately; Cargo owns its own build-lock queue.
+//! `max_concurrent_builds` observes occupancy across the host. Busy slots wait
+//! a bounded time, then warn and proceed; `0` disables the cap. Cargo owns
+//! its own build-lock queue.
 use provenant_os::build_slots::BuildSlots;
 use provenant_supervisor::census::{ProcessObservation, ProcessObserver, SystemProcessObserver};
 use std::{
     ffi::{OsStr, OsString},
     io::Write,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 // `PROVENANT_BUILD_SLOT` is set in a gated build to `pid:start`, the holder shim's
@@ -112,7 +114,10 @@ fn subcommand(args: &[OsString]) -> Option<&str> {
 pub(crate) struct Settings {
     pub state: PathBuf,
     pub slots: u64,
+    pub wait: Duration,
 }
+
+const DEFAULT_WAIT: Duration = Duration::from_secs(15);
 impl Settings {
     /// None when the host did not configure slots; the build then runs
     /// ungated.
@@ -126,7 +131,8 @@ impl Settings {
         let number = |name: &str| get(name)?.to_str()?.parse::<u64>().ok();
         Some(Self {
             state: state.is_absolute().then_some(state)?,
-            slots: number(BUILD_SLOTS).filter(|n| (1..=64).contains(n))?,
+            slots: number(BUILD_SLOTS).filter(|n| *n <= 64)?,
+            wait: DEFAULT_WAIT,
         })
     }
 }
@@ -272,8 +278,42 @@ fn nested_with(env: &[(OsString, OsString)], observer: &dyn ProcessObserver) -> 
     ancestor_of(me.pid, &holder, &command, observer)
 }
 
+struct Taken {
+    guard: Option<provenant_os::build_slots::SlotGuard>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    status: Option<String>,
+}
+
+/// Take one slot, waiting up to `settings.wait` when every slot is busy.
+/// `slots == 0` is not handled here; the caller skips the gate.
+fn take_slot(settings: &Settings) -> Result<Taken, String> {
+    let slots = BuildSlots::open(&settings.state).map_err(|error| error.to_string())?;
+    if let Some(guard) = slots
+        .try_acquire(settings.slots)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(Taken {
+            guard: Some(guard),
+            status: None,
+        });
+    }
+    let status = format!(
+        "waiting for a host build slot ({} held of {})",
+        slots.held(settings.slots),
+        settings.slots
+    );
+    say(&status);
+    let guard = slots
+        .acquire_within(settings.slots, settings.wait)
+        .map_err(|error| error.to_string())?;
+    Ok(Taken {
+        guard,
+        status: Some(status),
+    })
+}
+
 /// Take a slot when `gate.command` compiles, run it and return its exit
-/// code. Busy or unavailable slots warn and the build proceeds immediately.
+/// code. Busy slots wait a bounded time, then warn and the build proceeds.
 pub(crate) fn run(gate: Gate<'_>) -> i32 {
     let env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     let backend = env
@@ -299,11 +339,7 @@ pub(crate) fn run(gate: Gate<'_>) -> i32 {
         env,
         nested,
         backend,
-        |settings| {
-            BuildSlots::open(&settings.state)
-                .and_then(|slots| slots.try_acquire(settings.slots))
-                .map_err(|error| error.to_string())
-        },
+        |settings| take_slot(settings).map(|taken| taken.guard),
         move |program, args, env| {
             if !gated(args) || nested {
                 return provenant_os::sys::run_wait(program, args, env)
@@ -420,7 +456,8 @@ fn run_with(
         return report(&message);
     }
     let mut held = None;
-    if gate_this {
+    let disabled = gate.settings.as_ref().is_some_and(|settings| settings.slots == 0);
+    if gate_this && !disabled {
         let admission = provenant_config::dispatch_port_backend(
             &backend,
             || match &gate.settings {
@@ -433,7 +470,9 @@ fn run_with(
         match admission {
             Ok(Some(slot)) => held = Some(slot),
             Ok(None) if matches!(&backend, provenant_config::PortBackend::Builtin) => {
-                warning("all configured slots are busy; Cargo manages its own build locks")
+                warning(
+                    "bounded wait ended with every build slot busy; building without one. Cargo manages its own build locks",
+                )
             }
             Err(error) if matches!(&backend, provenant_config::PortBackend::Builtin) => {
                 warning(&error)
@@ -628,6 +667,7 @@ mod tests {
             settings: Some(Settings {
                 state: state.path().to_owned(),
                 slots: 1,
+                wait: std::time::Duration::ZERO,
             }),
             local: Local::All,
             command: &command,
@@ -655,6 +695,62 @@ mod tests {
         assert!(ran);
         assert_eq!(warnings.len(), 1);
         drop(held);
+    }
+
+    #[test]
+    fn six_lane_builds_on_two_slots_each_report_a_wait() {
+        let state = tempfile::tempdir().unwrap();
+        BuildSlots::provision(state.path(), 2).unwrap();
+        let slots = BuildSlots::open(state.path()).unwrap();
+        let _held = [
+            slots.try_acquire(2).unwrap().unwrap(),
+            slots.try_acquire(2).unwrap().unwrap(),
+        ];
+        let mut threads = Vec::new();
+        for _ in 0..4 {
+            let path = state.path().to_owned();
+            threads.push(std::thread::spawn(move || {
+                super::take_slot(&super::Settings {
+                    state: path,
+                    slots: 2,
+                    wait: std::time::Duration::from_millis(200),
+                })
+                .unwrap()
+            }));
+        }
+        for thread in threads {
+            let taken = thread.join().unwrap();
+            assert!(taken.guard.is_none());
+            let status = taken.status.expect("status");
+            assert!(status.contains("waiting for a host build slot"));
+            assert!(status.contains("2 held of 2"));
+        }
+    }
+
+    #[test]
+    fn a_disabled_cap_does_not_take_a_slot() {
+        let command = [OsString::from("cargo"), OsString::from("check")];
+        let gate = Gate {
+            settings: Some(Settings {
+                state: std::path::PathBuf::from("/unused"),
+                slots: 0,
+                wait: std::time::Duration::ZERO,
+            }),
+            local: Local::All,
+            command: &command,
+        };
+        let mut warnings = Vec::new();
+        let code = run_with(
+            gate,
+            Vec::new(),
+            false,
+            provenant_config::PortBackend::Builtin,
+            |_| unreachable!("disabled cap does not acquire"),
+            |_, _, _| Ok(0),
+            |message| warnings.push(message.to_owned()),
+        );
+        assert_eq!(code, 0);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]
@@ -735,10 +831,15 @@ mod tests {
         let good = env(&[(BUILD_SLOT_STATE, "/s"), (BUILD_SLOTS, "2")]);
         let settings = Settings::from_env(&good).unwrap();
         assert_eq!(settings.slots, 2);
+        assert_eq!(
+            Settings::from_env(&env(&[(BUILD_SLOT_STATE, "/s"), (BUILD_SLOTS, "0")]))
+                .unwrap()
+                .slots,
+            0
+        );
         for bad in [
             env(&[]),
             env(&[(BUILD_SLOT_STATE, "relative"), (BUILD_SLOTS, "2")]),
-            env(&[(BUILD_SLOT_STATE, "/s"), (BUILD_SLOTS, "0")]),
             env(&[(BUILD_SLOT_STATE, "/s"), (BUILD_SLOTS, "65")]),
             env(&[(BUILD_SLOT_STATE, "/s"), (BUILD_SLOTS, "x")]),
         ] {

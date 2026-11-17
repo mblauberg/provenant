@@ -533,7 +533,7 @@ impl LaneBuildSettings {
     pub fn invalid_keys(&self) -> Vec<&'static str> {
         let mut invalid = Vec::new();
         let in_range = |value: Option<u64>, max: u64| value.is_none_or(|n| (1..=max).contains(&n));
-        if !in_range(self.max_concurrent_builds, 64) {
+        if self.max_concurrent_builds.is_some_and(|n| n > 64) {
             invalid.push("max_concurrent_builds");
         }
         if self
@@ -621,15 +621,25 @@ impl LaneBuildSettings {
         self.build_dir_grace_seconds
             .unwrap_or(DEFAULT_BUILD_DIR_GRACE_SECONDS)
     }
-    /// Concurrent cargo builds the host allows: the setting (clamped to 1..=64)
-    /// or max(1, min(cores / cargo_build_jobs, total GiB / 6)), so a 10-core
-    /// 16 GiB host with the default 2 jobs gets 2.
+    /// Concurrent cargo builds the host allows. `0` disables the cap. An
+    /// unset value is `max(1, min(cores / cargo_build_jobs, total GiB / 6))`,
+    /// so a 10-core 16 GiB host with the default 2 jobs gets 2.
     pub fn build_limit(&self, total_bytes: u64) -> u64 {
         if let Some(limit) = self.max_concurrent_builds {
-            return limit.clamp(1, 64);
+            return if limit == 0 { 0 } else { limit.clamp(1, 64) };
         }
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u64);
         Self::automatic_builds(cores, self.jobs(), total_bytes)
+    }
+
+    /// `host` when `max_concurrent_builds` is set, including `0` (disabled).
+    /// Otherwise the count is the compiled default from cores and memory.
+    pub fn build_limit_source(&self) -> &'static str {
+        if self.max_concurrent_builds.is_some() {
+            "host"
+        } else {
+            "default"
+        }
     }
     /// The automatic build limit for a host with `cores` and `total_bytes`.
     pub fn automatic_builds(cores: u64, jobs: u64, total_bytes: u64) -> u64 {
@@ -1389,10 +1399,10 @@ mod build_tests {
         assert_eq!(automatic, LaneBuildSettings::default());
         let invalid: LaneBuildSettings =
             toml_edit::de::from_str("max_concurrent_builds = 0\ncargo_build_jobs = 1025").unwrap();
-        assert_eq!(
-            invalid.invalid_keys(),
-            ["max_concurrent_builds", "cargo_build_jobs"]
-        );
+        assert_eq!(invalid.invalid_keys(), ["cargo_build_jobs"]);
+        assert_eq!(invalid.max_concurrent_builds, Some(0));
+        assert_eq!(invalid.build_limit(0), 0);
+        assert_eq!(invalid.build_limit_source(), "host");
         assert!(toml_edit::de::from_str::<LaneBuildSettings>("cargo_build_jobs = -2").is_err());
     }
     #[test]
@@ -1478,7 +1488,8 @@ mod build_tests {
             max_concurrent_builds: Some(0),
             ..Default::default()
         };
-        assert_eq!(wild.build_limit(0), 1);
+        assert_eq!(wild.build_limit(0), 0);
+        assert_eq!(LaneBuildSettings::default().build_limit_source(), "default");
     }
     #[test]
     fn total_lane_caps_are_optional_and_validate_host_policy() {

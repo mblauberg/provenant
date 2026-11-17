@@ -86,6 +86,11 @@ work; a hard boundary stops it. Providers without live usage expose an advisory
 limit rather than a fabricated measurement.
 - Why: budget enforcement must preserve completed work and report its evidence.
 
+## Lane verification and the host build cap
+
+A writer preamble's verification paragraph is `lanes.verification` (`check`, `targeted` or `full`). Unset, the paragraph is the historical compile-check wording and names no source. A brief line `Verification scope: targeted` (or `check` or `full`) overrides the knob and the paragraph names source `brief`. When the knob and that line disagree, the paragraph follows the brief and the stop cause names both scopes. The host build cap is `domains.fabric.lanes.max_concurrent_builds`: unset, the count is derived from cores and memory (source `default`); a set value is source `host`; `0` disables the cap. A compiling cargo command that finds every slot busy waits a bounded time, then warns and proceeds.
+- Why: a chair brief must be able to widen what a lane verifies, and parallel lanes must share one host cap instead of each taking the machine.
+
 ## Every limit names the layer that set it
 
 `dispatch_profile` seals, for every effective knob not at its registry default,

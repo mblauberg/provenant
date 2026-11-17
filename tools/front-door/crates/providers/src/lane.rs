@@ -118,8 +118,7 @@ impl crate::LaunchSpec {
             }
             Ok(shell_quote(value))
         };
-        if (matches!(&gate.backend, provenant_config::PortBackend::Builtin)
-            && !(1..=64).contains(&gate.slots))
+        if (matches!(&gate.backend, provenant_config::PortBackend::Builtin) && gate.slots > 64)
             || !["all", "check", "none"].contains(&gate.local_cargo)
         {
             return Err(ProviderError::Malformed);
