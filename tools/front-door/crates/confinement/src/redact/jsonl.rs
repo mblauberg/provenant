@@ -437,6 +437,15 @@ impl JsonlRedactor {
                             && literal.get(scalar.bytes.len()) == Some(&b)
                     });
             if matches!(scalar.number, Number::Invalid) && !possible_literal {
+                // A complete root literal followed by an escape can conceal the
+                // start of a credential key. Passing both to the plain scanner
+                // joins them into one word and loses the key boundary.
+                if self.positions.len() == 1
+                    && matches!(scalar.bytes.as_slice(), b"true" | b"false" | b"null")
+                    && b == b'\\'
+                {
+                    return self.malformed(&scalar.bytes, scalar.masked, out);
+                }
                 let mut remainder = scalar.bytes;
                 remainder.push(b);
                 if self.positions.len() == 1 && !scalar.streamed {
@@ -862,6 +871,16 @@ mod tests {
             br#"true\u0070assword=unshaped-value literal-\u0073ecret"#,
         ] {
             let expected = filtered(input, 1).0;
+            for split in 0..=input.len() {
+                let mut filter =
+                    JsonlRedactor::new([b"literal-secret".to_vec(), b"12345".to_vec()]).unwrap();
+                let mut output = Vec::new();
+                let mut sink = |b: &[u8]| output.extend_from_slice(b);
+                filter.filter(&input[..split], &mut sink).unwrap();
+                filter.filter(&input[split..], &mut sink).unwrap();
+                filter.finish(&mut sink).unwrap();
+                assert_eq!(output, expected, "split {split}, input {input:?}");
+            }
             for seed in 2..20 {
                 let output = filtered(input, seed).0;
                 assert_eq!(output, expected);
