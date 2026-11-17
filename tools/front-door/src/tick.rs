@@ -1044,7 +1044,7 @@ fn target_seed_task(directory: &Directory) -> Task {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Serialize)]
 pub(crate) struct Graphs {
     pub advanced: usize,
     pub errors: Vec<String>,

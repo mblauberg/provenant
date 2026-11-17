@@ -718,7 +718,7 @@ fn factory_mode(
 
 mod graph_execution;
 use graph_execution::*;
-pub(crate) use graph_execution::{Announce, launch_retry_worker, tick_graphs, tick_launch_retry};
+pub(crate) use graph_execution::{Announce, tick_graphs, tick_launch_retry};
 
 #[cfg(test)]
 #[allow(

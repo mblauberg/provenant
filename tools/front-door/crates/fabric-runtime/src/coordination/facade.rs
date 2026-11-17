@@ -1709,7 +1709,7 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
 
 #[cfg(test)]
 mod diagnostic_tests {
-    use super::FacadeError;
+    use super::{FacadeError, IoCause};
 
     #[test]
     fn relay_causes_survive_diagnostics_and_wire_round_trips()

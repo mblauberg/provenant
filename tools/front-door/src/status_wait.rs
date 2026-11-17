@@ -217,22 +217,14 @@ fn read(
     }
 }
 
-/// A missing receipt means its observation expired while the detached worker
-/// still owned execution. Keep that wake in flight until persisted progress
-/// gives this observer a different wake; dropping the waiter is harmless.
 struct RetryTick {
     wake: provenant_core::WallTime,
-    receipt: Option<mpsc::Receiver<Result<Option<crate::tick::Graphs>, String>>>,
+    receipt: mpsc::Receiver<Result<crate::tick::Graphs, String>>,
 }
 impl RetryTick {
-    fn poll(&mut self) -> Option<Result<crate::tick::Graphs, String>> {
-        match self.receipt.as_ref()?.try_recv() {
-            Ok(Ok(None)) => {
-                self.receipt = None;
-                None
-            }
-            Ok(Ok(Some(report))) => Some(Ok(report)),
-            Ok(Err(error)) => Some(Err(error)),
+    fn poll(&self) -> Option<Result<crate::tick::Graphs, String>> {
+        match self.receipt.try_recv() {
+            Ok(result) => Some(result),
             Err(mpsc::TryRecvError::Empty) => None,
             Err(mpsc::TryRecvError::Disconnected) => {
                 Some(Err("scheduler receipt disconnected".into()))
@@ -1304,7 +1296,7 @@ pub(crate) fn run(
                                 if retry_ticks.get(&retry_key).is_some_and(|tick| tick.wake != wake) {
                                     retry_ticks.remove(&retry_key);
                                 }
-                                if let Some(result) = retry_ticks.get_mut(&retry_key).and_then(RetryTick::poll) {
+                                if let Some(result) = retry_ticks.get(&retry_key).and_then(RetryTick::poll) {
                                     retry_ticks.remove(&retry_key);
                                     if let Ok(mut warnings) = warnings.lock() {
                                         match result {
@@ -1316,9 +1308,9 @@ pub(crate) fn run(
                                         }
                                     }
                                 }
-                                if !retry_ticks.contains_key(&retry_key) {
+                                if let std::collections::btree_map::Entry::Vacant(entry) = retry_ticks.entry(retry_key) {
                                     match crate::fabric::tick_launch_retry(resolved, project, &graph, workers) {
-                                        Ok(receipt) => { retry_ticks.insert(retry_key, RetryTick { wake, receipt: Some(receipt) }); },
+                                        Ok(receipt) => { entry.insert(RetryTick { wake, receipt }); },
                                         Err(error) => if let Ok(mut warnings) = warnings.lock() {
                                             warnings.push(format!("launch retry for {graph} could not start: {error}"));
                                         },
@@ -1790,31 +1782,6 @@ mod tests {
             due + interval >= next_remote_poll,
         );
         assert_eq!(second_due_reads, pending);
-    }
-
-    // Spec: docs/specs/cli.md#waits-are-readers
-    #[test]
-    fn expired_retry_receipt_retains_its_in_flight_wake() {
-        let (sender, receiver) = mpsc::channel();
-        sender.send(Ok(None)).unwrap();
-        drop(sender);
-        let wake = provenant_core::WallTime::from_micros(5_000_000).unwrap();
-        let mut tick = RetryTick {
-            wake,
-            receipt: Some(receiver),
-        };
-        assert!(tick.poll().is_none());
-        assert!(
-            tick.receipt.is_none(),
-            "receipt expired while worker continues"
-        );
-        for _ in 0..2 {
-            assert!(
-                tick.poll().is_none(),
-                "expired receipt cannot become completion"
-            );
-            assert_eq!(tick.wake, wake, "same persisted wake stays in flight");
-        }
     }
 
     // Spec: docs/specs/cli.md#waits-are-readers

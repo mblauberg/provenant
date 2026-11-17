@@ -111,104 +111,23 @@ pub(crate) fn scheduler_task<T: Send + 'static>(
     Ok(receiver)
 }
 
-/// Advance only the requested local graph under scheduler-owned authority.
-/// The journal is re-read under custody before any launch. A wait may stop
-/// observing this receipt while admitted preparation continues independently.
+/// Advance a due retry on an in-process scheduler thread. The observer may
+/// end without cancelling it; process exit leaves the persisted wake for recovery.
 pub(crate) fn tick_launch_retry(
     resolved: &crate::roots::Resolved,
     project: provenant_core::ProjectId,
     graph: &str,
     workers: &'static dyn WorkerObserver,
-) -> std::io::Result<std::sync::mpsc::Receiver<Result<Option<crate::tick::Graphs>, String>>> {
+) -> std::io::Result<std::sync::mpsc::Receiver<Result<crate::tick::Graphs, String>>> {
     let resolved = resolved.clone();
     let graph = graph.to_owned();
     scheduler_task(move |cancel| {
-        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-        let argv = [
-            executable.into_os_string(),
-            "--state-dir".into(),
-            resolved.roots.state.as_path().as_os_str().to_owned(),
-            "--json".into(),
-            "internal".into(),
-            "tick-graph".into(),
-            project.to_string().into(),
-            graph.clone().into(),
-        ];
-        let receipt = provenant_os::exec::detached_receipt(
-            &argv,
-            &resolved.project,
-            std::time::Duration::from_secs(5),
-        );
-        // A libtest executable cannot re-enter the CLI; exercise the same
-        // scheduler authority in process. Production always uses a worker.
-        #[cfg(any(test, feature = "fixture"))]
-        if matches!(receipt, Err(provenant_os::exec::ExecError::TestHarness)) {
-            let now = SystemClock::new()
-                .wall_now()
-                .map_err(|error| error.to_string())?;
-            return tick_graphs_selected(&resolved, now, workers, Some((project, &graph)), cancel)
-                .map(Some)
-                .map_err(|error| error.to_string());
-        }
-        let _ = (workers, cancel);
-        let Some(receipt) = receipt.map_err(|error| error.to_string())? else {
-            // Receipt expiry is observation only. The worker retains custody;
-            // its journal result is observable by this or a later waiter.
-            return Ok(None);
-        };
-        let result: serde_json::Value =
-            serde_json::from_slice(&receipt).map_err(|error| error.to_string())?;
-        if let Some(error) = result.get("error").filter(|error| !error.is_null()) {
-            return Err(error.to_string());
-        }
-        serde_json::from_value(result["data"].clone())
-            .map(Some)
+        let now = SystemClock::new()
+            .wall_now()
+            .map_err(|error| error.to_string())?;
+        tick_graphs_selected(&resolved, now, workers, Some((project, &graph)), cancel)
             .map_err(|error| error.to_string())
     })
-}
-
-pub(crate) fn launch_retry_worker(
-    globals: &provenant_cli::Globals,
-    project: provenant_core::ProjectId,
-    graph: &str,
-    workers: &'static dyn WorkerObserver,
-) -> u8 {
-    let result = (|| -> Result<crate::tick::Graphs, Box<dyn std::error::Error>> {
-        if provenant_cli::fabric::in_lane() {
-            return Err("graph retry requires host custody".into());
-        }
-        let resolved = crate::roots::resolve(
-            globals,
-            crate::roots::Workspace::Project,
-            crate::roots::Product::Required,
-        )?;
-        tick_graphs_selected(
-            &resolved,
-            SystemClock::new().wall_now()?,
-            workers,
-            Some((project, graph)),
-            &CancelToken::new(),
-        )
-    })();
-    match result {
-        Ok(report) => crate::emit(
-            &provenant_records::CommandResult::new(
-                "internal tick-graph",
-                provenant_records::Outcome::Ok,
-                report,
-            ),
-            globals,
-            "graph retry advanced",
-            false,
-        ),
-        Err(error) => crate::fail(
-            "internal tick-graph",
-            provenant_records::Outcome::Error,
-            "GRAPH_RETRY",
-            &error.to_string(),
-            globals,
-        ),
-    }
 }
 
 fn tick_graphs_selected(
