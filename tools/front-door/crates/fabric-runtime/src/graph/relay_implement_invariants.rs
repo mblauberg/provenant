@@ -19,7 +19,7 @@ mod relay_provisioning {
         };
         let request: relay::ChildRequest = serde_json::from_value(json!({
             "id": "planned",
-            "brief": "Implement a bounded slice",
+            "prompt": "Implement a bounded slice",
             "writer": true,
             "write_scope": ["src/parser"],
             "idempotency_key": "planned-implement",

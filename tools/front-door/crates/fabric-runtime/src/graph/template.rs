@@ -786,7 +786,7 @@ pub struct Template {
     pub doc: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub parameters: BTreeMap<String, TemplateParameter>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "prompt", skip_serializing_if = "Option::is_none")]
     pub brief: Option<String>,
     /// Route alias for the leaf: `junior`, `senior`, `principal` or `web`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

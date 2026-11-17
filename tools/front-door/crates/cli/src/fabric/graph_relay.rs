@@ -2371,7 +2371,7 @@ mod provisioning_tests {
         }
         git(&["remote", "add", "origin", remote])?;
         git(&["checkout", "--detach", "-q"])?;
-        let request = json!({"op":"add","id":"writer","use":"implement","brief":"Write","writer":true,"write_scope":["src"],"idempotency_key":"write"});
+        let request = json!({"op":"add","id":"writer","use":"implement","prompt":"Write","writer":true,"write_scope":["src"],"idempotency_key":"write"});
         let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
         let path = receipt["worktree"].as_str().ok_or("missing worktree")?;
         assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
@@ -2459,7 +2459,7 @@ mod provisioning_tests {
                 })?;
                 journal.save(&checkpoint)?;
             }
-            let request = json!({"op":"add","id":"child","use":"task","brief":"Read", "idempotency_key":"lost-reply"});
+            let request = json!({"op":"add","id":"child","use":"task","prompt":"Read", "idempotency_key":"lost-reply"});
             let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
             let settled = {
                 let mut journal = open()?;
@@ -2484,7 +2484,7 @@ mod provisioning_tests {
             assert_eq!(replay["replayed"], true);
             assert_eq!(open()?.load("g-lost-receipt")?, Some(settled));
             let mut changed = request.clone();
-            changed["brief"] = json!("Different");
+            changed["prompt"] = json!("Different");
             assert!(
                 matches!(serve(&context, "caller", changed, budget, &cancel, &clock),
                 Err(ServiceError::Cli { code, .. }) if code == "idempotency_conflict")
@@ -2956,7 +2956,7 @@ mod panel_tests {
                 serde_json::from_value(json!({
                     "id": "review",
                     "use": "task",
-                    "brief": "Review the selected subject",
+                    "prompt": "Review the selected subject",
                     "idempotency_key": "nested-review",
                     "launch": {
                         "node": {
@@ -3063,14 +3063,14 @@ mod panel_tests {
             serde_json::from_value(json!({
                 "id": "missing",
                 "use": "review-panel",
-                "brief": "Review the selected subject",
+                "prompt": "Review the selected subject",
                 "idempotency_key": "missing-source"
             }))?;
         let dynamic_add: provenant_fabric_runtime::graph::relay::ChildRequest =
             serde_json::from_value(json!({
                 "id": "dynamic",
                 "use": "task",
-                "brief": "Review the selected subject",
+                "prompt": "Review the selected subject",
                 "idempotency_key": "dynamic-source",
                 "launch": {
                     "node": {
@@ -3084,7 +3084,7 @@ mod panel_tests {
             serde_json::from_value(json!({
                 "id": "integration",
                 "use": "task",
-                "brief": "Review the selected subject",
+                "prompt": "Review the selected subject",
                 "idempotency_key": "integration-source",
                 "launch": {
                     "node": {

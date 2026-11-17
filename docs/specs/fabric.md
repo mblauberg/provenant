@@ -128,7 +128,9 @@ reported, never mirrored.
 ## CLI and relay surfaces
 
 Relay input is a strict tagged enum with no coercion, validated before side
-effects, and the relay carries coordination only. A queued relay caller must
+effects, and the relay carries coordination only. The wire field for child lane
+addition is `prompt`, matching the compiled graph node key; stray `brief`
+spellings on the relay wire are rejected. A queued relay caller must
 still be present with budget left before any effect, so a timed-out call cannot
 commit. The CLI and the relay render one typed category per error. Settlement
 reactions (graph advance, chair notice, chair log) run once in effect; notices

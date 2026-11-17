@@ -38,7 +38,7 @@ pub struct ChildRequest {
     /// Template to `use`; a plain lane is `task`.
     #[serde(default = "task", rename = "use")]
     pub template: String,
-    pub brief: String,
+    pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
     /// Preserve the caller's provider-process limit when adding the graph node.
@@ -617,7 +617,7 @@ fn child_patch(
     let mut node = Map::new();
     node.insert("id".into(), request.id.clone().into());
     node.insert("use".into(), request.template.clone().into());
-    node.insert("prompt".into(), request.brief.clone().into());
+    node.insert("prompt".into(), request.prompt.clone().into());
     if let Some(tier) = &request.tier {
         node.insert("tier".into(), tier.clone().into());
     }
@@ -649,7 +649,7 @@ fn child_patch(
         node.remove("prompt");
         node.remove("tier");
         if template.parameters.contains_key("brief") {
-            node.insert("with".into(), serde_json::json!({"brief": request.brief}));
+            node.insert("with".into(), serde_json::json!({"brief": request.prompt}));
         }
         let compiler = Compiler {
             library: context.library,
@@ -659,8 +659,8 @@ fn child_patch(
             .lower(&Value::Object(node.clone()))
             .map_err(PatchError::from)?;
         inherit_child_controls(&mut compiled, request);
-        if !template.parameters.contains_key("brief") && !request.brief.is_empty() {
-            append_child_brief(&mut compiled, &request.brief);
+        if !template.parameters.contains_key("brief") && !request.prompt.is_empty() {
+            append_child_brief(&mut compiled, &request.prompt);
         }
         template::preserve_compiled_metadata(&mut compiled).map_err(PatchError::from)?;
         // Keep `use` and its effective parameters for admission evidence. The

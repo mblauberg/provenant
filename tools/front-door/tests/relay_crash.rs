@@ -199,7 +199,7 @@ fn relay_host_crash_recovers_in_flight_child() -> Result {
     let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
     let _socket = SocketCleanup(provenant_providers::LaneRuntime::fabric_socket(attempt));
     let host = start(&rig, attempt, false)?;
-    let request = json!({"op":"add","id":"child","use":"task","brief":"Child work","idempotency_key":"child-once"});
+    let request = json!({"op":"add","id":"child","use":"task","prompt":"Child work","idempotency_key":"child-once"});
     let send = |request| {
         provenant_fabric_runtime::relay::graph(
             &provenant_providers::LaneRuntime::fabric_socket(attempt),
