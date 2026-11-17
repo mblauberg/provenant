@@ -288,7 +288,7 @@ impl GraphRelayCause {
                 "the review panel could not be resolved; check the review routing configuration"
             }
             Self::Secret => {
-                "the child request contains a potential secret; remove credential material before retrying"
+                "the brief contains a credential-shaped value; remove credential material before retrying"
             }
             Self::Cycle => "the patch creates a dependency cycle; remove the cyclic dependency",
             Self::Conflict => {

@@ -1120,9 +1120,26 @@ pub(super) struct Admission {
 }
 
 fn scan(patch: &Patch, context: &PatchContext<'_>) -> Result<(), PatchError> {
+    fn strings(value: &Value, context: &PatchContext<'_>) -> Result<(), PatchError> {
+        match value {
+            Value::String(text) => {
+                (context.scan)(text).map_err(|reason| PatchError::new("secret", reason))
+            }
+            Value::Array(values) => values.iter().try_for_each(|value| strings(value, context)),
+            Value::Object(values) => values
+                .values()
+                .try_for_each(|value| strings(value, context)),
+            _ => Ok(()),
+        }
+    }
+    let value =
+        serde_json::to_value(patch).map_err(|error| PatchError::invalid(error.to_string()))?;
     let text =
-        serde_json::to_string(patch).map_err(|error| PatchError::invalid(error.to_string()))?;
-    (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))
+        serde_json::to_string(&value).map_err(|error| PatchError::invalid(error.to_string()))?;
+    (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))?;
+    // JSON escaping can hide a credential in a prompt. Scan each original
+    // string too, before admission can publish the candidate checkpoint.
+    strings(&value, context)
 }
 
 /// Compile and check a patch against the current expansion without changing

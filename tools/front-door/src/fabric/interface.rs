@@ -114,7 +114,7 @@ fn decode_input<T: serde::de::DeserializeOwned>(
 
 fn retry_patch_error(error: patch::PatchError) -> FacadeError {
     use provenant_fabric_runtime::coordination::facade::GraphRelayCause;
-    if error.parameter.is_some() {
+    if error.parameter.is_some() || error.admission.is_some() || error.code != "invalid" {
         return graph_patch_error(error);
     }
     let cause = if error.message.starts_with("unknown node ") {
@@ -123,8 +123,6 @@ fn retry_patch_error(error: patch::PatchError) -> FacadeError {
         GraphRelayCause::RetryUnsettled
     } else if error.message.contains("container retry") {
         GraphRelayCause::RetryContainerBrief
-    } else if error.admission.is_some() {
-        return graph_patch_error(error);
     } else {
         GraphRelayCause::RetryInvalidConfiguration
     };
@@ -147,13 +145,26 @@ fn compile_error(error: provenant_fabric_runtime::graph::template::CompileError)
 /// a template launch reads the same message as the raw document it compiles to.
 /// Failures before admission stay a redacted graph-input reason.
 fn graph_patch_error(error: patch::PatchError) -> FacadeError {
-    match error.admission.clone() {
-        Some(admission) => FacadeError::graph_admission(admission),
-        None => match error.parameter.clone() {
-            Some(refusal) => FacadeError::invalid(InvalidInputDetail::Parameter(refusal)),
-            None => graph_input_reason(error),
-        },
+    use provenant_fabric_runtime::coordination::facade::GraphRelayCause;
+    if let Some(admission) = error.admission.clone() {
+        return FacadeError::graph_admission(admission);
     }
+    if let Some(refusal) = error.parameter.clone() {
+        return FacadeError::invalid(InvalidInputDetail::Parameter(refusal));
+    }
+    let cause = match error.code {
+        "secret" => Some(GraphRelayCause::Secret),
+        "cycle" => Some(GraphRelayCause::Cycle),
+        "conflict" | "stale_revision" | "idempotency_conflict" => Some(GraphRelayCause::Conflict),
+        "started" => Some(GraphRelayCause::StartedNode),
+        "edit_scope" => Some(GraphRelayCause::TargetOutsideGraph),
+        "journal" => Some(GraphRelayCause::JournalUnavailable),
+        _ => None,
+    };
+    if let Some(cause) = cause {
+        return FacadeError::invalid(InvalidInputDetail::GraphRelayCause(cause));
+    }
+    graph_input_reason(error)
 }
 
 pub(super) fn relay_error(error: ServiceError) -> FacadeError {
@@ -1977,8 +1988,11 @@ impl Factory {
         // preview or publication can expose or persist it.
         let bound_document =
             serde_json::to_string(&document).map_err(|_| FacadeError::StateCorrupt)?;
-        patch::scan_for_secrets(&bound_document)
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        patch::scan_for_secrets(&bound_document).map_err(|_| {
+            FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
+                provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret,
+            ))
+        })?;
         let expanded_for_warnings = document
             .expanded(&self.context.config.graph.limits)
             .map_err(|error| FacadeError::DispatchRefused {
@@ -2348,7 +2362,7 @@ impl Factory {
                 worktree_layout: self.context.port_table.worktree_layout.clone(),
             },
         )
-        .map_err(graph_input_reason)?;
+        .map_err(graph_patch_error)?;
         for expansion in &mut checkpoint.expansions {
             for node in &mut expansion.nodes {
                 let mut value = encode(&*node)?;

@@ -10,6 +10,26 @@ use std::{
 };
 type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
+// Spec: docs/specs/retry-owner.md#admission-is-distinct-from-observation
+#[test]
+fn run_refuses_secret_brief_with_safe_cause() -> Result {
+    let rig = GraphProject::new()?;
+    let brief = rig.project.join("secret-brief.md");
+    std::fs::write(&brief, "password=\"fixture-secret-3391\"")?;
+    let output = rig
+        .command()
+        .args(["run", "task", "--brief-file"])
+        .arg(&brief)
+        .output()?;
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(!output.status.success(), "{value}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("credential-shaped value"), "{text}");
+    assert!(!text.contains("fixture-secret-3391"), "{text}");
+    assert!(graph_records(&rig.state())?.is_empty());
+    Ok(())
+}
+
 #[test]
 fn file_briefs_reach_the_compiled_prompt_or_refuse_before_launch() -> Result {
     use std::io::Write;

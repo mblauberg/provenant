@@ -1319,17 +1319,7 @@ pub(crate) fn unified_graph_command(
                 factory.clock.mono_now(),
                 factory.context.config.graph.launch_wait_seconds,
             )?;
-            let mut data = factory.graph_document(input, budget, &cancel).map_err(|error| {
-                if matches!(command, GraphCommand::Retry { .. })
-                    && matches!(error, FacadeError::InvalidInput { detail: Some(InvalidInputDetail::GraphReason(_)) } | FacadeError::GraphRelayRefused { detail: Some(InvalidInputDetail::GraphReason(_)), .. })
-                {
-                    FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
-                        provenant_fabric_runtime::coordination::facade::GraphRelayCause::RetryInvalidConfiguration,
-                    ))
-                } else {
-                    error
-                }
-            })?;
+            let mut data = factory.graph_document(input, budget, &cancel)?;
             if let (Some(rows), Some(graph)) = (data["rows"].as_array_mut(), graph)
                 && !factory.context.in_lane
             {
