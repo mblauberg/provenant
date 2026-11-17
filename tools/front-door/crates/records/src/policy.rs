@@ -238,6 +238,31 @@ impl Policy {
             )),
         }
     }
+    /// Shared path for a non-boundary rule: a violated predicate warns on
+    /// stderr, naming the rule, setting source and knob, then proceeds; under
+    /// strict mode the caller's refusal is returned. Boundary rules use
+    /// `boundary_error`, never this.
+    #[allow(clippy::print_stderr, clippy::panic)]
+    pub fn warn_or<E>(
+        &self,
+        code: &str,
+        facts: Facts,
+        refuse: impl FnOnce(crate::diagnostic::Diagnostic) -> E,
+    ) -> Result<(), E> {
+        use std::io::Write;
+        assert!(
+            self.rule(code).rule.boundary == Boundary::None,
+            "warn_or serves only non-boundary rules"
+        );
+        match self.check(code, facts) {
+            Effect::Proceed => Ok(()),
+            Effect::Warn(message) => {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                Ok(())
+            }
+            Effect::Refuse(diagnostic) => Err(refuse(*diagnostic)),
+        }
+    }
     /// Keep an existing domain error while routing its immutable safety
     /// decision through the compiled policy table. Boundary rules have no
     /// knobs and must always refuse a violated predicate; a table regression
@@ -334,6 +359,59 @@ mod tests {
                 assert!(!rule.supports(Strength::Off), "{}", rule.code);
             }
         }
+    }
+    #[test]
+    fn rules_guarding_no_boundary_warn_by_default_and_document_their_knob() {
+        let registry: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../../config/harness-knobs.json"))
+                .expect("knob registry");
+        let documented = registry["policy_rules"]["settings"]
+            .as_object()
+            .expect("policy_rules settings");
+        // Opt-in overlap noise; the sole deliberate non-warn default.
+        const QUIET: &str = "CONFINEMENT_SOURCE_AGENT_CONFIG_NONE";
+        for rule in table()
+            .iter()
+            .filter(|rule| rule.boundary == Boundary::None)
+        {
+            let expected = if rule.code == QUIET {
+                Strength::Off
+            } else {
+                Strength::Warn
+            };
+            assert_eq!(rule.strength, expected, "{}", rule.code);
+            let knob = rule.knob.as_deref().expect("knob");
+            let entry = documented
+                .get(knob)
+                .unwrap_or_else(|| panic!("{knob} undocumented in harness-knobs.json"));
+            assert_eq!(entry["default"], strength_name(rule.strength), "{knob}");
+        }
+    }
+
+    #[test]
+    fn warn_or_warns_by_default_and_refuses_under_strict_mode() {
+        let mut policy = Policy::default();
+        let code = "LANE_DEPTH";
+        assert!(
+            table()
+                .iter()
+                .any(|rule| rule.code == code && rule.refusable)
+        );
+        let fact = || Facts::violation("depth 5 exceeds 4");
+        assert!(policy.warn_or(code, fact(), |_| ()).is_ok());
+        policy.overlay(
+            &BTreeMap::from([(code.into(), Strength::Refuse)]),
+            Source::Project,
+        );
+        let diagnostic = policy
+            .warn_or(code, fact(), |diagnostic| diagnostic)
+            .expect_err("strict mode refuses");
+        assert!(
+            diagnostic
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("Project"))
+        );
     }
     #[test]
     #[allow(clippy::panic)]
