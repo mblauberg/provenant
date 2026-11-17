@@ -102,15 +102,15 @@ impl JournalError {
     }
 
     /// The underlying error, for typed recovery without discarding context.
-    pub fn cause(&self) -> &Self {
+    pub fn root_cause(&self) -> &Self {
         match self {
-            Self::Graph { source, .. } => source.cause(),
+            Self::Graph { source, .. } => source.as_ref().root_cause(),
             other => other,
         }
     }
 
     pub fn is_lock_timeout(&self) -> bool {
-        matches!(self.cause(), Self::Filesystem(FsError::LockTimeout { .. }))
+        matches!(self.root_cause(), Self::Filesystem(FsError::LockTimeout { .. }))
     }
 
     /// Stable identifier independent of the displayed explanation.

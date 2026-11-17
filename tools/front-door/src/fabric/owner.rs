@@ -808,7 +808,7 @@ pub(crate) fn graph_journal_error(
 ) -> FacadeError {
     use provenant_fabric_runtime::graph::JournalError;
     if let JournalError::Graph { ref source, .. } = error {
-        return match source.cause() {
+        return match source.root_cause() {
             JournalError::TooLarge => FacadeError::DispatchRefused {
                 fact: None,
                 disk: None,
