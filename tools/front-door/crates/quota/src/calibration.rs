@@ -44,17 +44,16 @@ impl crate::Settings {
         }
         for record in records {
             let local_ledger = provenant_records::AdapterSpec::get(&record.account.adapter)
-                .is_some_and(|spec| {
-                    let plan = record
-                        .snapshot
-                        .as_ref()
-                        .and_then(|snapshot| snapshot.details.as_ref())
-                        .and_then(|details| details.plan.as_deref());
-                    spec.account_plan(plan).map_or(
-                        spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger,
-                        |p| p.quota == provenant_records::AccountQuota::LocalLedger,
+                .and_then(|spec| {
+                    spec.account_plan(
+                        record
+                            .snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.details.as_ref())
+                            .and_then(|details| details.plan.as_deref()),
                     )
-                });
+                })
+                .is_some_and(|plan| plan.quota == provenant_records::AccountQuota::LocalLedger);
             if !local_ledger {
                 continue;
             }
