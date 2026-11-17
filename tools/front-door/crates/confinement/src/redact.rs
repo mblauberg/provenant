@@ -398,7 +398,28 @@ fn marker_match(bytes: &[u8], marker: &[u8]) -> MarkerMatch {
     }
 }
 
+// First bytes that can begin a token marker. Any other byte mismatches every
+// marker, so the per-marker comparison is skipped on that hot path.
+const MARKER_START: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut index = 0;
+    while index < TOKEN_MARKERS.len() {
+        table[TOKEN_MARKERS[index].0[0] as usize] = true;
+        index += 1;
+    }
+    table
+};
+
+fn marker_may_start(bytes: &[u8]) -> bool {
+    bytes
+        .first()
+        .is_none_or(|first| MARKER_START[usize::from(*first)])
+}
+
 fn token_marker_at(bytes: &[u8]) -> Option<(usize, TokenKind)> {
+    if !marker_may_start(bytes) {
+        return None;
+    }
     TOKEN_MARKERS.iter().find_map(|(marker, kind)| {
         match marker_match(bytes, marker_pattern(marker)) {
             MarkerMatch::Complete(length) => Some((length, *kind)),
@@ -408,6 +429,9 @@ fn token_marker_at(bytes: &[u8]) -> Option<(usize, TokenKind)> {
 }
 
 fn token_marker_prefix(bytes: &[u8]) -> bool {
+    if !marker_may_start(bytes) {
+        return false;
+    }
     TOKEN_MARKERS.iter().any(|(marker, _)| {
         matches!(
             marker_match(bytes, marker_pattern(marker)),
@@ -748,6 +772,9 @@ impl AssignmentScanner {
 
     /// The scheme flag of the key that the run ends with, if any.
     fn key_ending_run(&self) -> Option<bool> {
+        if self.run.is_empty() {
+            return None;
+        }
         ASSIGNMENT_KEYS.iter().find_map(|(key, scheme)| {
             let start = self.run.len().checked_sub(key.len())?;
             let bounded = start == 0 || !self.run[start - 1].is_ascii_alphanumeric();
