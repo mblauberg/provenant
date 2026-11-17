@@ -4942,8 +4942,8 @@ impl RunStore {
                     AttemptState::Starting { .. } => self
                         .attempt_dir(attempt.attempt_id, false)
                         .is_ok_and(|dir| {
-                            read_sealed(&dir, "cancel.json", RECORD_LIMIT)
-                                .is_ok_and(|found| found.is_some())
+                            crate::store::CancelMarker::read(&dir, Self::scope(&attempt))
+                                .is_ok_and(|marker| marker != crate::store::CancelMarker::Absent)
                                 || self.launcher_gone(&attempt, &dir, true, call)
                         }),
                     AttemptState::Terminal {

@@ -3291,8 +3291,8 @@ impl WriterLaunch {
             if stop.marker_vetoes(attempt)? {
                 return Err(RunError::Validation("lane import cancelled"));
             }
-        } else if crate::artifacts::read_sealed(attempt, "cancel.json", crate::RECORD_LIMIT)?
-            .is_some()
+        } else if crate::store::CancelMarker::read(attempt, custody.scope())?
+            != crate::store::CancelMarker::Absent
         {
             return Err(RunError::Validation("lane import cancelled"));
         }
@@ -3416,7 +3416,8 @@ impl WriterLaunch {
         let import_cancelled = if let Some(stop) = delivered_steer {
             stop.marker_vetoes(attempt)?
         } else {
-            crate::artifacts::read_sealed(attempt, "cancel.json", crate::RECORD_LIMIT)?.is_some()
+            crate::store::CancelMarker::read(attempt, custody.scope())?
+                != crate::store::CancelMarker::Absent
         };
         if import_cancelled {
             return Err(RunError::Validation("lane import cancelled"));
