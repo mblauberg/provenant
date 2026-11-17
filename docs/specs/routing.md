@@ -78,7 +78,7 @@ expanding the full panel, it
 derives changed paths and measured size from the merge-base-to-subject diff and
 passes both to `ReviewConfig::resolve_panel`. Configured path floors can raise
 the selected shape and add their lenses; explicit request fields and layered
-review configuration keep their existing precedence. If size metadata is
+review configuration keep their existing precedence. Bundled floors are repository-neutral, do not select the deep shape, and warn on coverage shortfalls. A project may declare its own floors under `[domains.routing.review.floors]` in `.provenant/config.toml`; only a floor with `hard = true` refuses a coverage shortfall. Runtime confinement is independent of review floors. If size metadata is
 unavailable because the diff is empty, selection proceeds with size unknown. If
 path or size metadata is incomplete, the resolver applies the configured
 unreadable-path floors and adds a warning to reviewer guidance.
