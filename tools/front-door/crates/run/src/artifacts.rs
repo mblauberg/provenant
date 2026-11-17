@@ -167,7 +167,9 @@ impl RunStore {
             let safe = redactor
                 .filter(&buffer[..count])
                 .map_err(|_| RunError::Validation("output redaction failed"))?;
-            capture.push(&safe);
+            for frame in safe {
+                capture.push(&frame);
+            }
         }
         let digest = provenant_records::FileDigest::from_bytes(hash.finalize().into());
         if total != artifact.bytes {
@@ -200,7 +202,9 @@ impl RunStore {
         let safe = redactor
             .finish()
             .map_err(|_| RunError::Validation("output redaction failed"))?;
-        capture.push(&safe);
+        for frame in safe {
+            capture.push(&frame);
+        }
         let mut result = capture.finish();
         // One handoff rule: the settled attempt's sealed, sanitised snapshot,
         // not a re-reading of the text.

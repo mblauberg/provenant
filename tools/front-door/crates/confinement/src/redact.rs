@@ -42,7 +42,6 @@ struct LiteralAutomaton {
     state: usize,
     pending: VecDeque<(u8, bool)>,
     max_secret_length: usize,
-    redaction_run: bool,
     matched: bool,
 }
 
@@ -93,12 +92,11 @@ impl LiteralAutomaton {
             state: 0,
             pending: VecDeque::new(),
             max_secret_length: secrets.iter().map(Vec::len).max().unwrap_or(0),
-            redaction_run: false,
             matched: false,
         }
     }
 
-    fn filter(&mut self, bytes: &[u8], output: &mut Vec<u8>) {
+    fn filter(&mut self, bytes: &[u8], output: &mut Vec<(u8, bool)>) {
         for byte in bytes {
             while self.state != 0 && !self.nodes[self.state].edges.contains_key(byte) {
                 self.state = self.nodes[self.state].failure;
@@ -120,27 +118,18 @@ impl LiteralAutomaton {
         }
     }
 
-    fn finish(&mut self, output: &mut Vec<u8>) {
+    fn finish(&mut self, output: &mut Vec<(u8, bool)>) {
         while !self.pending.is_empty() {
             self.emit_front(output);
         }
         self.state = 0;
-        self.redaction_run = false;
     }
 
-    fn emit_front(&mut self, output: &mut Vec<u8>) {
+    fn emit_front(&mut self, output: &mut Vec<(u8, bool)>) {
         let Some((byte, masked)) = self.pending.pop_front() else {
             return;
         };
-        if masked {
-            if !self.redaction_run {
-                output.extend_from_slice(REDACTED);
-            }
-            self.redaction_run = true;
-        } else {
-            output.push(byte);
-            self.redaction_run = false;
-        }
+        output.push((byte, masked));
     }
 }
 
@@ -151,7 +140,6 @@ enum TokenKind {
     AwsAccessKey,
 }
 
-// Keep delimiters in the stored table so adjacent markers cannot look like a token.
 const TOKEN_MARKERS: &[(&[u8], TokenKind)] = &[
     (b"Bearer \0", TokenKind::Bearer),
     (b"ghp_\0", TokenKind::Generic),
@@ -170,14 +158,17 @@ fn marker_pattern(marker: &[u8]) -> &[u8] {
 }
 
 struct ActiveToken {
-    marker: Vec<u8>,
     kind: TokenKind,
+    // Withheld until the body length determines whether the marker belongs to
+    // a credential. Generic/AWS markers are masked with a matching body.
+    // Candidate body bytes are delayed only until the minimum credential
+    // length is known. The bytes remain in source form, including JSON escapes.
+    marker: Vec<u8>,
     body: Vec<u8>,
     body_length: usize,
     emitted: bool,
 }
 
-// Interpret JSON escapes only for boundary detection; retain the original bytes.
 #[derive(Default)]
 enum Escape {
     #[default]
@@ -188,11 +179,15 @@ enum Escape {
 
 struct TokenScanner {
     active: Option<ActiveToken>,
+    // A possible marker or a partial Unicode token character at a chunk edge.
     tail: Vec<u8>,
     boundary: bool,
     escape: Escape,
+    // URL userinfo cannot be decided until the authority delimiter arrives.
+    // This remains bounded by FRAME_LIMIT, as in the original scanner.
     url_authority: Option<Vec<u8>>,
     matched: bool,
+    replacements: Vec<(usize, usize)>,
 }
 
 impl Default for TokenScanner {
@@ -204,18 +199,21 @@ impl Default for TokenScanner {
             escape: Escape::None,
             url_authority: None,
             matched: false,
+            replacements: Vec::new(),
         }
     }
 }
 
 impl TokenScanner {
-    fn filter(&mut self, bytes: &[u8], output: &mut Vec<u8>) -> Result<(), FilterError> {
+    /// Return decisions for source bytes in order. Each byte appears once;
+    /// `true` marks the credential body or URL userinfo for masking.
+    fn filter(&mut self, bytes: &[u8], output: &mut Vec<(u8, bool)>) -> Result<(), FilterError> {
         let mut combined = std::mem::take(&mut self.tail);
         combined.extend_from_slice(bytes);
         self.process(&combined, false, output)
     }
 
-    fn finish(&mut self, output: &mut Vec<u8>) -> Result<(), FilterError> {
+    fn finish(&mut self, output: &mut Vec<(u8, bool)>) -> Result<(), FilterError> {
         let tail = std::mem::take(&mut self.tail);
         self.process(&tail, true, output)?;
         if let Some(authority) = self.url_authority.take() {
@@ -231,7 +229,7 @@ impl TokenScanner {
         &mut self,
         input: &[u8],
         eof: bool,
-        output: &mut Vec<u8>,
+        output: &mut Vec<(u8, bool)>,
     ) -> Result<(), FilterError> {
         let mut index = 0;
         while index < input.len() {
@@ -278,23 +276,33 @@ impl TokenScanner {
                 };
                 if token_byte(kind, byte) || escaped.is_some() {
                     let width = escaped.unwrap_or(1);
-                    let mut became_secret = false;
-                    if let Some(active) = self.active.as_mut()
-                        && !active.emitted
-                    {
-                        active.body.extend_from_slice(&remaining[..width]);
-                        active.body_length += 1;
-                        if active.body_length >= minimum_token_length(kind) {
-                            active.body.clear();
-                            active.emitted = true;
-                            became_secret = true;
+                    let became_secret = if let Some(active) = self.active.as_mut() {
+                        if active.emitted {
+                            output.extend(remaining[..width].iter().copied().map(|b| (b, true)));
+                            false
+                        } else {
+                            active.body.extend_from_slice(&remaining[..width]);
+                            active.body_length += 1;
+                            if active.body_length >= minimum_token_length(kind) {
+                                if matches!(kind, TokenKind::Bearer) {
+                                    if active.marker != b"Bearer " {
+                                        self.replacements.push((output.len(), active.marker.len()));
+                                    }
+                                    output.extend(active.marker.drain(..).map(|b| (b, false)));
+                                } else {
+                                    output.extend(active.marker.drain(..).map(|b| (b, true)));
+                                }
+                                output.extend(active.body.drain(..).map(|b| (b, true)));
+                                active.emitted = true;
+                                true
+                            } else {
+                                false
+                            }
                         }
-                    }
+                    } else {
+                        false
+                    };
                     if became_secret {
-                        if matches!(kind, TokenKind::Bearer) {
-                            output.extend_from_slice(b"Bearer ");
-                        }
-                        output.extend_from_slice(REDACTED);
                         self.matched = true;
                     }
                     for byte in &remaining[..width] {
@@ -308,7 +316,7 @@ impl TokenScanner {
             }
 
             if input[index..].starts_with(b"://") {
-                output.extend_from_slice(b"://");
+                output.extend(b"://".iter().copied().map(|b| (b, false)));
                 for byte in b"://" {
                     self.observe(*byte);
                 }
@@ -324,15 +332,16 @@ impl TokenScanner {
             // Only an escaped opening backslash disables a Unicode marker.
             // Raw ASCII markers still match immediately after a backslash.
             if self.boundary && !(input[index] == b'\\' && matches!(self.escape, Escape::Slash)) {
-                if let Some((length, kind)) = token_marker_at(&input[index..]) {
+                if let Some((length, _kind)) = token_marker_at(&input[index..]) {
                     let marker = &input[index..index + length];
-                    for byte in marker {
+                    let marker = marker.to_vec();
+                    for byte in &marker {
                         self.observe(*byte);
                     }
                     self.active = Some(ActiveToken {
-                        marker: marker.to_vec(),
-                        kind,
-                        body: Vec::with_capacity(minimum_token_length(kind)),
+                        kind: _kind,
+                        marker,
+                        body: Vec::with_capacity(minimum_token_length(_kind)),
                         body_length: 0,
                         emitted: false,
                     });
@@ -346,7 +355,7 @@ impl TokenScanner {
             }
 
             let byte = input[index];
-            output.push(byte);
+            output.push((byte, false));
             self.observe(byte);
             index += 1;
         }
@@ -381,29 +390,36 @@ impl TokenScanner {
         }
     }
 
-    fn finish_active(&mut self, output: &mut Vec<u8>) {
-        if let Some(active) = self.active.take()
+    fn finish_active(&mut self, output: &mut Vec<(u8, bool)>) {
+        if let Some(mut active) = self.active.take()
             && !active.emitted
         {
-            output.extend_from_slice(&active.marker);
-            output.extend_from_slice(&active.body);
+            output.extend(active.marker.drain(..).map(|byte| (byte, false)));
+            output.extend(active.body.drain(..).map(|byte| (byte, false)));
         }
     }
 
-    fn finish_authority(&mut self, authority: Vec<u8>, output: &mut Vec<u8>) {
+    fn finish_authority(&mut self, authority: Vec<u8>, output: &mut Vec<(u8, bool)>) {
         if let Some(userinfo_end) = authority.iter().rposition(|byte| *byte == b'@') {
             let userinfo = &authority[..userinfo_end];
-            let has_password = userinfo.contains(&b':');
-            if has_password {
-                output.extend_from_slice(REDACTED);
-                output.extend_from_slice(&authority[userinfo_end..]);
+            if userinfo.contains(&b':') {
+                output.extend(
+                    authority[..userinfo_end]
+                        .iter()
+                        .copied()
+                        .map(|byte| (byte, true)),
+                );
+                output.extend(
+                    authority[userinfo_end..]
+                        .iter()
+                        .copied()
+                        .map(|byte| (byte, false)),
+                );
                 self.matched = true;
-            } else {
-                output.extend_from_slice(&authority);
+                return;
             }
-        } else {
-            output.extend_from_slice(&authority);
         }
+        output.extend(authority.into_iter().map(|byte| (byte, false)));
     }
 }
 
@@ -480,7 +496,7 @@ fn word_byte(byte: u8) -> bool {
 }
 
 fn url_delimiter(byte: u8) -> bool {
-    byte.is_ascii_whitespace() || b"/?#\"'<>`\\".contains(&byte)
+    byte.is_ascii_whitespace() || b"/?#\\\"'<>`\\\\".contains(&byte)
 }
 
 /// Credential keys, matched case-insensitively. A run of identifier bytes
@@ -531,8 +547,8 @@ enum Assignment {
         quote: Option<u8>,
         quote_slashes: usize,
         backslashes: usize,
+        pending_slashes: usize,
         line: bool,
-        masked: bool,
     },
 }
 
@@ -544,38 +560,65 @@ struct AssignmentScanner {
     run: Vec<u8>,
     after_backslash: bool,
     matched: bool,
+    insertions: Vec<usize>,
 }
 
 impl AssignmentScanner {
-    fn filter(&mut self, bytes: &[u8], output: &mut Vec<u8>) {
+    fn filter(&mut self, bytes: &[u8], output: &mut DecisionQueue) {
         for byte in bytes {
             self.step(*byte, output);
         }
     }
 
-    fn finish(&mut self, output: &mut Vec<u8>) {
-        if let Assignment::Scheme { .. } = std::mem::take(&mut self.state) {
-            // A held scheme word never reached whitespace, so it is the credential.
-            self.mask(output);
+    fn finish(&mut self, output: &mut DecisionQueue) {
+        match std::mem::take(&mut self.state) {
+            Assignment::Scheme { word } => {
+                // A held scheme word never reached whitespace, so it is the credential.
+                self.mask_bytes(&word, output);
+            }
+            Assignment::Value {
+                quote: Some(_),
+                pending_slashes,
+                ..
+            } => self.mask_slashes(pending_slashes, output),
+            _ => {}
         }
         self.run.clear();
         self.after_backslash = false;
     }
 
-    fn mask(&mut self, output: &mut Vec<u8>) {
-        output.extend_from_slice(REDACTED);
-        self.matched = true;
+    fn keep(&mut self, byte: u8, masked: bool, output: &mut DecisionQueue) {
+        output.push((byte, masked));
+        self.matched |= masked;
+    }
+
+    fn mask_bytes(&mut self, bytes: &[u8], output: &mut DecisionQueue) {
+        for byte in bytes {
+            self.keep(*byte, true, output);
+        }
+    }
+
+    fn mask_slashes(&mut self, count: usize, output: &mut DecisionQueue) {
+        for _ in 0..count {
+            self.keep(b'\\', true, output);
+        }
+    }
+
+    fn keep_slashes(&mut self, count: usize, masked: bool, output: &mut DecisionQueue) {
+        for _ in 0..count {
+            self.keep(b'\\', masked, output);
+        }
     }
 
     // `std::mem::take` leaves `Scan`, so a branch that sets no state returns to scanning.
-    fn step(&mut self, byte: u8, output: &mut Vec<u8>) {
+    fn step(&mut self, byte: u8, output: &mut DecisionQueue) {
         loop {
             match std::mem::take(&mut self.state) {
                 Assignment::Scan => {
                     let escaped = std::mem::take(&mut self.after_backslash);
                     if escaped && byte.is_ascii_alphanumeric() {
-                        // The letter of a JSON escape such as `\n` is not part of a key.
-                        output.push(byte);
+                        // The letter of a JSON escape such as `\\n` is not part of a key.
+                        self.keep(byte, false, output);
                         return;
                     }
                     if byte.is_ascii_alphanumeric() || b"_-.".contains(&byte) {
@@ -583,7 +626,7 @@ impl AssignmentScanner {
                         if self.run.len() > ASSIGNMENT_RUN {
                             self.run.remove(0);
                         }
-                        output.push(byte);
+                        self.keep(byte, false, output);
                         return;
                     }
                     let key = self.key_ending_run();
@@ -593,12 +636,12 @@ impl AssignmentScanner {
                         continue;
                     }
                     self.after_backslash = byte == b'\\' && !escaped;
-                    output.push(byte);
+                    self.keep(byte, false, output);
                     return;
                 }
                 Assignment::Gap { scheme } => {
                     if byte == b'=' || byte == b':' {
-                        output.push(byte);
+                        self.keep(byte, false, output);
                         self.state = Assignment::Lead {
                             scheme,
                             quote: None,
@@ -608,7 +651,7 @@ impl AssignmentScanner {
                         return;
                     }
                     if byte.is_ascii_whitespace() || b"\"'\\".contains(&byte) {
-                        output.push(byte);
+                        self.keep(byte, false, output);
                         self.state = Assignment::Gap { scheme };
                         return;
                     }
@@ -622,7 +665,7 @@ impl AssignmentScanner {
                     backslashes,
                 } => {
                     if quote.is_none() && (byte.is_ascii_whitespace() || byte == b'\\') {
-                        output.push(byte);
+                        self.keep(byte, false, output);
                         self.state = Assignment::Lead {
                             scheme,
                             quote,
@@ -636,7 +679,7 @@ impl AssignmentScanner {
                         return;
                     }
                     if quote.is_none() && (byte == b'"' || byte == b'\'') {
-                        output.push(byte);
+                        self.keep(byte, false, output);
                         self.state = Assignment::Lead {
                             scheme,
                             quote: Some(byte),
@@ -652,13 +695,12 @@ impl AssignmentScanner {
                         self.state = Assignment::Scheme { word: vec![byte] };
                         return;
                     }
-                    // Defer the mask until a value byte is known: empty quotes stay empty.
                     self.state = Assignment::Value {
                         quote,
                         quote_slashes,
                         backslashes: 0,
+                        pending_slashes: 0,
                         line: scheme,
-                        masked: false,
                     };
                     continue;
                 }
@@ -671,8 +713,10 @@ impl AssignmentScanner {
                     let known =
                         word.eq_ignore_ascii_case(b"basic") || word.eq_ignore_ascii_case(b"bearer");
                     if known && byte.is_ascii_whitespace() {
-                        output.extend_from_slice(&word);
-                        output.push(byte);
+                        for source_byte in &word {
+                            self.keep(*source_byte, false, output);
+                        }
+                        self.keep(byte, false, output);
                         self.state = Assignment::Lead {
                             scheme: false,
                             quote: None,
@@ -681,13 +725,13 @@ impl AssignmentScanner {
                         };
                         return;
                     }
-                    self.mask(output);
+                    self.mask_bytes(&word, output);
                     self.state = Assignment::Value {
                         quote: None,
                         quote_slashes: 0,
                         backslashes: 0,
+                        pending_slashes: 0,
                         line: true,
-                        masked: true,
                     };
                     continue;
                 }
@@ -695,32 +739,57 @@ impl AssignmentScanner {
                     quote,
                     quote_slashes,
                     backslashes,
+                    pending_slashes,
                     line,
-                    mut masked,
                 } => match quote {
                     Some(quote) => {
                         if byte == b'\n' || byte == b'\r' {
+                            self.mask_slashes(pending_slashes, output);
                             continue;
                         }
                         if byte == quote && quote_close(backslashes, quote_slashes) {
-                            output.extend(std::iter::repeat_n(b'\\', quote_slashes));
-                            output.push(byte);
+                            // Keep only the source slashes needed to encode this close.
+                            // Older slashes from the same run were emitted as masked.
+                            if pending_slashes > 0 {
+                                // The old scanner masks the first slash as a value
+                                // byte before recognising the closing delimiter.
+                                self.insertions.push(output.total);
+                                self.matched = true;
+                            }
+                            self.keep_slashes(pending_slashes, false, output);
+                            self.keep(byte, false, output);
                             return;
                         }
-                        if !masked {
-                            self.mask(output);
-                            masked = true;
+                        if byte == b'\\' {
+                            let next_count = backslashes.saturating_add(1);
+                            if pending_slashes < quote_slashes {
+                                self.state = Assignment::Value {
+                                    quote: Some(quote),
+                                    quote_slashes,
+                                    backslashes: next_count,
+                                    pending_slashes: pending_slashes.saturating_add(1),
+                                    line,
+                                };
+                            } else {
+                                self.keep(byte, true, output);
+                                self.state = Assignment::Value {
+                                    quote: Some(quote),
+                                    quote_slashes,
+                                    backslashes: next_count,
+                                    pending_slashes,
+                                    line,
+                                };
+                            }
+                            return;
                         }
+                        self.mask_slashes(pending_slashes, output);
+                        self.keep(byte, true, output);
                         self.state = Assignment::Value {
                             quote: Some(quote),
                             quote_slashes,
-                            backslashes: if byte == b'\\' {
-                                backslashes.saturating_add(1)
-                            } else {
-                                0
-                            },
+                            backslashes: 0,
+                            pending_slashes: 0,
                             line,
-                            masked,
                         };
                         return;
                     }
@@ -733,15 +802,13 @@ impl AssignmentScanner {
                         if ends {
                             continue;
                         }
-                        if !masked {
-                            self.mask(output);
-                        }
+                        self.keep(byte, true, output);
                         self.state = Assignment::Value {
                             quote: None,
                             quote_slashes: 0,
                             backslashes: 0,
+                            pending_slashes: 0,
                             line,
-                            masked: true,
                         };
                         return;
                     }
@@ -789,6 +856,70 @@ fn is_delimiter(byte: u8) -> bool {
     byte.is_ascii_whitespace() || b"\"'\\&,;<>)]}`".contains(&byte)
 }
 
+// Run-length encoding keeps a withheld closing backslash run compact even when
+// the opener is arbitrarily long. Each run covers source bytes, not output.
+#[derive(Default)]
+struct DecisionQueue {
+    runs: VecDeque<DecisionRun>,
+    total: usize,
+}
+struct DecisionRun {
+    byte: u8,
+    masked: bool,
+    count: usize,
+}
+impl DecisionQueue {
+    fn extend(&mut self, decisions: Vec<(u8, bool)>) {
+        for decision in decisions {
+            self.push(decision);
+        }
+    }
+    fn push(&mut self, (byte, masked): (u8, bool)) {
+        self.total += 1;
+        if let Some(last) = self.runs.back_mut()
+            && last.byte == byte
+            && last.masked == masked
+        {
+            last.count += 1;
+        } else {
+            self.runs.push_back(DecisionRun {
+                byte,
+                masked,
+                count: 1,
+            });
+        }
+    }
+    fn consume(&mut self, count: usize) {
+        let first = self.runs.front_mut().expect("nonempty");
+        first.count -= count;
+        if first.count == 0 {
+            self.runs.pop_front();
+        }
+    }
+}
+fn append_frame_bytes(frames: &mut Vec<Vec<u8>>, mut bytes: &[u8]) {
+    while !bytes.is_empty() {
+        if frames.last().is_none_or(|frame| frame.len() == FRAME_LIMIT) {
+            frames.push(Vec::new());
+        }
+        let frame = frames.last_mut().expect("frame exists");
+        let count = bytes.len().min(FRAME_LIMIT - frame.len());
+        frame.extend_from_slice(&bytes[..count]);
+        bytes = &bytes[count..];
+    }
+}
+fn append_frame_repeat(frames: &mut Vec<Vec<u8>>, byte: u8, mut count: usize) {
+    while count > 0 {
+        if frames.last().is_none_or(|frame| frame.len() == FRAME_LIMIT) {
+            frames.push(Vec::new());
+        }
+        let frame = frames.last_mut().expect("frame exists");
+        let take = count.min(FRAME_LIMIT - frame.len());
+        frame.resize(frame.len() + take, byte);
+        count -= take;
+    }
+}
+
 /// Stateful filter used directly by supervisor capture. Values are never
 /// serialized or printed; malformed bounds make construction fail closed.
 pub struct Redactor {
@@ -796,6 +927,12 @@ pub struct Redactor {
     tokens: TokenScanner,
     assignments: AssignmentScanner,
     failed: bool,
+    decisions: [DecisionQueue; 3],
+    redaction_run: bool,
+    emitted_source: usize,
+    token_source: usize,
+    replacements: VecDeque<(usize, usize)>,
+    insertions: VecDeque<usize>,
 }
 
 impl Redactor {
@@ -827,6 +964,12 @@ impl Redactor {
             tokens: TokenScanner::default(),
             assignments: AssignmentScanner::default(),
             failed: false,
+            decisions: std::array::from_fn(|_| DecisionQueue::default()),
+            redaction_run: false,
+            emitted_source: 0,
+            token_source: 0,
+            replacements: VecDeque::new(),
+            insertions: VecDeque::new(),
         })
     }
 
@@ -834,54 +977,152 @@ impl Redactor {
         self.literals.matched || self.tokens.matched || self.assignments.matched
     }
 
-    fn filter_bounded(&mut self, bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
-        if self.failed || bytes.len() > FRAME_LIMIT {
-            self.failed = true;
+    fn filter_frames(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, FilterError> {
+        if self.failed {
             return Err(FilterError);
         }
-        let mut literals = Vec::with_capacity(bytes.len());
-        self.literals.filter(bytes, &mut literals);
-        if literals.len() > FRAME_LIMIT {
-            self.failed = true;
-            return Err(FilterError);
+        let mut frames = Vec::new();
+        for chunk in bytes.chunks(FRAME_LIMIT) {
+            let mut literals = Vec::new();
+            let mut tokens = Vec::new();
+            self.literals.filter(chunk, &mut literals);
+            self.tokens.filter(chunk, &mut tokens).map_err(|_| {
+                self.failed = true;
+                FilterError
+            })?;
+            self.assignments.filter(chunk, &mut self.decisions[2]);
+            self.insertions
+                .extend(self.assignments.insertions.drain(..));
+            self.decisions[0].extend(literals);
+            self.queue_tokens(tokens);
+            self.emit_decided(&mut frames)?;
         }
-        let mut tokens = Vec::with_capacity(literals.len());
-        self.tokens.filter(&literals, &mut tokens).map_err(|_| {
-            self.failed = true;
-            FilterError
-        })?;
-        let mut filtered = Vec::with_capacity(tokens.len());
-        self.assignments.filter(&tokens, &mut filtered);
-        if filtered.len() > FRAME_LIMIT {
-            self.failed = true;
-            return Err(FilterError);
-        }
-        Ok(filtered)
+        Ok(frames)
     }
 
-    fn finish_bounded(&mut self) -> Result<Vec<u8>, FilterError> {
+    fn finish_frames(&mut self) -> Result<Vec<Vec<u8>>, FilterError> {
         if self.failed {
             return Err(FilterError);
         }
         let mut literals = Vec::new();
-        self.literals.finish(&mut literals);
         let mut tokens = Vec::new();
-        self.tokens.filter(&literals, &mut tokens).map_err(|_| {
-            self.failed = true;
-            FilterError
-        })?;
+        self.literals.finish(&mut literals);
         self.tokens.finish(&mut tokens).map_err(|_| {
             self.failed = true;
             FilterError
         })?;
-        let mut filtered = Vec::new();
-        self.assignments.filter(&tokens, &mut filtered);
-        self.assignments.finish(&mut filtered);
-        if filtered.len() > FRAME_LIMIT {
+        self.assignments.finish(&mut self.decisions[2]);
+        self.insertions
+            .extend(self.assignments.insertions.drain(..));
+        self.decisions[0].extend(literals);
+        self.queue_tokens(tokens);
+        let mut frames = Vec::new();
+        self.emit_decided(&mut frames)?;
+        if self.decisions.iter().any(|queue| !queue.runs.is_empty()) {
             self.failed = true;
             return Err(FilterError);
         }
-        Ok(filtered)
+        Ok(frames)
+    }
+
+    fn queue_tokens(&mut self, tokens: Vec<(u8, bool)>) {
+        for (start, len) in self.tokens.replacements.drain(..) {
+            self.replacements
+                .push_back((self.token_source + start, len));
+        }
+        self.token_source += tokens.len();
+        self.decisions[1].extend(tokens);
+    }
+
+    fn emit_decided(&mut self, frames: &mut Vec<Vec<u8>>) -> Result<(), FilterError> {
+        while self.decisions.iter().all(|queue| !queue.runs.is_empty()) {
+            if self.insertions.front() == Some(&self.emitted_source) {
+                self.insertions.pop_front();
+                if !self.redaction_run {
+                    append_frame_bytes(frames, REDACTED);
+                }
+                self.redaction_run = true;
+            }
+            if let Some(&(start, len)) = self.replacements.front()
+                && start == self.emitted_source
+            {
+                // A replacement is safe only if all detectors have decided the
+                // entire marker and none masks any of its original bytes.
+                if self
+                    .decisions
+                    .iter()
+                    .any(|queue| queue.runs.iter().map(|run| run.count).sum::<usize>() < len)
+                {
+                    break;
+                }
+                let masked = self.decisions.iter().any(|queue| {
+                    let mut left = len;
+                    queue.runs.iter().any(|run| {
+                        if left == 0 {
+                            return false;
+                        }
+                        let used = left.min(run.count);
+                        left -= used;
+                        run.masked
+                    })
+                });
+                self.replacements.pop_front();
+                if !masked {
+                    for queue in &mut self.decisions {
+                        let mut left = len;
+                        while left > 0 {
+                            let count =
+                                left.min(queue.runs.front().expect("marker decisions").count);
+                            queue.consume(count);
+                            left -= count;
+                        }
+                    }
+                    append_frame_bytes(frames, b"Bearer ");
+                    self.redaction_run = false;
+                    self.emitted_source += len;
+                    continue;
+                }
+            }
+            let first = self.decisions[0].runs.front().expect("nonempty");
+            let byte = first.byte;
+            let mut count = self
+                .decisions
+                .iter()
+                .map(|queue| queue.runs.front().expect("nonempty").count)
+                .min()
+                .expect("three queues");
+            if let Some(&(start, _)) = self.replacements.front() {
+                count = count.min(start - self.emitted_source);
+            }
+            if let Some(&start) = self.insertions.front() {
+                count = count.min(start - self.emitted_source);
+            }
+            let masked = self
+                .decisions
+                .iter()
+                .any(|queue| queue.runs.front().expect("nonempty").masked);
+            if !self
+                .decisions
+                .iter()
+                .all(|queue| queue.runs.front().expect("nonempty").byte == byte)
+            {
+                self.failed = true;
+                return Err(FilterError);
+            }
+            if masked {
+                if !self.redaction_run {
+                    append_frame_bytes(frames, REDACTED);
+                }
+            } else {
+                append_frame_repeat(frames, byte, count);
+            }
+            self.redaction_run = masked;
+            self.emitted_source += count;
+            for queue in &mut self.decisions {
+                queue.consume(count);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -891,9 +1132,9 @@ pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
     let mut safe = Vec::new();
     for chunk in bytes.chunks(8192) {
-        safe.extend(redactor.filter(chunk)?);
+        safe.extend(redactor.filter(chunk)?.into_iter().flatten());
     }
-    safe.extend(redactor.finish()?);
+    safe.extend(redactor.finish()?.into_iter().flatten());
     Ok(safe)
 }
 
@@ -1181,14 +1422,16 @@ fn filter_pass(
                 Err(_) => return Ok(false),
             }
         }
-        let filtered = redactor.filter(&buffer[..read])?;
-        write_staged(staged.as_deref_mut(), &filtered)?;
+        for frame in redactor.filter(&buffer[..read])? {
+            write_staged(staged.as_deref_mut(), &frame)?;
+        }
     }
     if !utf8_tail.is_empty() {
         return Ok(false);
     }
-    let tail = redactor.finish()?;
-    write_staged(staged, &tail)?;
+    for frame in redactor.finish()? {
+        write_staged(staged.as_deref_mut(), &frame)?;
+    }
     let after = source.metadata().map_err(|_| FilterError)?;
     if !opened.unchanged(&after) {
         return Err(FilterError);
@@ -1272,12 +1515,12 @@ pub fn bounded_line(text: &str, max_chars: usize) -> String {
 }
 
 impl CaptureFilter for Redactor {
-    fn filter(&mut self, bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
-        self.filter_bounded(bytes)
+    fn filter(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, FilterError> {
+        self.filter_frames(bytes)
     }
 
-    fn finish(&mut self) -> Result<Vec<u8>, FilterError> {
-        self.finish_bounded()
+    fn finish(&mut self) -> Result<Vec<Vec<u8>>, FilterError> {
+        self.finish_frames()
     }
 }
 
@@ -1289,9 +1532,21 @@ mod tests {
     fn joined(redactor: &mut Redactor, chunks: &[&[u8]]) -> Vec<u8> {
         let mut output = Vec::new();
         for chunk in chunks {
-            output.extend(redactor.filter(chunk).expect("bounded input"));
+            output.extend(
+                redactor
+                    .filter(chunk)
+                    .expect("bounded input")
+                    .into_iter()
+                    .flatten(),
+            );
         }
-        output.extend(redactor.finish().expect("bounded finish"));
+        output.extend(
+            redactor
+                .finish()
+                .expect("bounded finish")
+                .into_iter()
+                .flatten(),
+        );
         output
     }
 
@@ -1819,12 +2074,120 @@ mod tests {
         assert!(redactor.has_redaction());
     }
 
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    fn checked_frames(redactor: &mut Redactor, chunks: &[&[u8]]) -> Vec<u8> {
+        let mut output = Vec::new();
+        for chunk in chunks {
+            for frame in redactor.filter(chunk).expect("filter succeeds") {
+                assert!(frame.len() <= FRAME_LIMIT);
+                output.extend(frame);
+            }
+        }
+        for frame in redactor.finish().expect("finish succeeds") {
+            assert!(frame.len() <= FRAME_LIMIT);
+            output.extend(frame);
+        }
+        output
+    }
+
     #[test]
-    fn an_expansion_over_the_capture_frame_bound_fails_closed() {
-        let mut redactor = Redactor::new([b"x".to_vec()]).expect("valid secret");
-        let input = b"x ".repeat(FRAME_LIMIT / 4 + 1);
-        assert!(redactor.filter(&input).is_err());
-        assert!(redactor.filter(b"future raw secret").is_err());
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    fn overlapping_literal_does_not_change_assignment_boundaries() {
+        let input = b"password=\"X\\\"LEAK_SENTINEL\" end\nnext";
+        let expected = b"password=\"[REDACTED]\" end\nnext";
+        for split in 0..=input.len() {
+            let mut redactor = Redactor::new([b"X\\".to_vec()]).expect("secret");
+            assert_eq!(
+                checked_frames(&mut redactor, &[&input[..split], &input[split..]]),
+                expected,
+                "split {split}"
+            );
+        }
+        for width in [1, 256, 8192, FRAME_LIMIT] {
+            let mut redactor = Redactor::new([b"X\\".to_vec()]).expect("secret");
+            assert_eq!(
+                checked_frames(&mut redactor, &input.chunks(width).collect::<Vec<_>>()),
+                expected,
+                "width {width}"
+            );
+        }
+        // An encoded Bearer prefix is canonicalised only when that cannot
+        // undo a literal redaction within the original marker.
+        let input = br"\u0042earer abcdefghijklmnopqrst!";
+        for split in 0..=input.len() {
+            let mut redactor = Redactor::new([br"\u0042".to_vec()]).expect("secret");
+            assert_eq!(
+                checked_frames(&mut redactor, &[&input[..split], &input[split..]]),
+                b"[REDACTED]earer [REDACTED]!",
+                "Bearer split {split}"
+            );
+        }
+    }
+
+    #[test]
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    fn expansions_and_long_delimiters_are_chunk_invariant_and_framed() {
+        let short = b"x x x tail";
+        let short_expected = b"[REDACTED] [REDACTED] [REDACTED] tail";
+        for split in 0..=short.len() {
+            let mut redactor = Redactor::new([b"x".to_vec()]).expect("secret");
+            assert_eq!(
+                checked_frames(&mut redactor, &[&short[..split], &short[split..]]),
+                short_expected
+            );
+        }
+        let expanded = b"x ".repeat(FRAME_LIMIT / 4 + 1);
+        let expected = b"[REDACTED] ".repeat(FRAME_LIMIT / 4 + 1);
+        for width in [1, 256, 8192, FRAME_LIMIT] {
+            let mut redactor = Redactor::new([b"x".to_vec()]).expect("secret");
+            assert_eq!(
+                checked_frames(&mut redactor, &expanded.chunks(width).collect::<Vec<_>>()),
+                expected,
+                "width {width}"
+            );
+        }
+        let empty_escaped = br#"password=\"\" end"#;
+        let empty_expected = br#"password=\"[REDACTED]\" end"#;
+        for split in 0..=empty_escaped.len() {
+            let mut redactor = Redactor::new([]).expect("empty secret set");
+            assert_eq!(
+                checked_frames(
+                    &mut redactor,
+                    &[&empty_escaped[..split], &empty_escaped[split..]]
+                ),
+                empty_expected,
+                "empty split {split}"
+            );
+        }
+        let sample = b"password=\\\\\\\\\\\\\\\"hidden\\\\\\\\\\\\\\\" end\nnext";
+        let sample_expected = b"password=\\\\\\\\\\\\\\\"[REDACTED]\\\\\\\\\\\\\\\" end\nnext";
+        for split in 0..=sample.len() {
+            let mut redactor = Redactor::new([]).expect("empty secret set");
+            assert_eq!(
+                checked_frames(&mut redactor, &[&sample[..split], &sample[split..]]),
+                sample_expected,
+                "split {split}"
+            );
+        }
+        let slashes = vec![b'\\'; FRAME_LIMIT - 1];
+        let mut input = b"password=".to_vec();
+        input.extend(&slashes);
+        input.extend(b"\"hidden");
+        input.extend(&slashes);
+        input.extend(b"\" end\nnext");
+        let mut expected = b"password=".to_vec();
+        expected.extend(&slashes);
+        expected.extend(b"\"[REDACTED]");
+        expected.extend(&slashes);
+        expected.extend(b"\" end\nnext");
+        for width in [1, 256, 8192, FRAME_LIMIT] {
+            let mut redactor = Redactor::new([]).expect("empty secret set");
+            assert_eq!(
+                checked_frames(&mut redactor, &input.chunks(width).collect::<Vec<_>>()),
+                expected,
+                "width {width}"
+            );
+        }
     }
 
     #[test]
