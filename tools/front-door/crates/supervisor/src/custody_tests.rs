@@ -1449,6 +1449,8 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
     const BOOT: &str = "darwin:00000000-0000-0000-0000-000000000000";
     for case in [
         "free",
+        "before_reservation_publication",
+        "guardian_identity_mismatch",
         "guardian_held",
         "custody_held",
         "lease_missing",
@@ -1474,6 +1476,11 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
             &evidence,
             &attempt,
             scope(),
+            recovery
+                .reservation
+                .guardian
+                .as_ref()
+                .ok_or(CustodyError::InvalidRecord)?,
             recovery.lease.as_ref().ok_or(CustodyError::Fenced)?,
             custody.as_ref().ok_or(CustodyError::Fenced)?,
         )?);
@@ -1500,6 +1507,33 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
             Ok(())
         };
         match case {
+            "before_reservation_publication" => {
+                // Crash after the lifetime record is durable but before the
+                // guardian identity replaces the pre-handoff reservation.
+                recovery.reservation.launch_state = LaunchState::HandingOff;
+                recovery.reservation.guardian = None;
+                recovery.reservation.provider = None;
+                recovery.reservation.census_incomplete = true;
+                write_record(
+                    &evidence,
+                    "reservation.json",
+                    &recovery.reservation,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
+            }
+            "guardian_identity_mismatch" => {
+                if let Some(guardian) = recovery.reservation.guardian.as_mut() {
+                    guardian.native_start += 1;
+                }
+                write_record(
+                    &evidence,
+                    "reservation.json",
+                    &recovery.reservation,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
+            }
             "guardian_replaced" => replace_lock(&evidence, "guardian.lock")?,
             "custody_replaced" => replace_lock(&attempt, "custody.lock")?,
             "writer_replaced" => replace_lock(&recovery.lock_directory, "writer.lock")?,
@@ -1536,7 +1570,10 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
             proof.is_some(),
             matches!(
                 case,
-                "free" | "drop_without_commit" | "replaced_after_proof"
+                "free"
+                    | "before_reservation_publication"
+                    | "drop_without_commit"
+                    | "replaced_after_proof"
             ),
             "{case}"
         );

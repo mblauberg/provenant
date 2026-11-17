@@ -537,6 +537,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         &evidence,
         &inherited.attempt_directory,
         message.scope,
+        &guardian,
         &inherited.writer,
         &inherited.custody,
     )?;

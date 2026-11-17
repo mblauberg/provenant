@@ -16,7 +16,9 @@ keeps its ownership until release is proved.
 
 Before acknowledging custody or spawning the provider, the guardian acquires an
 exclusive per-attempt `guardian.lock` and durably records its inode alongside
-the attempt, writer and custody identities. Only the guardian holds this lock;
+the attempt, writer and custody identities and its own native process identity.
+The lock record is sufficient even if the guardian dies before updating the
+pre-handoff reservation. Only the guardian holds this lock;
 the provider and its descendants never inherit it. The guardian retains it
 through terminal publication and custody release. Kernel process teardown
 releases it even when the guardian cannot publish an exit.

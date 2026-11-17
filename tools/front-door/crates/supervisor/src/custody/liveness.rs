@@ -28,6 +28,7 @@ impl Identity {
 struct GuardianLock {
     schema_version: u64,
     scope: Scope,
+    guardian_process: ProcessIdentity,
     attempt: Identity,
     guardian: Identity,
     writer: Identity,
@@ -56,13 +57,24 @@ pub(crate) fn hold_guardian_lifetime(
     evidence: &Directory,
     attempt: &Directory,
     scope: Scope,
+    guardian_process: &ProcessIdentity,
     writer: &LockGuard,
     custody: &LockGuard,
 ) -> Result<LockGuard> {
+    guardian_process
+        .validate()
+        .map_err(|_| CustodyError::InvalidRecord)?;
+    if guardian_process.native_start == 0
+        || guardian_process.group_id != guardian_process.pid
+        || guardian_process.session_id != guardian_process.pid
+    {
+        return Err(CustodyError::InvalidRecord);
+    }
     let guardian = evidence.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
     let record = GuardianLock {
         schema_version: 1,
         scope,
+        guardian_process: guardian_process.clone(),
         attempt: Identity::of(attempt.metadata()?),
         guardian: Identity::of(guardian.metadata()?),
         writer: Identity::of(writer.metadata()?),
@@ -116,7 +128,18 @@ impl Recovery {
         let metadata = attempt.metadata()?;
         if record.schema_version != 1
             || record.scope != self.scope()
-            || self.reservation.guardian.is_none()
+            || record.guardian_process.validate().is_err()
+            || record.guardian_process.native_start == 0
+            || record.guardian_process.group_id != record.guardian_process.pid
+            || record.guardian_process.session_id != record.guardian_process.pid
+            || record.guardian_process.boot != self.reservation.boot
+            || self
+                .reservation
+                .guardian
+                .as_ref()
+                .is_some_and(|guardian| *guardian != record.guardian_process)
+            || (self.reservation.guardian.is_none()
+                && self.reservation.launch_state != LaunchState::HandingOff)
             || self.reservation.attempt_device != Some(metadata.device)
             || self.reservation.attempt_inode != Some(metadata.inode)
             || !record.attempt.matches(metadata)
@@ -161,10 +184,7 @@ impl Recovery {
         // Check live roots and every retained descendant as well as their
         // sessions/groups. PID reuse supplies no death evidence: the lock and
         // the worktree census establish quiescence independently of PID values.
-        let identities: Vec<_> = self
-            .reservation
-            .guardian
-            .iter()
+        let identities: Vec<_> = std::iter::once(&record.guardian_process)
             .chain(self.reservation.provider.iter())
             .chain(self.reservation.descendants.iter())
             .collect();
