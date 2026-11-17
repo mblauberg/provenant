@@ -22,14 +22,12 @@ min_monthly_allowance_usd = 60
 [pacing]
 [pacing_reserve]
 # Path classes are owner-configurable. Unknown paths use the unknown class.
-# Crucial selects the deep shape, so a crucial floor covers only paths that
-# implement a hard boundary of ADR 0035 or an irreversible external effect,
-# where a missed defect cannot be reverted or recovered afterwards. Each floor
-# states which. A broad change reaches deep through its integration head, not
-# through a path name. Match whole path segments or file stems, never loose
-# substrings: a word such as "build" or "object" appears in many files that
-# guard nothing. Projects add their own boundaries as further floors in their
-# routing configuration; the `provenant_*` floors below are this repository's.
+# The bundled floors are repo-neutral: they may add a lens or raise a panel to
+# the standard shape, never to deep, and a shortfall against them only warns.
+# A project declares its own boundaries as further floors, and `hard = true` on
+# one of its own floors makes a coverage shortfall against it refuse. Match
+# whole path segments or file stems, never loose substrings: a word such as
+# "build" or "object" appears in many files that guard nothing.
 [review.floors.routine]
 # Documentation and prose carry no executable behaviour.
 paths = ["docs/**", "**/*.md"]
@@ -41,7 +39,7 @@ paths = []
 tier = "substantial"
 lenses = ["correctness-spec"]
 [review.floors.security]
-# Credentials and secrets (ADR 0035 boundary 2): they must never cross hosts or
+# Credentials and secrets: they must never cross hosts or
 # reach prompts, receipts or output, and a leak cannot be recalled.
 paths = [
   "**/credentials/**",
@@ -53,7 +51,7 @@ paths = [
   "**/.env",
   "**/.env.*",
 ]
-tier = "crucial"
+tier = "substantial"
 lenses = ["correctness-spec", "security-privacy"]
 [review.floors.external_effects]
 # Workflows that publish, deploy, release or merge without a person: a
@@ -65,85 +63,15 @@ paths = [
   "**/.github/workflows/deploy*.y*ml",
   "**/.github/workflows/*merge*.y*ml",
 ]
-tier = "crucial"
+tier = "substantial"
 lenses = ["correctness-spec", "reliability"]
 [review.floors.authority]
-# Who must approve a change (ADR 0035 boundary 4, authority gates): editing
+# Who must approve a change: editing
 # code ownership changes who can land to the default branch.
 paths = ["**/CODEOWNERS"]
-tier = "crucial"
+tier = "substantial"
 lenses = ["correctness-spec", "adversarial"]
 
-# This repository's own boundaries. They name its modules, so they do nothing
-# in another project; there is no repository-tracked project layer to hold them,
-# which is why they ship here.
-[review.floors.provenant_credentials]
-# ADR 0035 boundary 2: host-only GitHub login lookup, secret-pattern scan and
-# output redaction.
-paths = [
-  "tools/front-door/crates/cli/src/run/provider/gh_auth.rs",
-  "tools/front-door/crates/run/src/delivery.rs",
-  "tools/front-door/crates/confinement/src/disclosure.rs",
-  "tools/front-door/crates/confinement/src/redact.rs",
-]
-tier = "crucial"
-lenses = ["correctness-spec", "security-privacy"]
-[review.floors.provenant_lane_git]
-# ADR 0035 boundary 1: a writer lane reaches shared refs only through
-# host-owned delivery. A lane that escapes can rewrite shared history.
-paths = [
-  "tools/front-door/crates/confinement/src/utility.rs",
-  "tools/front-door/src/pr/git.rs",
-  "tools/front-door/crates/confinement/src/worktrees.rs",
-  "tools/front-door/crates/confinement/src/worktrees/**",
-  "tools/front-door/crates/confinement/src/permissions/**",
-  # Resolves mandatory credential and Git protections for each launch.
-  "tools/front-door/crates/confinement/src/run_config.rs",
-  "tools/front-door/crates/confinement/src/push.rs",
-  "tools/front-door/crates/confinement/src/transport.rs",
-  "tools/front-door/crates/confinement/src/repo.rs",
-  "tools/front-door/crates/confinement/tests/lane_git_conformance.rs",
-  "tools/front-door/crates/os/src/git.rs",
-  "tools/front-door/crates/fabric-runtime/src/git_transport.rs",
-]
-tier = "crucial"
-lenses = ["correctness-spec", "adversarial"]
-[review.floors.provenant_object_integrity]
-# ADR 0035 boundary 3: lane objects are digest-checked and fsck-verified on
-# receipt. A corrupt or substituted object lands in shared history unnoticed.
-paths = [
-  "tools/front-door/crates/run/src/objects.rs",
-  "tools/front-door/crates/run/src/objects/**",
-  "tools/front-door/crates/run/src/objects_tests.rs",
-]
-tier = "crucial"
-lenses = ["correctness-spec", "adversarial"]
-[review.floors.provenant_authority]
-# ADR 0035 boundary 4: landing, publishing, handoff acceptance and chair
-# switching need held authority. Merging and publishing are external effects.
-paths = [
-  "tools/front-door/crates/fabric-store/src/landing.rs",
-  "tools/front-door/crates/fabric-store/src/chairs.rs",
-  "tools/front-door/crates/fabric-runtime/src/chairs.rs",
-  "tools/front-door/crates/fabric-runtime/src/graph/land.rs",
-  "tools/front-door/crates/fabric-runtime/src/handoff.rs",
-  "tools/front-door/crates/fabric-runtime/src/handoff/**",
-  "tools/front-door/crates/records/src/handoff.rs",
-  "tools/front-door/src/handoff.rs",
-  "tools/front-door/src/pr/land.rs",
-  "tools/front-door/src/pr/landing/**",
-  "tools/front-door/src/fabric/landing.rs",
-]
-tier = "crucial"
-lenses = ["correctness-spec", "adversarial"]
-[review.floors.provenant_release]
-# Release packaging and upgrade: a published release cannot be unpublished.
-paths = [
-  "tools/front-door/src/bin/package-release.rs",
-  "tools/front-door/src/upgrade-release.sh",
-]
-tier = "crucial"
-lenses = ["correctness-spec", "reliability"]
 [review.floors.contract]
 # A public interface or schema change is costly to undo but recoverable, so it
 # keeps the standard panel rather than deep.

@@ -1,0 +1,76 @@
+# This repository's own review floors. The bundled defaults are repo-neutral;
+# these name this repository's modules and its ADR 0035 boundaries, so only this
+# project carries them. `hard = true` makes a panel that misses a floor's lenses
+# refuse instead of warn. Other projects declare their own the same way.
+[domains.routing.review.floors.provenant_credentials]
+# ADR 0035 boundary 2: host-only GitHub login lookup, secret-pattern scan and
+# output redaction.
+paths = [
+  "tools/front-door/crates/cli/src/run/provider/gh_auth.rs",
+  "tools/front-door/crates/run/src/delivery.rs",
+  "tools/front-door/crates/confinement/src/disclosure.rs",
+  "tools/front-door/crates/confinement/src/redact.rs",
+]
+tier = "crucial"
+hard = true
+lenses = ["correctness-spec", "security-privacy"]
+[domains.routing.review.floors.provenant_lane_git]
+# ADR 0035 boundary 1: a writer lane reaches shared refs only through
+# host-owned delivery. A lane that escapes can rewrite shared history.
+paths = [
+  "tools/front-door/crates/confinement/src/utility.rs",
+  "tools/front-door/src/pr/git.rs",
+  "tools/front-door/crates/confinement/src/worktrees.rs",
+  "tools/front-door/crates/confinement/src/worktrees/**",
+  "tools/front-door/crates/confinement/src/permissions/**",
+  # Resolves mandatory credential and Git protections for each launch.
+  "tools/front-door/crates/confinement/src/run_config.rs",
+  "tools/front-door/crates/confinement/src/push.rs",
+  "tools/front-door/crates/confinement/src/transport.rs",
+  "tools/front-door/crates/confinement/src/repo.rs",
+  "tools/front-door/crates/confinement/tests/lane_git_conformance.rs",
+  "tools/front-door/crates/os/src/git.rs",
+  "tools/front-door/crates/fabric-runtime/src/git_transport.rs",
+]
+tier = "crucial"
+hard = true
+lenses = ["correctness-spec", "adversarial"]
+[domains.routing.review.floors.provenant_object_integrity]
+# ADR 0035 boundary 3: lane objects are digest-checked and fsck-verified on
+# receipt. A corrupt or substituted object lands in shared history unnoticed.
+paths = [
+  "tools/front-door/crates/run/src/objects.rs",
+  "tools/front-door/crates/run/src/objects/**",
+  "tools/front-door/crates/run/src/objects_tests.rs",
+]
+tier = "crucial"
+hard = true
+lenses = ["correctness-spec", "adversarial"]
+[domains.routing.review.floors.provenant_authority]
+# ADR 0035 boundary 4: landing, publishing, handoff acceptance and chair
+# switching need held authority. Merging and publishing are external effects.
+paths = [
+  "tools/front-door/crates/fabric-store/src/landing.rs",
+  "tools/front-door/crates/fabric-store/src/chairs.rs",
+  "tools/front-door/crates/fabric-runtime/src/chairs.rs",
+  "tools/front-door/crates/fabric-runtime/src/graph/land.rs",
+  "tools/front-door/crates/fabric-runtime/src/handoff.rs",
+  "tools/front-door/crates/fabric-runtime/src/handoff/**",
+  "tools/front-door/crates/records/src/handoff.rs",
+  "tools/front-door/src/handoff.rs",
+  "tools/front-door/src/pr/land.rs",
+  "tools/front-door/src/pr/landing/**",
+  "tools/front-door/src/fabric/landing.rs",
+]
+tier = "crucial"
+hard = true
+lenses = ["correctness-spec", "adversarial"]
+[domains.routing.review.floors.provenant_release]
+# Release packaging and upgrade: a published release cannot be unpublished.
+paths = [
+  "tools/front-door/src/bin/package-release.rs",
+  "tools/front-door/src/upgrade-release.sh",
+]
+tier = "crucial"
+hard = true
+lenses = ["correctness-spec", "reliability"]

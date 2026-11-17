@@ -532,7 +532,9 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                         // is selected afresh in every round.
                         input.node.clone()
                     };
-                    if !child.depends_on.contains(&input.node) {
+                    if !child.depends_on.contains(&input.node)
+                        && !child.after_settled.contains(&input.node)
+                    {
                         child.depends_on.push(input.node.clone());
                     }
                 }
