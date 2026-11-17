@@ -834,9 +834,34 @@ fn a_handoff_in_its_own_codex_message_is_read_after_prose() {
 fn credential_shaped_assignment_in_jsonl_string_preserves_frame_and_settles_done_handoff() {
     use provenant_os::exec::CaptureFilter;
 
+    let temp = tempfile::tempdir().unwrap();
+    let thread = "01234567-89ab-cdef-0123-456789abcdef";
+    let day = temp.path().join("candidate-0/sessions/2026/10/24");
+    std::fs::create_dir_all(&day).unwrap();
+    let rollout = day.join(format!("rollout-2026-10-24T00-00-00-{thread}.jsonl"));
+    let identity = format!(
+        "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{thread}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"model\":\"gpt-6.1-terra\"}}}}\n"
+    );
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    std::fs::write(
+        &rollout,
+        format!("{identity}{{\"type\":\"response_item\",\"payload\":{{\"text\":\"{secret}\"}}}}\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        provenant_confinement::redact::scrub_session_history(temp.path()).unwrap(),
+        1
+    );
+    let scrubbed = std::fs::read_to_string(&rollout).unwrap();
+    assert!(scrubbed.starts_with(&identity));
+    assert!(!scrubbed.contains(secret));
     let route = run::RouteRecord {
         provider: Some("codex".into()),
         model: Some("codex/gpt-6.1-terra".into()),
+        sandbox: Some(run::SandboxModeReceipt {
+            effective: true,
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let handoff = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"n\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
@@ -845,7 +870,7 @@ fn credential_shaped_assignment_in_jsonl_string_preserves_frame_and_settles_done
             .to_string()
     };
     let stream = [
-        r#"{"type":"thread.started","thread_id":"t"}"#.to_owned(),
+        format!(r#"{{"type":"thread.started","thread_id":"{thread}"}}"#),
         r#"{"type":"item.started","item":{"id":"item_30","type":"command_execution","command":"/bin/zsh -lc \"sed -n '145,180p' src/main.rs; rg -n 'fn scan|credential-shaped|password='\"","aggregated_output":""}}"#.to_owned(),
         message("Done inspecting files."),
         message("VERDICT: PASS"),
@@ -864,7 +889,7 @@ fn credential_shaped_assignment_in_jsonl_string_preserves_frame_and_settles_done
     assert!(redactor.has_redaction());
 
     let decoded = Registry::default()
-        .decode(&route, &filtered, &clean_exit(), Path::new("/unused"))
+        .decode(&route, &filtered, &clean_exit(), temp.path())
         .unwrap();
 
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
