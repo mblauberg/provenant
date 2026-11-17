@@ -886,6 +886,9 @@ impl FacadeError {
     pub fn graph_candidate(error: crate::graph::CandidateError) -> Self {
         use crate::graph::CandidateError;
         match error {
+            CandidateError::Plan => {
+                Self::graph_admission(crate::graph::AdmissionError::Plan(String::new()))
+            }
             CandidateError::Checkpoint => Self::StateCorrupt,
             CandidateError::CheckpointTopology { node, invariant } => Self::StateCorruptDetail {
                 detail: format!("graph checkpoint node {node}: {invariant}"),
@@ -895,6 +898,18 @@ impl FacadeError {
             }
             CandidateError::WriterWorktree { node } => {
                 Self::graph_admission(crate::graph::AdmissionError::WriterWorktree { node })
+            }
+            CandidateError::Schema => {
+                Self::graph_admission(crate::graph::AdmissionError::Schema(String::new()))
+            }
+            CandidateError::Composite => {
+                Self::graph_admission(crate::graph::AdmissionError::Composite(String::new()))
+            }
+            CandidateError::OutputKind(field) => {
+                Self::graph_admission(crate::graph::AdmissionError::OutputKind {
+                    field,
+                    reason: String::new(),
+                })
             }
             CandidateError::Secret(cause) => Self::invalid(InvalidInputDetail::GraphRelayCause(
                 GraphRelayCause::Secret {

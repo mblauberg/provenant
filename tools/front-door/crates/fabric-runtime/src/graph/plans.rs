@@ -449,8 +449,16 @@ pub(super) fn expand(
     expansions: &[Expansion],
     limits: &crate::config::GraphLimits,
 ) -> Result<GraphDocument, String> {
-    let mut expanded =
-        loops::expand(document, extensions, limits).map_err(|error| error.to_string())?;
+    expand_typed(document, extensions, expansions, limits).map_err(|error| error.to_string())
+}
+
+pub(super) fn expand_typed(
+    document: &GraphDocument,
+    extensions: &[String],
+    expansions: &[Expansion],
+    limits: &crate::config::GraphLimits,
+) -> Result<GraphDocument, AdmissionError> {
+    let mut expanded = loops::expand(document, extensions, limits)?;
     let mut sources = std::collections::BTreeSet::new();
     for addition in expansions.iter().filter(|addition| !addition.retired()) {
         // A patch may come from the host (no source), a parent may patch more
@@ -463,7 +471,7 @@ pub(super) fn expand(
                 && expanded.nodes.iter().any(|n| n.id == addition.source)
         };
         if !valid {
-            return Err("invalid expansion source".into());
+            return Err(AdmissionError::Plan("invalid expansion source".into()));
         }
         append(&mut expanded, addition);
     }

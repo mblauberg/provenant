@@ -189,8 +189,10 @@ resume validators.
 A structural limit at first admission refuses without publishing. An existing
 running graph that exceeds a structural limit, including during expansion or
 following a host limit reduction, saves a `StructuralLimit` pause and can
-resume after the limit is raised. A settled or cancelled graph saves no new
-structural pause. Resume does not reactivate a previous expansion pause before
+resume after the limit is raised. A cancelled graph, or a settled graph with
+no pending recovery, saves no new structural pause. A verdict correction that
+cannot fit retains the structural pause on its failed lens until retried.
+Resume does not reactivate a previous expansion pause before
 retrying its decision. Malformed fragments remain `InvalidPlanExpansion`;
 only a typed structural overrun receives `StructuralLimit`. Persisted topology
 is checked by the candidate gate before prospective topology so corrupt checkpoints retain their node

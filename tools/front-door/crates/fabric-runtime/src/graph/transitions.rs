@@ -1577,6 +1577,26 @@ pub(super) fn apply_loop_extensions(
     Ok(())
 }
 
+fn recovery_pending(checkpoint: &GraphCheckpoint) -> bool {
+    checkpoint
+        .nodes
+        .iter()
+        .any(|node| next_step::stop_cause(node, checkpoint).is_some())
+        || checkpoint.nodes.iter().any(|node| {
+            node.state == NodeState::Failed
+                && node.advance_error_code.as_deref() == Some("review_verdict_invalid")
+                && node.review_verdict_correction_refused.is_none()
+                && !checkpoint
+                    .expansions
+                    .iter()
+                    .filter_map(|expansion| expansion.patch.as_ref())
+                    .any(|patch| {
+                        patch.reason.as_deref()
+                            == Some(format!("correct review verdict {}", node.id).as_str())
+                    })
+        })
+}
+
 pub(super) fn refresh_structure_pause(
     checkpoint: &mut GraphCheckpoint,
     expanded: &GraphDocument,
@@ -1590,15 +1610,7 @@ pub(super) fn refresh_structure_pause(
     }
     // A settled failed lens or stopped writer may still owe a recovery patch.
     // Its existing topology must be paused before that patch is planned.
-    let recovery_pending = checkpoint
-        .nodes
-        .iter()
-        .any(|node| next_step::stop_cause(node, checkpoint).is_some())
-        || checkpoint.nodes.iter().any(|node| {
-            node.state == NodeState::Failed
-                && node.advance_error_code.as_deref() == Some("review_verdict_invalid")
-                && node.review_verdict_correction_refused.is_none()
-        });
+    let recovery_pending = recovery_pending(checkpoint);
     let structural_pause =
         if checkpoint.nodes.iter().all(|node| node.state.settled()) && !recovery_pending {
             None
@@ -1678,6 +1690,7 @@ pub(super) fn record_separation(progress: &mut NodeProgress, record: FamilySepar
 
 pub(super) fn clear_settled_pause(checkpoint: &mut GraphCheckpoint) -> bool {
     if checkpoint.nodes.iter().all(|node| node.state.settled())
+        && !recovery_pending(checkpoint)
         && checkpoint
             .nodes
             .iter()

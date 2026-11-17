@@ -289,12 +289,22 @@ pub(super) fn correct_verdict(
     ) {
         if let Some(PlanFailureFact::Structural(limit)) = &error.cause {
             next = checkpoint.clone();
-            next.set_pause(PauseCause::StructuralLimit, &limit.to_string());
+            plans::set_expansion_pause(
+                &mut next,
+                index,
+                limit.to_string(),
+                false,
+                None,
+                Some(*limit),
+            );
             return Ok(Some(next));
         }
         // Admission is atomic: keep the failed attempt and fence further
         // automatic corrections so coverage can settle on subsequent advances.
         next = checkpoint.clone();
+        if next.nodes[index].expansion_pause.is_some() {
+            plans::clear_expansion_pause(&mut next, index, true);
+        }
         next.nodes[index].review_verdict_correction_refused =
             Some(bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES));
         return Ok(Some(next));

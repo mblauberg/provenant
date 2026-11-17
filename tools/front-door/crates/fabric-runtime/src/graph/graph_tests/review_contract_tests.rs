@@ -1039,9 +1039,10 @@ fn below_minimum_review_keeps_returned_findings_on_replay() {
     }
 }
 
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
 #[test]
 fn correction_over_structural_limit_pauses_until_limit_is_raised() {
-    let document = panel("f0-v0-s0");
+    let document = panel_with_lenses("f0-v0-s0", &["correctness"]);
     let (plan, _) = validate_plan(&document).unwrap();
     let lens = plan
         .nodes
@@ -1086,12 +1087,18 @@ fn correction_over_structural_limit_pauses_until_limit_is_raised() {
     assert_eq!(lens.state, NodeState::Failed);
     assert!(lens.review_verdict_correction_refused.is_none());
     assert!(lens.previous_attempts.is_empty());
+    assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(run.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+    assert!(lens.expansion_pause.is_some());
     assert_eq!(journal.0.as_ref(), Some(&run.checkpoint));
+    // Reopen the durable checkpoint as a fresh host would.
+    let saved = serde_json::to_vec(&journal.0).unwrap();
+    let mut journal = MemoryJournal(serde_json::from_slice(&saved).unwrap());
     let resumed = resume_with_budget(
         &document, &mut owner, &mut journal, &Default::default(), &Default::default(), &[],
     ).unwrap();
     assert_ne!(resumed.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+    assert_eq!(owner.prompts.iter().filter(|prompt| prompt.contains("only automatic verdict correction")).count(), 1);
 
 }
 
