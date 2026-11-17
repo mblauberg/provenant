@@ -299,9 +299,32 @@ pub struct CredentialRoot {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CredentialRoots {
     entries: Vec<CredentialRoot>,
+    lane_roots: Vec<PathBuf>,
 }
 
 impl CredentialRoots {
+    /// Bind the actual launch roots once. Only strict descendants of a store
+    /// are carve-outs; equality and stores inside lane roots remain refused.
+    pub fn with_lane_roots(mut self, lane_roots: Vec<PathBuf>) -> Self {
+        self.lane_roots = lane_roots;
+        self
+    }
+
+    pub fn lane_roots(&self) -> &[PathBuf] {
+        &self.lane_roots
+    }
+
+    pub fn lane_exceptions<'a>(
+        &'a self,
+        root: &'a CredentialRoot,
+    ) -> impl Iterator<Item = &'a PathBuf> {
+        self.lane_roots.iter().filter(move |lane| {
+            root.scope == CredentialScope::Subtree
+                && **lane != root.path
+                && lane.starts_with(&root.path)
+        })
+    }
+
     pub fn for_home(home: &Path) -> Self {
         let mut roots = Self::default();
         for declaration in crate::CredentialDeclaration::for_home(home) {
@@ -398,6 +421,12 @@ impl CredentialRoots {
         read: bool,
     ) -> Option<&CredentialRoot> {
         self.entries.iter().find(|root| {
+            if self
+                .lane_exceptions(root)
+                .any(|lane| path.starts_with(lane))
+            {
+                return false;
+            }
             if read
                 && root.kind == CredentialKind::CodexHome
                 && codex_standalone_path(path, &root.path)

@@ -5,8 +5,7 @@ use crate::{Output, Part, PricesRefresh, Reconcile, Stats, Switch, Target, Trace
 #[cfg(test)]
 use provenant_core::ActorId;
 use provenant_core::{
-    AttemptId, CancelToken, Clock, CredentialRoots, CredentialScope, DeliveryId, OperationId,
-    Roots, WallTime,
+    AttemptId, CancelToken, Clock, CredentialRoots, DeliveryId, OperationId, Roots, WallTime,
 };
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::clock::SystemClock;
@@ -374,7 +373,9 @@ pub fn admit_source_root(
     };
     let check_credentials = |path: &Path| {
         credentials
-            .refusal(path, CredentialScope::Subtree, true)
+            .entries()
+            .iter()
+            .find(|root| root.path == path || root.path.starts_with(path))
             .map_or(Ok(()), |root| {
                 Err(refuse(&format!(
                     "graph source checkout overlaps declared credential root {} (source: {})",
@@ -435,12 +436,6 @@ pub fn admit_source_root(
 }
 
 /// Built-in and host declarations classified before account configuration is available.
-pub fn host_credentials(home: &Path, project: &Path) -> Result<CredentialRoots, String> {
-    provider::host_credentials(home, project)
-}
-
-/// Resolve the full declared credential table for a launch edge, including
-/// account registrations and host environment overrides.
 pub fn declared_credentials(registry: &Registry<'_>) -> Result<CredentialRoots, String> {
     provider::declared_credentials(registry)
 }

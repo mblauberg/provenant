@@ -308,6 +308,14 @@ fn inventory_links(
                 continue;
             };
             let path = entry.path();
+            if mandatory
+                .credential_roots()
+                .lane_roots()
+                .iter()
+                .any(|lane| path.starts_with(lane))
+            {
+                continue;
+            }
             if kind.is_symlink() {
                 let (Ok(target), Ok(metadata)) =
                     (resolve_boundary_path(&path), std::fs::metadata(&path))
@@ -423,12 +431,16 @@ impl MandatoryRoots {
         github: &[PathGrant],
         protected: &[PathGrant],
     ) -> Result<Self, PermissionError> {
+        let mut declarations = roots.credential_roots().clone();
+        for root in credentials {
+            declarations.add_entry(root.clone());
+        }
         Self::for_host_with_scratch_mode(
             roots,
             home,
             source,
             scratch,
-            credentials,
+            &declarations,
             github,
             protected,
             true,
@@ -443,7 +455,7 @@ impl MandatoryRoots {
         home: &Path,
         source: &Path,
         scratch: &Path,
-        credentials: &[CredentialRoot],
+        credentials: &provenant_core::CredentialRoots,
         github: &[PathGrant],
         protected: &[PathGrant],
         sandboxed: bool,
@@ -453,32 +465,7 @@ impl MandatoryRoots {
             scope: PathScope::Subtree,
         };
         let mut mandatory = Self::new(home, roots.state.as_path(), source)?;
-        mandatory.credential_roots = roots.credential_roots().clone();
-        mandatory.credentials = mandatory
-            .credential_roots
-            .entries()
-            .iter()
-            .map(|root| PathGrant {
-                path: root.path.clone(),
-                scope: match root.scope {
-                    CredentialScope::Exact => PathScope::Exact,
-                    CredentialScope::Subtree => PathScope::Subtree,
-                },
-            })
-            .collect();
-        for root in credentials {
-            mandatory.add_declared_credential(
-                PathGrant {
-                    path: root.path.clone(),
-                    scope: match root.scope {
-                        CredentialScope::Exact => PathScope::Exact,
-                        CredentialScope::Subtree => PathScope::Subtree,
-                    },
-                },
-                root.source.clone(),
-                root.kind.clone(),
-            )?;
-        }
+        mandatory.set_credential_roots(credentials.clone());
         for path in SYSTEM_SHELL_STARTUP
             .iter()
             .map(PathBuf::from)
@@ -767,7 +754,7 @@ mod tests {
                 &home,
                 &root.join("source"),
                 &root.join("scratch"),
-                &[],
+                &provenant_core::CredentialRoots::for_home(&home),
                 &[],
                 &[],
                 sandboxed,

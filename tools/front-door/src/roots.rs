@@ -249,8 +249,6 @@ pub fn resolve(
         None => product_root().unwrap_or_else(|_| project.clone()),
     };
     let mut inputs = RootInputs::new(home.clone(), assets.clone());
-    inputs.credential_roots = provenant_cli::run::host_credentials(&home, &project)
-        .map_err(provenant_core::RootError::CredentialDeclarations)?;
     inputs.state_dir = globals.state_dir.clone();
     inputs.environment_state_dir =
         std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);

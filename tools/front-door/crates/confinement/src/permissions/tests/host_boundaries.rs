@@ -191,3 +191,85 @@ if printf overwrite > "$6"; then exit 85; fi
     }
     Ok(())
 }
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[test]
+fn native_shared_stores_deny_unlisted_files_outside_lanes_under_both_defaults()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
+    let temp = crate::test_support::tempdir()?;
+    let root = provenant_os::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let executor = SystemExecutor::new(2)?;
+    for store in [
+        home.clone(),
+        home.join("relocated-codex"),
+        home.join(".claude"),
+    ] {
+        let project = store.join("project");
+        let cwd = project.join("cwd");
+        let scratch = store.join("scratch");
+        std::fs::create_dir_all(&cwd)?;
+        std::fs::create_dir_all(&scratch)?;
+        let allowed = cwd.join("ordinary");
+        let secret = store.join("unlisted-secret");
+        std::fs::write(&allowed, b"ordinary\n")?;
+        std::fs::write(&secret, b"synthetic credential\n")?;
+        let mut credentials = CredentialRoots::default();
+        credentials.add(
+            &store,
+            CredentialScope::Subtree,
+            "shared fixture",
+            CredentialKind::Store,
+        );
+        let (mut plan, mut profile) = write_grants_fixture();
+        plan.credential_roots =
+            credentials.with_lane_roots(vec![project.clone(), cwd.clone(), scratch.clone()]);
+        plan.read_roots = vec![PathGrant {
+            path: project.clone(),
+            scope: PathScope::Subtree,
+        }];
+        plan.selected_authentication = None;
+        plan.scratch = PathGrant {
+            path: scratch.clone(),
+            scope: PathScope::Subtree,
+        };
+        plan.private_state = None;
+        profile.spec.authentication.clear();
+        profile.spec.allow_process_fork = true;
+        profile.spec.process_executables = vec![PathGrant {
+            path: "/bin/sh".into(),
+            scope: PathScope::Exact,
+        }];
+        let rendered = render(&GrantSet::build(&plan, &profile, &home, None)?)?;
+        // Production is open. Change only the ambient default to exercise the
+        // same store boundary in an allowlist fixture, granting runtime files
+        // and the lane roots explicitly, never the enclosing store.
+        for default in ["allow", "deny"] {
+            let mut source =
+                rendered.replacen("(allow default)", &format!("({default} default)"), 1);
+            source.push_str("(allow file-read-metadata)\n(allow file-read* (subpath \"/usr\") (subpath \"/System\") (subpath \"/bin\") (subpath \"/dev\"))\n");
+            let launch = ConfinedLaunch {
+                enforcement: Enforcement::MacOsSandboxExec,
+                profile: source.into_bytes(),
+                profile_digest: [0; 32],
+                native_controls: Vec::new(),
+            };
+            let command = launch.command(
+                &[
+                    "/bin/sh".into(), "-c".into(),
+                    "IFS= read -r value < \"$1\" || exit 81; test \"$value\" = ordinary || exit 82; if IFS= read -r value < \"$2\"; then exit 83; fi; printf lane > \"$3\" || exit 84".into(),
+                    "shared-store".into(), allowed.as_os_str().to_owned(), secret.as_os_str().to_owned(), scratch.join("output").into_os_string(),
+                ],
+                &provenant_core::AttemptId::from_bytes([10;16]),
+                &provenant_os::fs::Directory::open_anchor(&root)?,
+            )?;
+            let result = executor.execute(command.options(&cwd, Duration::from_secs(5))?)?;
+            assert!(
+                successful_probe(&result),
+                "default={default}, store={store:?}: {result:?}"
+            );
+        }
+    }
+    Ok(())
+}

@@ -197,21 +197,31 @@ credential roots and grants enclosing them, broad home or tmp grants and
 Git-internal roots. Credential declarations name concrete resolved paths and
 their source: built-in secret stores, provider configuration and data stores,
 every registered account's stores and the resolved Cargo home's credential
-files. Built-in, provider, host-variable and account declarations pass through
-one shared/dedicated classifier before entering the core root table; state-root
-selection and lane grant validation consume that table. Dedicated credential
-directories retain subtree protection. A declared directory equal to HOME or
-containing or equal to a lane root uses its known file inventory instead,
-including adapter-declared files, Claude lane tokens and refresh locks, and
-host-variable inventories such as GitHub CLI configuration files. A shared
-declaration without a precise inventory refuses, naming its source. Sibling
-profiles and file declarations retain exact scope.
+files. Roots carry declarations; launch preparation classifies built-in,
+provider, host-variable and account declarations once, using the actual launch
+source and cwd, scratch, and the derived writer cache, without unioning an
+earlier project classification. Scratch and the writer cache are lane roots
+just as the source and cwd are.
 
-No lane grant may cover a declared credential file or a dedicated credential
-store. Undeclared files in a shared store are outside this guarantee: a lane
-may read them inside a granted lane root by design. Shared-store narrowing
-does not add a deny rule for undeclared files outside that root; their access
-follows the ambient permission policy above, which currently allows by default.
+A store containing no lane root retains whole-subtree protection. A store
+strictly containing lane roots retains whole-subtree protection minus those
+lane roots. In the open profile, the renderer denies the store subpath with
+`require-all` and a `require-not` subpath carve-out for each contained lane root.
+Under an allowlist profile, default deny protects the store outside the lane
+roots, and lane grants cover only those lane roots. The current production
+renderer is open; this rule also defines the boundary for an allowlist profile.
+Undeclared store files outside lane roots remain denied in both profiles;
+files inside a lane root are accessible by design. A store equal to or inside
+a lane root refuses the launch.
+
+Adapter and host file inventories, including Provenant-owned per-account lane
+tokens and refresh locks, serve only to check that no declared credential file
+lies inside any lane root. Such a file refuses the launch, naming its origin
+and path, including when an alias resolves into a lane root. An inventory does
+not replace or narrow the store denial. Stores without an inventory retain the
+same subtree boundary. Independent sibling profiles and file declarations keep
+exact scope. No grant may enclose a store or declared credential file, or open
+a store outside its lane carve-outs.
 Declared credential denials follow grants in the rendered profile. The
 standalone Codex release package read exception belongs only to the built-in
 default Codex home; relocated and registered stores retain whole-store
@@ -225,7 +235,9 @@ A component named `.claude`, `.codex`, `.cursor` or `.gemini` does not establish
 a credential boundary. Project-local agent configuration overlaps warn with
 their source and proceed. A verified linked worktree is admitted at its real
 path, including beneath project-local agent configuration or outside the
-project, unless it overlaps a declared credential store. Git markers, common
+project. A declared store may strictly contain that root under the carve-out
+rule above; equality, enclosed stores and enclosed credential files refuse.
+Git markers, common
 directories and private worktree Git directories keep their hard hold.
 `run --explain` and launch preparation use one source admission decision and
 report its refusal code and reason or sourced warnings.

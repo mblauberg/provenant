@@ -268,7 +268,7 @@ pub(super) fn confinement_request(
             roots.home,
             roots.cwd,
             roots.scratch,
-            roots.credential_roots.entries(),
+            roots.credential_roots,
             roots.github_roots,
             roots.protected_worktrees,
             sandboxed,
@@ -695,21 +695,13 @@ pub(super) fn protected_worktrees(
     Ok(protected)
 }
 
-/// Inventory names and registration metadata only; credential contents are
-/// never needed to establish the mandatory boundary.
-pub(super) fn credential_roots(
+fn credential_declarations(
     registry: &Registry<'_>,
     home: &Path,
     settings: &provenant_providers::accounts::Settings,
-    lane_roots: &[&Path],
-) -> Result<provenant_core::CredentialRoots, String> {
+) -> Vec<provenant_core::CredentialDeclaration> {
     use provenant_core::{
-        CredentialDeclaration, CredentialInventory, CredentialKind, CredentialRoot,
-        CredentialRoots, CredentialScope,
-    };
-    let resolve = |path: &Path| {
-        provenant_confinement::permissions::resolve_boundary_path(path)
-            .map_err(|error| error.to_string())
+        CredentialDeclaration, CredentialInventory, CredentialKind, CredentialRoot, CredentialScope,
     };
     let mut declarations = CredentialDeclaration::for_home(home);
 
@@ -776,6 +768,29 @@ pub(super) fn credential_roots(
             .unwrap_or_else(run::HostLaunchContext::credential_roots),
     );
 
+    // Sibling profiles are independent exact declarations, not holes in the
+    // directory boundary. Inventories themselves are only used at admission.
+    let siblings: Vec<_> = declarations
+        .iter()
+        .filter_map(|declaration| {
+            let CredentialInventory::Adapter(adapter) = &declaration.inventory else {
+                return None;
+            };
+            let spec = provenant_records::AdapterSpec::get(adapter)?;
+            spec.credential_profile_sibling
+                .then(|| CredentialDeclaration {
+                    root: CredentialRoot {
+                        path: declaration.root.path.with_extension("json"),
+                        scope: CredentialScope::Exact,
+                        source: declaration.root.source.clone(),
+                        kind: CredentialKind::Store,
+                    },
+                    inventory: CredentialInventory::Unknown,
+                })
+        })
+        .collect();
+    declarations.extend(siblings);
+
     // Keep distinct kinds and inventories, even when path and source match.
     let mut unique = Vec::new();
     for declaration in declarations {
@@ -783,7 +798,23 @@ pub(super) fn credential_roots(
             unique.push(declaration);
         }
     }
-    let declarations = unique;
+    unique
+}
+
+/// Inventory names and registration metadata only; credential contents are
+/// never needed to establish the mandatory boundary.
+pub(super) fn credential_roots(
+    registry: &Registry<'_>,
+    home: &Path,
+    settings: &provenant_providers::accounts::Settings,
+    lane_roots: &[&Path],
+) -> Result<provenant_core::CredentialRoots, String> {
+    use provenant_core::{CredentialInventory, CredentialKind, CredentialRoots, CredentialScope};
+    let declarations = credential_declarations(registry, home, settings);
+    let resolve = |path: &Path| {
+        provenant_confinement::permissions::resolve_boundary_path(path)
+            .map_err(|error| error.to_string())
+    };
     let resolve_declared = |path: &Path, source: &str| {
         resolve(path).map_err(|error| {
             format!(
@@ -795,7 +826,6 @@ pub(super) fn credential_roots(
     for decl in &declarations {
         resolve_declared(&decl.root.path, &decl.root.source)?;
     }
-    let resolved_home = resolve_declared(home, "home directory")?;
     let resolved_lanes = lane_roots
         .iter()
         .map(|lane| {
@@ -812,20 +842,42 @@ pub(super) fn credential_roots(
     for decl in &declarations {
         let root = &decl.root;
         if root.scope == CredentialScope::Exact {
+            let path = resolve_declared(&root.path, &root.source)?;
+            if resolved_lanes.iter().any(|lane| path.starts_with(lane)) {
+                return Err(format!(
+                    "{}: declared credential file {} lies inside lane root",
+                    root.source,
+                    path.display()
+                ));
+            }
             roots.add_entry(root.clone());
             continue;
         }
         let resolved_store = resolve_declared(&root.path, &root.source)?;
-        let is_shared = resolved_store == resolved_home
-            || resolved_lanes
-                .iter()
-                .any(|lane| lane.starts_with(&resolved_store));
-        if !is_shared {
-            roots.add_entry(root.clone());
+        if resolved_lanes
+            .iter()
+            .any(|lane| resolved_store.starts_with(lane))
+        {
+            return Err(format!(
+                "{}: credential store {} is equal to or inside lane root",
+                root.source,
+                resolved_store.display()
+            ));
         }
+        roots.add_entry(root.clone());
         let inventory = match &decl.inventory {
             CredentialInventory::Adapter(adapter) => {
-                crate::accounts::exact_directory_credential_paths(&root.path, adapter, &root.source)
+                if provenant_records::AdapterSpec::get(adapter)
+                    .is_some_and(|spec| !spec.credential_files.is_empty())
+                {
+                    crate::accounts::exact_directory_credential_paths(
+                        &root.path,
+                        adapter,
+                        &root.source,
+                    )
+                } else {
+                    Ok(Vec::new())
+                }
             }
             CredentialInventory::Files(files) => {
                 if files.iter().any(|name| {
@@ -843,34 +895,25 @@ pub(super) fn credential_roots(
                 }
                 Ok(files.iter().map(|name| root.path.join(name)).collect())
             }
-            CredentialInventory::Unknown => Err(format!(
-                "{} at {} cannot be resolved precisely: shared credential root has no precise file inventory",
-                root.source,
-                root.path.display()
-            )),
+            CredentialInventory::Unknown => Ok(Vec::new()),
         };
-        let paths = match inventory {
-            Ok(paths) if !paths.is_empty() => paths,
-            Ok(_) if is_shared => {
+        for path in inventory? {
+            let resolved = resolve_declared(&path, &root.source)?;
+            if resolved_lanes.iter().any(|lane| resolved.starts_with(lane)) {
                 return Err(format!(
-                    "{} at {} cannot be resolved precisely: shared credential root has no precise file inventory",
+                    "{}: declared credential file {} lies inside lane root",
                     root.source,
-                    root.path.display()
+                    path.display()
                 ));
             }
-            Err(error) if is_shared => return Err(error),
-            _ => Vec::new(), // Dedicated stores retain whole-directory protection.
-        };
-        for path in paths {
-            resolve_declared(&path, &root.source)?;
-            roots.add(
-                path,
-                CredentialScope::Exact,
-                root.source.clone(),
-                CredentialKind::Store,
-            );
         }
     }
+    // Both spellings are needed when a lane root is reached through an alias.
+    let mut lanes = resolved_lanes;
+    lanes.extend(lane_roots.iter().map(|path| path.to_path_buf()));
+    lanes.sort();
+    lanes.dedup();
+    let roots = roots.with_lane_roots(lanes);
 
     let sources: std::collections::BTreeMap<PathBuf, String> = roots
         .entries()
@@ -888,33 +931,14 @@ pub(super) fn credential_roots(
     })
 }
 
-/// Initial state binding precedes account configuration reads, but must use
-/// the same built-in and host declaration classifier as launch preparation.
-pub fn host_credentials(
-    home: &Path,
-    project: &Path,
-) -> Result<provenant_core::CredentialRoots, String> {
-    credential_roots(
-        &Registry {
-            home: Some(home),
-            cwd: Some(project),
-            ..Registry::default()
-        },
-        home,
-        &provenant_providers::accounts::Settings::default(),
-        &[project],
-    )
-}
-
 pub fn declared_credentials(
     registry: &Registry<'_>,
 ) -> Result<provenant_core::CredentialRoots, String> {
-    declared_credentials_for(registry, &registry.cwd.into_iter().collect::<Vec<_>>())
+    declared_credentials_for(registry)
 }
 
 fn declared_credentials_for(
     registry: &Registry<'_>,
-    lane_roots: &[&Path],
 ) -> Result<provenant_core::CredentialRoots, String> {
     let home = registry.home.ok_or("home directory is unavailable")?;
     let roots = registry
@@ -925,7 +949,14 @@ fn declared_credentials_for(
         .domains
         .accounts
         .unique_accounts();
-    credential_roots(registry, home, &settings, lane_roots)
+    let mut roots = provenant_core::CredentialRoots::default();
+    for declaration in credential_declarations(registry, home, &settings) {
+        roots.add_entry(declaration.root);
+    }
+    roots.with_aliases(|path| {
+        provenant_confinement::permissions::resolve_boundary_path(path)
+            .map_err(|error| error.to_string())
+    })
 }
 
 pub(super) fn github_roots(registry: &Registry<'_>) -> Vec<PathGrant> {
@@ -1197,10 +1228,7 @@ pub(super) fn source_cwd(
     let state = registry
         .state_root
         .ok_or_else(|| SourceCwdError::Operational("state root is unavailable".into()))?;
-    let lane_roots = std::iter::once(cwd)
-        .chain(task.access.source_root.as_deref())
-        .collect::<Vec<_>>();
-    let credentials = declared_credentials_for(registry, &lane_roots).map_err(|error| {
+    let credentials = declared_credentials_for(registry).map_err(|error| {
         source_cwd_authority(format!("credential declarations unavailable: {error}"))
     })?;
     let Some(source) = &task.access.source_root else {

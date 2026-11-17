@@ -1043,7 +1043,9 @@ fn mandatory_for_plan(
         .or_else(|| plan.read_only.as_ref().map(|grants| grants.root.as_path()))
         .or_else(|| plan.read_roots.first().map(|root| root.path.as_path()))
         .unwrap_or(&missing_source);
-    MandatoryRoots::new(home, &state, source)
+    let mut mandatory = MandatoryRoots::new(home, &state, source)?;
+    mandatory.set_credential_roots(plan.credential_roots.clone());
+    Ok(mandatory)
 }
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
@@ -1267,39 +1269,55 @@ fn push_boundaries(
     }
     let empty = Vec::new();
     for root in mandatory.credentials() {
+        let lane_exceptions = mandatory.lane_exceptions(root);
         // This separate exact store stays hidden even from Claude itself.
         let exceptions = if root.path == home.join(".claude.json") {
             &empty
         } else {
             &credential_reads
         };
-        push_denial(source, "file-read*", root, exceptions)?;
-        push_denial(source, "file-clone", root, exceptions)?;
-        push_denial(source, "process-exec", root, &packages)?;
-        push_denial(source, "file-map-executable", root, &packages)?;
+        // A shared store must not be reopened by a broad authentication or
+        // GitHub configuration grant. Exact selected credentials still work.
+        let reads: Vec<_> = exceptions
+            .iter()
+            .filter(|grant| lane_exceptions.is_empty() || grant.scope == PathScope::Exact)
+            .chain(&lane_exceptions)
+            .cloned()
+            .collect();
+        let exec: Vec<_> = packages.iter().chain(&lane_exceptions).cloned().collect();
+        push_denial(source, "file-read*", root, &reads)?;
+        push_denial(source, "file-clone", root, &reads)?;
+        push_denial(source, "process-exec", root, &exec)?;
+        push_denial(source, "file-map-executable", root, &exec)?;
         if profile.spec.deny_credential_access
             || credential_writes.is_empty()
             || root.path == home.join(".claude.json")
         {
-            push_denial(source, "file-write*", root, &[])?;
+            push_denial(source, "file-write*", root, &lane_exceptions)?;
         } else {
-            push_denial(source, "file-write*", root, credential_writes)?;
+            let writes: Vec<_> = credential_writes
+                .iter()
+                .filter(|grant| lane_exceptions.is_empty() || grant.scope == PathScope::Exact)
+                .chain(&lane_exceptions)
+                .cloned()
+                .collect();
+            push_denial(source, "file-write*", root, &writes)?;
             // A refresh can modify bytes only. Creating, replacing, renaming,
             // changing ownership/mode or relinking the credential stays denied.
-            push_rule(
+            push_denial(
                 source,
-                "deny",
                 "file-write-create file-write-unlink file-write-mode file-write-owner file-write-flags file-write-acl file-write-xattr file-write-setugid file-write-mount file-write-umount",
-                &root.path,
-                root.scope,
+                root,
+                &lane_exceptions,
             )?;
         }
-        push_socket_denial(source, root, &[])?;
+        push_socket_denial(source, root, &lane_exceptions)?;
         push_ancestor_guards(source, root, &mut ancestors)?;
     }
     // Only the typed native keychain mechanism can read the exact login
     // keychain. Other mandatory stores and aliases retain their denials.
     for root in mandatory.non_exempt() {
+        let lanes = mandatory.lane_exceptions(root);
         for operation in [
             "file-read*",
             "file-clone",
@@ -1307,21 +1325,17 @@ fn push_boundaries(
             "process-exec",
             "file-map-executable",
         ] {
+            let mut exceptions = lanes.clone();
             if operation == "file-read*" && root.path == home.join("Library/Keychains") {
-                push_denial(
-                    source,
-                    operation,
-                    root,
-                    &keychain.iter().cloned().collect::<Vec<_>>(),
-                )?;
-            } else {
-                push_rule(source, "deny", operation, &root.path, root.scope)?;
+                exceptions.extend(keychain.iter().cloned());
             }
+            push_denial(source, operation, root, &exceptions)?;
         }
-        push_socket_denial(source, root, &[])?;
+        push_socket_denial(source, root, &lanes)?;
     }
     for root in mandatory.github() {
-        push_rule(source, "deny", "file-write*", &root.path, root.scope)?;
+        let lanes = mandatory.lane_exceptions(root);
+        push_denial(source, "file-write*", root, &lanes)?;
     }
     let private: Vec<_> = std::iter::once(&plan.scratch)
         .chain(&plan.private_state)

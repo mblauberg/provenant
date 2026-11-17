@@ -1905,3 +1905,74 @@ fn host_writer_roots_inside_protected_checkouts_render_as_exceptions() -> Result
     );
     Ok(())
 }
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn shared_stores_render_subtree_denials_with_every_lane_root_carved_out()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
+    let home = Path::new("/fixture/home");
+    // A home-rooted account, a relocated CODEX_HOME, and a built-in store
+    // containing an alternate graph source all use the same boundary.
+    for store in [
+        home.to_owned(),
+        home.join("relocated-codex"),
+        home.join(".claude"),
+    ] {
+        let project = store.join("project");
+        let cwd = project.join("cwd");
+        let scratch = store.join("scratch");
+        let lanes = vec![project.clone(), cwd, scratch];
+        let mut credentials = CredentialRoots::default();
+        credentials.add(
+            &store,
+            CredentialScope::Subtree,
+            "shared fixture",
+            CredentialKind::Store,
+        );
+        let credentials = credentials.with_lane_roots(lanes.clone());
+        assert!(credentials.refuses(&store.join("unlisted-secret"), CredentialScope::Exact, true));
+        assert!(!credentials.refuses(&project.join("ordinary"), CredentialScope::Exact, true));
+        let (mut plan, mut profile) = write_grants_fixture();
+        plan.credential_roots = credentials;
+        plan.network = NetworkAccess::Off;
+        plan.read_roots = lanes
+            .iter()
+            .map(|path| PathGrant {
+                path: path.clone(),
+                scope: PathScope::Subtree,
+            })
+            .collect();
+        // A selected broad auth grant cannot cancel the shared store denial.
+        profile.spec.authentication[1].roots = vec![PathGrant {
+            path: store.clone(),
+            scope: PathScope::Subtree,
+        }];
+        let source = render(&GrantSet::build(&plan, &profile, home, None)?)?;
+        for operation in [
+            "file-read*",
+            "file-clone",
+            "file-write*",
+            "process-exec",
+            "file-map-executable",
+        ] {
+            let rule = source
+                .lines()
+                .find(|line| {
+                    line.starts_with(&format!(
+                        "(deny {operation} (require-all (subpath \"{}\")",
+                        store.display()
+                    ))
+                })
+                .ok_or("missing shared store denial")?;
+            for lane in &lanes {
+                assert!(
+                    rule.contains(&format!("(require-not (subpath \"{}\"))", lane.display())),
+                    "{rule}"
+                );
+            }
+        }
+    }
+    Ok(())
+}

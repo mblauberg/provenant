@@ -147,6 +147,38 @@ impl MandatoryRoots {
         Ok(roots)
     }
 
+    #[cfg(any(target_os = "macos", feature = "snapshot"))]
+    pub(crate) fn lane_exceptions(&self, root: &PathGrant) -> Vec<PathGrant> {
+        self.credential_roots
+            .lane_roots()
+            .iter()
+            .filter(|lane| {
+                root.scope == PathScope::Subtree
+                    && **lane != root.path
+                    && lane.starts_with(&root.path)
+            })
+            .map(|lane| PathGrant {
+                path: lane.clone(),
+                scope: PathScope::Subtree,
+            })
+            .collect()
+    }
+
+    pub(crate) fn set_credential_roots(&mut self, roots: CredentialRoots) {
+        self.credentials = roots
+            .entries()
+            .iter()
+            .map(|root| PathGrant {
+                path: root.path.clone(),
+                scope: match root.scope {
+                    CredentialScope::Exact => PathScope::Exact,
+                    CredentialScope::Subtree => PathScope::Subtree,
+                },
+            })
+            .collect();
+        self.credential_roots = roots;
+    }
+
     /// Add registered identity homes, relocated XDG stores and isolated Agy
     /// homes, including identities not selected by this attempt. Additive only.
     pub fn add_credentials(&mut self, root: PathGrant) -> Result<(), PermissionError> {

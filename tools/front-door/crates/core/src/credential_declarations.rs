@@ -20,8 +20,8 @@ pub struct CredentialDeclaration {
 
 impl CredentialDeclaration {
     /// The only built-in inventory. Launch preparation classifies these just
-    /// like account and host declarations; roots without an inventory cannot
-    /// be narrowed when they contain a lane root.
+    /// like account and host declarations. Inventories check for declared
+    /// credential files inside lane roots; stores always keep subtree protection.
     pub fn for_home(home: &Path) -> Vec<Self> {
         use CredentialInventory::{Adapter, Files, Unknown};
         use CredentialKind::{CodexHome, Store};
