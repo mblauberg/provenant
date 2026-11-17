@@ -163,11 +163,11 @@ fn unknown_opencode_error_settles_unclassified() {
         Path::new("/nonexistent"),
     ).unwrap();
     assert_eq!(decoded.outcome, run::Outcome::Unclassified);
-    // The adapter diagnostic names the route and error type; the provider's
-    // own untrusted text is not copied once a diagnostic explains it.
+    // The adapter diagnostic names the route and error type, and the bounded
+    // provider message rides along with it.
     let reason = decoded.reason.as_deref().unwrap_or_default();
     assert!(reason.contains("type=unknown"), "{reason}");
-    assert!(!reason.contains("fixture failure"), "{reason}");
+    assert!(reason.contains("fixture failure"), "{reason}");
 }
 
 #[test]
@@ -1180,5 +1180,8 @@ fn unsupported_opencode_reference_is_actionable_and_redacted_in_status_and_outpu
             assert!(text.contains("choose a supported model and variant"));
             assert!(!text.contains("fixture-secret") && !text.contains("user:secret"));
         }
+        // The bounded provider message is carried, with its assignment redacted.
+        let reason = decoded.reason.as_deref().unwrap();
+        assert!(reason.contains("password=[REDACTED]"), "{reason}");
     }
 }
