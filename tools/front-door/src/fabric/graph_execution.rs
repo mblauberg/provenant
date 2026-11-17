@@ -396,6 +396,19 @@ impl Factory {
             Err(error) if error.is_unreadable() => return Ok((selector.to_owned(), Err(error))),
             _ => {}
         }
+        // Paths and hashes select a retained graph just like its exact ID.
+        // Resume must use its sealed execution, not re-plan the source file:
+        // initial admission may have added compiled template metadata.
+        let selected_document = |document: provenant_fabric_runtime::graph::GraphDocument| {
+            let id = document.graph_id.clone();
+            let document = FileJournal::execution(
+                &self.context.roots.state,
+                self.context.identity.project,
+                &id,
+            )
+            .map(|execution| execution.map_or(document, |execution| execution.document));
+            Ok((id, document))
+        };
         // Then a document path: any path-shaped selector, or a bare name of an
         // existing file in the working directory or the scratch graphs directory.
         let path = Path::new(selector);
@@ -414,7 +427,7 @@ impl Factory {
                 local
             };
             return match self.read_graph_document(&path) {
-                Ok(document) => Ok((document.graph_id.clone(), Ok(document))),
+                Ok(document) => selected_document(document),
                 Err(FacadeError::Io { .. }) => Err(refused()),
                 Err(error) => Err(error),
             };
@@ -428,7 +441,7 @@ impl Factory {
             return Err(refused());
         };
         match <[_; 1]>::try_from(found) {
-            Ok([document]) => Ok((document.graph_id.clone(), Ok(document))),
+            Ok([document]) => selected_document(document),
             Err(found) if found.is_empty() => Err(FacadeError::NotFound),
             Err(_) => Err(refused()),
         }
@@ -1514,6 +1527,8 @@ mod tests {
             independent: true,
         };
         checkpoint.nodes[0].review_settlement = Some(review.clone());
+        // A sealed terminal fixture has already drained its attached children.
+        checkpoint.nodes[0].children_cancelled = true;
         let project = factory.context.identity.project;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;

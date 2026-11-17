@@ -2094,6 +2094,7 @@ mod provisioning_tests {
             directory: project.clone(),
             document,
         })?;
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
         journal.save(&checkpoint)?;
         let error = recover_provisioning(
             &context,
@@ -2437,6 +2438,7 @@ mod provisioning_tests {
                 directory: project.clone(),
                 document,
             })?;
+            journal.prepare_fixture_checkpoint(&mut checkpoint)?;
             journal.save(&checkpoint)?;
         }
         git(&["commit", "--allow-empty", "-qm", "move host head"])?;
@@ -2508,7 +2510,7 @@ mod provisioning_tests {
             let clock = provenant_os::clock::SystemClock::new();
             let budget = WaitBudget::cli(clock.mono_now(), 5)?;
             let reference = format!("{}/caller", context.identity.host);
-            let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
                 "schema_version":2,"graph_id":"g-lost-receipt","plan_digest":"fixture",
                 "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[{
                     "launched":true,"key":{"graph_id":"g-lost-receipt","node_id":"parent","route_index":0, "attempt": 1},
@@ -2541,6 +2543,7 @@ mod provisioning_tests {
                         "nodes":[{"id":"parent","access":"read_only","prompt":"Go","route":{"alias":"senior"}}]
                     }))?,
                 })?;
+                journal.prepare_fixture_checkpoint(&mut checkpoint)?;
                 journal.save(&checkpoint)?;
             }
             let request = json!({"op":"add","id":"child","use":"task","prompt":"Read", "idempotency_key":"lost-reply"});
@@ -2609,7 +2612,7 @@ mod provisioning_tests {
                 {"id":"review","access":"read_only","prompt":"Review","route":{"alias":"senior"}}
             ]
         }))?;
-        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
             "schema_version":2,"graph_id":"edit-scope","plan_digest":"fixture",
             "nodes":[
                 {"id":"writer","state":"running","worktree":null,"attempts":[{
@@ -2638,6 +2641,7 @@ mod provisioning_tests {
                 directory: project.clone(),
                 document,
             })?;
+            journal.prepare_fixture_checkpoint(&mut checkpoint)?;
             journal.save(&checkpoint)?;
         }
         for edit in [
@@ -2739,6 +2743,7 @@ mod provisioning_tests {
             ]
         }))?;
         relay::fence_provisioning(&mut checkpoint, "a--w", path, &source);
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
         journal.save(&checkpoint)?;
         assert!(!project.join(path).exists());
         // Process death releases the journal lock. Recover using a fresh host.

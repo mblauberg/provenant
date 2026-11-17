@@ -3692,6 +3692,7 @@ mod tests {
         })?;
         let mut before = checkpoint("g");
         before.nodes[0].attempts.clear();
+        journal.prepare_fixture_checkpoint(&mut before)?;
         journal.save(&before)?;
         drop(journal);
         let events = FileJournal::read_events(&roots.state, project, "g")?;
@@ -3899,6 +3900,7 @@ mod tests {
             if graph == "h" {
                 checkpoint.nodes[0].attempts.clear();
             }
+            journal.prepare_fixture_checkpoint(&mut checkpoint)?;
             journal.save(&checkpoint)?;
         }
         let target = |text: &str| text.parse::<provenant_cli::Target>();

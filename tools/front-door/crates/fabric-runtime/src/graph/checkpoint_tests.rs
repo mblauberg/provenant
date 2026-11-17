@@ -44,9 +44,7 @@ fn deployed_2_0_5_checkpoint_and_external_prompts_still_read() {
     assert_eq!(stored.execution.document.graph_id, graph_id);
     let (plan, _) = validate_plan_with_limits(&stored.execution.document, &Default::default())
         .expect("deployed document remains valid");
-    let plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
-        .unwrap()
-        .to_string();
+    let plan_digest = plan_digest(&plan).unwrap().to_string();
     assert_eq!(stored.checkpoint.plan_digest, plan_digest);
     validate_checkpoint::<std::convert::Infallible, JournalError>(
         &stored.execution.document,
@@ -62,19 +60,12 @@ fn review_schema_versions_and_stored_digests() {
     let fixture = stored();
     let legacy: StoredCheckpoint = serde_json::from_value(fixture.clone()).unwrap();
     assert_eq!(serde_json::to_value(&legacy).unwrap(), fixture);
-    let digest = CanonicalV1::record_digest(
-        "fabric-graph-checkpoint",
-        2,
-        &(&legacy.checkpoint, &legacy.execution),
-    )
-    .unwrap();
+    let digest = checkpoint_digest(&legacy.checkpoint, &legacy.execution).unwrap();
     assert_eq!(digest.to_string(), legacy.digest);
     let (plan, _) =
         validate_plan_with_limits(&legacy.execution.document, &Default::default()).unwrap();
     assert_eq!(
-        CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
-            .unwrap()
-            .to_string(),
+        plan_digest(&plan).unwrap().to_string(),
         legacy.checkpoint.plan_digest
     );
 
@@ -92,17 +83,13 @@ fn review_schema_versions_and_stored_digests() {
 
 fn sealed(mut record: StoredCheckpoint) -> Vec<u8> {
     if let Ok((base, _)) = validate_replay_plan(&record.execution.document, &plans::generous())
-        && let Ok(plan_digest) = CanonicalV1::record_digest("fabric-graph-plan", 1, &base)
+        && let Ok(plan_digest) = plan_digest(&base)
     {
         record.checkpoint.plan_digest = plan_digest.to_string();
     }
-    record.digest = CanonicalV1::record_digest(
-        "fabric-graph-checkpoint",
-        2,
-        &(&record.checkpoint, &record.execution),
-    )
-    .unwrap()
-    .to_string();
+    record.digest = checkpoint_digest(&record.checkpoint, &record.execution)
+        .unwrap()
+        .to_string();
     serde_json::to_vec(&record).unwrap()
 }
 

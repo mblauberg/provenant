@@ -62,9 +62,7 @@ fn stored_fixture() -> StoredCheckpoint {
 
 fn fixture_plan_digest(document: &GraphDocument) -> String {
     let (plan, _) = validate_replay_plan(document, &plans::generous()).unwrap();
-    CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
-        .unwrap()
-        .to_string()
+    plan_digest(&plan).unwrap().to_string()
 }
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
@@ -90,9 +88,7 @@ impl GraphJournal for ReadableJournal {
         let document = &stored.execution.document;
         let limits = plans::generous();
         let (base, _) = validate_replay_plan(document, &limits).unwrap();
-        let digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &base)
-            .unwrap()
-            .to_string();
+        let digest = plan_digest(&base).unwrap().to_string();
         let expanded = plans::expand(
             document,
             &checkpoint.extensions,
@@ -303,13 +299,9 @@ fn landing_review_query_reads_typed_settlement_on_only_the_exact_head() {
     assert_eq!(std::fs::read(&path).unwrap(), previous);
 
     // A valid envelope digest must not conceal an invalid plan digest on read.
-    fixture.digest = CanonicalV1::record_digest(
-        "fabric-graph-checkpoint",
-        2,
-        &(&fixture.checkpoint, &fixture.execution),
-    )
-    .unwrap()
-    .to_string();
+    fixture.digest = checkpoint_digest(&fixture.checkpoint, &fixture.execution)
+        .unwrap()
+        .to_string();
     std::fs::write(&path, CanonicalV1::bytes(&fixture).unwrap().as_bytes()).unwrap();
     let found = landing_reviews(&root, project, head).unwrap();
     assert!(found.reviews.is_empty());
@@ -347,9 +339,7 @@ fn round_2_checkpoint_with_identity_key_in_parameters_resumes_and_lands() {
     assert!(document.nodes[0].template.is_none());
     let limits = plans::generous();
     let (base_plan, _) = validate_replay_plan(&document, &limits).unwrap();
-    let plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &base_plan)
-        .unwrap()
-        .to_string();
+    let plan_digest = plan_digest(&base_plan).unwrap().to_string();
 
     let mut fixture: StoredCheckpoint = stored_fixture();
     fixture.schema_version = 2;
@@ -366,13 +356,9 @@ fn round_2_checkpoint_with_identity_key_in_parameters_resumes_and_lands() {
         independent: true,
     };
     fixture.checkpoint.nodes[0].review_settlement = Some(review.clone());
-    fixture.digest = CanonicalV1::record_digest(
-        "fabric-graph-checkpoint",
-        2,
-        &(&fixture.checkpoint, &fixture.execution),
-    )
-    .unwrap()
-    .to_string();
+    fixture.digest = checkpoint_digest(&fixture.checkpoint, &fixture.execution)
+        .unwrap()
+        .to_string();
 
     let path = root
         .as_path()
@@ -830,13 +816,9 @@ fn checkpoint_scale_fixture() -> (tempfile::TempDir, StateRoot, ProjectId) {
         } else {
             NodeState::Running
         };
-        stored.digest = CanonicalV1::record_digest(
-            "fabric-graph-checkpoint",
-            2,
-            &(&stored.checkpoint, &stored.execution),
-        )
-        .unwrap()
-        .to_string();
+        stored.digest = checkpoint_digest(&stored.checkpoint, &stored.execution)
+            .unwrap()
+            .to_string();
         let bytes = CanonicalV1::bytes(&stored).unwrap();
         std::fs::write(directory.join(format!("graph-{id}.json")), bytes.as_bytes()).unwrap();
     }
@@ -1287,13 +1269,9 @@ fn launched_route_fallback_history_is_readable() {
     next.key.route_index = 1;
     next.key.attempt = 2;
     node.attempts.push(next);
-    stored.digest = CanonicalV1::record_digest(
-        "fabric-graph-checkpoint",
-        2,
-        &(&stored.checkpoint, &stored.execution),
-    )
-    .unwrap()
-    .to_string();
+    stored.digest = checkpoint_digest(&stored.checkpoint, &stored.execution)
+        .unwrap()
+        .to_string();
     let decoded = decode_checkpoint(&serde_json::to_vec(&stored).unwrap(), "g-test").unwrap();
     assert_eq!(decoded.checkpoint.nodes[0].attempts.len(), 2);
 }

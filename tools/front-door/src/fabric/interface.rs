@@ -3465,7 +3465,7 @@ mod tests {
             .as_array_mut()
             .ok_or("document nodes")?
             .push(pending);
-        let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+        let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(fixture["checkpoint"].clone())?;
         let document: GraphDocument =
             serde_json::from_value(fixture["execution"]["document"].clone())?;
@@ -3493,6 +3493,7 @@ mod tests {
             directory: factory.cwd.clone(),
             document: document.clone(),
         })?;
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
         journal.save(&checkpoint)?;
         drop(journal);
         assert!(
@@ -3575,7 +3576,7 @@ mod tests {
         let fixture: Value = serde_json::from_str(include_str!(
             "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
         ))?;
-        let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+        let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(fixture["checkpoint"].clone())?;
         let execution: GraphDocument =
             serde_json::from_value(fixture["execution"]["document"].clone())?;
@@ -3603,6 +3604,7 @@ mod tests {
             directory: PathBuf::from("/legacy/project"),
             document: execution,
         })?;
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
         journal.save(&checkpoint)?;
         drop(journal);
         let path = directory.join("graph-g-test.json");
@@ -3610,11 +3612,11 @@ mod tests {
 
         let error = factory
             .graph_document(
-                json!({"op":"retry","id":"g-test/reader","brief":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"}),
+                json!({"op":"retry","id":"g-test/reader","node":"other","brief":"Replacement"}),
                 budget,
                 &cancel,
             )
-            .expect_err("secret replacement brief must be refused");
+            .expect_err("conflicting retry targets must be refused");
         assert!(matches!(error, FacadeError::InvalidInput { .. }));
         assert_eq!(std::fs::read(&path)?, before);
         assert_eq!(
@@ -3664,6 +3666,7 @@ mod tests {
             directory: PathBuf::from("/legacy/project"),
             document: execution,
         })?;
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
         journal.save(&checkpoint)?;
 
         let receipt = factory.graph_document(
@@ -5335,6 +5338,7 @@ mod tests {
                 directory: rig.project.clone(),
                 document: document.clone(),
             })?;
+            journal.prepare_fixture_checkpoint(&mut checkpoint)?;
             journal.save(&checkpoint)?;
         }
         crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "host head moved"])?;
@@ -5694,11 +5698,12 @@ mod tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
         let secret = "sk-abcdefghijklmnopqrstuvwx";
-        // A compiled document bypasses template scanning. The credential is
-        // only in graph context, outside submission's nodes and parameters.
+        // Spec: docs/specs/fabric.md#checkpoint-envelope
+        // Context values are free-form and normalised. Object keys retain
+        // identity, so credentials there must be refused before publication.
         let document = json!({
             "schema_version":2, "graph_id":"metadata-secret",
-            "context":{"retained_note":secret},
+            "context":{(secret):"retained note"},
             "nodes":[{"id":"inspect", "prompt":"Inspect code", "access":"read_only", "route":{"alias":"junior"}}]
         });
         for explain in [true, false] {
@@ -5711,7 +5716,7 @@ mod tests {
                     &cancel,
                 )
                 .err()
-                .ok_or("context credential was accepted")?;
+                .ok_or("credential-shaped context key was accepted")?;
             assert_eq!(error, FacadeError::InvalidInput { detail: None });
             assert!(!serde_json::to_string(&error)?.contains(secret));
             assert!(!serde_json::to_string(&error.diagnostic())?.contains(secret));
@@ -6069,6 +6074,7 @@ mod tests {
             directory: factory.cwd.clone(),
             document,
         })?;
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
         journal.save(&checkpoint)?;
         drop(journal);
         let edit = json!({"op":"edit","id":format!("{id}/task"),"patch":{"schema_version":1,"expected_revision":0,"idempotency_key":"add-one","nodes":[{"id":"second","use":"task","prompt":"Next"}]}});
@@ -6156,7 +6162,9 @@ mod tests {
         reserved.nodes[1].attempts[0].outcome = None;
         reserved.nodes[1].attempts[0].usage = None;
         reserved.nodes[1].previous_attempts.clear();
+        journal.prepare_fixture_checkpoint(&mut reserved)?;
         journal.save(&reserved)?;
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
         journal.save(&checkpoint)?;
         drop(journal);
         let stats = factory.graph_document(

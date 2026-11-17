@@ -3,6 +3,27 @@ use super::*;
 /// Stored execution/checkpoint contract; older duplicate-pin records are rejected.
 pub(super) const CHECKPOINT_SCHEMA_VERSION: u64 = 2;
 
+/// Digest of a validated plan. Writers and readers share the domain and version.
+pub(super) fn plan_digest(plan: &PlannedGraph) -> Result<provenant_core::Digest, CanonicalError> {
+    CanonicalV1::record_digest("fabric-graph-plan", 1, plan)
+}
+
+/// Plan identity for a persisted document, without normalising its stored text.
+pub fn graph_plan_digest(document: &GraphDocument) -> Result<provenant_core::Digest, JournalError> {
+    let (plan, _) = validate_replay_plan(document, &replay_limits())
+        .map_err(|_| JournalError::InvalidTopology)?;
+    Ok(plan_digest(&plan)?)
+}
+
+/// Digest of the complete inline checkpoint and its bound execution.
+/// Envelope extensions and prompt-store references are outside this payload.
+pub fn checkpoint_digest(
+    checkpoint: &GraphCheckpoint,
+    execution: &GraphExecution,
+) -> Result<provenant_core::Digest, CanonicalError> {
+    CanonicalV1::record_digest("fabric-graph-checkpoint", 2, &(checkpoint, execution))
+}
+
 #[path = "events.rs"]
 pub(super) mod events;
 pub use events::{GraphEvent, GraphEventKind};
@@ -398,6 +419,18 @@ impl FileJournal {
             })
         })()
         .map_err(|error: JournalError| error.for_graph(&error_graph_id))
+    }
+
+    /// Give a hand-built fixture the same plan identity as a real admitted graph.
+    /// Production saves never repair or replace an incoming checkpoint digest.
+    #[cfg(feature = "fixture")]
+    pub fn prepare_fixture_checkpoint(
+        &self,
+        checkpoint: &mut GraphCheckpoint,
+    ) -> Result<(), JournalError> {
+        let execution = self.execution.as_ref().ok_or(JournalError::BadEnvelope)?;
+        checkpoint.plan_digest = graph_plan_digest(&execution.document)?.to_string();
+        Ok(())
     }
 
     pub fn bind(&mut self, execution: GraphExecution) -> Result<(), JournalError> {
@@ -1254,12 +1287,7 @@ impl GraphJournal for FileJournal {
             let stored = StoredCheckpoint {
                 extra: self.extra.clone(),
                 schema_version: CHECKPOINT_SCHEMA_VERSION,
-                digest: CanonicalV1::record_digest(
-                    "fabric-graph-checkpoint",
-                    2,
-                    &(checkpoint, execution),
-                )?
-                .to_string(),
+                digest: checkpoint_digest(checkpoint, execution)?.to_string(),
                 checkpoint: checkpoint.clone(),
                 execution: execution.clone(),
             };
@@ -1490,13 +1518,8 @@ pub(super) fn decode_checkpoint(
     decode_checkpoint_limited(bytes, graph_id, MAX_CHECKPOINT_BYTES)
 }
 
-fn decode_checkpoint_limited(
-    bytes: &[u8],
-    graph_id: &str,
-    max_bytes: u64,
-) -> Result<StoredCheckpoint, JournalError> {
-    let stored = decode_verified_checkpoint(bytes, graph_id, max_bytes.max(MAX_CHECKPOINT_BYTES))?;
-    let limits = crate::config::GraphLimits {
+fn replay_limits() -> crate::config::GraphLimits {
+    crate::config::GraphLimits {
         nodes: usize::MAX,
         edges: usize::MAX,
         routes_per_node: u16::MAX as usize,
@@ -1505,10 +1528,19 @@ fn decode_checkpoint_limited(
         fan_out_width: usize::MAX,
         expansion_depth: usize::MAX,
         ..Default::default()
-    };
+    }
+}
+
+fn decode_checkpoint_limited(
+    bytes: &[u8],
+    graph_id: &str,
+    max_bytes: u64,
+) -> Result<StoredCheckpoint, JournalError> {
+    let stored = decode_verified_checkpoint(bytes, graph_id, max_bytes.max(MAX_CHECKPOINT_BYTES))?;
+    let limits = replay_limits();
     let (base, _) = validate_replay_plan(&stored.execution.document, &limits)
         .map_err(|_| JournalError::InvalidTopology)?;
-    let plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &base)?;
+    let plan_digest = plan_digest(&base)?;
     if stored.checkpoint.plan_digest != plan_digest.to_string() {
         return Err(JournalError::BadDigest);
     }
@@ -1577,11 +1609,7 @@ fn decode_verified_checkpoint(
     {
         return Err(JournalError::BadEnvelope);
     }
-    let digest = CanonicalV1::record_digest(
-        "fabric-graph-checkpoint",
-        2,
-        &(&stored.checkpoint, &stored.execution),
-    )?;
+    let digest = checkpoint_digest(&stored.checkpoint, &stored.execution)?;
     if digest.to_string() != stored.digest {
         return Err(JournalError::BadDigest);
     }

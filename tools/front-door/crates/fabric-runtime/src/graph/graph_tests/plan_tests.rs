@@ -2014,7 +2014,7 @@ fn nested_plan_rewires_all_consumers_and_keeps_original_digest() {
     let (base, _) = validate_plan(&doc).unwrap();
     assert_eq!(
         run.checkpoint.plan_digest,
-        CanonicalV1::record_digest("fabric-graph-plan", 1, &base)
+        plan_digest(&base)
             .unwrap()
             .to_string()
     );

@@ -48,6 +48,7 @@ fn submission_cancellation_drains_only_attached_work() -> TestResult {
                         "route":{"alias":"senior"}}]
                 }))?,
             })?;
+            journal.prepare_fixture_checkpoint(&mut checkpoint)?;
             journal.save(&checkpoint)?;
             drop(journal);
             assert_eq!(

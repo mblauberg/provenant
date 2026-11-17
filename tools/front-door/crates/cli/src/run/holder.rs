@@ -1410,7 +1410,7 @@ mod tests {
             "blocked",
             "skipped",
         ] {
-            let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
                 "schema_version":2,"graph_id":"custody","plan_digest":"fixture",
                 "nodes":[{"id":"parent","state":"succeeded","attempts":[{
                     "launched":true,"key":{"graph_id":"custody","node_id":"parent","route_index":0, "attempt": 1},
@@ -1419,6 +1419,7 @@ mod tests {
                 }]}, {"id":"parent--child--grandchild","state":status,"attempts":[]},
                 {"id":"parental--other","state":"running","attempts":[]}]
             }))?;
+            journal.prepare_fixture_checkpoint(&mut checkpoint)?;
             journal.save(&checkpoint)?;
             assert_eq!(
                 holder.has_live_children(&raw)?,

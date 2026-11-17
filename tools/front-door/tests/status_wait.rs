@@ -106,17 +106,17 @@ fn seed_graph(rig: &TestRig, graph: &str) -> Result<()> {
             "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":graph,"nodes":[
             {"id":"fast","kind":"gate","access":"read_only","condition":{"type":"budget"}},
             {"id":"slow","kind":"gate","access":"read_only","condition":{"type":"budget"}},
-            {"id":"blocked","prompt":"blocked writer","access":"worktree_write","write_scope":["."]},
+            {"id":"blocked","prompt":"blocked writer","access":"worktree_write","worktree":".worktrees/blocked","write_scope":["."],"route":{"alias":"senior"}},
             {"id":"skipped","kind":"gate","access":"read_only","condition":{"type":"budget"}}
         ]
     }))?;
-    let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint = serde_json::from_value(
+    let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint = serde_json::from_value(
         json!({
             "schema_version":support::GRAPH_CHECKPOINT_SCHEMA_VERSION,"graph_id":graph,"plan_digest":format!("sha256:{}", "f".repeat(64)),
             "nodes":[
                 {"id":"fast","state":"pending","attempts":[]},
                 {"id":"slow","state":"pending","attempts":[]},
-                {"id":"blocked","state":"pending","attempts":[]},
+                {"id":"blocked","state":"pending","worktree":".worktrees/blocked","attempts":[]},
                 {"id":"skipped","state":"pending","attempts":[]}
             ]
         }),
@@ -133,6 +133,7 @@ fn seed_graph(rig: &TestRig, graph: &str) -> Result<()> {
         directory: rig.project.clone(),
         document,
     })?;
+    journal.prepare_fixture_checkpoint(&mut checkpoint)?;
     journal.save(&checkpoint)?;
     Ok(())
 }

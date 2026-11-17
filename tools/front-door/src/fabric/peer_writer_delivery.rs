@@ -186,7 +186,7 @@ fn resumed_lane_settlement_ignores_terminal_graph() -> Result<(), Box<dyn std::e
         "schema_version":1,"graph_id":"terminal-unrelated","nodes":[{"id":"one","prompt":"work",
             "access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
     }))?;
-    let checkpoint: graph::GraphCheckpoint = serde_json::from_value(serde_json::json!({
+    let mut checkpoint: graph::GraphCheckpoint = serde_json::from_value(serde_json::json!({
         "schema_version":2,"graph_id":"terminal-unrelated","plan_digest":"digest",
         "nodes":[{"id":"one","state":"succeeded","attempts":[]}]
     }))?;
@@ -207,6 +207,7 @@ fn resumed_lane_settlement_ignores_terminal_graph() -> Result<(), Box<dyn std::e
         document,
         extra: Default::default(),
     })?;
+    journal.prepare_fixture_checkpoint(&mut checkpoint)?;
     journal.save(&checkpoint)?;
     drop(journal);
     graph::take_checkpoint_read_ids();

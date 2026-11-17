@@ -437,14 +437,19 @@ nodes or prior expansions. Typed handoffs are normalised at capture before any
 consumer retains them. Checkpoints persist
 the normalised form. Compaction retains parsed, normalised findings as typed
 values in content-addressed storage. Resume never fills templates or rewrites a
-sealed submission. Journal binding and compilation move admitted text without
+sealed submission. A resume path or document hash selects the retained graph
+identity and its sealed execution, just as an exact graph ID does. Journal binding and compilation move admitted text without
 another normalisation pass. Every strict read and every digest check verifies the
 stored bytes as stored and never normalises again. Normalising is idempotent.
 Content-addressed storage only externalises bytes and never rewrites digested
 content. The journal strictly validates the stored representation before
 publishing it. The strict checkpoint decoder verifies both the envelope digest
 and the base plan digest, so publication and landing review reads reject the same
-corrupt state. Landing skips unusable review sources and retains their graph
+corrupt state. `graph::checkpoint_digest` owns the envelope payload and domain;
+`graph::graph_plan_digest` derives the shared plan identity from a persisted
+document. Hand-built journal fixtures use `FileJournal::prepare_fixture_checkpoint`
+to assign that identity before save; production saves never repair a supplied
+plan digest. Landing skips unusable review sources and retains their graph
 identities in structured report warnings, including when another source
 supplies a valid approval. Enumeration and source-read failures are warnings
 too; evaluation continues through the other configured sources, and refuses

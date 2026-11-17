@@ -1425,7 +1425,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
     let (mut plan, mut positions) = validate_flat_plan(&expanded, &unbounded)
         .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
-    let plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &base)
+    let plan_digest = plan_digest(&base)
         .map_err(GraphError::Canonical)?
         .to_string();
 
