@@ -643,6 +643,7 @@ impl run::Providers for Registry<'_> {
             run::ContinuationDecodeContext {
                 context,
                 expectation: None,
+                task: None,
             },
         )
     }
@@ -656,6 +657,7 @@ impl run::Providers for Registry<'_> {
         provider_state: &Path,
         continuation: run::ContinuationDecodeContext<'_>,
     ) -> Result<run::Decoded, String> {
+        let policy = settlement_policy(continuation.context, continuation.task);
         let continuation_session = continuation
             .expectation
             .map(|expectation| expectation.session.as_str());
@@ -669,6 +671,7 @@ impl run::Providers for Registry<'_> {
                 DecodeOptions {
                     host_settlement: false,
                     expected_session: continuation_session,
+                    policy: Some(&policy),
                 },
             );
         };
@@ -692,6 +695,7 @@ impl run::Providers for Registry<'_> {
                 DecodeOptions {
                     host_settlement: false,
                     expected_session: continuation_session,
+                    policy: Some(&policy),
                 },
             );
         }
@@ -718,6 +722,7 @@ impl run::Providers for Registry<'_> {
                     DecodeOptions {
                         host_settlement: false,
                         expected_session: continuation_session,
+                        policy: Some(&policy),
                     },
                 )?;
                 if decoded.reason.as_deref().is_some_and(capacity_reason) {
@@ -749,6 +754,7 @@ impl run::Providers for Registry<'_> {
             DecodeOptions {
                 host_settlement: true,
                 expected_session: continuation_session,
+                policy: Some(&policy),
             },
         )
     }
@@ -773,6 +779,23 @@ impl run::Providers for Registry<'_> {
     }
 }
 
+fn settlement_policy(
+    context: Option<&run::HolderContext>,
+    task: Option<&run::TaskRequest>,
+) -> provenant_records::policy::Policy {
+    match (context, task) {
+        (Some(context), Some(task)) => {
+            let (state, _) = context.disk_roots();
+            provenant_config::policy::for_task(state, &context.project_id.to_string(), task)
+        }
+        (None, Some(task)) if task.profile.launch_policy.is_some() => {
+            provenant_config::policy::for_task(Path::new(""), "", task)
+        }
+        // TODO(#3371 seam): run owner supplies task policy for legacy decode callers.
+        _ => provenant_records::policy::Policy::default(),
+    }
+}
+
 fn strip_final_eof_fragment(stdout: &[u8]) -> &[u8] {
     stdout
         .iter()
@@ -784,6 +807,7 @@ fn strip_final_eof_fragment(stdout: &[u8]) -> &[u8] {
 struct DecodeOptions<'a> {
     host_settlement: bool,
     expected_session: Option<&'a str>,
+    policy: Option<&'a provenant_records::policy::Policy>,
 }
 
 impl Registry<'_> {
@@ -805,6 +829,7 @@ impl Registry<'_> {
             DecodeOptions {
                 host_settlement,
                 expected_session: None,
+                policy: None,
             },
         )
     }
@@ -821,6 +846,7 @@ impl Registry<'_> {
         let DecodeOptions {
             host_settlement,
             expected_session,
+            policy,
         } = options;
         let captured_stdout_len = stdout.len();
         let identity_evidence = run::ProviderIdentityEvidence::classify(
@@ -879,8 +905,9 @@ impl Registry<'_> {
             .map(|spec| spec.model_observation)
             .unwrap_or(provenant_records::ModelObservation::Stream);
         let model = stream_model(route);
-        // TODO(#3371 seam): settlement slice must pass the sealed attempt policy here.
-        let policy = provenant_records::policy::Policy::default();
+        // TODO(#3371 seam): run owner supplies task policy for legacy decode callers.
+        let fallback = provenant_records::policy::Policy::default();
+        let policy = policy.unwrap_or(&fallback);
         let mut state = match expected_session {
             Some(session) => {
                 let Some(model) = model.as_deref() else {
@@ -888,13 +915,13 @@ impl Registry<'_> {
                         "resumed provider route has no model identity for session validation",
                     ));
                 };
-                match adapter.stream_for_continuation(session, model, &policy) {
+                match adapter.stream_for_continuation(session, model, policy) {
                     Ok(state) => state,
                     Err(_) => return Ok(failed("provider stream is unavailable")),
                 }
             }
             None => {
-                let Ok(mut state) = adapter.stream(None, &policy) else {
+                let Ok(mut state) = adapter.stream(None, policy) else {
                     return Ok(failed("provider stream is unavailable"));
                 };
                 if let Some(model) = model.as_deref() {

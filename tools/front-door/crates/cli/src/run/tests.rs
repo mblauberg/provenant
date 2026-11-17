@@ -289,6 +289,7 @@ fn resumed_provider_requires_matching_observed_session() -> Result<(), Box<dyn s
             DecodeOptions {
                 host_settlement: false,
                 expected_session: Some("retained-session"),
+                policy: None,
             },
         )
     };

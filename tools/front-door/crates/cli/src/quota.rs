@@ -729,6 +729,8 @@ pub(crate) fn read_readiness_after_probe(
 /// in the account record become unavailable observations, and clear when the
 /// record stops holding them. A dropped account loses its file.
 fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), EdgeError> {
+    // Host-wide quota evidence has no project.
+    let policy = provenant_config::policy::read(state, "", &Default::default());
     let (adapter, key) = (&intent.account.adapter, &intent.account.account_key);
     let name = format!("{adapter}.json");
     let existing = open_readiness_account(state, key)?;
@@ -747,8 +749,7 @@ fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), E
         // only moves when a fresh reading stops counting as fresh.
         let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
         let admission = Admission {
-            // TODO(#3371 seam): CLI owner slice supplies the operation policy.
-            policy: &provenant_records::policy::Policy::default(),
+            policy: &policy,
             policies: &policies,
             now_unix_seconds: now,
             records: std::slice::from_ref(record),
@@ -897,15 +898,15 @@ fn clean_orphan_dirs(dir: &Directory) -> Result<(), EdgeError> {
 fn detections(
     registry: &[provenant_providers::Registration],
     configured: &[AccountScope],
+    policy: &provenant_records::policy::Policy,
 ) -> Vec<Detection> {
     registry
         .iter()
         .filter(|r| r.quota_source.is_some())
         .map(|r| {
-            // TODO(#3371 seam): quota CLI slice must pass the host-resolved policy.
             let status = r
                 .adapter
-                .stream(None, &provenant_records::policy::Policy::default())
+                .stream(None, policy)
                 .and_then(|s| r.adapter.account(&s));
             Detection {
                 adapter: r.adapter.id().into(),
@@ -1379,6 +1380,8 @@ pub fn recorded_login_rows(roots: &Roots) -> Result<Vec<AccountRow>, String> {
     recorded_login_rows_inner(roots).map_err(|error| error.to_string())
 }
 fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError> {
+    // Quota commands are host-wide and have no project.
+    let policy = provenant_config::policy::read(roots.state.as_path(), "", &Default::default());
     let domains = crate::config_reads::read_for(roots, "quota")?.domains;
     let accounts = domains.accounts.unique_accounts();
     let mut configured: Vec<_> = accounts
@@ -1406,14 +1409,13 @@ fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError
     let policies =
         provenant_providers::scheduling_policies(&domains.quota, provenant_providers::REGISTRY);
     let mut report = schedule::report(
-        // TODO(#3371 seam): quota CLI slice supplies the host policy.
         &policies,
         &records,
         &[],
         &QuotaQuery { adapter: None },
         now,
         String::new(),
-        &provenant_records::policy::Policy::default(),
+        &policy,
     )?;
     decorate(&mut report, &accounts, &domains.quota.display);
     decorate_login(
@@ -1512,6 +1514,8 @@ pub(crate) fn execute(
     registry: &[provenant_providers::Registration],
     effects: &dyn QuotaEffects,
 ) -> Result<QuotaReport, EdgeError> {
+    // Quota commands are host-wide and have no project.
+    let policy = provenant_config::policy::read(roots.state.as_path(), "", &Default::default());
     let all = Filter { adapter: None };
     let (filter, tick) = match command {
         Quota::Show(filter) => (filter, None),
@@ -1554,7 +1558,7 @@ pub(crate) fn execute(
     let report_path = path.to_str().ok_or(EdgeError::Path)?.to_owned();
     let policies = provenant_providers::scheduling_policies(&settings, registry);
     let configured = effects.accounts()?;
-    let detected = detections(registry, &configured);
+    let detected = detections(registry, &configured, &policy);
     let query = QuotaQuery {
         adapter: filter.adapter.clone(),
     };
@@ -1563,14 +1567,13 @@ pub(crate) fn execute(
         add_configured(&mut records, &configured);
         settings.apply_calibration(&mut records, now);
         let mut report = schedule::report(
-            // TODO(#3371 seam): quota CLI slice supplies the host policy.
             &policies,
             &records,
             &detected,
             &query,
             now,
             report_path,
-            &provenant_records::policy::Policy::default(),
+            &policy,
         )?;
         decorate(&mut report, &entries, &settings.display);
         decorate_login(
@@ -1813,14 +1816,13 @@ pub(crate) fn execute(
         .as_second();
     settings.apply_calibration(&mut records, now);
     let mut report = schedule::report(
-        // TODO(#3371 seam): quota CLI slice supplies the host policy.
         &policies,
         &records,
         &detected,
         &QuotaQuery { adapter: None },
         now,
         report_path,
-        &provenant_records::policy::Policy::default(),
+        &policy,
     )?;
     decorate(&mut report, &entries, &settings.display);
     decorate_login(
@@ -1845,14 +1847,13 @@ pub(crate) fn execute(
     signal_quota(roots.state.as_path());
     // Publish all accounts even when the caller requests a filtered projection.
     let mut shown = schedule::report(
-        // TODO(#3371 seam): quota CLI slice supplies the host policy.
         &policies,
         &records,
         &detected,
         &query,
         now,
         report.report_path.clone(),
-        &provenant_records::policy::Policy::default(),
+        &policy,
     )?;
     decorate(&mut shown, &entries, &settings.display);
     decorate_login(
@@ -4711,7 +4712,11 @@ mod tests {
             label: "michael".into(),
         };
         let configured = vec![account.clone()];
-        let detected = detections(&[registration], &configured);
+        let detected = detections(
+            &[registration],
+            &configured,
+            &provenant_records::policy::Policy::default(),
+        );
         assert_eq!(detected.len(), 1);
         assert_eq!(detected[0].status, QuotaStatus::AuthRequired);
         assert_eq!(detected[0].accounts, Some(configured.clone()));

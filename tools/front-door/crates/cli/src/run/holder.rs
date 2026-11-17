@@ -1519,8 +1519,7 @@ mod tests {
             Source::Project,
         );
         child.request.task.profile.launch_policy = Some(sealed);
-        let recovered =
-            provenant_config::policy::for_task(dir.path(), "other-project", &child.request.task);
+        let recovered = super::super::settlement_policy(None, Some(&child.request.task));
         let stream = provenant_providers::codex::Codex
             .stream_for_continuation("session", "model", &recovered)?;
         assert_eq!(

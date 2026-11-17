@@ -1121,6 +1121,7 @@ pub(crate) fn check_dispatch_candidate(
     roots: &Roots,
     route: &provenant_records::ResolvedRoute,
     registry: &[provenant_providers::Registration],
+    policy: &provenant_records::policy::Policy,
 ) -> Result<(), EdgeError> {
     let catalogue = Catalogue::bundled()?;
     let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
@@ -1131,8 +1132,7 @@ pub(crate) fn check_dispatch_candidate(
     let records = crate::quota::read_cache(roots)?;
     let (records, policies) = account_evidence(&domains.quota, records, now, registry);
     provenant_quota::Admission {
-        // TODO(#3371 seam): CLI owner slice supplies the operation policy.
-        policy: &provenant_records::policy::Policy::default(),
+        policy,
         policies: &policies,
         now_unix_seconds: now,
         records: &records,

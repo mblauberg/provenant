@@ -2015,6 +2015,7 @@ impl RunStore {
                     .flatten()
                     .unwrap_or_default();
                 let continuation = self.continuation_expectation(record.attempt_id, call)?;
+                let request = self.request(record.attempt_id, call)?;
                 providers
                     .decode_captures_with_continuation(
                         route,
@@ -2025,6 +2026,7 @@ impl RunStore {
                         crate::ContinuationDecodeContext {
                             context: completion.holder_context(),
                             expectation: continuation.as_ref(),
+                            task: Some(&request.task),
                         },
                     )
                     .map_err(RunError::ProviderEvidence)?
