@@ -406,7 +406,8 @@ fn create_refuses_aliases_of_local_and_remote_branches() -> Result<(), Box<dyn E
 }
 
 #[test]
-fn create_list_remove_keeps_branch_and_refuses_primary() -> Result<(), Box<dyn Error>> {
+fn create_list_remove_deletes_landed_branch_and_refuses_primary() -> Result<(), Box<dyn Error>> {
+    // Spec: docs/specs/supervisor.md#one-writer-removal-never-forces
     let fixture = Fixture::new()?;
     fixture.run(&["branch", "-M", "main"])?;
     let test_context = TestContext::new(&fixture)?;
@@ -469,7 +470,7 @@ fn create_list_remove_keeps_branch_and_refuses_primary() -> Result<(), Box<dyn E
         &cancellation,
     )?;
     assert!(!created.path.exists());
-    assert!(branch_exists(&fixture, "feature/lifecycle"));
+    assert!(!branch_exists(&fixture, "feature/lifecycle"));
     Ok(())
 }
 
