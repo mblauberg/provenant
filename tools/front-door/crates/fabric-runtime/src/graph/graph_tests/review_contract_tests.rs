@@ -1040,7 +1040,7 @@ fn below_minimum_review_keeps_returned_findings_on_replay() {
 }
 
 #[test]
-fn correction_admission_failure_is_fenced_and_panel_proceeds() {
+fn correction_over_structural_limit_pauses_until_limit_is_raised() {
     let document = panel("f0-v0-s0");
     let (plan, _) = validate_plan(&document).unwrap();
     let lens = plan
@@ -1084,36 +1084,15 @@ fn correction_admission_failure_is_fenced_and_panel_proceeds() {
         .find(|node| node.id == lens.id)
         .unwrap();
     assert_eq!(lens.state, NodeState::Failed);
-    assert!(lens.review_verdict_correction_refused.is_some());
+    assert!(lens.review_verdict_correction_refused.is_none());
     assert!(lens.previous_attempts.is_empty());
-    assert_eq!(
-        owner
-            .calls
-            .iter()
-            .filter(|(key, _)| key.node_id == lens.id)
-            .count(),
-        1
-    );
-    let panel = run
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "panel")
-        .unwrap();
-    assert_eq!(panel.state, NodeState::Succeeded);
-    assert!(review::partial(panel.outputs.as_ref().unwrap()));
-    assert_eq!(
-        advance_with_budget(
-            &document,
-            &mut owner,
-            &mut journal,
-            &limits,
-            &Default::default()
-        )
-        .unwrap()
-        .checkpoint,
-        run.checkpoint
-    );
+    assert_eq!(run.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+    assert_eq!(journal.0.as_ref(), Some(&run.checkpoint));
+    let resumed = resume_with_budget(
+        &document, &mut owner, &mut journal, &Default::default(), &Default::default(), &[],
+    ).unwrap();
+    assert_ne!(resumed.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+
 }
 
 #[test]

@@ -1597,11 +1597,23 @@ pub(super) fn refresh_structure_pause(
         checkpoint.activate_expansion_pause(index);
         checkpoint.set_pause(cause, &reason);
     }
-    let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
-        None
-    } else {
-        structural_limit_reason(expanded, plan, limits)
-    };
+    // A settled failed lens or stopped writer may still owe a recovery patch.
+    // Its existing topology must be paused before that patch is planned.
+    let recovery_pending = checkpoint
+        .nodes
+        .iter()
+        .any(|node| next_step::stop_cause(node, checkpoint).is_some())
+        || checkpoint.nodes.iter().any(|node| {
+            node.state == NodeState::Failed
+                && node.advance_error_code.as_deref() == Some("review_verdict_invalid")
+                && node.review_verdict_correction_refused.is_none()
+        });
+    let structural_pause =
+        if checkpoint.nodes.iter().all(|node| node.state.settled()) && !recovery_pending {
+            None
+        } else {
+            structural_limit_reason(expanded, plan, limits)
+        };
     if let Some(reason) = &structural_pause {
         checkpoint.deactivate_expansion_pauses();
         checkpoint.set_pause(PauseCause::StructuralLimit, reason);

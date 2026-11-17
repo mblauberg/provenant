@@ -287,6 +287,11 @@ pub(super) fn correct_verdict(
             worktree_layout: worktree_layout.clone(),
         },
     ) {
+        if let Some(PlanFailureFact::Structural(limit)) = &error.cause {
+            next = checkpoint.clone();
+            next.set_pause(PauseCause::StructuralLimit, &limit.to_string());
+            return Ok(Some(next));
+        }
         // Admission is atomic: keep the failed attempt and fence further
         // automatic corrections so coverage can settle on subsequent advances.
         next = checkpoint.clone();

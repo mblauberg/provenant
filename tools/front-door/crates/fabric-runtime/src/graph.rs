@@ -1638,6 +1638,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
     };
 
+    if let Some(limit) = admitted.growth_limit {
+        checkpoint.set_pause(PauseCause::StructuralLimit, &limit.to_string());
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+        return Ok(transitions::graph_run(checkpoint));
+    }
+
     if recover_minima(&mut checkpoint, &plan) {
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
@@ -1705,37 +1711,49 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
             continue 'schedule;
         }
-        if let Some(next) =
-            review::correct_verdict(document, &plan, &checkpoint, limits, &worktree_layout)
-                .map_err(|error| GraphError::Refused(error.to_string()))?
-        {
-            let next_expanded = plans::expand(document, &next.extensions, &next.expansions, limits)
-                .map_err(|error| GraphError::Invalid(error.to_string()))?;
-            let (next_plan, next_positions) = validate_flat_plan(&next_expanded, limits)
-                .map_err(|error| GraphError::Invalid(error.to_string()))?;
-            owner
-                .validate_expansion(&next_expanded, &next)
-                .map_err(GraphError::Run)?;
-            journal.save(&next).map_err(GraphError::Journal)?;
-            checkpoint = next;
-            (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
-            resume = false;
-            continue 'schedule;
+        // Save the running graph's pause before any recovery patch is planned
+        // against today's tighter limits.
+        let structural_pause =
+            transitions::refresh_structure_pause(&mut checkpoint, &expanded, &plan, limits);
+        if structural_pause.is_some() {
+            journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
-        if let Some((next, next_expanded, next_plan, next_positions)) = settle_stopped_writer::<R, J>(
-            document,
-            owner,
-            &plan,
-            &checkpoint,
-            limits,
-            &worktree_layout,
-        )? {
-            // A stop saved by an earlier host, or one the chair resumed.
-            journal.save(&next).map_err(GraphError::Journal)?;
-            checkpoint = next;
-            (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
-            resume = false;
-            continue 'schedule;
+        if structural_pause.is_none() {
+            if let Some(next) =
+                review::correct_verdict(document, &plan, &checkpoint, limits, &worktree_layout)
+                    .map_err(|error| GraphError::Refused(error.to_string()))?
+            {
+                let next_expanded =
+                    plans::expand(document, &next.extensions, &next.expansions, limits)
+                        .map_err(|error| GraphError::Invalid(error.to_string()))?;
+                let (next_plan, next_positions) = validate_flat_plan(&next_expanded, limits)
+                    .map_err(|error| GraphError::Invalid(error.to_string()))?;
+                owner
+                    .validate_expansion(&next_expanded, &next)
+                    .map_err(GraphError::Run)?;
+                journal.save(&next).map_err(GraphError::Journal)?;
+                checkpoint = next;
+                (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
+                resume = false;
+                continue 'schedule;
+            }
+            if let Some((next, next_expanded, next_plan, next_positions)) =
+                settle_stopped_writer::<R, J>(
+                    document,
+                    owner,
+                    &plan,
+                    &checkpoint,
+                    limits,
+                    &worktree_layout,
+                )?
+            {
+                // A stop saved by an earlier host, or one the chair resumed.
+                journal.save(&next).map_err(GraphError::Journal)?;
+                checkpoint = next;
+                (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
+                resume = false;
+                continue 'schedule;
+            }
         }
         plans::remaining(&mut checkpoint, &expanded, limits);
         if checkpoint.cancelled {
@@ -1895,18 +1913,27 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             journal,
                         )?
                     {
-                        if let Err(reason) = loops::prepare_decision_extension(
+                        if let Err(error) = loops::prepare_decision_extension(
                             document,
                             &checkpoint,
                             &extension,
                             limits,
                         ) {
-                            loops::pause_invalid_decision(
-                                &mut checkpoint,
-                                &node.id,
-                                &reason,
-                                journal,
-                            )?;
+                            match error {
+                                loops::DecisionExtensionError::Structural(limit) => {
+                                    checkpoint
+                                        .set_pause(PauseCause::StructuralLimit, &limit.to_string());
+                                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                                }
+                                loops::DecisionExtensionError::Invalid(reason) => {
+                                    loops::pause_invalid_decision(
+                                        &mut checkpoint,
+                                        &node.id,
+                                        &reason,
+                                        journal,
+                                    )?;
+                                }
+                            }
                         } else {
                             return advance_inner(
                                 document,

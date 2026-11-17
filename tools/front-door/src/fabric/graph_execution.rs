@@ -617,16 +617,25 @@ impl Factory {
                     )
                     .map_err(graph_journal_error)?;
                     let admitted = checkpoint.is_some();
-                    document
-                        .admit(&self.context.config.graph.limits)
-                        .map_err(FacadeError::graph_admission)?;
-                    let expanded = document
-                        .expanded(&self.context.config.graph.limits)
-                        .map_err(|reason| FacadeError::DispatchRefused {
+                    // Existing checkpoints are checked by the running-candidate gate
+                    // under the journal lock; lowered structural limits pause there.
+                    let mut preflight_limits = self.context.config.graph.limits.clone();
+                    if admitted {
+                        preflight_limits.nodes = usize::MAX;
+                        preflight_limits.edges = usize::MAX;
+                        preflight_limits.routes_per_node = u16::MAX as usize;
+                        preflight_limits.node_prompt_bytes = usize::MAX;
+                        preflight_limits.graph_prompt_bytes = usize::MAX;
+                        preflight_limits.fan_out_width = usize::MAX;
+                        preflight_limits.expansion_depth = usize::MAX;
+                    }
+                    let expanded = document.expanded(&preflight_limits).map_err(|reason| {
+                        FacadeError::DispatchRefused {
                             reason,
                             disk: None,
                             fact: None,
-                        })?;
+                        }
+                    })?;
                     // A new writer does not exist until the kernel has journalled
                     // its provisioning intent. Check its declared branch here;
                     // provisioning still verifies the actual checkout at launch.

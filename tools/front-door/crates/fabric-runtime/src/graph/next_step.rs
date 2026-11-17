@@ -587,7 +587,22 @@ pub(super) fn settle_stop(
             unblock_dependants(plan, &mut next, &node.id);
             Some((index, next))
         }
-        Err(error) => Some((index, refused(plan, checkpoint, index, &error.to_string()))),
+        Err(error) => {
+            if let Some(PlanFailureFact::Structural(limit)) = &error.cause {
+                let mut paused = checkpoint.clone();
+                plans::set_expansion_pause(
+                    &mut paused,
+                    index,
+                    error.to_string(),
+                    false,
+                    None,
+                    Some(*limit),
+                );
+                Some((index, paused))
+            } else {
+                Some((index, refused(plan, checkpoint, index, &error.to_string())))
+            }
+        }
     }
 }
 

@@ -1250,7 +1250,7 @@ fn plan_validates_host_limits_before_saving() {
         assert_eq!(run.status, GraphStatus::Paused);
         assert_eq!(
             run.checkpoint.pause_cause(),
-            Some(PauseCause::InvalidPlanExpansion)
+            Some(PauseCause::StructuralLimit)
         );
         assert!(run.checkpoint.expansions.is_empty());
         assert_eq!(owner.calls.len(), 1);
@@ -1473,7 +1473,7 @@ fn pattern_expansion_counts_against_the_graph_node_limit() {
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
         run.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidPlanExpansion)
+        Some(PauseCause::StructuralLimit)
     );
     assert!(run.checkpoint.expansions.is_empty());
 }
@@ -1498,7 +1498,7 @@ fn assert_pattern_parameter_error(
     assert_eq!(run.status, GraphStatus::Paused, "{case}");
     assert_eq!(
         run.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidPlanExpansion),
+        Some(PauseCause::StructuralLimit),
         "{case}"
     );
     assert!(

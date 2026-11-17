@@ -1094,13 +1094,13 @@ fn loop_host_ceiling_rejects_third_round_before_saving_and_can_accept() {
         &Default::default(),
     )
     .unwrap();
-    let before = journal.0.clone();
-    let rejected = resume_with_budget(
+    let paused = resume_with_budget(
         &document, &mut reviews(&[]), &mut journal, &limits,
         &Default::default(), &["loop.revise.rounds=3".into()],
-    ).unwrap_err();
-    assert!(matches!(rejected, GraphError::Candidate(CandidateError::Structural(_))));
-    assert_eq!(journal.0, before);
+    ).unwrap();
+    assert_eq!(paused.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+    assert_eq!(journal.0.as_ref(), Some(&paused.checkpoint));
+    assert!(paused.checkpoint.extensions.is_empty());
     let accepted = extension(
         &document,
         &mut reviews(&[]),
@@ -1671,7 +1671,7 @@ fn loop_inbox_large_extension_cannot_bypass_host_node_limit() {
     assert_eq!(paused.status, GraphStatus::Paused);
     assert_eq!(
         paused.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidLoopDecision)
+        Some(PauseCause::StructuralLimit)
     );
     assert_eq!(paused.checkpoint.nodes.len(), 5);
     assert!(paused.checkpoint.extensions.is_empty());

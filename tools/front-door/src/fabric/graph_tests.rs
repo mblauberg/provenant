@@ -8,6 +8,64 @@ mod graph_writer_admission_tests {
     use std::{path::PathBuf, time::Duration};
 
     #[test]
+    fn facade_resume_persists_lowered_structural_limit_and_recovers() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{self, GraphJournal};
+        use provenant_records::pause::PauseCause;
+
+        struct Pending;
+        impl graph::AttemptOwner for Pending {
+            type Error = std::convert::Infallible;
+            fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+                provenant_config::PortTable::builtin().worktree_layout
+            }
+            fn actor(&self) -> String { "fixture".into() }
+            fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute, _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending { attempt_ref: None })
+            }
+        }
+        struct Free;
+        impl WorkerObserver for Free {
+            fn observe_roots(&self, roots: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy> {
+                roots.iter().cloned().map(|root| (root, provenant_confinement::worktrees::Occupancy::Available)).collect()
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let mut factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, workers: &Free,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "limit-resume", "nodes": [
+                {"id":"one","prompt":"one","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}},
+                {"id":"two","prompt":"two","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}
+            ]
+        }))?;
+        graph::patch::submission(&mut document, "submit:limit-resume", &factory.context.config.graph.limits, factory.context.port_table.worktree_layout.clone())?;
+        let project = factory.context.identity.project;
+        let mut journal = graph::FileJournal::open(&roots.state, project, &document.graph_id, budget, &cancel, &factory.clock)?;
+        journal.bind(graph::GraphExecution {
+            peer_origin_context: None, peer_submission_digest: None, requester_path: None,
+            extra: Default::default(), bases: None, directory: rig.project.clone(), document: document.clone(),
+        })?;
+        graph::advance_with_budget(&document, &mut Pending, &mut journal, &Default::default(), &Default::default())?;
+        drop(journal);
+        factory.context.config.graph.limits.nodes = 1;
+        let resume = || GraphInput::Resume { extra: Default::default(), document: "limit-resume".into(), extend: vec![] };
+        let paused = factory.graph(resume(), budget, &cancel)?;
+        assert_eq!(paused.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+        assert_eq!(graph::FileJournal::read_checkpoint(&roots.state, project, "limit-resume")?.unwrap().pause_cause(), Some(PauseCause::StructuralLimit));
+        factory.context.config.graph.limits.nodes = provenant_fabric_runtime::config::GraphLimits::default().nodes;
+        let resumed = factory.graph(resume(), budget, &cancel)?;
+        assert_ne!(resumed.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+        Ok(())
+    }
+
+    #[test]
     fn writer_contention_is_typed_separately_from_permanent_refusals() {
         let lock = |path: &str| {
             WorktreeError::Filesystem(FsError::LockTimeout {

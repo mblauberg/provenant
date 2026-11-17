@@ -49,6 +49,7 @@ pub struct AdmittedCandidate {
     pub(super) expanded: GraphDocument,
     pub(super) plan: PlannedGraph,
     pub(super) effective_budget: crate::config::GraphBudget,
+    pub(super) growth_limit: Option<GraphStructuralLimit>,
 }
 
 /// Build and check the complete prospective view before publishing bindings or state.
@@ -81,7 +82,6 @@ pub fn admit_running_candidate(
     budget: &crate::config::GraphBudget,
     requester_path: Option<&[u8]>,
 ) -> Result<AdmittedCandidate, CandidateError> {
-    let topology_changes = extensions.iter().any(|e| e.starts_with("loop."));
     admit(
         document,
         Some(checkpoint),
@@ -89,7 +89,7 @@ pub fn admit_running_candidate(
         limits,
         budget,
         requester_path,
-        !topology_changes,
+        true,
     )
 }
 
@@ -189,7 +189,20 @@ fn admit(
     if expanded != *document {
         scan(&serde_json::to_value(&expanded).map_err(|_| CandidateError::Plan)?)?;
     }
-    if let Some(limit) = structural_limit(&expanded, &plan, limits)
+    let topology_changes = if running_unchanged {
+        let previous = plans::expand(document, saved, expansions, &generous)
+            .map_err(|_| CandidateError::Plan)?;
+        previous != expanded
+    } else {
+        false
+    };
+    let limit = structural_limit(&expanded, &plan, limits);
+    let growth_limit = if running_unchanged && topology_changes {
+        limit
+    } else {
+        None
+    };
+    if let Some(limit) = limit
         && !running_unchanged
     {
         let node = expanded.nodes.iter().find(|node| match limit.key {
@@ -223,5 +236,6 @@ fn admit(
         expanded,
         plan,
         effective_budget,
+        growth_limit,
     })
 }

@@ -1057,14 +1057,32 @@ pub(super) fn pause_invalid_decision<R: Error + 'static, J: GraphJournal>(
     journal.save(checkpoint).map_err(GraphError::Journal)
 }
 
+pub(super) enum DecisionExtensionError {
+    Invalid(String),
+    Structural(GraphStructuralLimit),
+}
+
 pub(super) fn prepare_decision_extension(
     document: &GraphDocument,
     checkpoint: &GraphCheckpoint,
     extension: &str,
     limits: &crate::config::GraphLimits,
-) -> Result<(), String> {
-    validate_resume_extension(document, checkpoint, extension, limits)
-        .map_err(|rule| refusal::ExtensionCause::loop_rule(extension, rule).to_string())?;
+) -> Result<(), DecisionExtensionError> {
+    let generous = crate::config::GraphLimits {
+        nodes: usize::MAX,
+        edges: usize::MAX,
+        routes_per_node: u16::MAX as usize,
+        node_prompt_bytes: usize::MAX,
+        graph_prompt_bytes: usize::MAX,
+        fan_out_width: usize::MAX,
+        expansion_depth: usize::MAX,
+        ..limits.clone()
+    };
+    validate_resume_extension(document, checkpoint, extension, &generous).map_err(|rule| {
+        DecisionExtensionError::Invalid(
+            refusal::ExtensionCause::loop_rule(extension, rule).to_string(),
+        )
+    })?;
     if extension
         .split_once('=')
         .is_some_and(|(key, _)| key.ends_with(".decision"))
@@ -1073,15 +1091,17 @@ pub(super) fn prepare_decision_extension(
     }
     let mut extensions = checkpoint.extensions.clone();
     extensions.push(extension.to_owned());
-    let expanded = plans::expand(document, &extensions, &checkpoint.expansions, limits)?;
-    let (plan, _) = validate_flat_plan(&expanded, limits).map_err(|error| error.to_string())?;
-    if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
-        return Err(reason);
+    let expanded = plans::expand(document, &extensions, &checkpoint.expansions, &generous)
+        .map_err(DecisionExtensionError::Invalid)?;
+    let (plan, _) = validate_flat_plan(&expanded, &generous)
+        .map_err(|error| DecisionExtensionError::Invalid(error.to_string()))?;
+    if let Some(limit) = structural_limit(&expanded, &plan, limits) {
+        return Err(DecisionExtensionError::Structural(limit));
     }
     if let Some(reason) =
         graph_envelope_reason(document, &checkpoint.expansions, &extensions, &plan)
     {
-        return Err(reason);
+        return Err(DecisionExtensionError::Invalid(reason));
     }
     Ok(())
 }
