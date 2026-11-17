@@ -769,7 +769,7 @@ fn credential_declarations(
     );
 
     // Sibling profiles are independent exact declarations, not holes in the
-    // directory boundary. Inventories themselves are only used at admission.
+    // directory boundary. Inventoried endpoints also enter the canonical table.
     let siblings: Vec<_> = declarations
         .iter()
         .filter_map(|declaration| {
@@ -918,6 +918,12 @@ pub(super) fn credential_roots(
                     path.display()
                 ));
             }
+            roots.add(
+                path,
+                CredentialScope::Exact,
+                root.source.clone(),
+                provenant_core::CredentialKind::Store,
+            );
         }
     }
     let roots = roots.with_lane_roots(lanes);
@@ -938,11 +944,7 @@ pub fn declared_credentials(
         .domains
         .accounts
         .unique_accounts();
-    let mut roots = provenant_core::CredentialRoots::default();
-    for declaration in credential_declarations(registry, home, &settings) {
-        roots.add_entry(declaration.root);
-    }
-    bind_credential_roots(roots)
+    credential_roots(registry, home, &settings, &[])
 }
 
 fn bind_credential_roots(

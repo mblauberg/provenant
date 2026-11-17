@@ -1358,14 +1358,10 @@ fn push_boundaries(
                     .iter()
                     .any(|declaration| {
                         declaration.path == root.path
-                            && mandatory.credential_roots().permits_read_carve_out(
-                                declaration,
-                                &grant.path,
-                                match grant.scope {
-                                    PathScope::Exact => provenant_core::CredentialScope::Exact,
-                                    PathScope::Subtree => provenant_core::CredentialScope::Subtree,
-                                },
+                            && super::validation::SandboxReadAdmission::new(
+                                mandatory.credential_roots(),
                             )
+                            .permits_carve_out(declaration, grant)
                     })
             })
             .cloned()

@@ -325,16 +325,6 @@ impl CredentialRoots {
         })
     }
 
-    /// Sandbox read grants retain independent exact endpoint denials.
-    pub fn permits_read_carve_out(
-        &self,
-        root: &CredentialRoot,
-        path: &Path,
-        scope: CredentialScope,
-    ) -> bool {
-        self.carve_out(root, path, scope, true)
-    }
-
     fn carve_out(
         &self,
         root: &CredentialRoot,
@@ -361,7 +351,7 @@ impl CredentialRoots {
         roots
     }
 
-    /// Keep every declaration. Only an exact repeat of path, scope and kind
+    /// Keep every declaration. Only an exact repeat of path, scope, source and kind
     /// is dropped, so a store declared at a Codex home's path keeps its own
     /// protection and the package exception cannot absorb it.
     pub fn add(
@@ -372,17 +362,19 @@ impl CredentialRoots {
         kind: CredentialKind,
     ) {
         let path = path.into();
-        if self
-            .entries
-            .iter()
-            .any(|entry| entry.path == path && entry.scope == scope && entry.kind == kind)
-        {
+        let source = source.into();
+        if self.entries.iter().any(|entry| {
+            entry.path == path
+                && entry.scope == scope
+                && entry.kind == kind
+                && entry.source == source
+        }) {
             return;
         }
         self.entries.push(CredentialRoot {
             path,
             scope,
-            source: source.into(),
+            source,
             kind,
         });
     }
@@ -452,17 +444,6 @@ impl CredentialRoots {
         self.refusal_impl(path, scope, read, false)
     }
 
-    /// Admission for sandbox read/exec grants only. Exact endpoints enclosed
-    /// by the grant remain protected by independently rendered denials. Never
-    /// use this predicate for copying inputs or admitting lane write authority.
-    pub fn read_grant_refusal(
-        &self,
-        path: &Path,
-        scope: CredentialScope,
-    ) -> Option<&CredentialRoot> {
-        self.refusal_impl(path, scope, true, true)
-    }
-
     fn refusal_impl(
         &self,
         path: &Path,
@@ -481,7 +462,7 @@ impl CredentialRoots {
             return Some(endpoint);
         }
         self.entries.iter().find(|root| {
-            if (read
+            if ((read && endpoint_denials)
                 || self
                     .lane_exceptions(root)
                     .any(|lane| path.starts_with(lane)))
@@ -510,7 +491,7 @@ impl CredentialRoots {
         self.entries.iter().any(|root| {
             root.kind == CredentialKind::CodexHome && codex_standalone_path(path, &root.path)
         }) && self
-            .read_grant_refusal(path, CredentialScope::Subtree)
+            .refusal_impl(path, CredentialScope::Subtree, true, true)
             .is_none()
     }
 
@@ -1020,7 +1001,7 @@ mod tests {
             for spelling in [alias, home] {
                 let package = release(spelling);
                 assert_eq!(
-                    roots.read_grant_refusal(&package, Subtree).is_none(),
+                    roots.refusal_impl(&package, Subtree, true, true).is_none(),
                     *exempt,
                     "{name}: read {}",
                     package.display()

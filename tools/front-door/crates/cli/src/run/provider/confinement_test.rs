@@ -318,12 +318,17 @@ fn registered_credential_roots_protect_lane_tokens_for_dedicated_and_shared_root
         }}),
     )?;
     let lane = shared.join("lane");
+    let alias_target = base.join("unselected-endpoint");
+    std::fs::write(&alias_target, b"synthetic credential")?;
+    std::os::unix::fs::symlink(&alias_target, dedicated.join(provenant_providers::claude::LANE_TOKEN_FILE))?;
     let roots = credential_roots(&Registry::default(), &home, &settings, &[&lane])?;
+    assert!(roots.entries().iter().any(|root| root.path == alias_target && root.scope == CredentialScope::Exact && root.source.contains("claude/dedicated")));
     for dir in [&dedicated, &shared, &home] {
         for name in [provenant_providers::claude::LANE_TOKEN_FILE, "undeclared.txt"] {
             assert!(roots.refuses(&dir.join(name), CredentialScope::Exact, true));
         }
         assert!(roots.entries().iter().any(|root| root.path == *dir && root.scope == CredentialScope::Subtree));
+        assert!(roots.entries().iter().any(|root| root.path == dir.join(provenant_providers::claude::LANE_TOKEN_FILE) && root.scope == CredentialScope::Exact && root.source.contains("claude/")));
     }
     assert!(!roots.refuses(&lane.join("ordinary.txt"), CredentialScope::Exact, true));
     assert!(roots.refuses(&shared, CredentialScope::Subtree, true));

@@ -217,6 +217,8 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
     std::fs::copy("/bin/bash", &provider)?;
     let asset = package.join("asset");
     std::fs::write(&asset, b"runtime\n")?;
+    let unselected_endpoint = package.join("unselected-keychain");
+    std::fs::write(&unselected_endpoint, b"unselected secret\n")?;
     let external = root.join("external-directory");
     std::fs::create_dir_all(external.join("nested"))?;
     let external_secret = external.join("nested/secret");
@@ -273,6 +275,12 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
             &store,
             CredentialScope::Subtree,
             "shared fixture",
+            CredentialKind::Store,
+        );
+        credentials.add(
+            &unselected_endpoint,
+            CredentialScope::Exact,
+            "unselected account",
             CredentialKind::Store,
         );
         let (mut plan, mut profile) = write_grants_fixture();
@@ -363,8 +371,8 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
             let command = launch.command(
                 &[
                     provider.as_os_str().to_owned(), "-c".into(),
-                    "IFS= read -r value < \"$1\" || exit 81; test \"$value\" = ordinary || exit 82; if IFS= read -r value < \"$2\"; then exit 83; fi; printf lane > \"$3\" || exit 84; if IFS= read -r value < \"$4\"; then exit 85; fi; IFS= read -r value < \"$5\" || exit 86; test \"$value\" = ordinary || exit 87; IFS= read -r value < \"$6\" || exit 88; test \"$value\" = selected || exit 89; if IFS= read -r value < \"$7\"; then exit 90; fi; if IFS= read -r value < \"$8\"; then exit 91; fi; if IFS= read -r value < \"$9\"; then exit 92; fi; IFS= read -r value < \"${10}\" || exit 93; test \"$value\" = runtime || exit 94".into(),
-                    "shared-store".into(), allowed.as_os_str().to_owned(), secret.as_os_str().to_owned(), scratch.join("output").into_os_string(), state_secret.as_os_str().to_owned(), project_file.as_os_str().to_owned(), login.as_os_str().to_owned(), outside.as_os_str().to_owned(), external_secret.as_os_str().to_owned(), external_link.join("nested/secret").into_os_string(), asset.as_os_str().to_owned(),
+                    "IFS= read -r value < \"$1\" || exit 81; test \"$value\" = ordinary || exit 82; if IFS= read -r value < \"$2\"; then exit 83; fi; printf lane > \"$3\" || exit 84; if IFS= read -r value < \"$4\"; then exit 85; fi; IFS= read -r value < \"$5\" || exit 86; test \"$value\" = ordinary || exit 87; IFS= read -r value < \"$6\" || exit 88; test \"$value\" = selected || exit 89; if IFS= read -r value < \"$7\"; then exit 90; fi; if IFS= read -r value < \"$8\"; then exit 91; fi; if IFS= read -r value < \"$9\"; then exit 92; fi; IFS= read -r value < \"${10}\" || exit 93; test \"$value\" = runtime || exit 94; if IFS= read -r value < \"${11}\"; then exit 95; fi".into(),
+                    "shared-store".into(), allowed.as_os_str().to_owned(), secret.as_os_str().to_owned(), scratch.join("output").into_os_string(), state_secret.as_os_str().to_owned(), project_file.as_os_str().to_owned(), login.as_os_str().to_owned(), outside.as_os_str().to_owned(), external_secret.as_os_str().to_owned(), external_link.join("nested/secret").into_os_string(), asset.as_os_str().to_owned(), unselected_endpoint.as_os_str().to_owned(),
                 ],
                 &provenant_core::AttemptId::from_bytes([10;16]),
                 &provenant_os::fs::Directory::open_anchor(&root)?,
@@ -403,19 +411,6 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
             "{message}"
         );
         profile.spec.runtime_reads.pop();
-        profile.spec.authentication[0].roots = vec![PathGrant {
-            path: package.join("auth.json"),
-            scope: PathScope::Exact,
-        }];
-        let compiled = super::super::render::compile_sbpl(&plan, &profile, &anchors)?;
-        let rendered = std::str::from_utf8(&compiled.profile)?;
-        assert!(
-            rendered.contains(&format!(
-                "(deny file-read* (literal \"{}\"))",
-                package.join("auth.json").display()
-            )),
-            "unselected endpoint inside a runtime package must stay denied"
-        );
         let error = MandatoryRoots::for_host_with_scratch_mode(
             &roots,
             &home,
