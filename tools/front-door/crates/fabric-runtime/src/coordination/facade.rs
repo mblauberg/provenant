@@ -886,6 +886,10 @@ impl FacadeError {
     pub fn graph_candidate(error: crate::graph::CandidateError) -> Self {
         use crate::graph::CandidateError;
         match error {
+            CandidateError::Checkpoint => Self::StateCorrupt,
+            CandidateError::CheckpointTopology { node, invariant } => Self::StateCorruptDetail {
+                detail: format!("graph checkpoint node {node}: {invariant}"),
+            },
             CandidateError::Cycle { node } => {
                 Self::graph_admission(crate::graph::AdmissionError::Cycle { node })
             }
@@ -928,7 +932,13 @@ impl FacadeError {
         let fact = match &error {
             AdmissionError::Schema(_) => DispatchRefusalFact::GraphSchema,
             AdmissionError::Composite(_) => DispatchRefusalFact::GraphComposite,
-            AdmissionError::Plan(_) => DispatchRefusalFact::GraphPlan,
+            AdmissionError::Plan(reason) => reason
+                .strip_prefix("node ")
+                .and_then(|reason| reason.strip_suffix(": writer worktree"))
+                .and_then(|node| node.to_owned().try_into().ok())
+                .map_or(DispatchRefusalFact::GraphPlan, |node| {
+                    DispatchRefusalFact::GraphWriterWorktree { node }
+                }),
             AdmissionError::WriterWorktree { node } => {
                 DispatchRefusalFact::GraphWriterWorktree { node: node.clone() }
             }

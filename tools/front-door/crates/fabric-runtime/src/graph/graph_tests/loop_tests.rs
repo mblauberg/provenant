@@ -1136,7 +1136,7 @@ fn loop_inbox_extension_respects_host_ceiling_and_keeps_the_rejected_ask_until_r
     assert_eq!(paused.status, GraphStatus::Paused);
     assert_eq!(
         paused.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidLoopDecision)
+        Some(PauseCause::StructuralLimit)
     );
     assert!(paused.checkpoint.extensions.is_empty());
     // The rejected answer stays inspectable through its link until a resume

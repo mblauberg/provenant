@@ -5,7 +5,7 @@ use crate::coordination::{facade::GraphInput, input::ValidateInput};
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CandidateError {
-    #[error("invalid input field `extend`: extension count, size or syntax limit")]
+    #[error("invalid input field `extend`: extension syntax")]
     Input,
     #[error("graph candidate schema or topology is invalid")]
     Plan,
@@ -15,6 +15,11 @@ pub enum CandidateError {
     WriterWorktree { node: refusal::GraphIdentifier },
     #[error("graph candidate checkpoint is invalid")]
     Checkpoint,
+    #[error("graph checkpoint node {node}: {invariant}")]
+    CheckpointTopology {
+        node: refusal::GraphIdentifier,
+        invariant: &'static str,
+    },
     #[error("{0}")]
     Secret(SecretCause),
     #[error("{0}")]
@@ -135,6 +140,16 @@ fn admit(
     let saved = checkpoint.map_or(&[][..], |c| c.extensions.as_slice());
     let expansions = checkpoint.map_or(&[][..], |c| c.expansions.as_slice());
     scan(&serde_json::to_value(expansions).map_err(|_| CandidateError::Plan)?)?;
+    // Persisted data must be diagnosed before prospective plan validation can
+    // collapse its invariant into a generic invalid candidate.
+    if checkpoint.is_some() {
+        plans::validate_persisted_topology(document, saved, expansions, &generous).map_err(
+            |(node, invariant)| match node.try_into() {
+                Ok(node) => CandidateError::CheckpointTopology { node, invariant },
+                Err(_) => CandidateError::Checkpoint,
+            },
+        )?;
+    }
     let mut all = saved.to_vec();
     let mut effective_budget = budget.clone();
     for (extension, replay) in saved.iter().map(|e| (e, true)).chain(

@@ -1498,7 +1498,7 @@ fn assert_pattern_parameter_error(
     assert_eq!(run.status, GraphStatus::Paused, "{case}");
     assert_eq!(
         run.checkpoint.pause_cause(),
-        Some(PauseCause::StructuralLimit),
+        Some(PauseCause::InvalidPlanExpansion),
         "{case}"
     );
     assert!(
@@ -1662,7 +1662,7 @@ fn pattern_expansion_respects_plan_max_nodes_boundary() {
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
         run.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidPlanExpansion)
+        Some(PauseCause::StructuralLimit)
     );
     assert!(
         run.checkpoint

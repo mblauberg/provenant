@@ -1583,19 +1583,10 @@ pub(super) fn refresh_structure_pause(
     plan: &PlannedGraph,
     limits: &crate::config::GraphLimits,
 ) -> Option<String> {
-    if let Some((index, reason)) = checkpoint
-        .nodes
-        .iter()
-        .enumerate()
-        .find_map(|(index, node)| {
-            node.expansion_pause
-                .as_ref()
-                .map(|reason| (index, reason.clone()))
-        })
-    {
-        let cause = plans::expansion_pause_cause(&checkpoint.nodes[index]);
-        checkpoint.activate_expansion_pause(index);
-        checkpoint.set_pause(cause, &reason);
+    // Node expansion pauses are activated by their owning transitions. Replaying
+    // them here would undo apply_resume before a continuation can be retried.
+    if checkpoint.cancelled {
+        return None;
     }
     // A settled failed lens or stopped writer may still owe a recovery patch.
     // Its existing topology must be paused before that patch is planned.

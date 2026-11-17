@@ -814,7 +814,9 @@ impl<R: Error + 'static, J: Error + 'static> GraphError<R, J> {
             Self::Instance(_) => "instance",
             Self::Invalid(_) | Self::Admission(_) => "invalid_graph",
             Self::Candidate(CandidateError::Extension(_)) => "invalid_extension",
-            Self::Candidate(CandidateError::Checkpoint) => "bad_checkpoint",
+            Self::Candidate(
+                CandidateError::Checkpoint | CandidateError::CheckpointTopology { .. },
+            ) => "bad_checkpoint",
             Self::Candidate(_) => "invalid_graph",
             Self::Refused(_) => "graph_refused",
             Self::PlanChanged => "plan_changed",
@@ -1454,15 +1456,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
         .map_err(GraphError::Candidate)?,
     };
-    if let Some(checkpoint) = &stored {
-        plans::validate_persisted_topology(
-            document,
-            &checkpoint.extensions,
-            &checkpoint.expansions,
-            &unbounded,
-        )
-        .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
-    }
     let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
     let mut expanded = plans::expand(
         document,
@@ -1639,6 +1632,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     };
 
     if let Some(limit) = admitted.growth_limit {
+        // A refused resume cannot reopen or re-pause a cancelled graph.
+        if checkpoint.cancelled {
+            return Ok(GraphRun {
+                status: GraphStatus::Cancelled,
+                outcome: None,
+                checkpoint,
+                advance_error: None,
+            });
+        }
         checkpoint.set_pause(PauseCause::StructuralLimit, &limit.to_string());
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
         return Ok(transitions::graph_run(checkpoint));

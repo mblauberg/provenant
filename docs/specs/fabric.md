@@ -179,8 +179,8 @@ input, write scope or explicit plan parameter emits the advisory
 ### Graph admission and refusal causes
 
 Launch, retry, edit and relay add/edit build the complete candidate in memory.
-Requester binding and PATH, extensions, `GraphInput::validate_input` count and
-byte limits, prospective loop expansion, structural host limits, the checkpoint
+Requester binding and PATH, extension syntax (`GraphInput::validate_input`),
+prospective loop expansion, structural host limits, the checkpoint
 envelope and the secret scan must all pass before publishing anything. The
 journal lock covers reading the original state through publication. A refused
 candidate leaves the checkpoint and execution binding unchanged. The pure
@@ -189,7 +189,13 @@ resume validators.
 A structural limit at first admission refuses without publishing. An existing
 running graph that exceeds a structural limit, including during expansion or
 following a host limit reduction, saves a `StructuralLimit` pause and can
-resume after the limit is raised. A settled graph saves no new structural pause.
+resume after the limit is raised. A settled or cancelled graph saves no new
+structural pause. Resume does not reactivate a previous expansion pause before
+retrying its decision. Malformed fragments remain `InvalidPlanExpansion`;
+only a typed structural overrun receives `StructuralLimit`. Persisted topology
+is checked by the candidate gate before prospective topology so corrupt checkpoints retain their node
+and `bad_checkpoint` diagnosis. Extensions have no separate count or byte cap;
+the complete retained extension list contributes to the checkpoint envelope.
 
 Admission refusals may name node IDs, loop keys and field paths that passed the
 identifier grammar, and host-owned rule identifiers and schema positions. They
