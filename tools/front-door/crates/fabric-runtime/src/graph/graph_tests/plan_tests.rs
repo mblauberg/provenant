@@ -3389,6 +3389,23 @@ fn live_patch_normalises_docs_and_extensions_once() {
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
+fn secret_scan_accepts_masked_assignments_but_refuses_remaining_values() {
+    for text in ["token=[REDACTED] next", r#"{"prompt":"token=[REDACTED] next"}"#] {
+        assert!(patch::scan_for_secrets(text).is_ok());
+    }
+    for text in [
+        "token=[REDACTED]secret",
+        "token=[REDACTED",
+        "token=PROVENANTMASK",
+        "token=secret",
+        "AKIAIOSFODNN7EXAMPLE",
+    ] {
+        assert!(patch::scan_for_secrets(text).is_err());
+    }
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
 fn split_credentials_are_refused_after_live_and_captured_patch_compilation() {
     let secret = "AKIAIOSFODNN7EXAMPLE";
     for nodes in [

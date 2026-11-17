@@ -261,11 +261,20 @@ pub struct PatchContext<'a> {
 
 /// The confinement secret scan, as submission applies it.
 pub fn scan_for_secrets(text: &str) -> Result<(), String> {
-    // The shared redactor can match an already masked assignment. Only refuse
-    // when it would change bytes, preserving normalised text on later scans.
-    let filtered = provenant_confinement::redact::known_shapes(text.as_bytes())
+    // An unquoted assignment ends at `]`, so rescanning its marker would
+    // otherwise append another bracket. Use a placeholder absent from the
+    // input and compare against the redactor's marker mapped back to it.
+    // Extra value bytes, including assembled credentials, still change.
+    let mut placeholder = "PROVENANTMASK".to_owned();
+    while text.contains(&placeholder) {
+        placeholder.push('X');
+    }
+    let comparable = text.replace("[REDACTED]", &placeholder);
+    let filtered = provenant_confinement::redact::known_shapes(comparable.as_bytes())
         .map_err(|_| "patch secret scan failed".to_owned())?;
-    if filtered == text.as_bytes() {
+    let filtered =
+        String::from_utf8(filtered).map_err(|_| "patch secret scan failed".to_owned())?;
+    if filtered.replace("[REDACTED]", &placeholder) == comparable {
         Ok(())
     } else {
         Err("patch matches a secret pattern; remove the secret and retry".to_owned())
