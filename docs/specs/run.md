@@ -164,12 +164,6 @@ A restart preserves the worktree and archives prior attempts. Bounds may turn a
 restart into a chair decision. See [routing](routing.md) for route selection.
 - Why: one decision keeps stop handling consistent and protects writer custody.
 
-A final answer's handoff is its closed `handoff` fence, which always wins. When
-the answer has no `handoff` fence, a `json` fence that ends the answer (only
-whitespace after it) and decodes as a handoff, with `schema_version` and
-`status`, is accepted with a warning; a `json` fence followed by other content
-is ordinary text.
-
 A writer's declared stop settles as `stopped_early`, or as `blocked` when its
 final handoff is blocked. The node's advance code records whether the stop left
 committed work: `writer_declared_stop` when the writer's head moved past its

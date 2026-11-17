@@ -67,6 +67,15 @@ Custody facts such as lost, unsettled or cancelled retain priority; the malforme
 handoff evidence still survives in their sealed stop.
 - Why: unfinished work must not appear complete or lose its handoff.
 
+A final answer's handoff is its closed `handoff` fence, which always wins.
+Without one, a `json` fence that ends the answer (only whitespace after it) and
+decodes as a handoff, with `schema_version` and `status`, is accepted with a
+warning naming the fallback; a `json` fence followed by other content is
+ordinary text.
+- Why: providers drift to `json` fences; refusing a complete declaration for
+  its fence label loses finished work, while the warning keeps the drift visible.
+- Owner: `crates/records/src/handoff.rs`, `crates/run/src/completion.rs`
+
 The canonical review result order is a standalone verdict followed by the
 final handoff. Every review prompt, including synthesis and the one automatic
 verdict correction, states that order and never invites text after the

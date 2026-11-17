@@ -48,6 +48,18 @@ impl RunStore {
                 repeated.warning()
             );
         }
+        if let Some(fallback) = provenant_records::handoff::Handoff::json_fence_fallback(
+            &decoded.result,
+            &decoded.turns,
+        ) {
+            // Accepted: the answer ended in a handoff-shaped json block.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: attempt {}: {}",
+                record.attempt_id,
+                fallback.warning()
+            );
+        }
         if let Some(handoff) = read_snapshot(attempt)? {
             let handoff = with_scope_report(attempt, handoff)?;
             return Ok(provenant_records::handoff::HandoffParse {
