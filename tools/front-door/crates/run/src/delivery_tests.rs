@@ -488,7 +488,16 @@ impl PrepareFixture {
                 .ok_or("no claim attempted")??
                 .ok_or_else(|| format!("resumed owner: {observation}"))?;
         }
-        launch.terminal(&state, &attempt, &recovery, &mut settlement, budget_stop)?;
+        launch.terminal(
+            &state,
+            &attempt,
+            &recovery,
+            &mut settlement,
+            crate::writer::TerminalPolicy {
+                budget_stop,
+                ..Default::default()
+            },
+        )?;
         let archive = attempt.open_verified_directory(OsStr::new("quarantine"))?;
         let manifest: serde_json::Value = serde_json::from_slice(
             &archive.read_bounded(OsStr::new("manifest.json"), RECORD_LIMIT)?,

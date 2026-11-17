@@ -14,7 +14,8 @@ fn quota_readiness_projection_covers_every_declared_reason() {
             | Reason::UncalibratedPartialCoverage
             | Reason::InvalidEvidence
             | Reason::UnreachablePeer
-            | Reason::UnsupportedPeerVersion => Excluded::UnknownAvailability,
+            | Reason::UnsupportedPeerVersion
+            | Reason::ProbedNoFigures => Excluded::UnknownAvailability,
             Reason::MissingExecutable => Excluded::MissingExecutable,
             Reason::SignedOut => Excluded::AuthRequired,
             Reason::LoginExpired => Excluded::LoginExpired,

@@ -4359,7 +4359,9 @@ mod writer_recovery_tests {
             DeliveredSteerUnavailable,
             Deadline,
         }
-        use Marker::{DeliveredSteer, ExplicitAfterSteer, ExplicitCancel};
+        use Marker::{
+            DeliveredSteer, DeliveredSteerUnavailable, ExplicitAfterSteer, ExplicitCancel,
+        };
         for (changed, dirty, blocked, shared, budget, marker) in [
             (false, false, false, false, false, Marker::AdmissionSteer),
             (false, false, false, false, false, Marker::AdmissionCancel),
