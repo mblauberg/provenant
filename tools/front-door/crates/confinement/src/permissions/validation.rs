@@ -507,7 +507,13 @@ pub(crate) fn validate_read_exec_grant(
     credentials: &CredentialRoots,
 ) -> Result<(), PermissionError> {
     grant.validate()?;
-    if let Some(root) = refuses_credential_grant(grant, true, credentials) {
+    if let Some(root) = credentials.read_grant_refusal(
+        &grant.path,
+        match grant.scope {
+            PathScope::Exact => CredentialScope::Exact,
+            PathScope::Subtree => CredentialScope::Subtree,
+        },
+    ) {
         return Err(PermissionError::credential_store(&grant.path, root));
     }
     Ok(())

@@ -424,7 +424,19 @@ fn every_declared_credential_root_protects_grants_and_enclosing_paths() {
                 path: parent.to_owned(),
                 scope: PathScope::Subtree,
             };
-            assert!(validate_read_exec_grant(&enclosing, &credentials).is_err());
+            // Exact endpoints stay denied independently of an enclosing read.
+            // Other declarations (or a broad path) may still refuse this parent.
+            let mut dedicated = provenant_core::CredentialRoots::default();
+            dedicated.add_entry(root.clone());
+            assert_eq!(
+                validate_read_exec_grant(&enclosing, &dedicated).is_err(),
+                scope == PathScope::Subtree || enclosing.validate().is_err(),
+                "{}",
+                root.path.display()
+            );
+            // Materialisation must not copy an endpoint into an unprotected
+            // staging path, even though the sandbox can deny it in place.
+            assert!(refuses_lane_root(&enclosing.path, true, &dedicated));
             assert!(validate_noncredential_grant(&enclosing, &credentials).is_err());
         }
     }

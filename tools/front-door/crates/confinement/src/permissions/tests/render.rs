@@ -920,7 +920,7 @@ fn network_levels_shared_writes_and_hard_denies_render_in_order() {
     };
     let mut plan = PlanPermissions {
         credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
-            "/fixture/home",
+            "/Users/fixture",
         )),
         policy: None,
         read_only: None,
@@ -1969,6 +1969,21 @@ fn shared_stores_render_subtree_denials_with_every_lane_root_carved_out()
                     operation,
                     &[state.to_str().ok_or("state path")?],
                     &["subpath"],
+                )
+                .is_some()
+            );
+        }
+        // Traversal can inspect the store directory itself, but cannot list
+        // its contents or read xattrs. No broad late allow reopens the store.
+        let store_path = store.to_str().ok_or("store path")?;
+        for operation in ["file-read-data", "file-read-xattr"] {
+            assert!(
+                rule_index_with_facts(
+                    &source,
+                    RuleAction::Deny,
+                    operation,
+                    &[store_path],
+                    &["literal"]
                 )
                 .is_some()
             );

@@ -359,8 +359,8 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
                 "default={default}, store={store:?}: {result:?}"
             );
         }
-        // Runtime authority may neither reopen an inventoried external subtree
-        // nor enclose a declared authentication endpoint inside its package.
+        // Runtime authority cannot reopen an inventoried external subtree.
+        // An enclosed exact endpoint instead keeps its independent denial.
         profile.spec.runtime_reads.push(PathGrant {
             path: external.clone(),
             scope: PathScope::Subtree,
@@ -391,14 +391,14 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
             path: package.join("auth.json"),
             scope: PathScope::Exact,
         }];
-        let error = super::super::render::compile_sbpl(&plan, &profile, &anchors)
-            .err()
-            .ok_or("runtime package enclosing a credential accepted")?;
-        let message = error.to_string();
+        let compiled = super::super::render::compile_sbpl(&plan, &profile, &anchors)?;
+        let rendered = std::str::from_utf8(&compiled.profile)?;
         assert!(
-            message.contains("unselected")
-                && message.contains(package.to_str().ok_or("package path")?),
-            "{message}"
+            rendered.contains(&format!(
+                "(deny file-read* (literal \"{}\"))",
+                package.join("auth.json").display()
+            )),
+            "unselected endpoint inside a runtime package must stay denied"
         );
         let error = MandatoryRoots::for_host_with_scratch_mode(
             &roots,

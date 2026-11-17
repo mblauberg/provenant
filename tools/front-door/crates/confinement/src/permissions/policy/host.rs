@@ -331,7 +331,7 @@ fn inventory_links(
                     return Err(PermissionError::credential_root_at(
                         &target,
                         None,
-                        &format!(
+                        format!(
                             "credential directory link {} under {}",
                             path.display(),
                             root.path.display()
@@ -393,7 +393,7 @@ fn inventory_links(
                         return Err(PermissionError::credential_root_at(
                             &target,
                             None,
-                            &format!(
+                            format!(
                                 "unrepresentable credential directory link {} under {}",
                                 path.display(),
                                 root.path.display()
@@ -462,7 +462,9 @@ impl MandatoryRoots {
             roots,
             home,
             source,
-            roots.state.as_path(),
+            // Without an explicit scratch root, only source is lane work.
+            // Host state is protected separately and may contain installed skills.
+            source,
             credentials,
             github,
             protected,
@@ -816,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn inventory_finds_dotfiles_links_and_skips_lane_directories()
+    fn inventory_finds_dotfiles_links_and_refuses_external_lane_directories()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = std::fs::canonicalize(temp.path())?;
@@ -835,9 +837,29 @@ mod tests {
         let hidden = root.join("not-followed");
         std::fs::write(&hidden, b"fixture")?;
         std::os::unix::fs::symlink(&hidden, dotfiles.join("keys/nested"))?;
-        std::os::unix::fs::symlink(root.join("source"), store.join("source"))?;
-        std::os::unix::fs::symlink(root.join("source"), store.join("auth.json"))?;
-        std::os::unix::fs::symlink(&scratch, store.join("scratch"))?;
+        // A directory link outside HOME overlapping lane authority refuses,
+        // whether or not its name is a declared credential endpoint.
+        for (target, name) in [
+            (root.join("source"), "source"),
+            (root.join("source"), "auth.json"),
+            (scratch.clone(), "scratch"),
+        ] {
+            let link = store.join(name);
+            std::os::unix::fs::symlink(&target, &link)?;
+            assert!(matches!(
+                MandatoryRoots::for_host_with_scratch(
+                    &roots,
+                    &home,
+                    &root.join("source"),
+                    &scratch,
+                    &[],
+                    &[],
+                    &[]
+                ),
+                Err(PermissionError::CredentialRootAt { .. })
+            ));
+            std::fs::remove_file(link)?;
+        }
         let inventory = MandatoryRoots::for_host_with_scratch(
             &roots,
             &home,

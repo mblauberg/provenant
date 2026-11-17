@@ -1146,6 +1146,50 @@ fn push_denial(
     Ok(())
 }
 
+/// Admitted files still need metadata on their ancestors during exec and
+/// dyld startup. Exempt only those directory vnodes from the broad read deny,
+/// then deny their contents and extended attributes separately. No late allow
+/// may reopen a credential, and sibling paths keep the original denial.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+fn push_read_denial(
+    source: &mut String,
+    root: &DenialRoot,
+    exceptions: &[PathGrant],
+) -> Result<(), PermissionError> {
+    let mut ancestors = std::collections::BTreeSet::new();
+    if root.scope == PathScope::Subtree {
+        for grant in exceptions {
+            for ancestor in grant.path.ancestors().skip(1) {
+                if ancestor.starts_with(&root.path)
+                    && !exceptions.iter().any(|read| {
+                        read.path == ancestor
+                            || (read.scope == PathScope::Subtree
+                                && ancestor.starts_with(&read.path))
+                    })
+                {
+                    ancestors.insert(ancestor.to_owned());
+                }
+            }
+        }
+    }
+    let mut metadata = exceptions.to_vec();
+    metadata.extend(ancestors.iter().map(|path| PathGrant {
+        path: path.clone(),
+        scope: PathScope::Exact,
+    }));
+    push_denial(source, "file-read*", root, &metadata)?;
+    for ancestor in ancestors {
+        push_rule(
+            source,
+            "deny",
+            "file-read-data file-read-xattr",
+            &ancestor,
+            PathScope::Exact,
+        )?;
+    }
+    Ok(())
+}
+
 /// Unix socket IPC need not issue a file-read check. Keep host services
 /// private under the same state and credential pathname boundary.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
@@ -1314,7 +1358,7 @@ fn push_boundaries(
                     .iter()
                     .any(|declaration| {
                         declaration.path == root.path
-                            && mandatory.credential_roots().permits_carve_out(
+                            && mandatory.credential_roots().permits_read_carve_out(
                                 declaration,
                                 &grant.path,
                                 match grant.scope {
@@ -1336,7 +1380,7 @@ fn push_boundaries(
             .chain(&runtime_exceptions)
             .cloned()
             .collect();
-        push_denial(source, "file-read*", root, &reads)?;
+        push_read_denial(source, root, &reads)?;
         push_denial(source, "file-clone", root, &reads)?;
         push_denial(source, "process-exec", root, &exec)?;
         push_denial(source, "file-map-executable", root, &exec)?;
@@ -1423,7 +1467,7 @@ fn push_boundaries(
     }
     state_reads.extend(profile.spec.fabric_state_reads.iter().cloned());
     for root in std::iter::once(mandatory.state()).chain(mandatory.state_aliases()) {
-        push_denial(source, "file-read*", root, &state_reads)?;
+        push_read_denial(source, &root.clone().into(), &state_reads)?;
         push_denial(source, "file-clone", root, &state_reads)?;
         let mut state_exec = private.clone();
         state_exec.extend(mandatory.state_exec().iter().cloned());

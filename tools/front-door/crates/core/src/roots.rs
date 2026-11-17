@@ -325,21 +325,31 @@ impl CredentialRoots {
         })
     }
 
-    /// Read/exec authority may carve a shared store only when it contains no
-    /// declared endpoint (or dedicated store). Enclosing stores are denials,
-    /// not endpoints; their own admission is checked independently.
-    pub fn permits_carve_out(
+    /// Sandbox read grants retain independent exact endpoint denials.
+    pub fn permits_read_carve_out(
         &self,
         root: &CredentialRoot,
         path: &Path,
         scope: CredentialScope,
+    ) -> bool {
+        self.carve_out(root, path, scope, true)
+    }
+
+    fn carve_out(
+        &self,
+        root: &CredentialRoot,
+        path: &Path,
+        scope: CredentialScope,
+        endpoint_denials: bool,
     ) -> bool {
         self.lane_exceptions(root).next().is_some()
             && path != root.path
             && path.starts_with(&root.path)
             && !self.entries.iter().any(|endpoint| {
                 endpoint.path == path
-                    || (scope == CredentialScope::Subtree && endpoint.path.starts_with(path))
+                    || (scope == CredentialScope::Subtree
+                        && (!endpoint_denials || endpoint.scope == CredentialScope::Subtree)
+                        && endpoint.path.starts_with(path))
             })
     }
 
@@ -426,8 +436,9 @@ impl CredentialRoots {
     }
 
     /// Any overlap with a declared store is refused, including a grant which
-    /// encloses that store. Exact entries protect the file and its enclosing
-    /// grants; subtree entries also protect descendants.
+    /// encloses that store. Exact entries protect the file and enclosing
+    /// grants; subtree entries also protect descendants. This strict check also
+    /// applies to materialised inputs, which cannot inherit sandbox denials.
     pub fn refuses(&self, path: &Path, scope: CredentialScope, read: bool) -> bool {
         self.refusal(path, scope, read).is_some()
     }
@@ -438,10 +449,34 @@ impl CredentialRoots {
         scope: CredentialScope,
         read: bool,
     ) -> Option<&CredentialRoot> {
+        self.refusal_impl(path, scope, read, false)
+    }
+
+    /// Admission for sandbox read/exec grants only. Exact endpoints enclosed
+    /// by the grant remain protected by independently rendered denials. Never
+    /// use this predicate for copying inputs or admitting lane write authority.
+    pub fn read_grant_refusal(
+        &self,
+        path: &Path,
+        scope: CredentialScope,
+    ) -> Option<&CredentialRoot> {
+        self.refusal_impl(path, scope, true, true)
+    }
+
+    fn refusal_impl(
+        &self,
+        path: &Path,
+        scope: CredentialScope,
+        read: bool,
+        endpoint_denials: bool,
+    ) -> Option<&CredentialRoot> {
         // Report the enclosed endpoint's origin rather than the enclosing
         // shared store when a requested carve-out would expose that endpoint.
         if let Some(endpoint) = self.entries.iter().find(|root| {
-            root.path == path || (scope == CredentialScope::Subtree && root.path.starts_with(path))
+            root.path == path
+                || (scope == CredentialScope::Subtree
+                    && (!endpoint_denials || root.scope == CredentialScope::Subtree)
+                    && root.path.starts_with(path))
         }) {
             return Some(endpoint);
         }
@@ -450,7 +485,7 @@ impl CredentialRoots {
                 || self
                     .lane_exceptions(root)
                     .any(|lane| path.starts_with(lane)))
-                && self.permits_carve_out(root, path, scope)
+                && self.carve_out(root, path, scope, endpoint_denials)
             {
                 return false;
             }
@@ -461,7 +496,9 @@ impl CredentialRoots {
                 return false;
             }
             root.path == path
-                || (scope == CredentialScope::Subtree && root.path.starts_with(path))
+                || (scope == CredentialScope::Subtree
+                    && (!endpoint_denials || root.scope == CredentialScope::Subtree)
+                    && root.path.starts_with(path))
                 || (root.scope == CredentialScope::Subtree && path.starts_with(&root.path))
         })
     }
@@ -472,7 +509,9 @@ impl CredentialRoots {
     pub fn is_codex_standalone_package(&self, path: &Path) -> bool {
         self.entries.iter().any(|root| {
             root.kind == CredentialKind::CodexHome && codex_standalone_path(path, &root.path)
-        }) && self.refusal(path, CredentialScope::Subtree, true).is_none()
+        }) && self
+            .read_grant_refusal(path, CredentialScope::Subtree)
+            .is_none()
     }
 
     pub fn overlaps(&self, path: &Path) -> bool {
@@ -952,7 +991,7 @@ mod tests {
                 false,
             ),
             (
-                "exact store inside the release",
+                "exact endpoint inside the release keeps its independent denial",
                 &[
                     ("/fixture/home/.codex", Subtree, CodexHome),
                     (
@@ -961,7 +1000,7 @@ mod tests {
                         Store,
                     ),
                 ],
-                false,
+                true,
             ),
             (
                 "unrelated store",
@@ -981,7 +1020,7 @@ mod tests {
             for spelling in [alias, home] {
                 let package = release(spelling);
                 assert_eq!(
-                    roots.refusal(&package, Subtree, true).is_none(),
+                    roots.read_grant_refusal(&package, Subtree).is_none(),
                     *exempt,
                     "{name}: read {}",
                     package.display()
@@ -991,6 +1030,14 @@ mod tests {
                     *exempt,
                     "{name}"
                 );
+                // Every endpoint itself remains refused, even when its parent
+                // package can be read with the endpoint independently denied.
+                for endpoint in roots.entries().iter().filter(|root| root.scope == Exact) {
+                    assert!(
+                        roots.refuses(&endpoint.path, Exact, true),
+                        "{name}: endpoint"
+                    );
+                }
                 // The exception never confers writes or reaches the home itself.
                 assert!(roots.refuses(&package, Subtree, false), "{name}: write");
                 assert!(roots.refuses(spelling, Subtree, true), "{name}: home");

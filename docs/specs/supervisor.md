@@ -214,13 +214,17 @@ root. A denial may cover HOME; this never relaxes broad-grant validation.
 A store containing no lane root retains whole-subtree protection. A store
 strictly containing lane roots retains whole-subtree protection minus validated
 lane, process-executable, runtime-read and tool-execution grants. Each carve-out
-must be a strict descendant of the store and enclose no declared credential
-endpoint or dedicated store. Runtime carve-outs confer read and execution only;
+must be a strict descendant of the store and enclose no dedicated store.
+An enclosed exact credential endpoint retains its independent denial; a grant
+at the endpoint itself refuses. Runtime carve-outs confer read and execution only;
 writes remain limited to lane roots and selected authentication refresh. In the
 open profile, the renderer denies the store subpath with `require-all` and a
 `require-not` carve-out for each admitted grant at its validated scope. Under an
 allowlist profile, default deny protects the store outside those grants. The current production
 renderer is open; this rule also defines the boundary for an allowlist profile.
+Metadata on ancestors of admitted paths remains available for executable and
+dynamic-loader traversal; directory contents and extended attributes stay denied.
+These metadata exceptions do not add read or execution authority over siblings.
 Undeclared store files outside validated carve-outs remain denied in both profiles;
 files inside a lane root are accessible by design. A store equal to or inside
 a lane root refuses the launch.
@@ -234,8 +238,12 @@ evade the boundary. An inventory does not replace or narrow the store denial. St
 same subtree boundary. A HOME-rooted store may enclose default state: the store
 is a protection rather than an authentication grant, and state retains its
 independent mandatory protection. Independent sibling profiles and file
-declarations keep exact scope. No grant may enclose a store or declared credential file, or open
-a store outside its validated carve-outs. Selected authentication retains its
+declarations keep exact scope. No grant may enclose a store or open
+a store outside its validated carve-outs. Read and execution grants may enclose
+exact credential files because their independent denials still apply; writes
+and lane authority enclosing a declared credential file refuse. Input
+materialisation also refuses enclosing endpoints: staged copies cannot inherit
+the original path's sandbox denial. Selected authentication retains its
 explicit exact-file access; a broad authentication or configuration grant
 cannot reopen a shared store. Adapters declare the selected identity's exact
 authentication endpoints, including database sidecars when required, and stage
@@ -249,7 +257,7 @@ Declared credential denials follow grants in the rendered profile. The
 standalone Codex release package read exception belongs only to the built-in
 default Codex home; dedicated relocated and registered stores retain whole-store
 protection. Shared stores use the validated carve-out rule above. The exception confers no writes and never exempts another
-overlapping credential declaration.
+overlapping credential denial.
 Every declaration is kept, whatever its order or kind; each spelling of a
 declared location carries every declaration made at or beneath any spelling of
 it, so a store registered at a Codex home or its alias stays refused.
