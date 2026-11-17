@@ -669,18 +669,24 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
         .map(|plan| plan.review_min_successful);
     for node in &mut document.nodes {
         if node.dependencies().any(|name| name == &expansion.source) {
-            node.after_expansion.extend(
-                expansion
-                    .nodes
-                    .iter()
-                    .filter(|n| {
-                        !expansion.nodes.iter().any(|root| {
-                            root.detached
-                                && (n.id == root.id || n.id.starts_with(&format!("{}--", root.id)))
-                        })
+            let fragment = expansion
+                .nodes
+                .iter()
+                .filter(|n| {
+                    !expansion.nodes.iter().any(|root| {
+                        root.detached
+                            && (n.id == root.id || n.id.starts_with(&format!("{}--", root.id)))
                     })
-                    .map(|n| n.id.clone()),
-            );
+                })
+                .map(|n| n.id.clone());
+            if node.after_settled.contains(&expansion.source)
+                && !node.depends_on.contains(&expansion.source)
+                && !node.after_expansion.contains(&expansion.source)
+            {
+                node.after_settled.extend(fragment);
+            } else {
+                node.after_expansion.extend(fragment);
+            }
 
             if expansion.closes_producer() {
                 wire_exports(node, &expansion.source, &exported);

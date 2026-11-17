@@ -675,6 +675,9 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
     outer.composite = Some(CompositeSpec {
         reduce_verdict: false,
         min_successful: None,
+        soft_review_coverage: false,
+        hard_review_coverage: false,
+        required_review_lenses: Vec::new(),
         nodes: vec![synthesis],
         exports: vec![input("synthesis")],
     });

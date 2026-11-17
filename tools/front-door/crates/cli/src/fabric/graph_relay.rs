@@ -1168,7 +1168,49 @@ fn launch_resolvers_with(
         }
     };
     let selection_review = fallback_review.as_ref().unwrap_or(review);
+    let applied_floors = selection_review.path_floors(&paths);
+    let mut hard_review_coverage = false;
+    let mut hard_floor_tier: Option<String> = None;
+    let mut hard_floor_lenses = Vec::new();
+    let risk_rank = |tier: &str| match tier {
+        "routine" => 0,
+        "substantial" => 1,
+        "crucial" => 2,
+        "terminal" => 3,
+        _ => 0,
+    };
+    for path in &paths {
+        let floors = selection_review.path_floors(std::slice::from_ref(path));
+        let protected = floors
+            .classes
+            .iter()
+            .any(|class| !matches!(class.as_str(), "routine" | "unknown"));
+        if !protected {
+            continue;
+        }
+        hard_review_coverage = true;
+        let tier = floors.tier.as_deref().unwrap_or("routine");
+        if hard_floor_tier
+            .as_deref()
+            .is_none_or(|current| risk_rank(tier) > risk_rank(current))
+        {
+            hard_floor_tier = Some(tier.to_owned());
+        }
+        for lens in floors.lenses {
+            if !hard_floor_lenses.contains(&lens) {
+                hard_floor_lenses.push(lens);
+            }
+        }
+    }
     let mut panel = selection_review.resolve_panel(&request, measured_size, &paths, false)?;
+    let coverage_minimum = hard_floor_tier
+        .as_deref()
+        .or(applied_floors.tier.as_deref())
+        .and_then(|tier| selection_review.select.by_risk.get(tier))
+        .and_then(|shape| selection_review.shapes.get(shape))
+        .or_else(|| selection_review.shapes.get(&panel.shape))
+        .map(|shape| shape.reviewers.iter().map(|reviewer| reviewer.count).sum())
+        .unwrap_or(panel.slots.len());
     if (!panel.minimum_family_counts.is_empty()
         || panel
             .slots
@@ -1252,6 +1294,17 @@ fn launch_resolvers_with(
     }
     resolvers.insert("review-panel".into(), lenses);
     resolvers.insert("review-panel-routes".into(), routes);
+    resolvers.insert(
+        "review-coverage-floor".into(),
+        vec![
+            serde_json::to_string(&json!({
+                "hard": hard_review_coverage,
+                "minimum": coverage_minimum,
+                "required_lenses": hard_floor_lenses,
+            }))
+            .map_err(|error| error.to_string())?,
+        ],
+    );
     Ok(resolvers)
 }
 
@@ -3225,6 +3278,7 @@ mod panel_tests {
 
     // Spec: docs/specs/routing.md#pinned-review-selection
     #[test]
+    // Spec: docs/specs/fabric.md#composite-settlement
     fn incomplete_pinned_review_metadata_uses_configured_unreadable_path_floors() {
         let mut review = provenant_routing::RoutingConfig::default().review;
         // Keep a non-default floor in the fixture so this catches a fallback
@@ -3273,6 +3327,10 @@ mod panel_tests {
             assert_eq!(resolvers["review-frame"], vec!["true".to_owned()]);
             assert_eq!(resolvers["review-verify"], vec!["true".to_owned()]);
             assert_eq!(resolvers["review-synthesis"], vec!["true".to_owned()]);
+            let floor: Value =
+                serde_json::from_str(&resolvers["review-coverage-floor"][0]).unwrap();
+            assert_eq!(floor["hard"], true);
+            assert!(!floor["required_lenses"].as_array().unwrap().is_empty());
             assert!(
                 resolvers["review-advice-correctness-spec"][0]
                     .contains("configured unreadable-path floors were applied")
@@ -3294,6 +3352,96 @@ mod panel_tests {
                 .all(|value| !value.contains("configured unreadable-path floors were applied"))
         );
         assert!(!quick["review-panel"].iter().any(|lens| lens == "tests"));
+        let quick_floor: Value = serde_json::from_str(&quick["review-coverage-floor"][0]).unwrap();
+        assert_eq!(quick_floor["hard"], false);
+
+        let protected = launch_resolvers_with(
+            &review,
+            &document,
+            ReviewDiffSelection::Captured(vec![provenant_run::ReviewDiffContext {
+                paths: vec!["credentials/token.json".into()],
+                numstat: Some("1\t0\tcredentials/token.json\0".into()),
+                tree: Some("tools/front-door/Cargo.toml".into()),
+            }]),
+            |_, _| Ok("fixture".into()),
+        )
+        .unwrap();
+        let floor: Value = serde_json::from_str(&protected["review-coverage-floor"][0]).unwrap();
+        assert_eq!(floor["hard"], true);
+        assert_eq!(floor["minimum"], 8);
+        assert!(
+            floor["required_lenses"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|lens| lens == "security-privacy")
+        );
+
+        let mut mixed_review = review.clone();
+        mixed_review.floors.get_mut("unknown").unwrap().lenses = vec!["adversarial".into()];
+        let mixed_paths = launch_resolvers_with(
+            &mixed_review,
+            &document,
+            ReviewDiffSelection::Captured(vec![provenant_run::ReviewDiffContext {
+                paths: vec!["credentials/token.json".into(), "src/unmatched.rs".into()],
+                numstat: Some(
+                    concat!("1\t0\tcredentials/token.json\0", "1\t0\tsrc/unmatched.rs\0").into(),
+                ),
+                tree: Some("tools/front-door/Cargo.toml".into()),
+            }]),
+            |_, _| Ok("fixture".into()),
+        )
+        .unwrap();
+        let floor: Value = serde_json::from_str(&mixed_paths["review-coverage-floor"][0]).unwrap();
+        assert_eq!(floor["hard"], true);
+        assert_eq!(floor["minimum"], 8);
+        assert!(
+            !floor["required_lenses"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|lens| lens == "adversarial")
+        );
+
+        let library = TemplateLibrary::bundled();
+        let compiled = provenant_fabric_runtime::graph::template::Compiler {
+            library: &library,
+            resolvers: &protected,
+        }
+        .compile(&json!({"id":"protected-panel", "use":"review-panel", "min_ok":1}))
+        .unwrap();
+        let root = compiled.composite.as_ref().unwrap();
+        assert!(root.soft_review_coverage);
+        assert!(root.hard_review_coverage);
+        assert!(
+            root.required_review_lenses
+                .contains(&"security-privacy".into())
+        );
+        let shape = root.nodes[0].composite.as_ref().unwrap();
+        let lenses = shape.nodes.iter().find(|node| node.id == "lenses").unwrap();
+        let lens_floor = lenses.composite.as_ref().unwrap();
+        assert!(lens_floor.soft_review_coverage);
+        assert!(lens_floor.hard_review_coverage);
+        assert_eq!(lens_floor.min_successful, Some(8));
+        assert!(
+            lens_floor
+                .required_review_lenses
+                .contains(&"security-privacy".into())
+        );
+
+        let docs_policy = launch_resolvers_with(
+            &review,
+            &document,
+            ReviewDiffSelection::Captured(vec![provenant_run::ReviewDiffContext {
+                paths: vec!["docs/guide.md".into()],
+                numstat: Some("1\t0\tdocs/guide.md\0".into()),
+                tree: Some("tools/front-door/Cargo.toml".into()),
+            }]),
+            |_, _| Ok("fixture".into()),
+        )
+        .unwrap();
+        let floor: Value = serde_json::from_str(&docs_policy["review-coverage-floor"][0]).unwrap();
+        assert_eq!(floor["hard"], false);
     }
 
     #[test]

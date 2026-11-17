@@ -169,6 +169,10 @@ A composite's state, outputs and error summary derive from its members while its
 - Why: recovery must validate a checkpoint against the topology it records.
 - Owner: `crates/fabric-runtime/src/graph/composites.rs`, `crates/fabric-runtime/src/graph/patch.rs`
 
+Launched review panels settle with partial coverage by default. When a selected lens fails, blocks or stops, the panel retains successful evidence, marks its verdict inconclusive unless blocking findings require changes, and names the unavailable lens in its result and coverage warning. Protected path floors carry their configured reviewer count and required lenses from launch into settlement; a shortfall against either fails the panel with `coverage_below_minimum`. An optional reviewer may be unavailable when the protected count and every required lens still succeed.
+- Why: one stopped reviewer must not discard useful independent coverage, while protected paths keep their declared minimum evidence.
+- Owner: `crates/routing/src/review.rs`, `crates/cli/src/fabric/graph_relay.rs`, `crates/fabric-runtime/src/graph/template.rs`, `crates/fabric-runtime/src/graph/composites.rs`
+
 ### Session-ready steering
 
 `provenant steer` accepts bounded, operation-idempotent instructions for the
