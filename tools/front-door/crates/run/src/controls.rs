@@ -869,6 +869,67 @@ mod reboot_tests {
     }
 
     #[test]
+    // Spec: docs/specs/run-settlement.md#continuation
+    fn resume_preserves_sealed_policy_after_project_config_changes() -> TestResult {
+        use provenant_records::policy::{Source, Strength};
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let mut run = crate::tests::input();
+        let mut settings = provenant_config::policy::Settings::default();
+        settings
+            .projects
+            .entry(context.project_id.to_string())
+            .or_default()
+            .rules
+            .insert("WRITE_SCOPE".into(), Strength::Refuse);
+        run.request.task.profile.launch_policy =
+            Some(settings.resolve(&context.project_id.to_string(), &Default::default()));
+        store.create(&run, &call)?;
+        store.withdraw(
+            run.attempt_id,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
+            Outcome::Cancelled,
+            "fixture",
+            clock.wall_now()?,
+            &call,
+        )?;
+        std::fs::write(
+            context.state_root.as_path().join("config.toml"),
+            format!(
+                "schema_version = 1\nprofile = 'economy'\n[domains.policy.projects.\"{}\".rules]\nWRITE_SCOPE = 'warn'\n",
+                context.project_id,
+            ),
+        )?;
+        let current = provenant_config::policy::read(
+            store.writer_registry(),
+            &context.project_id.to_string(),
+            &Default::default(),
+        );
+        assert_eq!(current.rule("WRITE_SCOPE").rule.strength, Strength::Warn);
+        assert_eq!(current.rule("WRITE_SCOPE").source, Source::Project);
+        let next = Resume {
+            prior: run.attempt_id,
+            expected_generation: 0,
+            operation_id: "policy-resume".parse()?,
+            attempt_id: AttemptId::from_bytes([9; 16]),
+            prompt: "Continue".into(),
+            created_at: clock.wall_now()?,
+            extend: Vec::new(),
+        };
+        store.resume(&next, &call)?;
+        let policy = store.resume_policy(next.attempt_id, &call)?;
+        assert_eq!(policy.rule("WRITE_SCOPE").rule.strength, Strength::Refuse);
+        assert_eq!(policy.rule("WRITE_SCOPE").source, Source::Project);
+        Ok(())
+    }
+
+    #[test]
     fn missing_terminal_attempt_directory_does_not_abort_reconcile()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -1931,6 +1992,7 @@ mod lineage_tests {
             store.context.state_root.as_path(),
             &store.attempt_dir(prior, false)?,
             RunStore::scope(&parent_record),
+            &provenant_records::policy::Policy::default(),
         )?;
 
         run_git(&info.path, &["config", "user.name", "Fixture"])?;
@@ -2149,6 +2211,7 @@ mod lineage_tests {
                 store.context.state_root.as_path(),
                 &store.attempt_dir(prior, false)?,
                 RunStore::scope(&record),
+                &provenant_records::policy::Policy::default(),
             )?;
             if origin == Some(WorktreeOrigin::Lane) {
                 let launch = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
@@ -2461,6 +2524,7 @@ mod lineage_tests {
             store.context.state_root.as_path(),
             &store.attempt_dir(continuation.attempt_id, false)?,
             RunStore::scope(&continuation),
+            &provenant_records::policy::Policy::default(),
         )?;
         let queued = store.record(prior, &call)?;
         assert!(matches!(
@@ -2509,6 +2573,7 @@ mod lineage_tests {
             store.context.state_root.as_path(),
             &store.attempt_dir(prior, false)?,
             RunStore::scope(&record),
+            &provenant_records::policy::Policy::default(),
         )?;
         let owner = worktrees::load_owner(&launch.worktree)?.ok_or("owner")?;
         std::fs::remove_file(

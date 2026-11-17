@@ -1074,7 +1074,13 @@ impl RunStore {
                     .holder_context()
                     .and_then(|context| context.host_delivery.as_ref())
                     .filter(|host| host.has_stop_publish());
+                let enforcement = crate::launch_policy(
+                    &self.writer_registry,
+                    &record.project_id.to_string(),
+                    &task,
+                );
                 let policy = crate::writer::TerminalPolicy {
+                    enforcement: &enforcement,
                     preservation_stop,
                     budget_stop,
                     work: trigger.map(|trigger| crate::writer::StopWorkPolicy {
@@ -2422,7 +2428,13 @@ impl RunStore {
                         .holder_context()
                         .and_then(|context| context.host_delivery.as_ref())
                         .filter(|host| host.has_stop_publish());
+                    let enforcement = crate::launch_policy(
+                        &self.writer_registry,
+                        &record.project_id.to_string(),
+                        &task,
+                    );
                     let policy = crate::writer::TerminalPolicy {
+                        enforcement: &enforcement,
                         preservation_stop,
                         budget_stop,
                         work: trigger.map(|trigger| crate::writer::StopWorkPolicy {
@@ -4077,7 +4089,12 @@ mod writer_recovery_tests {
                 execution.state_root.as_path(),
                 execution.project_id,
             )?;
-            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            launch.snapshot(
+                execution.state_root.as_path(),
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -4282,7 +4299,12 @@ mod writer_recovery_tests {
             execution.state_root.as_path(),
             execution.project_id,
         )?;
-        launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+        launch.snapshot(
+            execution.state_root.as_path(),
+            &attempt,
+            scope,
+            &provenant_records::policy::Policy::default(),
+        )?;
         let candidate = store.temporary_path(id, &call)?.join("candidate-0");
         std::fs::create_dir_all(&candidate)?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -4553,7 +4575,12 @@ mod writer_recovery_tests {
                 execution.state_root.as_path(),
                 execution.project_id,
             )?;
-            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            launch.snapshot(
+                execution.state_root.as_path(),
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -5238,7 +5265,12 @@ mod writer_recovery_tests {
                 execution.state_root.as_path(),
                 execution.project_id,
             )?;
-            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            launch.snapshot(
+                execution.state_root.as_path(),
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -5472,7 +5504,12 @@ mod writer_recovery_tests {
             execution.state_root.as_path(),
             execution.project_id,
         )?;
-        launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+        launch.snapshot(
+            execution.state_root.as_path(),
+            &attempt,
+            scope,
+            &provenant_records::policy::Policy::default(),
+        )?;
         let candidate = store.temporary_path(id, &call)?.join("candidate-0");
         std::fs::create_dir_all(&candidate)?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -5615,7 +5652,12 @@ mod writer_recovery_tests {
                 execution.state_root.as_path(),
                 execution.project_id,
             )?;
-            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            launch.snapshot(
+                execution.state_root.as_path(),
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -5785,16 +5827,18 @@ mod writer_recovery_tests {
         }
         if matches!(case, BudgetStopCase::StrictScope) {
             run.request.task.profile.write_scope = vec!["src".into()];
-            run.request
-                .task
-                .profile
-                .knobs
-                .insert("policy.WRITE_SCOPE".into(), serde_json::json!("refuse"));
-            run.request
-                .task
-                .profile
-                .overrides
-                .push("policy.WRITE_SCOPE=refuse".into());
+            let mut settings = provenant_config::policy::Settings::default();
+            settings
+                .projects
+                .entry(execution.project_id.to_string())
+                .or_default()
+                .rules
+                .insert(
+                    "WRITE_SCOPE".into(),
+                    provenant_records::policy::Strength::Refuse,
+                );
+            run.request.task.profile.launch_policy =
+                Some(settings.resolve(&execution.project_id.to_string(), &Default::default()));
         }
         store.create(&run, &call)?;
         let id = run.attempt_id;
@@ -5840,7 +5884,12 @@ mod writer_recovery_tests {
             execution.state_root.as_path(),
             execution.project_id,
         )?;
-        launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+        launch.snapshot(
+            execution.state_root.as_path(),
+            &attempt,
+            scope,
+            &provenant_records::policy::Policy::default(),
+        )?;
         let candidate = store.temporary_path(id, &call)?.join("candidate-0");
         std::fs::create_dir_all(&candidate)?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -6029,8 +6078,10 @@ mod writer_recovery_tests {
                 &recovery,
                 &mut settlement,
                 crate::writer::TerminalPolicy {
+                    enforcement: &store.resume_policy(id, &call)?,
                     budget_stop: true,
-                    ..Default::default()
+                    preservation_stop: None,
+                    work: None,
                 },
             );
             assert!(result.is_err());
@@ -6040,7 +6091,7 @@ mod writer_recovery_tests {
             )?;
             assert_eq!(report["code"], "WRITE_SCOPE");
             assert_eq!(report["strength"], "refuse");
-            assert_eq!(report["source"], "dispatch");
+            assert_eq!(report["source"], "project");
             assert!(
                 !report["out_of_scope_paths"]
                     .as_array()
@@ -6095,8 +6146,10 @@ mod writer_recovery_tests {
                 &recovery,
                 &mut settlement,
                 crate::writer::TerminalPolicy {
+                    enforcement: &store.resume_policy(id, &call)?,
                     budget_stop: true,
-                    ..Default::default()
+                    preservation_stop: None,
+                    work: None,
                 },
             );
             assert!(result.is_err(), "unsafe object store must remain unsettled");
@@ -6161,8 +6214,10 @@ mod writer_recovery_tests {
                 &recovery,
                 &mut settlement,
                 crate::writer::TerminalPolicy {
+                    enforcement: &store.resume_policy(id, &call)?,
                     budget_stop: true,
-                    ..Default::default()
+                    preservation_stop: None,
+                    work: None,
                 },
             );
             assert!(matches!(
@@ -6539,7 +6594,12 @@ mod writer_recovery_tests {
                 execution.state_root.as_path(),
                 execution.project_id,
             )?;
-            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            launch.snapshot(
+                execution.state_root.as_path(),
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -6642,7 +6702,12 @@ mod writer_recovery_tests {
                 execution.state_root.as_path(),
                 execution.project_id,
             )?;
-            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            launch.snapshot(
+                execution.state_root.as_path(),
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -6784,7 +6849,12 @@ mod writer_recovery_tests {
                 execution.state_root.as_path(),
                 execution.project_id,
             )?;
-            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            launch.snapshot(
+                execution.state_root.as_path(),
+                &attempt,
+                scope,
+                &provenant_records::policy::Policy::default(),
+            )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
             let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -7508,7 +7578,12 @@ mod writer_recovery_tests {
             execution.state_root.as_path(),
             execution.project_id,
         )?;
-        launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+        launch.snapshot(
+            execution.state_root.as_path(),
+            &attempt,
+            scope,
+            &provenant_records::policy::Policy::default(),
+        )?;
         let candidate = store.temporary_path(id, &call)?.join("candidate-0");
         std::fs::create_dir_all(&candidate)?;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;

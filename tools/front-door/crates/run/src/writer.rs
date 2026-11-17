@@ -316,8 +316,8 @@ fn resolve_writer_with(
     })
 }
 
-#[derive(Default)]
 pub(crate) struct TerminalPolicy<'a> {
+    pub enforcement: &'a provenant_records::policy::Policy,
     pub preservation_stop: Option<crate::settlement::PreservationStop>,
     pub budget_stop: bool,
     pub work: Option<StopWorkPolicy<'a>>,
@@ -3009,8 +3009,8 @@ impl WriterLaunch {
         state: &Path,
         attempt: &Directory,
         scope: provenant_records::custody::Scope,
+        policy: &provenant_records::policy::Policy,
     ) -> Result<()> {
-        let policy = writer_policy_for_attempt(state, attempt);
         seal_writer_ownership(attempt, &self.worktree)?;
         let utility = runtime(state)?;
         let head = self
@@ -3089,11 +3089,11 @@ impl WriterLaunch {
     }
     fn report_write_scope(
         &self,
-        state: &Path,
         attempt: &Directory,
         base: GitOid,
         head: GitOid,
         source: Option<&crate::objects::ObjectSource>,
+        policy: &provenant_records::policy::Policy,
     ) -> Result<()> {
         let Some(raw) =
             crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
@@ -3109,19 +3109,12 @@ impl WriterLaunch {
         if scope.is_empty() {
             return Ok(());
         }
-        let project = request
-            .task
-            .profile
-            .policy_project
-            .map(|project| project.to_string())
-            .unwrap_or_default();
-        let policy = crate::launch_policy(state, &project, &request.task);
         let saved = crate::artifacts::read_sealed(
             attempt,
             "policy-write-scope.json",
             provenant_records::run::TERMINAL_RECORD_LIMIT,
         )
-        .map_err(|_| invalid_write_scope_snapshot(&policy))?;
+        .map_err(|_| invalid_write_scope_snapshot(policy))?;
         if let Some(raw) = saved {
             let report: provenant_records::handoff::WriteScopeReport = crate::db::decode(&raw)?;
             let provenant_records::handoff::WriteScopeReport::Full {
@@ -3133,14 +3126,14 @@ impl WriterLaunch {
                 ..
             } = report
             else {
-                return Err(invalid_write_scope_snapshot(&policy));
+                return Err(invalid_write_scope_snapshot(policy));
             };
             if schema_version != 1
                 || code != "WRITE_SCOPE"
                 || saved_base != base.to_string()
                 || saved_head != head.to_string()
             {
-                return Err(invalid_write_scope_snapshot(&policy));
+                return Err(invalid_write_scope_snapshot(policy));
             }
             let effect = policy.check(
                 "WRITE_SCOPE",
@@ -3308,6 +3301,7 @@ impl WriterLaunch {
         policy: TerminalPolicy<'_>,
     ) -> Result<()> {
         let TerminalPolicy {
+            enforcement,
             preservation_stop,
             budget_stop,
             work,
@@ -3389,23 +3383,12 @@ impl WriterLaunch {
         };
         settlement.set_head(verified_tip)?;
         if let Err(error) =
-            self.report_write_scope(state, attempt, base, verified_tip, source.as_ref())
+            self.report_write_scope(attempt, base, verified_tip, source.as_ref(), enforcement)
         {
             if error.boundary_class() != provenant_records::diagnostic::BoundaryClass::None {
                 return Err(error);
             }
-            let request: crate::CanonicalRequest = crate::db::decode(
-                &crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
-                    .ok_or(RunError::NotFound)?,
-            )?;
-            let project = request
-                .task
-                .profile
-                .policy_project
-                .map(|project| project.to_string())
-                .unwrap_or_default();
-            let policy = crate::launch_policy(state, &project, &request.task);
-            let effect = policy.check(
+            let effect = enforcement.check(
                 "WRITE_SCOPE",
                 provenant_records::policy::Facts::violation(format!(
                     "scope report unavailable: {error}"
@@ -3457,13 +3440,6 @@ impl WriterLaunch {
                 &crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
                     .ok_or(RunError::NotFound)?,
             )?;
-            let project = request
-                .task
-                .profile
-                .policy_project
-                .map(|project| project.to_string())
-                .unwrap_or_default();
-            let policy = crate::launch_policy(state, &project, &request.task);
             let ancestor = crate::objects::publish_branch(
                 &git_executable,
                 self.worktree.repo(),
@@ -3471,7 +3447,7 @@ impl WriterLaunch {
                 base,
                 request.task.base_ref.as_deref(),
                 verified_tip,
-                &policy,
+                enforcement,
             )?;
             if let Some(warning) = ancestor.warning(self.branch.as_str(), base, verified_tip) {
                 // Best effort: the ancestor is also in the branch reflog.
@@ -3812,26 +3788,6 @@ fn invalid_write_scope_snapshot(policy: &provenant_records::policy::Policy) -> R
             None,
         ),
     )
-}
-
-fn writer_policy_for_attempt(
-    state: &Path,
-    attempt: &Directory,
-) -> provenant_records::policy::Policy {
-    let request = crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)
-        .ok()
-        .flatten()
-        .and_then(|raw| crate::db::decode::<crate::CanonicalRequest>(&raw).ok());
-    let Some(request) = request else {
-        return Default::default();
-    };
-    let project = request
-        .task
-        .profile
-        .policy_project
-        .map(|project| project.to_string())
-        .unwrap_or_default();
-    crate::launch_policy(state, &project, &request.task)
 }
 
 impl WriterLaunch {

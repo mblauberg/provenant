@@ -415,7 +415,12 @@ impl RunStore {
                     writer.base,
                 )
                 .and_then(|()| {
-                    writer.snapshot(self.context.state_root.as_path(), &writer_attempt, scope)
+                    writer.snapshot(
+                        self.context.state_root.as_path(),
+                        &writer_attempt,
+                        scope,
+                        &policy,
+                    )
                 })
             {
                 local_or_withdraw!(Err::<(), _>(typed_local(
