@@ -119,7 +119,7 @@ pub(crate) fn tick_launch_retry(
     project: provenant_core::ProjectId,
     graph: &str,
     workers: &'static dyn WorkerObserver,
-) -> std::io::Result<std::sync::mpsc::Receiver<Result<crate::tick::Graphs, String>>> {
+) -> std::io::Result<std::sync::mpsc::Receiver<Result<Option<crate::tick::Graphs>, String>>> {
     let resolved = resolved.clone();
     let graph = graph.to_owned();
     scheduler_task(move |cancel| {
@@ -147,20 +147,23 @@ pub(crate) fn tick_launch_retry(
                 .wall_now()
                 .map_err(|error| error.to_string())?;
             return tick_graphs_selected(&resolved, now, workers, Some((project, &graph)), cancel)
+                .map(Some)
                 .map_err(|error| error.to_string());
         }
         let _ = (workers, cancel);
         let Some(receipt) = receipt.map_err(|error| error.to_string())? else {
             // Receipt expiry is observation only. The worker retains custody;
             // its journal result is observable by this or a later waiter.
-            return Ok(crate::tick::Graphs::default());
+            return Ok(None);
         };
         let result: serde_json::Value =
             serde_json::from_slice(&receipt).map_err(|error| error.to_string())?;
         if let Some(error) = result.get("error").filter(|error| !error.is_null()) {
             return Err(error.to_string());
         }
-        serde_json::from_value(result["data"].clone()).map_err(|error| error.to_string())
+        serde_json::from_value(result["data"].clone())
+            .map(Some)
+            .map_err(|error| error.to_string())
     })
 }
 
