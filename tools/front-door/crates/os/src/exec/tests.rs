@@ -300,7 +300,7 @@ fn decoder_and_filter_failures_are_observable_without_fabricating_frames() {
 
     struct FailedFilter;
     impl CaptureFilter for FailedFilter {
-        fn filter(&mut self, _: &[u8]) -> Result<Vec<Vec<u8>>, FilterError> {
+        fn filter(&mut self, _: &[u8], _sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
             Err(FilterError)
         }
     }

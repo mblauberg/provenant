@@ -123,19 +123,15 @@ pub trait FrameSink: Send + Sync {
 #[error("capture filter failed")]
 pub struct FilterError;
 /// A filter returns zero or more frames per call, each at most `FRAME_LIMIT` bytes.
-/// Capture drains decided output before the next input and after EOF.
+/// Output is pushed to the caller's sink as soon as it is decided.
 pub trait CaptureFilter {
-    fn filter(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, FilterError>;
-
-    /// Drain decided output before supplying more input or finishing.
-    fn drain(&mut self) -> Result<Vec<Vec<u8>>, FilterError> {
-        Ok(Vec::new())
-    }
+    fn filter(&mut self, bytes: &[u8], sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError>;
 
     /// Flush bytes held until the end of the stream. Filters without buffered
     /// state can keep the default implementation.
-    fn finish(&mut self) -> Result<Vec<Vec<u8>>, FilterError> {
-        Ok(Vec::new())
+    fn finish(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+        let _ = sink;
+        Ok(())
     }
 }
 /// Memory-only bytes for one inherited read pipe. Only its descriptor number

@@ -902,26 +902,48 @@ impl DecisionQueue {
         }
     }
 }
-fn append_frame_bytes(frames: &mut Vec<Vec<u8>>, mut bytes: &[u8]) {
-    while !bytes.is_empty() {
-        if frames.last().is_none_or(|frame| frame.len() == FRAME_LIMIT) {
-            frames.push(Vec::new());
-        }
-        let frame = frames.last_mut().expect("frame exists");
-        let count = bytes.len().min(FRAME_LIMIT - frame.len());
-        frame.extend_from_slice(&bytes[..count]);
-        bytes = &bytes[count..];
-    }
+struct FrameEmitter<'a> {
+    sink: &'a mut dyn FnMut(&[u8]),
+    buf: Vec<u8>,
 }
-fn append_frame_repeat(frames: &mut Vec<Vec<u8>>, byte: u8, mut count: usize) {
-    while count > 0 {
-        if frames.last().is_none_or(|frame| frame.len() == FRAME_LIMIT) {
-            frames.push(Vec::new());
+
+impl<'a> FrameEmitter<'a> {
+    fn new(sink: &'a mut dyn FnMut(&[u8])) -> Self {
+        Self {
+            sink,
+            buf: Vec::with_capacity(FRAME_LIMIT),
         }
-        let frame = frames.last_mut().expect("frame exists");
-        let take = count.min(FRAME_LIMIT - frame.len());
-        frame.resize(frame.len() + take, byte);
-        count -= take;
+    }
+
+    fn push_bytes(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let count = bytes.len().min(FRAME_LIMIT - self.buf.len());
+            self.buf.extend_from_slice(&bytes[..count]);
+            bytes = &bytes[count..];
+            if self.buf.len() == FRAME_LIMIT {
+                (self.sink)(&self.buf);
+                self.buf.clear();
+            }
+        }
+    }
+
+    fn push_repeat(&mut self, byte: u8, mut count: usize) {
+        while count > 0 {
+            let take = count.min(FRAME_LIMIT - self.buf.len());
+            self.buf.resize(self.buf.len() + take, byte);
+            count -= take;
+            if self.buf.len() == FRAME_LIMIT {
+                (self.sink)(&self.buf);
+                self.buf.clear();
+            }
+        }
+    }
+
+    fn flush(&mut self) {
+        if !self.buf.is_empty() {
+            (self.sink)(&self.buf);
+            self.buf.clear();
+        }
     }
 }
 
@@ -932,7 +954,6 @@ pub struct Redactor {
     tokens: TokenScanner,
     assignments: AssignmentScanner,
     failed: bool,
-    finishing: bool,
     decisions: [DecisionQueue; 3],
     redaction_run: bool,
     emitted_source: usize,
@@ -970,7 +991,6 @@ impl Redactor {
             tokens: TokenScanner::default(),
             assignments: AssignmentScanner::default(),
             failed: false,
-            finishing: false,
             decisions: std::array::from_fn(|_| DecisionQueue::default()),
             redaction_run: false,
             emitted_source: 0,
@@ -984,14 +1004,18 @@ impl Redactor {
         self.literals.matched || self.tokens.matched || self.assignments.matched
     }
 
-    fn filter_frames(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, FilterError> {
+    fn filter_frames(
+        &mut self,
+        bytes: &[u8],
+        sink: &mut dyn FnMut(&[u8]),
+    ) -> Result<(), FilterError> {
         if self.failed {
             return Err(FilterError);
         }
         if bytes.len() > FRAME_LIMIT {
             return Err(FilterError);
         }
-        let mut frames = Vec::new();
+        let mut emitter = FrameEmitter::new(sink);
         for chunk in bytes.chunks(FRAME_LIMIT) {
             let mut literals = Vec::new();
             let mut tokens = Vec::new();
@@ -1005,16 +1029,16 @@ impl Redactor {
                 .extend(self.assignments.insertions.drain(..));
             self.decisions[0].extend(literals);
             self.queue_tokens(tokens);
-            self.emit_decided(&mut frames)?;
+            self.emit_decided(&mut emitter)?;
         }
-        Ok(frames)
+        emitter.flush();
+        Ok(())
     }
 
-    fn finish_frames(&mut self) -> Result<Vec<Vec<u8>>, FilterError> {
+    fn finish_frames(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
         if self.failed {
             return Err(FilterError);
         }
-        self.finishing = true;
         let mut literals = Vec::new();
         let mut tokens = Vec::new();
         self.literals.finish(&mut literals);
@@ -1027,9 +1051,14 @@ impl Redactor {
             .extend(self.assignments.insertions.drain(..));
         self.decisions[0].extend(literals);
         self.queue_tokens(tokens);
-        let mut frames = Vec::new();
-        self.emit_decided(&mut frames)?;
-        Ok(frames)
+        let mut emitter = FrameEmitter::new(sink);
+        self.emit_decided(&mut emitter)?;
+        emitter.flush();
+        if self.decisions.iter().any(|queue| !queue.runs.is_empty()) {
+            self.failed = true;
+            return Err(FilterError);
+        }
+        Ok(())
     }
 
     fn queue_tokens(&mut self, tokens: Vec<(u8, bool)>) {
@@ -1041,16 +1070,12 @@ impl Redactor {
         self.decisions[1].extend(tokens);
     }
 
-    fn emit_decided(&mut self, frames: &mut Vec<Vec<u8>>) -> Result<(), FilterError> {
-        while self.decisions.iter().all(|queue| !queue.runs.is_empty())
-            && frames
-                .last()
-                .is_none_or(|frame| frame.len() < FRAME_LIMIT - REDACTED.len().max(7))
-        {
+    fn emit_decided(&mut self, emitter: &mut FrameEmitter<'_>) -> Result<(), FilterError> {
+        while self.decisions.iter().all(|queue| !queue.runs.is_empty()) {
             if self.insertions.front() == Some(&self.emitted_source) {
                 self.insertions.pop_front();
                 if !self.redaction_run {
-                    append_frame_bytes(frames, REDACTED);
+                    emitter.push_bytes(REDACTED);
                 }
                 self.redaction_run = true;
             }
@@ -1088,7 +1113,7 @@ impl Redactor {
                             left -= count;
                         }
                     }
-                    append_frame_bytes(frames, b"Bearer ");
+                    emitter.push_bytes(b"Bearer ");
                     self.redaction_run = false;
                     self.emitted_source += len;
                     continue;
@@ -1108,8 +1133,6 @@ impl Redactor {
             if let Some(&start) = self.insertions.front() {
                 count = count.min(start - self.emitted_source);
             }
-            count =
-                count.min(FRAME_LIMIT - frames.last().map_or(0, Vec::len) - REDACTED.len().max(7));
             let masked = self
                 .decisions
                 .iter()
@@ -1124,10 +1147,10 @@ impl Redactor {
             }
             if masked {
                 if !self.redaction_run {
-                    append_frame_bytes(frames, REDACTED);
+                    emitter.push_bytes(REDACTED);
                 }
             } else {
-                append_frame_repeat(frames, byte, count);
+                emitter.push_repeat(byte, count);
             }
             self.redaction_run = masked;
             self.emitted_source += count;
@@ -1144,16 +1167,13 @@ impl Redactor {
 pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
     let mut safe = Vec::new();
+    let mut sink = |frame: &[u8]| {
+        safe.extend_from_slice(frame);
+    };
     for chunk in bytes.chunks(8192) {
-        safe.extend(redactor.filter(chunk)?.into_iter().flatten());
-        while let Some(frame) = redactor.drain()?.into_iter().next() {
-            safe.extend(frame);
-        }
+        redactor.filter(chunk, &mut sink)?;
     }
-    safe.extend(redactor.finish()?.into_iter().flatten());
-    while let Some(frame) = redactor.drain()?.into_iter().next() {
-        safe.extend(frame);
-    }
+    redactor.finish(&mut sink)?;
     Ok(safe)
 }
 
@@ -1441,22 +1461,24 @@ fn filter_pass(
                 Err(_) => return Ok(false),
             }
         }
-        for frame in redactor.filter(&buffer[..read])? {
-            write_staged(staged.as_deref_mut(), &frame)?;
-        }
-        while let Some(frame) = redactor.drain()?.into_iter().next() {
-            write_staged(staged.as_deref_mut(), &frame)?;
-        }
+        let mut write_err = Ok(());
+        redactor.filter(&buffer[..read], &mut |frame| {
+            if write_err.is_ok() {
+                write_err = write_staged(staged.as_deref_mut(), frame);
+            }
+        })?;
+        write_err?;
     }
     if !utf8_tail.is_empty() {
         return Ok(false);
     }
-    for frame in redactor.finish()? {
-        write_staged(staged.as_deref_mut(), &frame)?;
-    }
-    while let Some(frame) = redactor.drain()?.into_iter().next() {
-        write_staged(staged.as_deref_mut(), &frame)?;
-    }
+    let mut write_err = Ok(());
+    redactor.finish(&mut |frame| {
+        if write_err.is_ok() {
+            write_err = write_staged(staged.as_deref_mut(), frame);
+        }
+    })?;
+    write_err?;
     let after = source.metadata().map_err(|_| FilterError)?;
     if !opened.unchanged(&after) {
         return Err(FilterError);
@@ -1540,25 +1562,12 @@ pub fn bounded_line(text: &str, max_chars: usize) -> String {
 }
 
 impl CaptureFilter for Redactor {
-    fn filter(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, FilterError> {
-        self.filter_frames(bytes)
+    fn filter(&mut self, bytes: &[u8], sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+        self.filter_frames(bytes, sink)
     }
 
-    fn finish(&mut self) -> Result<Vec<Vec<u8>>, FilterError> {
-        self.finish_frames()
-    }
-
-    fn drain(&mut self) -> Result<Vec<Vec<u8>>, FilterError> {
-        let mut frames = Vec::new();
-        self.emit_decided(&mut frames)?;
-        if self.finishing
-            && frames.is_empty()
-            && self.decisions.iter().any(|queue| !queue.runs.is_empty())
-        {
-            self.failed = true;
-            return Err(FilterError);
-        }
-        Ok(frames)
+    fn finish(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+        self.finish_frames(sink)
     }
 }
 
@@ -1569,28 +1578,13 @@ mod tests {
 
     fn joined(redactor: &mut Redactor, chunks: &[&[u8]]) -> Vec<u8> {
         let mut output = Vec::new();
+        let mut sink = |frame: &[u8]| {
+            output.extend_from_slice(frame);
+        };
         for chunk in chunks {
-            output.extend(
-                redactor
-                    .filter(chunk)
-                    .expect("bounded input")
-                    .into_iter()
-                    .flatten(),
-            );
-            while let Some(frame) = redactor.drain().expect("drain").into_iter().next() {
-                output.extend(frame);
-            }
+            redactor.filter(chunk, &mut sink).expect("bounded input");
         }
-        output.extend(
-            redactor
-                .finish()
-                .expect("bounded finish")
-                .into_iter()
-                .flatten(),
-        );
-        while let Some(frame) = redactor.drain().expect("drain").into_iter().next() {
-            output.extend(frame);
-        }
+        redactor.finish(&mut sink).expect("bounded finish");
         output
     }
 
@@ -2121,22 +2115,14 @@ mod tests {
     // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     fn checked_frames(redactor: &mut Redactor, chunks: &[&[u8]]) -> Vec<u8> {
         let mut output = Vec::new();
-        for chunk in chunks {
-            for frame in redactor.filter(chunk).expect("filter succeeds") {
-                assert!(frame.len() <= FRAME_LIMIT);
-                output.extend(frame);
-            }
-            while let Some(frame) = redactor.drain().expect("drain").into_iter().next() {
-                output.extend(frame);
-            }
-        }
-        for frame in redactor.finish().expect("finish succeeds") {
+        let mut sink = |frame: &[u8]| {
             assert!(frame.len() <= FRAME_LIMIT);
-            output.extend(frame);
+            output.extend_from_slice(frame);
+        };
+        for chunk in chunks {
+            redactor.filter(chunk, &mut sink).expect("filter succeeds");
         }
-        while let Some(frame) = redactor.drain().expect("drain").into_iter().next() {
-            output.extend(frame);
-        }
+        redactor.finish(&mut sink).expect("finish succeeds");
         output
     }
 
@@ -2271,27 +2257,18 @@ mod tests {
         opener.extend(b"\"secret");
         let mut redactor = Redactor::new([]).expect("redactor");
         let mut output = Vec::new();
+        let mut sink = |frame: &[u8]| {
+            assert!(frame.len() <= FRAME_LIMIT);
+            output.extend_from_slice(frame);
+        };
         for chunk in opener
             .chunks(8192)
             .chain(slashes.chunks(8192))
             .chain(std::iter::once(b"\" end".as_slice()))
         {
-            let frames = redactor.filter(chunk).expect("filter");
-            assert!(frames.iter().map(Vec::len).sum::<usize>() <= FRAME_LIMIT);
-            output.extend(frames.into_iter().flatten());
-            loop {
-                let frames = redactor.drain().expect("drain");
-                assert!(frames.iter().map(Vec::len).sum::<usize>() <= FRAME_LIMIT);
-                if frames.is_empty() {
-                    break;
-                }
-                output.extend(frames.into_iter().flatten());
-            }
+            redactor.filter(chunk, &mut sink).expect("filter");
         }
-        output.extend(redactor.finish().expect("finish").into_iter().flatten());
-        while let Some(frame) = redactor.drain().expect("drain").into_iter().next() {
-            output.extend(frame);
-        }
+        redactor.finish(&mut sink).expect("finish");
         let mut expected = b"password=".to_vec();
         expected.extend(&slashes);
         expected.extend(b"\"[REDACTED]");
