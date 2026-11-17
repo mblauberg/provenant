@@ -315,7 +315,7 @@ impl PrepareFixture {
     fn terminal_via_inner(
         &self,
         _remote: &str,
-        _base_ref: Option<&str>,
+        base_ref: Option<&str>,
         resume_after_publish: bool,
         advance_after_publish: bool,
         budget_stop: bool,
@@ -421,6 +421,15 @@ impl PrepareFixture {
                 format!("{tip}\n"),
             )?;
         }
+        // Publication reads the sealed request for its launch base ref.
+        let mut request = tests::input().request;
+        request.task.base_ref = base_ref.map(str::to_owned);
+        crate::artifacts::seal(
+            &attempt,
+            "request.json",
+            &crate::db::bytes(&request)?,
+            RECORD_LIMIT,
+        )?;
         recovery.prepare_settlement()?;
         let mut settlement =
             crate::settlement::Guard::claim(&attempt, scope, &clock)?.ok_or("settlement owner")?;

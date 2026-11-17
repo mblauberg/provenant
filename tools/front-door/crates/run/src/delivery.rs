@@ -346,12 +346,14 @@ impl HostDeliveryContext {
                 "stop publishing requires a branch push",
             ));
         }
-        let mut separate = self.clone();
-        separate.bound = None;
-        separate.stop_publish_bound = None;
-        let prepared = separate.prepare(writer, request)?;
-        self.stop_publish_bound = prepared.bound;
-        Ok(self)
+        self.bound = None;
+        self.stop_publish_bound = None;
+        // The prepared context carries the validated host tools and
+        // environment that stop publication needs; only its binding moves to
+        // the stop-publish slot so it never doubles as a launch binding.
+        let mut prepared = self.prepare(writer, request)?;
+        prepared.stop_publish_bound = prepared.bound.take();
+        Ok(prepared)
     }
     /// Rebuild stop-publish transport from its immutable launch binding.
     pub(crate) fn prepare_stop_publish_recovery(
