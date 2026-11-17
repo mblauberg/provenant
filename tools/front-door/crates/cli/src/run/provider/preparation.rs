@@ -3736,7 +3736,10 @@ pub(super) fn prepare_candidates(
         let lanes = provenant_config::LaneBuildSettings::read(state_root).unwrap_or_default();
         let total = provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
         let extras = run::PreambleExtras {
-            verification: Some(run::VerificationResolution::resolve(&task.profile, prompt_text)),
+            verification: Some(run::VerificationResolution::resolve(
+                &task.profile,
+                prompt_text,
+            )),
             build_cap: Some(run::BuildCap {
                 slots: lanes.build_limit(total),
                 source: lanes.build_limit_source(),

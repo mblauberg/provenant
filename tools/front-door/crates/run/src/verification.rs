@@ -131,9 +131,7 @@ fn display_source(source: LimitSource) -> &'static str {
 /// Stop cause when guidance and the brief name different scopes. The preamble
 /// follows the brief; this names both if the lane stops on the disagreement.
 pub fn conflict_cause(guidance: &str, brief: &str) -> String {
-    format!(
-        "verification scope conflict: lane guidance is {guidance}; the brief declares {brief}"
-    )
+    format!("verification scope conflict: lane guidance is {guidance}; the brief declares {brief}")
 }
 
 #[cfg(test)]
@@ -143,12 +141,8 @@ mod tests {
     #[test]
     fn a_brief_scope_overrides_and_names_its_source() {
         let mut profile = HarnessProfile::default();
-        profile
-            .knobs
-            .insert(KNOB.into(), "check".into());
-        profile
-            .knob_sources
-            .insert(KNOB.into(), LimitSource::Host);
+        profile.knobs.insert(KNOB.into(), "check".into());
+        profile.knob_sources.insert(KNOB.into(), LimitSource::Host);
         let resolved = VerificationResolution::resolve(
             &profile,
             "Do the work.\nVerification scope: targeted\n",
@@ -176,8 +170,7 @@ mod tests {
         profile
             .knob_sources
             .insert(KNOB.into(), LimitSource::Launch);
-        let resolved =
-            VerificationResolution::resolve(&profile, "Verification scope: full\n");
+        let resolved = VerificationResolution::resolve(&profile, "Verification scope: full\n");
         let cause = resolved.conflict.expect("conflict");
         assert!(cause.contains("lane guidance is check"));
         assert!(cause.contains("the brief declares full"));

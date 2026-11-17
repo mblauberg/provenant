@@ -456,7 +456,10 @@ fn run_with(
         return report(&message);
     }
     let mut held = None;
-    let disabled = gate.settings.as_ref().is_some_and(|settings| settings.slots == 0);
+    let disabled = gate
+        .settings
+        .as_ref()
+        .is_some_and(|settings| settings.slots == 0);
     if gate_this && !disabled {
         let admission = provenant_config::dispatch_port_backend(
             &backend,
@@ -469,11 +472,9 @@ fn run_with(
         );
         match admission {
             Ok(Some(slot)) => held = Some(slot),
-            Ok(None) if matches!(&backend, provenant_config::PortBackend::Builtin) => {
-                warning(
-                    "bounded wait ended with every build slot busy; building without one. Cargo manages its own build locks",
-                )
-            }
+            Ok(None) if matches!(&backend, provenant_config::PortBackend::Builtin) => warning(
+                "bounded wait ended with every build slot busy; building without one. Cargo manages its own build locks",
+            ),
             Err(error) if matches!(&backend, provenant_config::PortBackend::Builtin) => {
                 warning(&error)
             }

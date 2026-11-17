@@ -323,7 +323,13 @@ pub fn lane_preamble(
     ci_scope: Option<crate::ResolvedCiScope>,
     handoff: Option<&Path>,
 ) -> String {
-    lane_preamble_with(model_guidance, limits, ci_scope, handoff, &PreambleExtras::default())
+    lane_preamble_with(
+        model_guidance,
+        limits,
+        ci_scope,
+        handoff,
+        &PreambleExtras::default(),
+    )
 }
 
 fn lane_preamble_with(

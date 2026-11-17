@@ -6,11 +6,11 @@ mod board;
 mod completion;
 pub use board::{BoardLane, BoardPage};
 pub use completion::{
-    handoff_progress_guidance, lane_preamble, lane_preamble_with_policy, sanitise_handoff,
-    sanitise_handoff_result, BuildCap, PreambleExtras,
+    BuildCap, PreambleExtras, handoff_progress_guidance, lane_preamble, lane_preamble_with_policy,
+    sanitise_handoff, sanitise_handoff_result,
 };
 mod verification;
-pub use verification::{conflict_cause, VerificationResolution};
+pub use verification::{VerificationResolution, conflict_cause};
 mod controls;
 mod correlation;
 pub use correlation::{WorkCoverage, WorkSelector, validate_work};

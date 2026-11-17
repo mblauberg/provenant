@@ -152,6 +152,7 @@ impl BuildSlots {
 
     /// Poll until a slot is free or `timeout` elapses. `Ok(None)` means every
     /// slot stayed busy for the whole wait.
+    #[allow(clippy::disallowed_methods)] // A real wall-clock wait on another process's lock.
     pub fn acquire_within(
         &self,
         limit: u64,
@@ -165,7 +166,8 @@ impl BuildSlots {
             if start.elapsed() >= timeout {
                 return Ok(None);
             }
-            let slice = std::time::Duration::from_millis(25).min(timeout.saturating_sub(start.elapsed()));
+            let slice =
+                std::time::Duration::from_millis(25).min(timeout.saturating_sub(start.elapsed()));
             std::thread::sleep(slice);
         }
     }
