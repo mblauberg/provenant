@@ -957,6 +957,27 @@ fn declared_stream_contract_preserves_long_command_tail_but_rejects_provider_lin
 
 // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
 #[test]
+fn raw_contract_preserves_backslashes_and_malformed_diagnostic_tail() {
+    let spec = provenant_records::AdapterSpec::get("command").unwrap();
+    let mut filter = holder::stdout_filter(spec.stdout).unwrap();
+    let input = br#"C:\tmp {broken password=secret_value_456 tail diagnostic
+"#;
+    let mut output = Vec::new();
+    for chunk in input.chunks(7) {
+        filter
+            .filter(chunk, &mut |b| output.extend_from_slice(b))
+            .unwrap();
+    }
+    filter.finish(&mut |b| output.extend_from_slice(b)).unwrap();
+    assert_eq!(
+        output,
+        br#"C:\tmp {broken password=[REDACTED] tail diagnostic
+"#
+    );
+}
+
+// Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+#[test]
 fn excessive_nesting_is_a_line_numbered_malformed_frame() {
     use provenant_os::exec::CaptureFilter;
     let route = run::RouteRecord {

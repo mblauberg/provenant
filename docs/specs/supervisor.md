@@ -306,14 +306,14 @@ from the opener's own up to the length of the backslash run, agrees is a close.
 No fixed depth cap applies, because a value can be escaped one layer deeper than
 any cap. Without a definite close, masking continues through the end of the raw line. Scanning resumes
 after a definite close or the line end.
-Provider JSONL uses a streaming tokenizer: keys and containers retain their
-structure, decoded string values pass through the plain redactor, and filtered
+Provider JSONL uses a streaming tokenizer: containers retain their structure,
+decoded string values pass through the plain redactor, and filtered
 bytes are JSON-escaped again. Escaped literals (including surrogate pairs) are
 matched after decoding. Credential-named fields mask scalar values, including leaves in nested
 containers, while retaining keys and container structure. The credential context
 survives malformed-input fallback and masks to the raw line boundary. Literal
-matches in non-string scalars become JSON string masks. Keys are protocol
-structure and are never redacted, even when a configured literal matches a key.
+matches in non-string scalars become JSON string masks. Keys are scanned after decoding and a matching key is replaced by the marker.
+Keys exceeding the bounded prefix are conservatively masked as a whole.
 Strings stream in bounded pieces; no line-size fallback changes their grammar.
 Tokenizer memory is bounded by a 128-level nesting stack, a 4 KiB decoded piece,
 a 16 KiB scalar prefix, and the plain redactor's existing detector bounds.

@@ -21,17 +21,20 @@ struct QuotaFrames {
 /// Admission binds the adapter before capture first asks for filtered bytes.
 struct StdoutFilter {
     evidence: Arc<Mutex<Option<QuotaCapture>>>,
-    inner: Option<provenant_confinement::redact::JsonlRedactor>,
+    inner: Option<Box<dyn provenant_os::exec::CaptureFilter>>,
 }
 
 pub(super) fn stdout_filter(
     contract: provenant_records::StreamContract,
-) -> Result<provenant_confinement::redact::JsonlRedactor, provenant_os::exec::FilterError> {
-    use provenant_confinement::redact::JsonlRedactor;
+) -> Result<Box<dyn provenant_os::exec::CaptureFilter>, provenant_os::exec::FilterError> {
+    use provenant_confinement::redact::{JsonlRedactor, Redactor};
     use provenant_records::StreamContract;
     match contract {
-        StreamContract::ProviderJsonl => JsonlRedactor::provider([]),
-        StreamContract::Raw => JsonlRedactor::new([]),
+        StreamContract::ProviderJsonl => JsonlRedactor::provider([])
+            .map(|r| Box::new(r) as Box<dyn provenant_os::exec::CaptureFilter>),
+        StreamContract::Raw => {
+            Redactor::new([]).map(|r| Box::new(r) as Box<dyn provenant_os::exec::CaptureFilter>)
+        }
     }
     .map_err(|_| provenant_os::exec::FilterError)
 }
@@ -39,8 +42,10 @@ pub(super) fn stdout_filter(
 impl StdoutFilter {
     fn inner(
         &mut self,
-    ) -> Result<&mut provenant_confinement::redact::JsonlRedactor, provenant_os::exec::FilterError>
-    {
+    ) -> Result<
+        &mut (dyn provenant_os::exec::CaptureFilter + 'static),
+        provenant_os::exec::FilterError,
+    > {
         use provenant_os::exec::FilterError;
         if self.inner.is_none() {
             let evidence = self.evidence.lock().map_err(|_| FilterError)?;
@@ -50,7 +55,7 @@ impl StdoutFilter {
             self.inner = Some(stdout_filter(spec.stdout)?);
         }
         match self.inner.as_mut() {
-            Some(filter) => Ok(filter),
+            Some(filter) => Ok(filter.as_mut()),
             None => Err(FilterError),
         }
     }

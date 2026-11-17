@@ -43,6 +43,8 @@ struct StringToken {
     decoded: Vec<u8>,
     escape: Vec<u8>,
     utf8: Vec<u8>,
+    key_source: Vec<u8>,
+    key_overflow: bool,
 }
 
 struct Scalar {
@@ -91,7 +93,7 @@ impl Number {
 
 /// A bounded streaming tokenizer. Sink frames, not total output per call, are
 /// bounded by CaptureFilter. Values stream independently of provider line size.
-/// Keys are preserved verbatim, including configured literals in key names.
+/// Keys are scanned as decoded strings and masked as a whole when sensitive.
 pub struct JsonlRedactor {
     secrets: Vec<Vec<u8>>,
     inner: Redactor,
@@ -182,6 +184,9 @@ impl JsonlRedactor {
         out: &mut FrameEmitter<'_>,
     ) -> Result<(), FilterError> {
         if token.key {
+            if !token.key_overflow {
+                token.decoded.extend_from_slice(bytes);
+            }
             for &b in bytes {
                 if token.tail.len() == ASSIGNMENT_RUN {
                     token.tail.remove(0);
@@ -232,8 +237,14 @@ impl JsonlRedactor {
         mut token: StringToken,
         out: &mut FrameEmitter<'_>,
     ) -> Result<(), FilterError> {
-        if token.key {
-            out.push_bytes(&[b]);
+        if token.key && !(token.escape.is_empty() && b == b'"') && !token.key_overflow {
+            if token.key_source.len() == MAX_SECRET_LENGTH {
+                token.key_source.clear();
+                token.decoded.clear();
+                token.key_overflow = true;
+            } else {
+                token.key_source.push(b);
+            }
         }
         if token.escape.is_empty() && (b >= 0x80 || !token.utf8.is_empty()) {
             token.utf8.push(b);
@@ -292,6 +303,18 @@ impl JsonlRedactor {
         } else if b == b'"' {
             if token.key {
                 self.mask_value = credential_key(&token.tail);
+                if !token.key_overflow {
+                    self.inner.filter(&token.decoded, &mut |_| {})?;
+                    self.inner.finish(&mut |_| {})?;
+                }
+                if token.key_overflow || self.inner.has_redaction() {
+                    out.push_bytes(REDACTED);
+                    self.has_redaction = true;
+                } else {
+                    out.push_bytes(&token.key_source);
+                }
+                self.reset_inner()?;
+                out.push_bytes(b"\"");
                 self.positions.last_mut().ok_or(FilterError)?.position = Position::ObjectColon;
             } else {
                 self.flush_string(&mut token, out)?;
@@ -440,6 +463,8 @@ impl JsonlRedactor {
                     decoded: Vec::new(),
                     escape: Vec::new(),
                     utf8: Vec::new(),
+                    key_source: Vec::new(),
+                    key_overflow: false,
                 });
             }
             (
@@ -484,6 +509,8 @@ impl JsonlRedactor {
                             decoded: Vec::new(),
                             escape: Vec::new(),
                             utf8: Vec::new(),
+                            key_source: Vec::new(),
+                            key_overflow: false,
                         });
                     }
                     b'-' | b'0'..=b'9' | b't' | b'f' | b'n' => {
@@ -691,6 +718,19 @@ mod tests {
                 let parsed = serde_json::from_slice(&output).expect("valid JSON remains valid");
                 same_structure(&value, &parsed);
             }
+        }
+    }
+
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    #[test]
+    fn credential_keys_are_masked_as_valid_json() {
+        let input = br#"{"\u0067hp_abcdefghijklmnopqrstuvwxyz":"safe","ordinary":"value"}"#;
+        for seed in 1..9 {
+            let (output, changed) = filtered(input, seed);
+            assert!(changed);
+            let parsed: Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(parsed["[REDACTED]"], "safe");
+            assert_eq!(parsed["ordinary"], "value");
         }
     }
 
