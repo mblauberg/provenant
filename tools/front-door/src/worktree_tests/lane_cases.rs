@@ -332,11 +332,14 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 ".cargo/credentials",
                 "Library/Keychains/login.keychain-db",
             ]
-            .map(|relative| provenant_core::CredentialRoot {
-                path: home.join(relative),
-                scope: provenant_core::CredentialScope::Exact,
-                source: "fixture host credential".into(),
-                kind: provenant_core::CredentialKind::Store,
+            .map(|relative| provenant_core::CredentialDeclaration {
+                root: provenant_core::CredentialRoot {
+                    path: home.join(relative),
+                    scope: provenant_core::CredentialScope::Exact,
+                    source: "fixture host credential".into(),
+                    kind: provenant_core::CredentialKind::Store,
+                },
+                inventory: provenant_core::CredentialInventory::Unknown,
             }),
         );
         host.github_roots = vec![home.join(".config/gh")];

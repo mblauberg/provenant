@@ -809,7 +809,7 @@ pub(super) fn credential_roots(
     settings: &provenant_providers::accounts::Settings,
     lane_roots: &[&Path],
 ) -> Result<provenant_core::CredentialRoots, String> {
-    use provenant_core::{CredentialInventory, CredentialKind, CredentialRoots, CredentialScope};
+    use provenant_core::{CredentialInventory, CredentialRoots, CredentialScope};
     let declarations = credential_declarations(registry, home, settings);
     let resolve = |path: &Path| {
         provenant_confinement::permissions::resolve_boundary_path(path)
