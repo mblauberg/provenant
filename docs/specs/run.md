@@ -129,8 +129,12 @@ A writer's declared stop settles as `stopped_early`, or as `blocked` when its
 final handoff is blocked. The node's advance code records whether the stop left
 committed work: `writer_declared_stop` when the writer's head moved past its
 source commit, and `stopped_no_work` otherwise, whether the worktree is clean or
-holds uncommitted edits. Both codes take the same next step: a restart in place
-on the retained worktree, or the chair.
+holds uncommitted edits. Both codes take the `stopped_early` row below unless
+the node overrides it: a new route, which restarts the writer in a fresh session
+on its retained worktree. A junior route escalates to senior; otherwise the
+restart uses a declared route not yet launched, and an alias route may resolve
+again. With no such route, or with the continuation budget spent, the writer
+pauses for the chair. A `blocked` stop always goes to the chair.
 - Why: the chair must see whether a restart resumes committed work, without a
   second stop rule that could treat the two differently.
 - Owner: `crates/fabric-runtime/src/graph/transitions.rs`,
