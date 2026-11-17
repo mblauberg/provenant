@@ -206,6 +206,10 @@ declarations and refuses state roots inside dedicated stores. A declaration
 exactly at HOME does not displace Provenant's normal home-relative state tree;
 exact credential declarations there retain their hold. This host-state rule
 does not classify or narrow the later launch boundary.
+Generic and sandbox credential refusals use `CredentialRoots::select_refusal`
+to name the most specific applicable declaration and its origin: an exact path
+match first, then the deepest enclosing or enclosed store, independent of
+declaration order. Equal-depth ties use stable declaration fields.
 
 Mandatory credential denials use `DenialRoot`, independently of grant
 validation: denial paths must be absolute, normalised and below the filesystem

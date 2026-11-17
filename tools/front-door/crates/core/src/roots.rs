@@ -451,17 +451,15 @@ impl CredentialRoots {
         read: bool,
         endpoint_denials: bool,
     ) -> Option<&CredentialRoot> {
-        // Report the enclosed endpoint's origin rather than the enclosing
-        // shared store when a requested carve-out would expose that endpoint.
-        if let Some(endpoint) = self.entries.iter().find(|root| {
-            root.path == path
+        self.select_refusal(path, |root| {
+            // Endpoints cannot inherit either read or lane carve-outs.
+            if root.path == path
                 || (scope == CredentialScope::Subtree
                     && (!endpoint_denials || root.scope == CredentialScope::Subtree)
                     && root.path.starts_with(path))
-        }) {
-            return Some(endpoint);
-        }
-        self.entries.iter().find(|root| {
+            {
+                return true;
+            }
             if ((read && endpoint_denials)
                 || self
                     .lane_exceptions(root)
@@ -476,12 +474,42 @@ impl CredentialRoots {
             {
                 return false;
             }
-            root.path == path
-                || (scope == CredentialScope::Subtree
-                    && (!endpoint_denials || root.scope == CredentialScope::Subtree)
-                    && root.path.starts_with(path))
-                || (root.scope == CredentialScope::Subtree && path.starts_with(&root.path))
+            root.scope == CredentialScope::Subtree && path.starts_with(&root.path)
         })
+    }
+
+    /// Attribute a refusal among applicable declarations: an exact path match
+    /// first, then the deepest enclosing or enclosed store. Stable tie-breaks
+    /// keep the reported path and source independent of declaration order.
+    /// Callers retain their own admission rules in `applies`.
+    pub fn select_refusal(
+        &self,
+        path: &Path,
+        mut applies: impl FnMut(&CredentialRoot) -> bool,
+    ) -> Option<&CredentialRoot> {
+        self.entries
+            .iter()
+            .filter(|root| applies(root))
+            .max_by(|left, right| {
+                (left.path == path)
+                    .cmp(&(right.path == path))
+                    .then_with(|| {
+                        left.path
+                            .components()
+                            .count()
+                            .cmp(&right.path.components().count())
+                    })
+                    .then_with(|| {
+                        (left.scope == CredentialScope::Exact)
+                            .cmp(&(right.scope == CredentialScope::Exact))
+                    })
+                    .then_with(|| left.path.cmp(&right.path))
+                    .then_with(|| left.source.cmp(&right.source))
+                    .then_with(|| {
+                        (left.kind == CredentialKind::Store)
+                            .cmp(&(right.kind == CredentialKind::Store))
+                    })
+            })
     }
 
     /// A read of a standalone Codex release package beneath a declared Codex
@@ -915,6 +943,71 @@ mod tests {
             Err(RootError::Resolution { .. })
         ));
         Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+    fn refusal_reports_the_most_specific_declaration_in_either_order() {
+        use CredentialScope::{Exact, Subtree};
+
+        let shared = Path::new("/fixture/shared");
+        let nested = shared.join("nested");
+        let lane = nested.join("lane");
+        // The first declaration is the expected attribution, regardless of
+        // insertion order. The lane reproduces discovery outside its carve-out.
+        for (grant, declarations) in [
+            (
+                nested.join("tool"),
+                vec![(nested.clone(), Subtree), (shared.to_owned(), Subtree)],
+            ),
+            (
+                lane.clone(),
+                vec![
+                    (lane.join("store/deep"), Subtree),
+                    (lane.join("store"), Subtree),
+                    (shared.to_owned(), Subtree),
+                ],
+            ),
+            (
+                lane.clone(),
+                vec![
+                    (lane.join("store/auth"), Exact),
+                    (lane.join("store"), Subtree),
+                    (shared.to_owned(), Subtree),
+                ],
+            ),
+            (
+                lane.clone(),
+                vec![
+                    (lane.clone(), Exact),
+                    (lane.join("store/deep"), Subtree),
+                    (shared.to_owned(), Subtree),
+                ],
+            ),
+        ] {
+            for reverse in [false, true] {
+                let expected_path = declarations[0].0.clone();
+                let mut declarations: Vec<_> = declarations.iter().enumerate().collect();
+                if reverse {
+                    declarations.reverse();
+                }
+                let mut roots = CredentialRoots::default();
+                for (index, (path, scope)) in declarations {
+                    roots.add(
+                        path.clone(),
+                        *scope,
+                        format!("source {index}"),
+                        CredentialKind::Store,
+                    );
+                }
+                let roots = roots.with_lane_roots(vec![lane.clone()]);
+                for read in [false, true] {
+                    let refusal = roots.refusal(&grant, Subtree, read).unwrap();
+                    assert_eq!(refusal.path, expected_path);
+                    assert_eq!(refusal.source, "source 0");
+                }
+            }
+        }
     }
 
     /// The package exception never absorbs another declaration, whichever

@@ -15,50 +15,60 @@ fn fixture_credentials() -> provenant_core::CredentialRoots {
 }
 
 #[test]
-// Spec: docs/specs/fabric.md#sources-and-read-roots
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
 fn read_refusal_reports_the_specific_credential_declaration_in_either_order() {
     use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
 
     let shared = PathBuf::from("/fixture/shared");
-    let lane = shared.join("lane");
-    for (grant, store, store_scope) in [
+    let nested = shared.join("nested");
+    let lane = nested.join("lane");
+    // The first declaration is the expected attribution. Enclosed exact files
+    // keep independent sandbox denials; enclosed subtree stores refuse reads.
+    for (grant, declarations, lane_roots) in [
         (
-            lane.join("endpoint"),
-            lane.join("endpoint"),
-            CredentialScope::Exact,
+            nested.join("tool"),
+            vec![
+                (nested.clone(), CredentialScope::Subtree),
+                (shared.clone(), CredentialScope::Subtree),
+            ],
+            vec![],
         ),
         (
             lane.clone(),
-            lane.join("dedicated"),
-            CredentialScope::Subtree,
+            vec![
+                (lane.join("store/deep"), CredentialScope::Subtree),
+                (lane.join("store/deep/auth"), CredentialScope::Exact),
+                (lane.join("store"), CredentialScope::Subtree),
+                (shared.clone(), CredentialScope::Subtree),
+            ],
+            vec![lane.clone()],
+        ),
+        (
+            lane.join("endpoint"),
+            vec![
+                (lane.join("endpoint"), CredentialScope::Exact),
+                (lane.join("endpoint/deeper"), CredentialScope::Subtree),
+                (shared.clone(), CredentialScope::Subtree),
+            ],
+            vec![lane.clone()],
         ),
     ] {
-        for shared_first in [true, false] {
-            let mut credentials = CredentialRoots::default();
-            let add_shared = |roots: &mut CredentialRoots| {
-                roots.add(
-                    shared.clone(),
-                    CredentialScope::Subtree,
-                    "shared source",
-                    CredentialKind::Store,
-                );
-            };
-            let add_specific = |roots: &mut CredentialRoots| {
-                roots.add(
-                    store.clone(),
-                    store_scope,
-                    "specific source",
-                    CredentialKind::Store,
-                );
-            };
-            if shared_first {
-                add_shared(&mut credentials);
-                add_specific(&mut credentials);
-            } else {
-                add_specific(&mut credentials);
-                add_shared(&mut credentials);
+        for reverse in [false, true] {
+            let expected_path = declarations[0].0.clone();
+            let mut declarations: Vec<_> = declarations.iter().enumerate().collect();
+            if reverse {
+                declarations.reverse();
             }
-            let credentials = credentials.with_lane_roots(vec![lane.clone()]);
+            let mut credentials = CredentialRoots::default();
+            for (index, (path, scope)) in declarations {
+                credentials.add(
+                    path.clone(),
+                    *scope,
+                    format!("source {index}"),
+                    CredentialKind::Store,
+                );
+            }
+            let credentials = credentials.with_lane_roots(lane_roots.clone());
             let error = validate_read_exec_grant(
                 &PathGrant {
                     path: grant.clone(),
@@ -69,10 +79,11 @@ fn read_refusal_reports_the_specific_credential_declaration_in_either_order() {
             .unwrap_err();
             assert!(matches!(error, PermissionError::CredentialStore {
                 path, root, declaration_source
-            } if path == grant && root == store && declaration_source == "specific source"));
+            } if path == grant && root == expected_path && declaration_source == "source 0"));
         }
     }
 }
+
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
