@@ -373,7 +373,7 @@ impl BoundFacade<'_> {
                 "peer does not support inbox operations".into(),
             )),
             Err(failure) => {
-                let code = match failure.error {
+                let code = match *failure.error {
                     FacadeError::LaunchUnknown { .. } => "ambiguous_outcome",
                     FacadeError::PeerVersion | FacadeError::PeerProtocolMismatch { .. } => {
                         "UNSUPPORTED_OWNER"

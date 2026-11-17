@@ -788,8 +788,10 @@ impl std::fmt::Display for GraphStructuralLimit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "limits.{} reached; set by domains.fabric.graph.limits",
-            self.key.name()
+            "limits.{}={} reached ({}); set by domains.fabric.graph.limits",
+            self.key.name(),
+            self.max,
+            self.actual
         )
     }
 }
@@ -827,6 +829,10 @@ pub enum AdmissionError {
     Composite(String),
     #[error("{0}")]
     Plan(String),
+    #[error("node {node}: dependency cycle")]
+    Cycle { node: refusal::GraphIdentifier },
+    #[error("node {node}: writer worktree")]
+    WriterWorktree { node: refusal::GraphIdentifier },
     #[error("{0}")]
     StructuralLimit(GraphStructuralLimit),
     #[error("{0}")]

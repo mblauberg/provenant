@@ -866,10 +866,10 @@ fn execute(
                 "peer reply does not match the request",
             ));
         }
-        Err(PeerFailure {
-            error: FacadeError::LaunchUnknown { operation_id },
-            ..
-        }) => {
+        Err(PeerFailure { error, .. }) if matches!(*error, FacadeError::LaunchUnknown { .. }) => {
+            let FacadeError::LaunchUnknown { operation_id } = *error else {
+                unreachable!()
+            };
             return Err(Refusal::new(
                 Outcome::Error,
                 "LAUNCH_UNKNOWN",

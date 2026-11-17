@@ -9,6 +9,10 @@ pub enum CandidateError {
     Input,
     #[error("graph candidate schema or topology is invalid")]
     Plan,
+    #[error("node {node}: dependency cycle")]
+    Cycle { node: refusal::GraphIdentifier },
+    #[error("node {node}: writer worktree")]
+    WriterWorktree { node: refusal::GraphIdentifier },
     #[error("graph candidate checkpoint is invalid")]
     Checkpoint,
     #[error("{0}")]
@@ -24,6 +28,18 @@ pub enum CandidateError {
     },
     #[error("{0}")]
     Envelope(GraphEnvelopeLimit),
+}
+
+impl CandidateError {
+    fn from_admission(error: AdmissionError) -> Self {
+        match error {
+            AdmissionError::Cycle { node } => Self::Cycle { node },
+            AdmissionError::WriterWorktree { node } => Self::WriterWorktree { node },
+            // Other admission errors can contain caller text. Retain only a
+            // closed cause until their diagnostic facts have a typed owner.
+            _ => Self::Plan,
+        }
+    }
 }
 
 pub struct AdmittedCandidate {
@@ -122,10 +138,15 @@ pub fn admit_candidate(
     }
     let expanded =
         plans::expand(document, &all, expansions, &generous).map_err(|_| CandidateError::Plan)?;
-    validate_schema(&expanded).map_err(|_| CandidateError::Plan)?;
-    let (plan, _) = validate_flat_plan(&expanded, &generous).map_err(|_| CandidateError::Plan)?;
-    validate_output_kinds(&expanded).map_err(|_| CandidateError::Plan)?;
-    scan(&serde_json::to_value(&expanded).map_err(|_| CandidateError::Plan)?)?;
+    validate_schema(&expanded).map_err(CandidateError::from_admission)?;
+    let (plan, _) =
+        validate_flat_plan(&expanded, &generous).map_err(CandidateError::from_admission)?;
+    validate_output_kinds(&expanded).map_err(CandidateError::from_admission)?;
+    // Expansion with no substitutions commonly retains the exact source.
+    // It has already passed both decoded-field and encoded-record scans.
+    if expanded != *document {
+        scan(&serde_json::to_value(&expanded).map_err(|_| CandidateError::Plan)?)?;
+    }
     if let Some(limit) = structural_limit(&expanded, &plan, limits) {
         let node = expanded.nodes.iter().find(|node| match limit.key {
             GraphLimitKey::NodePromptBytes => node.content_bytes() > limit.max,

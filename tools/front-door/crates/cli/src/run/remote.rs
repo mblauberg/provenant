@@ -46,7 +46,7 @@ fn peer_failure_fail(failure: PeerFailure) -> Fail {
         Some(detail) => format!("{error} ({detail})"),
         None => error.to_string(),
     };
-    if matches!(error, FacadeError::LaunchUnknown { .. }) {
+    if matches!(*error, FacadeError::LaunchUnknown { .. }) {
         return Fail::new(
             Status::Error,
             ErrorKind::LaunchUnknown,
@@ -59,7 +59,7 @@ fn peer_failure_fail(failure: PeerFailure) -> Fail {
     let (status, kind) = crate::fabric::facade_outcome(&error);
     let projection = error.diagnostic();
     Fail {
-        detail: Some(Box::new(error)),
+        detail: Some(error),
         projection: Some(Box::new(projection)),
         ..Fail::new(status, kind, format!("peer: {message}"))
     }

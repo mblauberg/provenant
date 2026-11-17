@@ -149,7 +149,7 @@ fn compile_error(error: provenant_fabric_runtime::graph::template::CompileError)
 /// A compile failure that reached graph admission keeps its typed refusal, so
 /// a template launch reads the same message as the raw document it compiles to.
 /// Failures before admission stay a redacted graph-input reason.
-fn graph_patch_error(error: patch::PatchError) -> FacadeError {
+pub(super) fn graph_patch_error(error: patch::PatchError) -> FacadeError {
     use provenant_fabric_runtime::coordination::facade::GraphRelayCause;
     if let Some(candidate) = error.candidate.clone() {
         return FacadeError::graph_candidate(*candidate);

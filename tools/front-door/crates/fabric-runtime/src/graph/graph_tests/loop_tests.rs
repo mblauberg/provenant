@@ -1086,7 +1086,7 @@ fn loop_host_ceiling_rejects_third_round_before_saving_and_can_accept() {
     let document = fixture("exhaust");
     let limits = tight_limits();
     let mut journal = MemoryJournal::default();
-    let paused = advance_with_budget(
+    advance_with_budget(
         &document,
         &mut reviews(&["VERDICT: FAIL", "VERDICT: FAIL"]),
         &mut journal,

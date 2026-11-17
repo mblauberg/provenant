@@ -983,7 +983,7 @@ impl Factory {
                     &self.context.config.graph.limits,
                     self.context.port_table.worktree_layout.clone(),
                 )
-                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                .map_err(super::interface::graph_patch_error)?;
             }
             let document = if is_retry {
                 retry_document.as_ref().ok_or(FacadeError::NotFound)?

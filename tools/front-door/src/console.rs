@@ -405,8 +405,8 @@ fn compose_peers(
             }
             continue;
         };
-        let unsupported = matches!(&result, Err(failure) if matches!(failure.error, FacadeError::PeerVersion | FacadeError::PeerProtocolMismatch { .. } | FacadeError::ContinuationUnsupported));
-        let unavailable = matches!(&result, Err(failure) if matches!(failure.error, FacadeError::HomeUnavailable | FacadeError::Timeout));
+        let unsupported = matches!(&result, Err(failure) if matches!(*failure.error, FacadeError::PeerVersion | FacadeError::PeerProtocolMismatch { .. } | FacadeError::ContinuationUnsupported));
+        let unavailable = matches!(&result, Err(failure) if matches!(*failure.error, FacadeError::HomeUnavailable | FacadeError::Timeout));
         if board {
             use provenant_cli::console::peer::{BoardObservation as O, PeerBoard};
             let observation = match result {

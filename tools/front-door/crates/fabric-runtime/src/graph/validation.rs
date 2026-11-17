@@ -283,6 +283,11 @@ fn plan_error(reason: &str) -> AdmissionError {
 }
 
 fn node_plan_error(node: &GraphNode, reason: impl std::fmt::Display) -> AdmissionError {
+    if reason.to_string() == "writer worktree"
+        && let Ok(node) = node.id.clone().try_into()
+    {
+        return AdmissionError::WriterWorktree { node };
+    }
     AdmissionError::Plan(format!("node {}: {reason}", node.id))
 }
 
@@ -831,9 +836,9 @@ pub(super) fn validate_flat_plan(
             .find(|(index, _)| indegree[*index] > 0)
             .map(|(_, node)| node.id.as_str())
             .unwrap_or("unknown");
-        return Err(AdmissionError::Plan(format!(
-            "node {node}: dependency cycle"
-        )));
+        return Err(AdmissionError::Cycle {
+            node: node.to_owned().try_into().map_err(plan_error)?,
+        });
     }
     land::validate_relations(&nodes, &positions).map_err(AdmissionError::Plan)?;
 

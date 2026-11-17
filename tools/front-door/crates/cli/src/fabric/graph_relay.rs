@@ -46,7 +46,19 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
             rule: provenant_fabric_runtime::graph::refusal::SecretRule::Secret,
         }),
         "cycle" => Some(Cause::Cycle),
-        "conflict" | "stale_revision" | "idempotency_conflict" => Some(Cause::Conflict),
+        "conflict" | "stale_revision" | "idempotency_conflict" => {
+            return ServiceError::Cli {
+                code: code.into(),
+                message: FacadeError::GraphRelayRefused {
+                    refusal_code: code.into(),
+                    detail: Some(InvalidInputDetail::GraphRelayCause(Cause::Conflict)),
+                }
+                .diagnostic()
+                .detail
+                .unwrap_or_default(),
+                data: Value::Null,
+            };
+        }
         "invalid" if message.ends_with("writer worktree") => Some(Cause::WriterWorktree),
         "invalid"
             if message == "writer composite children require explicit per-node work bindings" =>

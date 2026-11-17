@@ -191,6 +191,12 @@ pub enum DispatchRefusalFact {
     GraphSchema,
     GraphComposite,
     GraphPlan,
+    GraphCycle {
+        node: crate::graph::refusal::GraphIdentifier,
+    },
+    GraphWriterWorktree {
+        node: crate::graph::refusal::GraphIdentifier,
+    },
     GraphStructuralLimit(crate::graph::GraphStructuralLimit),
     GraphExtension(crate::graph::refusal::ExtensionCause),
     GraphNodeLimit {
@@ -880,6 +886,12 @@ impl FacadeError {
     pub fn graph_candidate(error: crate::graph::CandidateError) -> Self {
         use crate::graph::CandidateError;
         match error {
+            CandidateError::Cycle { node } => {
+                Self::graph_admission(crate::graph::AdmissionError::Cycle { node })
+            }
+            CandidateError::WriterWorktree { node } => {
+                Self::graph_admission(crate::graph::AdmissionError::WriterWorktree { node })
+            }
             CandidateError::Secret(cause) => Self::invalid(InvalidInputDetail::GraphRelayCause(
                 GraphRelayCause::Secret {
                     field: cause.field,
@@ -917,6 +929,12 @@ impl FacadeError {
             AdmissionError::Schema(_) => DispatchRefusalFact::GraphSchema,
             AdmissionError::Composite(_) => DispatchRefusalFact::GraphComposite,
             AdmissionError::Plan(_) => DispatchRefusalFact::GraphPlan,
+            AdmissionError::WriterWorktree { node } => {
+                DispatchRefusalFact::GraphWriterWorktree { node: node.clone() }
+            }
+            AdmissionError::Cycle { node } => {
+                DispatchRefusalFact::GraphCycle { node: node.clone() }
+            }
             AdmissionError::StructuralLimit(limit) => {
                 DispatchRefusalFact::GraphStructuralLimit(*limit)
             }
@@ -926,8 +944,14 @@ impl FacadeError {
             }
         };
         Self::DispatchRefused {
-            reason: match fact {
+            reason: match &fact {
                 DispatchRefusalFact::GraphStructuralLimit(limit) => limit.to_string(),
+                DispatchRefusalFact::GraphCycle { node } => {
+                    format!("node {node}: dependency cycle")
+                }
+                DispatchRefusalFact::GraphWriterWorktree { node } => {
+                    format!("node {node}: writer worktree")
+                }
                 DispatchRefusalFact::GraphEnvelope => {
                     "graph checkpoint would exceed its size limit".into()
                 }
@@ -1014,6 +1038,14 @@ impl FacadeError {
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphExtension(cause)), .. } => {
                 projected = projected.detail(cause.to_string()).next(cause.next_action());
             }
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphWriterWorktree { node }), .. } => {
+                projected = projected.detail(format!("node {node}: writer worktree"))
+                    .next("pass --worktree PATH for an existing worktree, or --branch B --base REF to create one");
+            }
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphCycle { node }), .. } => {
+                projected = projected.detail(format!("node {node}: dependency cycle"))
+                    .next("remove the cyclic dependency and retry");
+            }
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphPlan), .. } => {
                 projected = projected.detail("graph plan schema or topology is invalid")
                     .next("inspect the graph schema and dependencies, then retry");
@@ -1028,7 +1060,7 @@ impl FacadeError {
                     DispatchRefusalFact::CheckedOutWriter => ("the branch is already checked out", "run `provenant worktree list`, inspect custody, then select the existing checkout with --worktree"),
                     DispatchRefusalFact::GraphSchema => ("graph document schema_version is invalid", "use a schema version that supports the document fields"),
                     DispatchRefusalFact::GraphComposite => ("graph composite or loop expansion is invalid", "inspect the composite or loop definition"),
-                    DispatchRefusalFact::GraphPlan => unreachable!(),
+                    DispatchRefusalFact::GraphPlan | DispatchRefusalFact::GraphCycle { .. } | DispatchRefusalFact::GraphWriterWorktree { .. } => unreachable!(),
                     DispatchRefusalFact::GraphStructuralLimit(_) => unreachable!(),
                     DispatchRefusalFact::GraphExtension(_) => unreachable!(),
                     DispatchRefusalFact::GraphNodeLimit { .. } => unreachable!(),

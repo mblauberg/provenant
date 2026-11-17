@@ -2,6 +2,32 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// A caller identifier may be disclosed only after its grammar has been checked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct GraphIdentifier(String);
+
+impl TryFrom<String> for GraphIdentifier {
+    type Error = &'static str;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if super::valid_node_identifier(&value) && super::patch::scan_for_secrets(&value).is_ok() {
+            Ok(Self(value))
+        } else {
+            Err("invalid graph identifier")
+        }
+    }
+}
+impl From<GraphIdentifier> for String {
+    fn from(value: GraphIdentifier) -> Self {
+        value.0
+    }
+}
+impl fmt::Display for GraphIdentifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SchemaField {
@@ -138,37 +164,43 @@ pub fn scan_value(
     value: &serde_json::Value,
     scan: &dyn Fn(&str) -> Result<(), String>,
 ) -> Result<(), SecretCause> {
-    fn walk(
-        value: &serde_json::Value,
+    fn walk<'a>(
+        value: &'a serde_json::Value,
         path: &SchemaPath,
         scan: &dyn Fn(&str) -> Result<(), String>,
+        scanned: &mut std::collections::HashSet<&'a str>,
     ) -> Result<(), SecretCause> {
         let refuse = |field| SecretCause {
             field,
             rule: SecretRule::Secret,
         };
         match value {
-            serde_json::Value::String(text) if scan(text).is_err() => Err(refuse(path.clone())),
+            serde_json::Value::String(text) if scanned.insert(text) && scan(text).is_err() => {
+                Err(refuse(path.clone()))
+            }
             serde_json::Value::Array(items) => {
                 for (index, item) in items.iter().enumerate() {
-                    walk(item, &path.index(index), scan)?;
+                    walk(item, &path.index(index), scan, scanned)?;
                 }
                 Ok(())
             }
             serde_json::Value::Object(fields) => {
                 for (key, value) in fields {
                     let child = path.key(key);
-                    if scan(key).is_err() {
+                    if scanned.insert(key) && scan(key).is_err() {
                         return Err(refuse(child));
                     }
-                    walk(value, &child, scan)?;
+                    walk(value, &child, scan, scanned)?;
                 }
                 Ok(())
             }
             _ => Ok(()),
         }
     }
-    walk(value, &SchemaPath::default(), scan)?;
+    // Snapshots can retain the same prompt in nodes, template bindings and
+    // submission patches. Its first occurrence supplies the schema position;
+    // rescanning identical text cannot discover another secret.
+    walk(value, &SchemaPath::default(), scan, &mut Default::default())?;
     // Keep the whole-record scan too: a scanner may recognise encoded or
     // cross-field forms that are absent from individual decoded strings.
     if let Ok(encoded) = serde_json::to_string(value) {
@@ -342,6 +374,33 @@ impl ExtensionCause {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    #[test]
+    fn disclosed_graph_identifiers_require_the_grammar_on_every_entry() {
+        for value in [
+            "a",
+            "loop.revise--2_review",
+            "",
+            "caller text",
+            "key=value",
+            "x/y",
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        ] {
+            let constructed = GraphIdentifier::try_from(value.to_owned());
+            let decoded = serde_json::from_value::<GraphIdentifier>(serde_json::json!(value));
+            assert_eq!(
+                constructed.is_ok(),
+                super::super::valid_node_identifier(value)
+                    && super::super::patch::scan_for_secrets(value).is_ok()
+            );
+            assert_eq!(decoded.is_ok(), constructed.is_ok());
+            if let Ok(identifier) = constructed {
+                assert_eq!(identifier.to_string(), value);
+                assert_eq!(serde_json::to_value(identifier).unwrap(), value);
+            }
+        }
+    }
+
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     #[test]
     fn schema_paths_never_resume_schema_names_inside_caller_maps() {

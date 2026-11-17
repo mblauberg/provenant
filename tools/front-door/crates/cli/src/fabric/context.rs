@@ -1044,13 +1044,13 @@ fn active_harness_client() -> Option<&'static str> {
 /// peer and cause. The detail is message text only; the wire codes are unchanged.
 #[derive(Debug)]
 pub struct PeerFailure {
-    pub error: FacadeError,
+    pub error: Box<FacadeError>,
     pub detail: Option<String>,
 }
 impl PeerFailure {
     fn new(error: FacadeError, detail: impl Into<String>) -> Self {
         Self {
-            error,
+            error: Box::new(error),
             detail: Some(detail.into()),
         }
     }
@@ -1058,7 +1058,7 @@ impl PeerFailure {
 impl From<FacadeError> for PeerFailure {
     fn from(error: FacadeError) -> Self {
         Self {
-            error,
+            error: Box::new(error),
             detail: None,
         }
     }
@@ -1132,7 +1132,7 @@ pub fn peer_failure(destination: &str, error: &PeerError) -> PeerFailure {
         _ => None,
     };
     PeerFailure {
-        error: FacadeError::from(error),
+        error: Box::new(FacadeError::from(error)),
         detail,
     }
 }

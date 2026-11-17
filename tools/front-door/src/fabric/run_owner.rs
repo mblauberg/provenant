@@ -1214,7 +1214,7 @@ impl BinaryRunOwner<'_> {
                 budget,
                 cancel,
             )
-            .map_err(|failure| failure.error)
+            .map_err(|failure| *failure.error)
     }
 }
 impl BinaryRunOwner<'_> {
