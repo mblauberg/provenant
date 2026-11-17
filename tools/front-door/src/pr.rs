@@ -530,7 +530,7 @@ fn merge_with(
         if status == Some(405) {
             return Err(wait::failure(
                 "MERGE_NOT_ALLOWED",
-                "pull request is not mergeable; next: resolve the mergeability problem and retry",
+                "pull request is not mergeable",
             ));
         }
         return Err(format!("merge request failed: {error}").into());
