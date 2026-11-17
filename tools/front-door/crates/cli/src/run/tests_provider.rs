@@ -163,12 +163,11 @@ fn unknown_opencode_error_settles_unclassified() {
         Path::new("/nonexistent"),
     ).unwrap();
     assert_eq!(decoded.outcome, run::Outcome::Unclassified);
-    assert!(
-        decoded
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("fixture failure"))
-    );
+    // The adapter diagnostic names the route and error type; the provider's
+    // own untrusted text is not copied once a diagnostic explains it.
+    let reason = decoded.reason.as_deref().unwrap_or_default();
+    assert!(reason.contains("type=unknown"), "{reason}");
+    assert!(!reason.contains("fixture failure"), "{reason}");
 }
 
 #[test]

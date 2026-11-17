@@ -3765,7 +3765,10 @@ mod tests {
         let protected = explain(&protected_head, &base)?;
         assert_eq!(protected.review_base.as_deref(), Some(base.as_str()));
         let protected_lenses = &protected.template_resolvers["review-panel"];
-        assert!(protected_lenses.len() >= crucial_reviewers, "{protected_lenses:?}");
+        assert!(
+            protected_lenses.len() >= crucial_reviewers,
+            "{protected_lenses:?}"
+        );
         for lens in ["correctness-spec", "reliability", "security-privacy"] {
             assert!(
                 protected_lenses.iter().any(|selected| selected == lens),
@@ -3842,7 +3845,10 @@ mod tests {
             crate::worktree_tests::git(&rig, &["commit-tree", &tree, "-m", "disconnected head"])?;
         let incomplete = explain(&disconnected_head, &disconnected_base)?;
         let incomplete_lenses = &incomplete.template_resolvers["review-panel"];
-        assert!(incomplete_lenses.len() >= crucial_reviewers, "{incomplete_lenses:?}");
+        assert!(
+            incomplete_lenses.len() >= crucial_reviewers,
+            "{incomplete_lenses:?}"
+        );
         for lens in ["correctness-spec", "reliability", "security-privacy"] {
             assert!(
                 incomplete_lenses.iter().any(|selected| selected == lens),

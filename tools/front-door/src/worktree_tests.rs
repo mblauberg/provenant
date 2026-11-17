@@ -625,10 +625,7 @@ impl provenant_supervisor::Holder for FixtureHolder<'_> {
     // Every defaulted method must forward: a swallowed `outcome` leaves the
     // record non-terminal, so the wrapped `terminal` refuses and settlement
     // retries until the test times out.
-    fn has_live_children(
-        &self,
-        context: &[u8],
-    ) -> provenant_supervisor::custody::Result<bool> {
+    fn has_live_children(&self, context: &[u8]) -> provenant_supervisor::custody::Result<bool> {
         self.0.has_live_children(context)
     }
     fn provider_exited(
@@ -646,10 +643,7 @@ impl provenant_supervisor::Holder for FixtureHolder<'_> {
     ) -> provenant_supervisor::custody::Result<()> {
         self.0.budget_warning(context, tokens, budget)
     }
-    fn budget_clean_point(
-        &self,
-        context: &[u8],
-    ) -> provenant_supervisor::custody::Result<bool> {
+    fn budget_clean_point(&self, context: &[u8]) -> provenant_supervisor::custody::Result<bool> {
         self.0.budget_clean_point(context)
     }
     fn budget_crossed(
