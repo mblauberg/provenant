@@ -5885,7 +5885,15 @@ mod tests {
                 )
                 .err()
                 .ok_or("context credential was accepted")?;
-            assert_eq!(error, FacadeError::InvalidInput { detail: None });
+            assert_eq!(
+                error,
+                FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
+                    provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
+                        field: serde_json::from_value(json!([{"field":"context"}, "key"]))?,
+                        rule: SecretRule::Secret,
+                    },
+                )),
+            );
             assert!(!serde_json::to_string(&error)?.contains(secret));
             assert!(!serde_json::to_string(&error.diagnostic())?.contains(secret));
             assert!(!rig.project.join(".provenant/scratch/graphs").exists());

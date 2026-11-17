@@ -47,7 +47,9 @@ mod graph_writer_admission_tests {
                     value["nodes"][0]["depends_on"] = serde_json::json!(["two"]);
                     value["nodes"][1]["depends_on"] = serde_json::json!(["one"]);
                 }
-                "plan" => value["nodes"][0]["depends_on"] = serde_json::json!(["missing"]),
+                // Missing dependencies fail earlier during composite name resolution.
+                // A zero deadline reaches the flat-plan validator instead.
+                "plan" => value["nodes"][0]["deadline_seconds"] = serde_json::json!(0),
                 "writer" => value["nodes"][0]["access"] = serde_json::json!("worktree_write"),
                 "output" => {
                     value["nodes"][1]["depends_on"] = serde_json::json!(["one"]);
