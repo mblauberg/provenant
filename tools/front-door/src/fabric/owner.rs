@@ -513,28 +513,35 @@ fn graph_ask_item(
     service: &provenant_fabric_runtime::inbox::InboxService<'_>,
     scope: &provenant_fabric_runtime::graph::AskScope<'_>,
     cancel: &CancelToken,
-) -> Result<provenant_records::inbox::InboxItem, FacadeError> {
+) -> Result<Option<provenant_records::inbox::InboxItem>, FacadeError> {
     use provenant_fabric_runtime::inbox::{InboxFilter, InboxInput, InboxResult};
-    let id = scope
-        .ask
-        .request
-        .parse::<provenant_core::HumanRequestId>()
-        .map_err(|_| FacadeError::StateCorrupt)?;
-    let InboxResult::Item { item, .. } = service
-        .execute(
-            InboxInput::List {
-                extra: Default::default(),
-                id: Some(id),
-                session: None,
-                state: InboxFilter::All,
-                limit: 1,
-                cursor: None,
-            },
-            cancel,
-        )
-        .map_err(|error| graph_ask_refused(&scope.ask.ask_id, &error))?
-    else {
-        return Err(FacadeError::StateCorrupt);
+    if scope.ask.request.is_empty() {
+        return Ok(None);
+    }
+    let Ok(id) = scope.ask.request.parse::<provenant_core::HumanRequestId>() else {
+        return Ok(None);
+    };
+    let outcome = service.execute(
+        InboxInput::List {
+            extra: Default::default(),
+            id: Some(id),
+            session: None,
+            state: InboxFilter::All,
+            limit: 1,
+            cursor: None,
+        },
+        cancel,
+    );
+    let item = match outcome {
+        Ok(InboxResult::Item { item, .. }) => item,
+        Err(provenant_fabric_runtime::inbox::InboxError::Store(
+            provenant_fabric_store::Error::NotFound,
+        )) => return Ok(None),
+        Err(provenant_fabric_runtime::inbox::InboxError::Store(
+            ref err @ provenant_fabric_store::Error::Decode(_),
+        )) => return Err(FacadeError::from(err)),
+        Err(error) => return Err(graph_ask_refused(&scope.ask.ask_id, &error)),
+        _ => return Err(FacadeError::StateCorrupt),
     };
     if item.request.chair_actor.to_string() != scope.actor {
         return Err(graph_ask_refused(
@@ -542,7 +549,7 @@ fn graph_ask_item(
             &"the request belongs to another actor",
         ));
     }
-    Ok(*item)
+    Ok(Some(*item))
 }
 
 /// Read the answer to the linked request, whichever channel gave it.
@@ -553,7 +560,9 @@ pub(crate) fn graph_ask_poll(
 ) -> Result<Option<provenant_fabric_runtime::graph::AskReply>, FacadeError> {
     use provenant_fabric_runtime::inbox::InboxInput;
     use provenant_records::inbox::RequestState;
-    let item = graph_ask_item(service, scope, cancel)?;
+    let Some(item) = graph_ask_item(service, scope, cancel)? else {
+        return Ok(None);
+    };
     if matches!(
         item.request.state,
         RequestState::Withdrawn | RequestState::Superseded | RequestState::Expired
@@ -597,7 +606,9 @@ pub(crate) fn graph_ask_close(
 ) -> Result<(), FacadeError> {
     use provenant_fabric_runtime::inbox::InboxInput;
     use provenant_records::inbox::RequestState;
-    let item = graph_ask_item(service, scope, cancel)?;
+    let Some(item) = graph_ask_item(service, scope, cancel)? else {
+        return Ok(());
+    };
     if item.request.state != RequestState::Open {
         return Ok(());
     }

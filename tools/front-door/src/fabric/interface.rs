@@ -1191,8 +1191,9 @@ impl Factory {
         Ok(ChildRequest {
             id: key.clone(),
             template: node["use"].as_str().unwrap_or("task").into(),
-            brief: input
-                .get("brief")
+            prompt: input
+                .get("prompt")
+                .or_else(|| input.get("brief"))
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .into(),
