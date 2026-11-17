@@ -620,6 +620,7 @@ fn restart_after_invalid_fragment_fallback_reuses_the_persisted_expansion() {
 
 #[test]
 fn restart_rejects_a_fallback_expansion_that_differs_from_the_spec() {
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     let document = two_step_fallback_document();
     let mut journal = MemoryJournal::default();
     let mut owner = FakeOwner {
@@ -1188,6 +1189,7 @@ fn oversized_nested_fragment_id_names_the_source_and_child() {
 
 #[test]
 fn plan_rejects_invalid_and_over_bound_fragments_without_admitting_consumers() {
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     let mut cyclic = slice("cycle", &["src"]);
     cyclic["depends_on"] = json!(["cycle"]);
     let mut undeclared = slice("unexpected", &["src"]);
@@ -1227,6 +1229,12 @@ fn plan_rejects_invalid_and_over_bound_fragments_without_admitting_consumers() {
                 .unwrap()
                 .status,
             GraphStatus::Paused
+        );
+        assert_eq!(owner.calls.len(), 1, "consumer admitted after resume: {output}");
+        assert!(journal.0.as_ref().unwrap().expansions.is_empty());
+        assert_eq!(
+            journal.0.as_ref().unwrap().pause_cause(),
+            Some(PauseCause::InvalidPlanExpansion)
         );
     }
 }

@@ -1454,7 +1454,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             }
             None => admit_candidate(document, None, extensions, limits, budget, None),
         }
-        .map_err(GraphError::Candidate)?,
+        .map_err(|error| match error {
+            CandidateError::CheckpointTopology { node, invariant } => GraphError::BadCheckpoint {
+                node: node.into(),
+                invariant,
+            },
+            other => GraphError::Candidate(other),
+        })?,
     };
     let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
     let mut expanded = plans::expand(
@@ -1781,12 +1787,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     .is_some_and(|spec| spec.fallback.is_some()))
                             || (n.state == NodeState::Succeeded
                                 && n.expansion_pause.is_some()
-                                && node
-                                    .plan
-                                    .as_ref()
-                                    .is_some_and(|spec| spec.fallback.is_some())))
+                                && node.plan.is_some()))
                 })
-                && let Some((next_expanded, next_plan, next_positions)) = plans::settle(
+            {
+                let before_settle = checkpoint.clone();
+                let settled = plans::settle(
                     node,
                     document,
                     &expanded,
@@ -1794,16 +1799,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     None,
                     limits,
                     &worktree_layout,
-                )
-            {
-                validate_expanded_rows(&checkpoint, &next_plan)?;
-                owner
-                    .validate_expansion(&next_expanded, &checkpoint)
-                    .map_err(GraphError::Run)?;
-                journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
-                resume = false;
-                continue 'schedule;
+                );
+                if let Some((next_expanded, next_plan, next_positions)) = settled {
+                    validate_expanded_rows(&checkpoint, &next_plan)?;
+                    owner
+                        .validate_expansion(&next_expanded, &checkpoint)
+                        .map_err(GraphError::Run)?;
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                    (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
+                    resume = false;
+                    continue 'schedule;
+                }
+                // A rejected retry reactivates its pause; persist it before
+                // returning or considering other work.
+                if checkpoint != before_settle {
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
             }
         }
         let structural_pause =
