@@ -121,6 +121,7 @@ impl LandingFixture {
             result,
             pool: None,
             duration_seconds: None,
+            reused_from_commit: None,
             extra: Default::default(),
         }
     }

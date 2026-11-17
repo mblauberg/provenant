@@ -487,6 +487,7 @@ impl GateRunner for FakeGate {
                 result,
                 pool: self.pool.clone(),
                 duration_seconds: self.duration_seconds,
+                reused_from_commit: None,
                 extra: Default::default(),
             });
         }

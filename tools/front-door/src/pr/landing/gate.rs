@@ -238,9 +238,7 @@ pub fn reusable_evidence(
         if evidence.result != GateResult::Passed {
             continue;
         }
-        evidence
-            .extra
-            .insert("reused_from_commit".into(), head.clone().into());
+        evidence.reused_from_commit = Some(head.clone());
         return Some(evidence);
     }
     None
@@ -456,6 +454,7 @@ pub fn execute_commands(
         result,
         pool: definition.pool.clone(),
         duration_seconds: Some(started.elapsed().as_secs()),
+        reused_from_commit: None,
         extra: Default::default(),
     })
 }

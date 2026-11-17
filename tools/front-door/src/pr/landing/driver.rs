@@ -382,11 +382,7 @@ fn run_inner(
                 report.warnings.push(format!(
                     "candidate tree {} already passed the required checks on {}; gate skipped",
                     candidate.tree,
-                    reused
-                        .extra
-                        .get("reused_from_commit")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default()
+                    reused.reused_from_commit.as_deref().unwrap_or_default()
                 ));
                 reused
             } else {
@@ -1239,6 +1235,7 @@ pub(super) mod tests {
                 result: GateResult::Passed,
                 pool: None,
                 duration_seconds: None,
+                reused_from_commit: None,
                 extra: Default::default(),
             };
             tested.definition_digest = definition.digest.clone();
@@ -1258,8 +1255,8 @@ pub(super) mod tests {
             assert_eq!(
                 report.receipts[0]
                     .gate_evidence
-                    .extra
-                    .contains_key("reused_from_commit"),
+                    .reused_from_commit
+                    .is_some(),
                 reuse
             );
         }

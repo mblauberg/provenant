@@ -750,6 +750,7 @@ impl Forge for GhForge {
             result,
             pool: None,
             duration_seconds: None,
+            reused_from_commit: None,
             extra: Default::default(),
         }])
     }
@@ -1509,6 +1510,7 @@ pub(super) fn bind_evidence(
         checks,
         coverage: definition.coverage.clone(),
         duration_seconds: None,
+        reused_from_commit: None,
         extra: Default::default(),
     })
 }
@@ -2566,6 +2568,7 @@ esac
             result: GateResult::Pending,
             pool: None,
             duration_seconds: None,
+            reused_from_commit: None,
             extra: Default::default(),
         }
     }
