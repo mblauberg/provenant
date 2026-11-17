@@ -499,6 +499,27 @@ fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
     assert_eq!(guard.field, F::Model);
     assert_eq!(guard.issue, I::Mismatch);
     assert_eq!(guard.rule, R::NativeSession);
+    for (body, issue) in [
+        (
+            format!(
+                "{}\n{}\n{}\n",
+                serde_json::json!({"type":"session_meta","payload":{"id":session}}),
+                serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6-luna"}}),
+                serde_json::json!({"type":"turn_context","payload":{"model":"other-model"}}),
+            ),
+            I::Mismatch,
+        ),
+        (
+            serde_json::json!({"type":"session_meta","payload":{}}).to_string(),
+            I::Invalid,
+        ),
+    ] {
+        std::fs::write(&rollout, body)?;
+        let error = verify_native_continuation(&prior, &route, &native_home, &state).unwrap_err();
+        let guard = error.guard().ok_or("typed rollout refusal")?;
+        assert_eq!(guard.field, F::Rollout);
+        assert_eq!(guard.issue, issue);
+    }
     std::fs::write(
         &rollout,
         format!(

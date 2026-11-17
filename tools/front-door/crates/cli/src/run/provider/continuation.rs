@@ -462,12 +462,23 @@ pub(super) fn verify_native_continuation(
             Err(provenant_providers::ProviderError::UnknownIdentity) => {
                 return Err(ContinuationError::NativeSessionUnavailable);
             }
-            Err(provenant_providers::ProviderError::IdentityMismatch) => {
+            Err(
+                error @ (provenant_providers::ProviderError::IdentityMismatch
+                | provenant_providers::ProviderError::Malformed),
+            ) => {
+                // The rollout reader can reject either its session metadata
+                // or contradictory turn contexts. Its error does not prove
+                // which identity field changed, so retain the rollout fact.
+                let issue = if matches!(error, provenant_providers::ProviderError::Malformed) {
+                    I::Invalid
+                } else {
+                    I::Mismatch
+                };
                 return Err(ContinuationError::Provider(
                     provenant_providers::ProviderError::ContinuationRefused(ContinuationGuard {
                         rule: R::NativeSession,
-                        field: F::Session,
-                        issue: I::Mismatch,
+                        field: F::Rollout,
+                        issue,
                     }),
                 ));
             }
