@@ -312,6 +312,19 @@ pub struct SourceIdentity {
     pub device: u64,
     pub inode: u64,
 }
+/// One reader for the persisted host publishing grant. A non-boolean or absent
+/// lane knob follows the registry default; restricted network always disables push.
+pub fn host_publishing_requested(
+    network: NetworkAccess,
+    knobs: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> bool {
+    network == NetworkAccess::Open
+        && knobs
+            .get("lanes.publish")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true)
+}
+
 impl LaneAccess {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
@@ -1001,7 +1014,28 @@ pub struct CiScopeReceipt {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
 }
+/// The identity of the provider session a route resumes: provider, model,
+/// effort, account and host-native lane. Excludes route-selection history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct SessionIdentity<'a> {
+    pub provider: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    pub account_key: Option<&'a str>,
+    pub host_native: Option<&'a str>,
+}
+
 impl RouteRecord {
+    /// Project the session identity, ignoring how the route was selected.
+    pub fn session_identity(&self) -> SessionIdentity<'_> {
+        SessionIdentity {
+            provider: self.provider.as_deref(),
+            model: self.model.as_deref(),
+            effort: self.effort.as_deref(),
+            account_key: self.account_key.as_deref(),
+            host_native: self.host_native.as_deref(),
+        }
+    }
     /// Copy the resolved routing decision into the launch record.
     pub fn from_resolved(
         route: &crate::ResolvedRoute,
@@ -1168,6 +1202,7 @@ pub enum Outcome {
     /// A writer succeeded but left uncommitted edits and no new commit.
     Uncommitted,
     InputRequired,
+    Unclassified,
 }
 impl Outcome {
     /// A safe status reason derived only from the typed terminal outcome.
@@ -1205,6 +1240,9 @@ impl Outcome {
             Self::InputRequired => {
                 "the lane needs input; inspect its request and provide the missing input"
             }
+            Self::Unclassified => {
+                "the provider reported an unclassified error; retrying or falling back to another route"
+            }
         }
     }
 }
@@ -1228,6 +1266,7 @@ impl From<Outcome> for crate::AttemptOutcome {
             Outcome::Unsettled => Self::Unsettled,
             Outcome::Uncommitted => Self::Uncommitted,
             Outcome::InputRequired => Self::InputRequired,
+            Outcome::Unclassified => Self::Unclassified,
         }
     }
 }
@@ -1835,6 +1874,8 @@ settlement_reasons! {
     Steered { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Steered) },
     Lost { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
     Unsettled { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
+    /// The provider reported an unclassified error.
+    Unclassified { source: Provider, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unclassified) },
     /// The provider ran and ended in a non-success outcome.
     Failed { source: Provider, node: Failed, outcome: Preserve, stop: None },
 }
@@ -1851,6 +1892,7 @@ impl SettlementReason {
         match (evidence, outcome) {
             (_, Outcome::Lost) => Self::Lost,
             (_, Outcome::Unsettled) => Self::Unsettled,
+            (_, Outcome::Unclassified) => Self::Unclassified,
             (Some(TerminalEvidence::Lost { .. }), _) => Self::Lost,
             (Some(TerminalEvidence::Unsettled { .. }), _) => Self::Unsettled,
             (_, Outcome::Cancelled) if terminal_cause == Some(TerminalCause::Steered) => {
@@ -2180,6 +2222,46 @@ pub struct PeerGraphRoute {
     pub required_family: Option<String>,
 }
 
+/// Why the host stopped a writer while it still had lane work to preserve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopWorkTrigger {
+    WallDeadline,
+    TokenBudget,
+    ExplicitCancellation,
+    Steered,
+    ContextHandoff,
+}
+
+/// Result of the optional host push of an already committed lane head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopWorkPush {
+    NotGranted,
+    NotAttempted,
+    NotNeeded,
+    Pushed,
+    Failed,
+}
+
+/// Durable evidence of committed and dirty work present when a writer stopped.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopWorkSummary {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+    pub schema_version: u64,
+    pub trigger: StopWorkTrigger,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<GitOid>,
+    /// Commit count ahead of the last verified remote branch observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<u64>,
+    /// Uncommitted paths left untouched by host stop handling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_paths: Option<u64>,
+    pub push: StopWorkPush,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2245,6 +2327,9 @@ pub struct AttemptRecord {
     pub protected_paths: Vec<PathWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<WriterDeliveryReceipt>,
+    /// Host summary of committed and dirty writer work after a stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_work: Option<StopWorkSummary>,
     pub verified_owner: Option<ActorId>,
     pub session: Option<String>,
     pub queued_at: WallTime,
@@ -2367,6 +2452,9 @@ pub struct SteeringOperation {
 /// Safe status projection of the private steering ledger.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SteeringStatus {
+    /// The task continued in a new provider session after a warning fallback.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh_session: bool,
     pub state: SteeringState,
     pub operations: Vec<SteeringOperation>,
     pub successor: Option<AttemptId>,
@@ -3396,6 +3484,25 @@ mod tests {
         let binding = RepositoryAdmissionBinding::new(crate::PortSource::Project, &command);
         let field_values = [
             (
+                "stop_work",
+                serde_json::json!({
+                    "schema_version":1,
+                    "trigger":"wall_deadline",
+                    "head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "ahead":2,
+                    "dirty_paths":3,
+                    "push":"not_granted"
+                }),
+                serde_json::json!({
+                    "schema_version":1,
+                    "trigger":"not_a_stop",
+                    "head":null,
+                    "ahead":-1,
+                    "dirty_paths":"many",
+                    "push":"unknown"
+                }),
+            ),
+            (
                 "budget_overrun",
                 serde_json::json!({"schema_version":1,"tokens":101,"budget":100}),
                 serde_json::json!(false),
@@ -3508,5 +3615,49 @@ mod tests {
             Some(&serde_json::json!({"kept":true}))
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod session_identity_tests {
+    use super::*;
+
+    #[test]
+    fn identity_ignores_selection_history_but_not_identity() {
+        let base = RouteRecord {
+            provider: Some("opencode".into()),
+            model: Some("m".into()),
+            account_key: Some("a".into()),
+            source: Some("pool".into()),
+            account_source: Some(AccountSource::Automatic),
+            ..Default::default()
+        };
+        let child = RouteRecord {
+            source: Some("continuation".into()),
+            account_source: Some(AccountSource::Continuation),
+            account_label: Some("x".into()),
+            ..base.clone()
+        };
+        assert_eq!(base.session_identity(), child.session_identity());
+        for changed in [
+            RouteRecord {
+                account_key: Some("b".into()),
+                ..base.clone()
+            },
+            RouteRecord {
+                model: Some("n".into()),
+                ..base.clone()
+            },
+            RouteRecord {
+                provider: Some("x".into()),
+                ..base.clone()
+            },
+            RouteRecord {
+                effort: Some("high".into()),
+                ..base.clone()
+            },
+        ] {
+            assert_ne!(base.session_identity(), changed.session_identity());
+        }
     }
 }

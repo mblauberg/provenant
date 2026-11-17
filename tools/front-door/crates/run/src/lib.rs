@@ -6,10 +6,13 @@ mod board;
 mod completion;
 pub use board::{BoardLane, BoardPage};
 pub use completion::{
-    handoff_progress_guidance, lane_preamble, lane_preamble_with_policy, sanitise_handoff,
-    sanitise_handoff_result,
+    BuildCap, PreambleExtras, handoff_progress_guidance, lane_preamble, lane_preamble_with_policy,
+    sanitise_handoff, sanitise_handoff_result,
 };
+mod verification;
+pub use verification::{VerificationResolution, conflict_cause};
 mod controls;
+pub use controls::release_progress;
 mod correlation;
 pub use correlation::{WorkCoverage, WorkSelector, validate_work};
 mod db;
@@ -549,6 +552,15 @@ pub enum RunError {
     ReviewAcceptanceRequired,
     #[error("lane object import refused: {0}")]
     ObjectImportLimit(&'static str),
+    #[error(
+        "lane tip {tip} descends from none of: its launch base {base}, the origin default branch, {}, or any pushed remote-tracking branch; push the branch it was rebased onto, or rebuild the lane from its launch base",
+        .launch_ref.as_deref().map_or_else(|| "its launch ref".to_owned(), |name| format!("its launch ref {name}"))
+    )]
+    LaneTipUnrooted {
+        tip: provenant_core::GitOid,
+        base: provenant_core::GitOid,
+        launch_ref: Option<String>,
+    },
     #[error("invalid Git base {0:?}: expected a resolvable commit reference")]
     InvalidBase(String),
     #[error(
@@ -638,6 +650,15 @@ impl From<provenant_confinement::worktrees::WorktreeError> for RunError {
 }
 pub type Result<T> = std::result::Result<T, RunError>;
 impl RunError {
+    /// A refusal whose inputs do not change on retry. Settlement seals it as a
+    /// failed, non-retryable import instead of looping on it.
+    pub(crate) fn import_refusal_is_final(&self) -> bool {
+        matches!(
+            self,
+            Self::ObjectImportLimit(_) | Self::LaneTipUnrooted { .. }
+        )
+    }
+
     /// A generic code can wrap multiple guards; classify the typed cause rather
     /// than assigning an unrelated hard boundary to every confinement error.
     pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {

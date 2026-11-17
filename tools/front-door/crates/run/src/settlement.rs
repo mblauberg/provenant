@@ -1,6 +1,6 @@
 //! Durable settlement progress. Kernel locks protect only journal updates.
 use crate::{
-    AdmissionError, RECORD_LIMIT, Result, RunError, artifacts::read_sealed, store::CancelMarker,
+    AdmissionError, RECORD_LIMIT, Result, RunError, artifacts::read_sealed, store::StopMarker,
 };
 use provenant_core::retry::Backoff;
 use provenant_core::{ActorId, CancelToken, Clock, DurationMicros, GitOid};
@@ -14,74 +14,98 @@ const LIMIT: u32 = 3;
 const UNKNOWN_OWNER_LIMIT_MS: u64 = 10 * 60 * 1000;
 const CLAIM_BACKOFF: Backoff = Backoff::new(Duration::from_secs(5), 6, Duration::from_secs(120));
 
-/// The exact durable Steered request admitted by a delivered provider stop.
-/// It is the only cancellation record that writer settlement may consume.
+/// Permission to preserve committed work under quiescent native custody.
+/// This consumes an exact current owner intent, never grants continuation,
+/// and never changes the provider's sealed signal ordering or stop cause.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct DeliveredSteerStop {
+pub(crate) struct PreservationStop {
     scope: Scope,
     requester: ActorId,
+    reason: provenant_supervisor::machine::StopReason,
+    fingerprint: provenant_core::Digest,
 }
-
-impl DeliveredSteerStop {
+impl PreservationStop {
+    pub(crate) fn reason(self) -> provenant_supervisor::machine::StopReason {
+        self.reason
+    }
     pub(crate) fn from_exit(
         attempt: &Directory,
         exit: &provenant_supervisor::custody::ExitObservation,
         requester: ActorId,
     ) -> Result<Option<Self>> {
-        if exit.stop_reason != Some(provenant_supervisor::machine::StopReason::Steered)
-            || exit.never_spawned
-            || exit.cancel_delivered_before_exit != Some(true)
-        {
+        use provenant_supervisor::machine::StopReason;
+        if exit.never_spawned {
             return Ok(None);
         }
-        Self::from_marker(attempt, exit.scope, requester)
+        let expected = if exit.stop_reason == Some(StopReason::Steered)
+            && exit.cancel_delivered_before_exit != Some(true)
+        {
+            None
+        } else {
+            exit.stop_reason
+        };
+        Self::from_marker(attempt, exit.scope, requester, expected)
     }
-
     pub(crate) fn from_terminal_record(
         attempt: &Directory,
         record: &provenant_records::run::AttemptRecord,
         requester: ActorId,
     ) -> Result<Option<Self>> {
-        let confirmed = record.provider_launched == Some(true)
-            && record.terminal_evidence.as_ref()
-                == Some(&provenant_records::run::TerminalEvidence::ProcessExit)
-            && record.exit_evidence.is_some()
-            && matches!(
-                &record.state,
-                provenant_records::run::AttemptState::Terminal {
-                    terminal_cause: Some(provenant_records::run::TerminalCause::Steered),
-                    ..
-                }
-            );
-        if !confirmed {
+        use provenant_records::stop::StopCause;
+        use provenant_supervisor::machine::StopReason;
+        if record.provider_launched != Some(true) || record.exit_evidence.is_none() {
             return Ok(None);
         }
-        Self::from_marker(attempt, crate::RunStore::scope(record), requester)
+        let expected = record.state.stop().and_then(|stop| match stop.cause() {
+            StopCause::Steered => Some(StopReason::Steered),
+            StopCause::Deadline => Some(StopReason::WallDeadline),
+            StopCause::TokenBudget => Some(StopReason::TokenBudget),
+            StopCause::ContextHandoff => Some(StopReason::ContextHandoff),
+            _ => None,
+        });
+        Self::from_marker(attempt, crate::RunStore::scope(record), requester, expected)
     }
-
-    fn from_marker(attempt: &Directory, scope: Scope, requester: ActorId) -> Result<Option<Self>> {
-        let stop = Self { scope, requester };
-        Ok(stop
-            .matches(CancelMarker::read(attempt, scope)?)
-            .then_some(stop))
+    fn from_marker(
+        attempt: &Directory,
+        scope: Scope,
+        requester: ActorId,
+        expected: Option<provenant_supervisor::machine::StopReason>,
+    ) -> Result<Option<Self>> {
+        use provenant_supervisor::{
+            custody::{StopIntentState, read_stop_intent},
+            machine::StopReason,
+        };
+        let StopIntentState::Requested(request) = read_stop_intent(attempt, scope)
+            .map_err(|error| RunError::Io(std::io::Error::other(error)))?
+        else {
+            return Ok(None);
+        };
+        if request.requester != requester
+            || !(request.reason == StopReason::ExplicitCancellation
+                || Some(request.reason) == expected)
+        {
+            return Ok(None);
+        }
+        let fingerprint =
+            provenant_records::CanonicalV1::record_digest("preservation-stop", 1, &request)?;
+        Ok(Some(Self {
+            scope,
+            requester,
+            reason: request.reason,
+            fingerprint,
+        }))
     }
-
-    fn matches(self, marker: CancelMarker) -> bool {
-        marker
-            == CancelMarker::Steered {
-                requester: self.requester,
-            }
-    }
-
-    fn matches_marker(self, raw: &[u8]) -> bool {
-        self.matches(CancelMarker::classify(raw, self.scope))
-    }
-
     pub(crate) fn marker_vetoes(self, attempt: &Directory) -> Result<bool> {
-        let Some(raw) = read_sealed(attempt, "cancel.json", RECORD_LIMIT)? else {
+        use provenant_supervisor::custody::{StopIntentState, read_stop_intent};
+        let StopIntentState::Requested(request) = read_stop_intent(attempt, self.scope)
+            .map_err(|error| RunError::Io(std::io::Error::other(error)))?
+        else {
             return Ok(true);
         };
-        Ok(!self.matches_marker(&raw))
+        Ok(request.requester != self.requester
+            || request.reason != self.reason
+            || provenant_records::CanonicalV1::record_digest("preservation-stop", 1, &request)?
+                != self.fingerprint)
     }
 }
 
@@ -156,6 +180,19 @@ pub(crate) fn blocked(
     journal.blocking_reason = Some(provenant_confinement::redact::bounded_line(reason, 4096));
     journal.retry_after_ms = now.saturating_add(backoff_ms(journal.recovery_failures));
     write(attempt, &journal)
+}
+
+/// Read-only, scope-checked diagnostic for status. The guardian records this
+/// even when no canonical outcome could be committed yet.
+pub fn blocking_reason_for(
+    root: &std::path::Path,
+    record: &provenant_records::run::AttemptRecord,
+) -> Option<String> {
+    let attempt =
+        Directory::open_anchor(&root.join(format!("attempts/{}", record.attempt_id))).ok()?;
+    read(&attempt, crate::RunStore::scope(record))
+        .ok()?
+        .blocking_reason
 }
 
 pub(crate) fn clear_blocked(attempt: &Directory, scope: Scope) -> Result<()> {
@@ -624,25 +661,14 @@ pub(crate) fn with_cancellation<T>(
 /// Run writer settlement while accepting only its already delivered Steered
 /// request. A replacement explicit cancellation still cancels the import, and
 /// so does a marker that disappears.
-pub(crate) fn with_cancellation_for_delivered_steer<T>(
+/// The watcher uses the shared stop-intent API. Ordinary work ignores a valid
+/// steer; settlement may consume exactly its delivered stop while preserving
+/// committed work. Foreign, replaced, undecodable or unreadable intent vetoes.
+pub(crate) fn with_cancellation_policy<T>(
     attempt: &Directory,
     scope: Scope,
     cancel: &CancelToken,
-    stop: DeliveredSteerStop,
-    action: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    with_cancellation_policy(attempt, scope, cancel, Some(stop), action)
-}
-
-/// The watcher reads `cancel.json` as [`CancelMarker`] does: only this scope's
-/// own Steered request continues, and any other marker, including a foreign
-/// or undecodable one, or one that cannot be read, cancels. A delivered steer
-/// adds one rule: its own marker must remain, from its own requester.
-fn with_cancellation_policy<T>(
-    attempt: &Directory,
-    scope: Scope,
-    cancel: &CancelToken,
-    delivered_steer: Option<DeliveredSteerStop>,
+    preservation_stop: Option<PreservationStop>,
     action: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     let directory = attempt.try_clone()?;
@@ -651,12 +677,9 @@ fn with_cancellation_policy<T>(
     std::thread::scope(|threads| {
         threads.spawn(move || {
             loop {
-                let cancelled = match read_sealed(&directory, "cancel.json", RECORD_LIMIT) {
-                    Ok(raw) => match delivered_steer {
-                        Some(stop) => raw.is_none_or(|raw| !stop.matches_marker(&raw)),
-                        None => raw.is_some_and(|raw| CancelMarker::classify(&raw, scope).stops()),
-                    },
-                    Err(_) => true,
+                let cancelled = match preservation_stop {
+                    Some(stop) => stop.marker_vetoes(&directory).unwrap_or(true),
+                    None => StopMarker::read(&directory, scope).map_or(true, StopMarker::stops),
                 };
                 if cancelled {
                     token.cancel();
@@ -694,6 +717,48 @@ mod tests {
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+    // Spec: docs/specs/run.md#stop-intent
+    #[test]
+    fn preservation_is_bound_to_the_exact_current_owner_intent() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        let scope = crate::tests::exit().scope;
+        let requester = ActorId::from_bytes([7; 16]);
+        provenant_supervisor::custody::request_stop(
+            attempt.try_clone()?,
+            scope,
+            requester,
+            provenant_supervisor::machine::StopReason::ExplicitCancellation,
+        )?;
+        let token =
+            PreservationStop::from_marker(&attempt, scope, requester, None)?.ok_or("stop")?;
+        assert!(!token.marker_vetoes(&attempt)?);
+        let raw = crate::artifacts::read_sealed(&attempt, "stop-intent.json", RECORD_LIMIT)?
+            .ok_or("intent")?;
+        for foreign_actor in [false, true] {
+            let mut replacement: provenant_supervisor::custody::StopIntent =
+                crate::db::decode(&raw)?;
+            if foreign_actor {
+                replacement.requester = ActorId::from_bytes([9; 16]);
+            } else {
+                replacement.request_id = provenant_core::OperationId::parse("different-operation")?;
+            }
+            attempt
+                .atomic_write(
+                    OsStr::new("stop-intent.json"),
+                    ".test-",
+                    &crate::db::bytes(&replacement)?,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
+            assert!(
+                token.marker_vetoes(&attempt)?,
+                "replaced intent cannot reuse preservation authority"
+            );
+        }
+        Ok(())
+    }
+
     // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
     fn running_git_continues_only_under_its_own_steer_marker() -> TestResult {
@@ -704,7 +769,7 @@ mod tests {
                 "schema_version": 1,
                 "scope": scope,
                 "requester": ActorId::from_bytes([7; 16]),
-                "request_id": format!("{}.{}.cancel", scope.attempt, scope.generation),
+                "request_id": format!("{}.{}.stop", scope.attempt, scope.generation),
                 "reason": reason,
             }))
         };
@@ -715,7 +780,7 @@ mod tests {
         ] {
             let temp = tempfile::tempdir()?;
             let attempt = Directory::open_anchor(temp.path())?;
-            crate::artifacts::seal(&attempt, "cancel.json", &steered, RECORD_LIMIT)?;
+            crate::artifacts::seal(&attempt, "stop-intent.json", &steered, RECORD_LIMIT)?;
             let cancel = CancelToken::new();
             let (continued, cancelled) = with_cancellation(&attempt, scope, &cancel, || {
                 // Several watcher polls read this scope's own Steered marker
@@ -729,7 +794,7 @@ mod tests {
                 .is_err();
                 attempt
                     .atomic_write(
-                        OsStr::new("cancel.json"),
+                        OsStr::new("stop-intent.json"),
                         ".run-",
                         &replacement,
                         PublishMode::Replace,

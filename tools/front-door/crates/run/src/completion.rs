@@ -11,11 +11,12 @@ use provenant_records::{
 };
 use std::{
     ffi::OsStr,
+    io::Write,
     path::{Component, Path},
 };
 
 pub(crate) fn guidance() -> &'static str {
-    "Work until the brief is finished. Do not end your turn because a slice is done, a commit is a natural checkpoint or the work is large; start the next item. Ending your turn ends your work, so a report of what remains is not progress. End your final answer with exactly one fenced handoff block, with nothing after it. Use schema_version 2 and status done, blocked or stopped_early; include note, remaining[], decisions[] and verify[] (verification performed and results). When a criterion is wrong, add spec_concerns entries with criterion, claim, evidence, proposed_change and status (as_written, diverged or stopped); disclose any divergence and keep it inside the approved write scope. Use done only when the brief is finished. Use blocked when you need an owner decision, lack a capability required by the brief, or need an external change you cannot make yourself. These cases must not use stopped_early. Use stopped_early only when you cannot carry on in this session, such as running out of context, and never to report work you could do now. The JSON is at most 12288 bytes; note and each array entry are 1..4096 bytes, each array at most 64 strings. Example:\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"what was done\",\"remaining\":[],\"decisions\":[],\"verify\":[\"check and result\"]}\n```"
+    "Work until the brief is finished. Do not end your turn because a slice is done, a commit is a natural checkpoint or the work is large; start the next item. Ending your turn ends your work, so a report of what remains is not progress. End your final answer with exactly one fenced handoff block, with nothing after it. Use schema_version 2 and status done, blocked or stopped_early; include note, remaining[], decisions[] and verify[] (verification performed and results). When a criterion is wrong, add spec_concerns entries with criterion, claim, evidence, proposed_change and status (as_written, diverged or stopped); disclose any divergence. A write scope names the expected files, not a fence: when the fix needs another file, edit it minimally and list each such path in decisions; only a strict WRITE_SCOPE lane policy refuses those paths at settlement. Use blocked only for a real boundary such as credentials, another repository or shared Git history. Use done only when the brief is finished. Use blocked when you need an owner decision, lack a capability required by the brief, or need an external change you cannot make yourself. These cases must not use stopped_early. Use stopped_early only when you cannot carry on in this session, such as running out of context, and never to report work you could do now. The JSON is at most 12288 bytes; note and each array entry are 1..4096 bytes, each array at most 64 strings. Example:\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"what was done\",\"remaining\":[],\"decisions\":[],\"verify\":[\"check and result\"]}\n```"
 }
 
 impl RunStore {
@@ -35,6 +36,30 @@ impl RunStore {
         decoded: &Decoded,
     ) -> Result<provenant_records::handoff::HandoffParse> {
         let parsed = decoded.handoff_report();
+        if let Some(repeated) =
+            provenant_records::handoff::Handoff::repeated_blocks(&decoded.result)
+            && parsed.handoff.as_ref().is_ok_and(Option::is_some)
+        {
+            // Accepted either way: the lane did its work and declared it.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: attempt {}: {}",
+                record.attempt_id,
+                repeated.warning()
+            );
+        }
+        if let Some(fallback) = provenant_records::handoff::Handoff::json_fence_fallback(
+            &decoded.result,
+            &decoded.turns,
+        ) {
+            // Accepted: the answer ended in a handoff-shaped json block.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: attempt {}: {}",
+                record.attempt_id,
+                fallback.warning()
+            );
+        }
         if let Some(handoff) = read_snapshot(attempt)? {
             let handoff = with_scope_report(attempt, handoff)?;
             return Ok(provenant_records::handoff::HandoffParse {
@@ -266,9 +291,36 @@ pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
 }
 
 /// The verification and slot-wait rules every writer lane is told. A writer's `cargo` commands
-/// that compile take one of the host's shared build slots, and a lane that
+/// that compile share the host's build cap, and a lane that
 /// stopped to report the wait cost a whole task (#2484).
-pub const BUILD_SLOT_GUIDANCE: &str = "Verification: where the repository has CI, CI runs the tests and lints on pull requests and the integrated branch, not on every push; the CI scope line below says what CI, if any, you wait for. Run at most one cheap compile check (`cargo check` on the one package you changed), then commit and push; do not run test suites, clippy or nextest locally, and do not restart a build that was stopped. The repository's test tiers (T0 to T3) describe what CI and a configured host run; they are not a checklist for you. A `cargo` command the host refuses because CI runs it is final: do not look for another way to run it.\nBuild slots: compiling `cargo` commands try one advisory slot. Busy or unavailable slots warn and the build proceeds; Cargo manages its own build locks.\n";
+pub const BUILD_SLOT_GUIDANCE: &str = "Verification: where the repository has CI, CI runs the tests and lints on pull requests and the integrated branch, not on every push; the CI scope line below says what CI, if any, you wait for. Run at most one cheap compile check (`cargo check` on the one package you changed), then commit and push; do not run test suites, clippy or nextest locally, and do not restart a build that was stopped. The repository's test tiers (T0 to T3) describe what CI and a configured host run; they are not a checklist for you. A `cargo` command the host refuses because CI runs it is final: do not look for another way to run it.\nBuild slots: compiling `cargo` commands share a host-wide cap (source: default; domains.fabric.lanes.max_concurrent_builds), derived from cores and memory. Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n";
+
+/// Host build cap stated in the preamble.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuildCap {
+    pub slots: u64,
+    pub source: &'static str,
+}
+
+/// Optional preamble overrides. Default keeps the historical verification paragraph.
+#[derive(Clone, Debug, Default)]
+pub struct PreambleExtras {
+    pub verification: Option<crate::VerificationResolution>,
+    pub build_cap: Option<BuildCap>,
+}
+
+fn slot_guidance(cap: Option<BuildCap>) -> String {
+    match cap {
+        Some(cap) => format!(
+            "Build slots: compiling `cargo` commands share a host-wide cap of {} (source: {}; domains.fabric.lanes.max_concurrent_builds). Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n",
+            cap.slots, cap.source
+        ),
+        None => BUILD_SLOT_GUIDANCE
+            .split_once('\n')
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_default(),
+    }
+}
 
 /// The reading rule every lane is told. Tool output stays in a lane's context and is
 /// paid for again on every later turn, so whole-file and large-range reads dominate its cost.
@@ -283,6 +335,22 @@ pub fn lane_preamble(
     ci_scope: Option<crate::ResolvedCiScope>,
     handoff: Option<&Path>,
 ) -> String {
+    lane_preamble_with(
+        model_guidance,
+        limits,
+        ci_scope,
+        handoff,
+        &PreambleExtras::default(),
+    )
+}
+
+fn lane_preamble_with(
+    model_guidance: &str,
+    limits: &provenant_records::LaneLimits,
+    ci_scope: Option<crate::ResolvedCiScope>,
+    handoff: Option<&Path>,
+    extras: &PreambleExtras,
+) -> String {
     let writer = ci_scope
         .map(|scope| {
             let budget = limits
@@ -296,7 +364,16 @@ pub fn lane_preamble(
                     )
                 })
                 .unwrap_or_default();
-            format!("{BUILD_SLOT_GUIDANCE}{}{budget}", scope.preamble())
+            let verification = extras
+                .verification
+                .as_ref()
+                .map(crate::VerificationResolution::paragraph)
+                .unwrap_or_else(|| crate::verification::CHECK_PARAGRAPH.to_string());
+            format!(
+                "{verification}{}{}{budget}",
+                slot_guidance(extras.build_cap),
+                scope.preamble()
+            )
         })
         .unwrap_or_default();
     format!(
@@ -313,10 +390,11 @@ pub fn lane_preamble_with_policy(
     ci_scope: Option<crate::ResolvedCiScope>,
     handoff: Option<&Path>,
     policy: &provenant_records::policy::Policy,
+    extras: &PreambleExtras,
 ) -> String {
     format!(
         "{}Launch policy (code, boundary, strength, source, knob):\n{}",
-        lane_preamble(model_guidance, limits, ci_scope, handoff),
+        lane_preamble_with(model_guidance, limits, ci_scope, handoff, extras),
         policy.render()
     )
 }
@@ -336,6 +414,15 @@ mod tests {
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
     #[test]
+    fn guidance_treats_write_scope_as_advisory_outside_strict_policy() {
+        let text = guidance();
+        assert!(text.contains("not a fence"));
+        assert!(text.contains("list each such path in decisions"));
+        assert!(text.contains("strict WRITE_SCOPE lane policy"));
+        assert!(!text.contains("keep it inside the approved write scope"));
+    }
+
+    #[test]
     fn writer_preamble_states_advisory_build_policy_and_read_only_does_not() {
         let handoff = Path::new("/state/handoff.json");
         let writer = lane_preamble(
@@ -344,6 +431,8 @@ mod tests {
             Some(crate::ResolvedCiScope::resolve(&Default::default())),
             Some(handoff),
         );
+        assert!(writer.contains(crate::verification::CHECK_PARAGRAPH));
+        assert!(writer.contains("source: default"));
         assert!(writer.contains("Build slots:"));
         assert!(writer.contains("CI scope:"));
         assert!(writer.contains(&format!("Progress handoff JSON: {}", handoff.display())));

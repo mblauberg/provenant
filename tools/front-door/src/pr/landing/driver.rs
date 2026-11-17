@@ -583,12 +583,12 @@ fn run_inner(
                 match published {
                     Ok(landed) => landed,
                     Err(error) => {
-                        if !matches!(
-                            error,
-                            LandingError::Refused(_)
-                                | LandingError::TargetMoved
-                                | LandingError::PullRequestChanged(_)
-                        ) {
+                        if !error.is_refusal()
+                            && !matches!(
+                                error,
+                                LandingError::TargetMoved | LandingError::PullRequestChanged(_)
+                            )
+                        {
                             recover(forge, repo, runner, alarms, &request, &repository, report)?;
                             prs.retain(|pr| {
                                 report.outcomes.get(&pr.number) != Some(&Outcome::Landed)
@@ -624,8 +624,7 @@ fn run_inner(
                                 record.outcomes.insert(step.pr.number, Outcome::Excluded);
                             }
                         }
-                        let refusal =
-                            matches!(error, LandingError::Refused(_)).then(|| error.to_string());
+                        let refusal = error.is_refusal().then(|| error.to_string());
                         reconcile::settle(request.state, &mut attempt, record, refusal)?;
                         let record = reconcile::finish_settled(
                             forge,

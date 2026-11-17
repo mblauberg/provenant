@@ -863,7 +863,8 @@ fn malformed_lens_is_corrected_once_without_repeating_siblings() {
                     .unwrap()
                     .warnings
                     .iter()
-                    .any(|warning| warning.starts_with(&format!("unavailable {}:", lens.id)))
+                    // The panel warning names the node and its lens (#3345).
+                    .any(|warning| warning.starts_with(&format!("unavailable {} (lens ", lens.id)))
             );
         }
         let output = run

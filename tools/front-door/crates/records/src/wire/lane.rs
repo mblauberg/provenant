@@ -76,8 +76,13 @@ lane_row! {
             ("state", choices(&["queued", "resumed", "not_continued"])),
             ("operations", array(object(&[("operation_id", string()), ("message_id", string())], &[]))),
             ("successor", nullable(string())),
-        ], &[("cause", choices(&["session_unavailable", "session_mismatch", "session_proof_incomplete", "terminal_stop", "continuation_refused"]))]);
+        ], &[("cause", choices(&["session_unavailable", "session_mismatch", "session_proof_incomplete", "terminal_stop", "continuation_refused"])), ("fresh_session", boolean())]);
         git_import_failure: Value => object(&[("reason", string()), ("head", nullable(string())), ("retained_objects", nullable(super::schema::worktree_path()))], &[]);
+        stop_work: crate::run::StopWorkSummary => object(&[
+            ("schema_version", unsigned()),
+            ("trigger", choices(&["wall_deadline", "token_budget", "explicit_cancellation", "steered", "context_handoff"])),
+            ("push", choices(&["not_granted", "not_attempted", "not_needed", "pushed", "failed"])),
+        ], &[("head", string()), ("ahead", unsigned()), ("dirty_paths", unsigned())]);
         write_grants: Value => nullable(array(grant_schema()));
         terminal_cause: crate::run::TerminalCause => choices(&["source_view_refused", "project_binding_directory_unsafe", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "cloud_placement_removed", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_mismatch", "stopped_no_work", "empty_writer_result", "context_handoff", "blocked", "lane_token_lost", "steered"]);
         host: String => string();
@@ -247,7 +252,9 @@ impl LaneRow {
         use crate::run::AttemptState;
         let (mut state, mut terminal_reason) = Self::state_and_reason(&lane.state);
         let recorded_state = state.clone();
-        if let Some(presence) = facts.presence {
+        if let Some(presence) = facts.presence
+            && !matches!(lane.state, AttemptState::Terminal { .. })
+        {
             state = match presence {
                 LanePresence::Live => "running",
                 LanePresence::Unattended => "unattended",
@@ -264,9 +271,9 @@ impl LaneRow {
                     LanePresence::Unknown => format!(
                         "the writer process state cannot be verified; run `provenant reconcile {target}` to inspect recovery before retrying"
                     ),
-                    LanePresence::Settling => format!(
-                        "the writer exited and recovery is pending; run `provenant reconcile {target}` to finish settlement"
-                    ),
+                    LanePresence::Settling => {
+                        "the writer exited; automatic settlement recovery is pending".to_owned()
+                    }
                     LanePresence::Live => unreachable!(),
                 });
             }
@@ -443,6 +450,7 @@ impl LaneRow {
                     "retained_objects": facts.retained_git_objects,
                 })
             }),
+            stop_work: lane.stop_work.clone(),
             cause: if git_import_failure.is_some() {
                 Some(crate::run::SettlementReason::Failed)
             } else {

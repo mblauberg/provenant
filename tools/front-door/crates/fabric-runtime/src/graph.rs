@@ -281,7 +281,9 @@ fn graph_envelope_bound(
 }
 
 pub const MAX_CANCEL_REASON_BYTES: usize = 256;
-const MAX_CHECKPOINT_BYTES: u64 = 16_777_216;
+// 16 MiB plus the pending-steer reserve (#3303 session-ready steering), so a
+// graph at the default node limit stays admitted.
+const MAX_CHECKPOINT_BYTES: u64 = 17_825_792;
 /// Every JSON member costs at least two bytes, so the byte limit binds first.
 const MAX_CHECKPOINT_MEMBERS: usize = MAX_CHECKPOINT_BYTES as usize / 2;
 const MAX_ADVANCE_ERROR_BYTES: usize = 2_048;
@@ -911,6 +913,8 @@ struct PlannedNode {
     when: Vec<WhenTerm>,
     prompt: String,
     depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    after_settled: Vec<String>,
     #[serde(default, skip_serializing_if = "model::is_false")]
     advisory: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1016,11 +1020,12 @@ fn node_context(plan: &PlannedGraph, node: &PlannedNode) -> provenant_records::r
 
 impl PlannedNode {
     fn dependencies(&self) -> impl Iterator<Item = &String> {
-        self.depends_on.iter().chain(
-            self.after_expansion
-                .iter()
-                .filter(|name| !self.depends_on.contains(name)),
-        )
+        self.depends_on
+            .iter()
+            .chain(self.after_settled.iter())
+            .chain(self.after_expansion.iter().filter(|name| {
+                !self.depends_on.contains(name) && !self.after_settled.contains(name)
+            }))
     }
 }
 

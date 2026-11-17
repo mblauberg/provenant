@@ -770,6 +770,7 @@ pub(super) fn validate_flat_plan(
             title: node.title.clone(),
             prompt: plans::prompt(node),
             depends_on,
+            after_settled: node.after_settled.clone(),
             advisory: node.advisory,
             inputs: node.inputs.clone(),
             routes,

@@ -157,14 +157,14 @@ frame = false
 verifiers = 0
 synthesis = "reduce"
 [review.shapes.standard]
-reviewers = [{ pool = "junior", count = 5, distinct_families = true }]
+reviewers = [{ pool = "junior", count = 3, distinct_families = true }]
 frame = true
 verifiers = 1
 synthesis = "model"
 [review.shapes.deep]
 reviewers = [
-  { pool = "junior", count = 4, distinct_families = true },
-  { pool = "senior", count = 4, distinct_families = true },
+  { pool = "junior", count = 2, distinct_families = true },
+  { pool = "senior", count = 2, distinct_families = true },
 ]
 frame = true
 verifiers = 1
@@ -186,15 +186,16 @@ refactor = "standard"
 small = "quick"
 medium = "standard"
 large = "standard"
-# Base lenses fill a shape's slots in this order. A kind may replace the order
+# Panels stay small: risk floors add the lenses a boundary needs, and base
+# lenses fill the remaining slots in this order. A kind may replace the order
 # (docs) or add lenses outside the slot cap (refactor); risk tags add more.
 [review.lenses]
 order = [
   "correctness-spec",
   "tests",
+  "reliability",
   "design-fit-reuse",
   "simplicity",
-  "reliability",
   "conventions-readability",
   "refactor-cleanup",
   "flexibility",

@@ -473,6 +473,83 @@ fn create_list_remove_keeps_branch_and_refuses_primary() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn named_removal_reports_unproven_landing_without_claiming_identity_changed()
+-> Result<(), Box<dyn Error>> {
+    // Spec: docs/specs/supervisor.md#one-writer-removal-never-forces
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "unlanded".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    fs::write(info.path.join("work"), "unlanded change")?;
+    run_in_worktree(&fixture, &info.path, &["add", "work"])?;
+    run_in_worktree(&fixture, &info.path, &["commit", "-m", "unlanded change"])?;
+    let error = remove_with_port(
+        &test,
+        &context,
+        WorktreeRemove::Name {
+            name: "unlanded".into(),
+            discard: false,
+            integration: None,
+            expected_head: None,
+        },
+        &cancel(),
+    )
+    .err()
+    .ok_or("unlanded worktree removed")?;
+    assert!(
+        matches!(&error, WorktreeError::UnprovenLanding { branch } if branch == "refs/heads/unlanded")
+    );
+    let message = error.with_repair();
+    assert!(message.contains("unlanded") && message.contains("proof"));
+    assert!(message.contains("provenant worktree remove NAME --discard"));
+    assert!(info.path.exists());
+    let branch = GitRefName::branch("unlanded")?;
+    let tip = *read_branch_tips(&context, &cancel())?
+        .get(&branch)
+        .ok_or("missing branch")?;
+    fixture.run(&["branch", "proof", &tip.to_string()])?;
+    let evidence = provenant_records::custody::LandedEvidence {
+        predicate: provenant_records::custody::LandingPredicate::Landed,
+        source: provenant_records::custody::LandingSource::IntegrationTarget {
+            reference: "refs/heads/proof".into(),
+            commit: tip,
+        },
+    };
+    super::super::lifecycle::revalidate_named_landing_evidence(
+        &context,
+        Some(&branch),
+        tip,
+        &evidence,
+        &cancel(),
+    )?;
+    // Keep the checkout and its tip fixed while invalidating the selected proof.
+    fixture.run(&["update-ref", "refs/heads/proof", &info.head.to_string()])?;
+    assert!(matches!(
+        super::super::lifecycle::revalidate_named_landing_evidence(
+            &context,
+            Some(&branch),
+            tip,
+            &evidence,
+            &cancel(),
+        ),
+        Err(WorktreeError::UnprovenLanding { .. })
+    ));
+    assert!(info.path.exists());
+    assert_eq!(
+        read_branch_tips(&context, &cancel())?.get(&branch),
+        Some(&tip)
+    );
+    Ok(())
+}
+
+#[test]
 fn ignored_files_prevent_worktree_removal() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     fixture.run(&["branch", "-M", "main"])?;

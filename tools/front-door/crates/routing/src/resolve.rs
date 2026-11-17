@@ -1245,6 +1245,19 @@ fn account_reason<'q>(
     {
         reason = Some(RouteExclusionReason::PacingReserve);
     }
+    if reason.is_none()
+        && account_failed_probe(model, availability, context)
+        && context
+            .config
+            .launch_policy
+            .check(
+                "PROBE_FAILURE",
+                provenant_records::policy::Facts::violation("quota probe failed for account"),
+            )
+            .blocks()
+    {
+        reason = Some(RouteExclusionReason::UnknownAvailability);
+    }
     (reason, quota)
 }
 /// How a route's unavailability reads to a person. Account evidence carries the
@@ -1335,6 +1348,46 @@ fn readiness_reason(
                 _ => None,
             }
         })
+}
+
+fn account_probe_failure_reason(
+    model: &ModelId,
+    availability: &AvailabilityRecord,
+    context: &RoutingContext<'_>,
+) -> Option<&'static str> {
+    let lookup = context.readiness?;
+    let account_key = availability.account_key.as_deref()?;
+    let now = context.now_seconds();
+    let read = lookup(
+        &provenant_quota::ReadinessScope {
+            extra: Default::default(),
+            host: provenant_quota::LOCAL_HOST.into(),
+            adapter: model.adapter().into(),
+            account_key: account_key.into(),
+            route: format!("{}/{}", model.adapter(), model.model()),
+        },
+        now,
+    );
+    if read.observed_scope.is_some()
+        && read.observed_unix_seconds.is_some_and(|at| at <= now)
+        && read.expires_unix_seconds.is_some_and(|expiry| expiry > now)
+    {
+        match read.reason {
+            Some(provenant_quota::ReadinessReason::CommandFailure) => Some("command failure"),
+            Some(provenant_quota::ReadinessReason::ProbeTimeout) => Some("probe timeout"),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+fn account_failed_probe(
+    model: &ModelId,
+    availability: &AvailabilityRecord,
+    context: &RoutingContext<'_>,
+) -> bool {
+    account_probe_failure_reason(model, availability, context).is_some()
 }
 
 fn uncertainty(
@@ -1799,11 +1852,13 @@ fn candidate(
             let load = account_load(model, a, context);
             let spent = latest_reading(model, a, context, false)
                 .is_some_and(|q| reading_exhausted(&q.snapshot, model, context));
+            let failed_probe = account_failed_probe(model, a, context);
             (
                 a,
                 reason,
                 (
                     !spent,
+                    !failed_probe,
                     uncertainty(model, a, context).is_none_or(|why| why == "stale quota"),
                     latest_reading(model, a, context, true).is_some(),
                     !avoid_cooling || !cooling(model, a.account_key.as_deref(), context),
@@ -1865,6 +1920,15 @@ fn candidate(
         },
     };
     let mut diagnostics = RouteDiagnostics::default();
+    if let Some(a) = availability
+        && matches!(readiness, RouteReadiness::Ready { .. })
+        && let Some(reason_text) = account_probe_failure_reason(model, a, context)
+    {
+        let key = a.account_key.as_deref().unwrap_or("unknown");
+        diagnostics
+            .launch_warnings
+            .push(format!("probe for account `{key}` failed: {reason_text}"));
+    }
     if let Some(value) = dropped_effort {
         diagnostics.effort_warning = Some(EffortWarning {
             extra: Default::default(),

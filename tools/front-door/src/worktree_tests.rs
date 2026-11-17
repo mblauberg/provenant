@@ -622,6 +622,47 @@ impl provenant_supervisor::Holder for FixtureHolder<'_> {
     ) -> provenant_supervisor::custody::Result<()> {
         self.0.admit(context, attempt)
     }
+    // Every defaulted method must forward: a swallowed `outcome` leaves the
+    // record non-terminal, so the wrapped `terminal` refuses and settlement
+    // retries until the test times out.
+    fn has_live_children(&self, context: &[u8]) -> provenant_supervisor::custody::Result<bool> {
+        self.0.has_live_children(context)
+    }
+    fn provider_exited(
+        &self,
+        context: &[u8],
+        reason: Option<provenant_supervisor::machine::StopReason>,
+    ) -> provenant_supervisor::custody::Result<()> {
+        self.0.provider_exited(context, reason)
+    }
+    fn budget_warning(
+        &self,
+        context: &[u8],
+        tokens: u64,
+        budget: u64,
+    ) -> provenant_supervisor::custody::Result<()> {
+        self.0.budget_warning(context, tokens, budget)
+    }
+    fn budget_clean_point(&self, context: &[u8]) -> provenant_supervisor::custody::Result<bool> {
+        self.0.budget_clean_point(context)
+    }
+    fn budget_crossed(
+        &self,
+        context: &[u8],
+        tokens: u64,
+        budget: u64,
+    ) -> provenant_supervisor::custody::Result<()> {
+        self.0.budget_crossed(context, tokens, budget)
+    }
+    fn outcome(
+        &self,
+        context: &[u8],
+        attempt: &provenant_os::fs::Directory,
+        exit: &provenant_supervisor::custody::ExitObservation,
+        recovery: Option<&provenant_supervisor::custody::Recovery>,
+    ) -> provenant_supervisor::custody::Result<()> {
+        self.0.outcome(context, attempt, exit, recovery)
+    }
     fn terminal(
         &self,
         context: &[u8],

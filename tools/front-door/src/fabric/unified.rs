@@ -1,7 +1,9 @@
 //! Read and control graph targets through the public command surface.
 use super::*;
 use provenant_cli::target::{ResolveError, Resolved, Want};
-use provenant_fabric_runtime::graph::{AttemptState, FileJournal, GraphRun, JournalError};
+use provenant_fabric_runtime::graph::{
+    AttemptState, FileJournal, GraphJournal, GraphRun, JournalError, PendingSteerQueueError,
+};
 use serde_json::{Value, json};
 
 #[derive(Clone, Debug)]
@@ -554,6 +556,22 @@ pub(crate) fn status_line(name: &str, row: &Value, model: Option<&str>) -> Strin
     if !note.is_null() {
         line.push_str(&format!(": {}", plain(note)));
     }
+    if let Some(work) = row.get("stop_work").filter(|value| !value.is_null()) {
+        let head = work["head"].as_str().unwrap_or("unknown");
+        let ahead = work["ahead"].as_u64();
+        let push = work["push"] == "pushed";
+        if let Some(ahead) = ahead.filter(|count| *count > 0) {
+            line.push_str(&format!(
+                " | {ahead} commits {} at {head}",
+                if push { "pushed" } else { "unpushed" }
+            ));
+        } else if push && ahead.is_none() {
+            line.push_str(&format!(" | committed work pushed at {head}"));
+        }
+        if let Some(dirty) = work["dirty_paths"].as_u64().filter(|count| *count > 0) {
+            line.push_str(&format!(" | {dirty} dirty paths left uncommitted"));
+        }
+    }
     let mut line = provenant_cli::bounded_text(&line, provenant_cli::limits::SUMMARY_ROW_BYTES);
     line.push('\n');
     line
@@ -987,10 +1005,28 @@ pub(crate) fn target_fault(error: ResolveError<JournalError>) -> TargetFault {
         ResolveError::Ambiguous { .. } => (provenant_records::Outcome::Invalid, "AMBIGUOUS_TARGET"),
         ResolveError::Read(_) => (provenant_records::Outcome::Error, "GRAPH_READ"),
     };
+    let message = match &error {
+        ResolveError::NotFound(target) => target.clone(),
+        ResolveError::Ambiguous { target, candidates } => format!(
+            "{target} has several nodes; use one of {}",
+            candidates.join(", ")
+        ),
+        ResolveError::Read(_) => error.to_string(),
+    };
     TargetFault {
         outcome,
         code,
-        message: error.to_string(),
+        message,
+    }
+}
+
+fn outside_project_fault(target: &provenant_cli::Target) -> TargetFault {
+    TargetFault {
+        outcome: provenant_records::Outcome::Invalid,
+        code: "NOT_FOUND",
+        message: format!(
+            "no project found for {target}; run from a project checkout or pass --project PATH"
+        ),
     }
 }
 
@@ -1037,8 +1073,13 @@ fn command_target_fault(
     }
     is_target_not_found(error).then(|| {
         let message = target.map_or_else(
-            || format!("NOT_FOUND: {error}"),
-            |target| format!("NOT_FOUND: {target}"),
+            || {
+                error
+                    .to_string()
+                    .trim_start_matches("NOT_FOUND: ")
+                    .to_owned()
+            },
+            |target| format!("{target} was not found in this project"),
         );
         (provenant_records::Outcome::Invalid, "NOT_FOUND", message)
     })
@@ -1335,32 +1376,19 @@ pub(crate) fn unified_graph_steer(
 ) -> u8 {
     enum SteerResult {
         Queued(Value),
+        Pending(Value),
         Refused(&'static str),
         Unsupported(provenant_records::control::ControlReceipt),
     }
     let result = (|| -> Result<SteerResult, Box<dyn std::error::Error>> {
         let factory = factory(globals, workers)?;
-        let (resolved, checkpoint) =
+        let (resolved, _checkpoint) =
             resolve_with_checkpoint(&factory, &args.target, Want::Attempt { settled: false })?;
-        let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(
-            factory.clock.mono_now(),
-            factory.context.config.graph.launch_wait_seconds,
-        )?;
-        let target = match super::steer::verified_target(
-            &factory,
-            &resolved,
-            &checkpoint,
-            budget,
-            &cancel,
-        ) {
-            Ok(Some(target)) => target,
-            Ok(None) | Err(_) => {
-                return Ok(SteerResult::Refused(
-                    "steering requires one verified, accepted, current live attempt",
-                ));
-            }
-        };
+        let project = factory.context.identity.project;
+        let work_key = resolved
+            .work_key(project)
+            .ok_or(FacadeError::StateCorrupt)?;
+        let operation_id = graph_steer_operation_id(args.operation_id.as_ref(), &work_key)?;
         let source = provenant_cli::brief::select_brief_source([
             args.brief
                 .clone()
@@ -1374,67 +1402,158 @@ pub(crate) fn unified_graph_steer(
             source,
             provenant_records::control::CONTROL_TEXT_BYTES,
         )?;
-        let mut facade = BoundFacade { factory: &factory };
-        let (host, id) = target
-            .reference
-            .split_once('/')
-            .ok_or(FacadeError::StateCorrupt)?;
-        let operation_id = match args.operation_id.as_ref() {
-            Some(operation) => {
-                let digest = provenant_records::CanonicalV1::record_digest(
-                    "graph-steer",
-                    1,
-                    &(operation, &target.reference),
-                )
-                .map_err(|_| FacadeError::StateCorrupt)?;
-                Some(provenant_core::OperationId::parse(&format!(
-                    "steer-{}",
-                    provenant_core::hex(digest.as_bytes())
-                ))?)
-            }
-            None if target.target.host != Some(factory.context.identity.host) => {
-                let bytes = provenant_os::fs::entropy_128()?;
-                Some(provenant_core::OperationId::parse(&format!(
-                    "steer-{}",
-                    provenant_core::hex(&bytes)
-                ))?)
-            }
-            None => None,
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(
+            factory.clock.mono_now(),
+            factory.context.config.graph.launch_wait_seconds,
+        )?;
+        // Queue state and fast delivery share graph exclusion, so operation
+        // replay cannot bypass a durable refusal or a still-pending intent.
+        let mut journal = FileJournal::open(
+            &factory.context.roots.state,
+            project,
+            &resolved.graph,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        let Some(mut current) = journal.load(&resolved.graph)? else {
+            return Ok(SteerResult::Refused(
+                "the graph target is no longer available",
+            ));
         };
-        let graph_context =
-            (target.target.host != Some(factory.context.identity.host)).then(|| {
-                provenant_fabric_runtime::inbox::GraphSteerContext {
-                    launch_actor: target.launch_actor,
-                    launch_operation: target.launch_operation.clone(),
-                    origin_work_key: target.work_key.clone(),
-                }
-            });
-        let input = provenant_fabric_runtime::inbox::InboxInput::Steer {
-            extra: Default::default(),
-            graph_context,
-            attempt: id.parse()?,
-            text,
-            operation_id,
-        };
-        let result = match facade.inbox_owner(input, Some(host.into()), budget, &cancel) {
-            Ok(result) => result,
-            Err(provenant_fabric_runtime::relay::ServiceError::InboxOwner { .. }) => {
+        if let Some(saved) = current.pending_steers.get(operation_id.as_str()) {
+            if saved.text != text
+                || saved.work_key != work_key
+                || saved.requester_host != factory.context.identity.inbox.host
+                || saved.requester_actor != factory.context.identity.inbox.actor
+                || saved.requester_agent != factory.context.identity.inbox.agent
+            {
+                return Ok(SteerResult::Refused(
+                    "steer operation ID was reused with different input",
+                ));
+            }
+            if saved.refusal.is_some() {
+                return Ok(SteerResult::Refused(
+                    "the queued steer was refused; its accepted text is retained",
+                ));
+            }
+            return Ok(SteerResult::Pending(
+                json!({"queued":true,"warning":"owner verification is pending; the original queued operation will retry"}),
+            ));
+        }
+        let send =
+            |factory: &Factory,
+             target: &super::steer::VerifiedTarget|
+             -> Result<
+                provenant_fabric_runtime::inbox::InboxResult,
+                provenant_fabric_runtime::relay::ServiceError,
+            > {
+                let (host, id) = target
+                    .reference
+                    .split_once('/')
+                    .ok_or(FacadeError::StateCorrupt)?;
+                let graph_context = (target.target.host != Some(factory.context.identity.host))
+                    .then(|| provenant_fabric_runtime::inbox::GraphSteerContext {
+                        launch_actor: target.launch_actor,
+                        launch_operation: target.launch_operation.clone(),
+                        origin_work_key: target.work_key.clone(),
+                    });
+                let input = provenant_fabric_runtime::inbox::InboxInput::Steer {
+                    extra: Default::default(),
+                    graph_context,
+                    attempt: id.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                    text: text.clone(),
+                    operation_id: Some(operation_id.clone()),
+                };
+                BoundFacade { factory }.inbox_owner(input, Some(host.into()), budget, &cancel)
+            };
+        match super::steer::verified_target(&factory, &resolved, &current, budget, &cancel) {
+            super::steer::TargetProof::Conflict => {
                 return Ok(SteerResult::Refused(
                     "steering requires one verified, accepted, current live attempt",
                 ));
             }
-            Err(error) => return Err(Box::new(error)),
+            super::steer::TargetProof::Verified(target) => match send(&factory, &target) {
+                Ok(provenant_fabric_runtime::inbox::InboxResult::Control { receipt })
+                    if receipt.state == provenant_records::control::ControlState::Unsupported =>
+                {
+                    return Ok(SteerResult::Unsupported(receipt));
+                }
+                Ok(provenant_fabric_runtime::inbox::InboxResult::Control { receipt }) => {
+                    return Ok(SteerResult::Queued(json!({"receipts":[receipt]})));
+                }
+                Ok(_) => return Err(FacadeError::StateCorrupt.into()),
+                Err(error) if super::steer::steer_delivery_unavailable(&error) => {}
+                Err(provenant_fabric_runtime::relay::ServiceError::InboxOwner { .. }) => {
+                    return Ok(SteerResult::Refused(
+                        "the verified inbox owner refused steering",
+                    ));
+                }
+                Err(error) => return Err(Box::new(error)),
+            },
+            super::steer::TargetProof::Unavailable => {}
+        }
+        let context = provenant_fabric_runtime::inbox::GraphSteerContext {
+            launch_actor: current
+                .nodes
+                .iter()
+                .flat_map(|node| node.recorded_attempts())
+                .find(|attempt| attempt.key.work_key(project).ok().as_ref() == Some(&work_key))
+                .and_then(|attempt| attempt.launch_actor.parse().ok())
+                .ok_or(FacadeError::StateCorrupt)?,
+            launch_operation: super::graph_execution::graph_operation(
+                "graph-attempt-operation",
+                &current
+                    .nodes
+                    .iter()
+                    .flat_map(|node| node.recorded_attempts())
+                    .find(|attempt| attempt.key.work_key(project).ok().as_ref() == Some(&work_key))
+                    .ok_or(FacadeError::StateCorrupt)?
+                    .key,
+            )?,
+            origin_work_key: work_key.clone(),
         };
-        match result {
-            provenant_fabric_runtime::inbox::InboxResult::Control { receipt }
-                if receipt.state == provenant_records::control::ControlState::Unsupported =>
-            {
-                Ok(SteerResult::Unsupported(receipt))
+        let pending = provenant_fabric_runtime::graph::PendingGraphSteer {
+            operation_id: operation_id.clone(),
+            caller_operation_id: args.operation_id.clone(),
+            work_key: work_key.clone(),
+            graph_context: context,
+            requester_host: factory.context.identity.inbox.host,
+            requester_agent: factory.context.identity.inbox.agent.clone(),
+            requester_actor: factory.context.identity.inbox.actor,
+            text: text.clone(),
+            refusal: None,
+        };
+        match current
+            .pending_steers
+            .enqueue(operation_id.to_string(), pending)
+        {
+            Ok(inserted) => {
+                if current
+                    .pending_steers
+                    .get(operation_id.as_str())
+                    .is_some_and(|saved| saved.refusal.is_some())
+                {
+                    return Ok(SteerResult::Refused(
+                        "the queued steer was refused; its accepted text is retained",
+                    ));
+                }
+                if inserted {
+                    journal.save(&current)?;
+                }
+                Ok(SteerResult::Pending(json!({
+                    "queued": true,
+                    "warning": "owner placement is still confirming; the graph tick will retry steering"
+                })))
             }
-            provenant_fabric_runtime::inbox::InboxResult::Control { receipt } => {
-                Ok(SteerResult::Queued(json!({"receipts":[receipt]})))
+            Err(PendingSteerQueueError::TooMany | PendingSteerQueueError::TooLarge) => {
+                Ok(SteerResult::Refused("graph steer queue is full"))
             }
-            _ => Err(FacadeError::StateCorrupt.into()),
+            Err(PendingSteerQueueError::OperationConflict) => Ok(SteerResult::Refused(
+                "steer operation ID was reused with different input",
+            )),
+            Err(PendingSteerQueueError::InvalidKey) => Err(FacadeError::StateCorrupt.into()),
         }
     })();
     match result {
@@ -1442,6 +1561,16 @@ pub(crate) fn unified_graph_steer(
             &provenant_records::CommandResult::new("steer", provenant_records::Outcome::Ok, data),
             globals,
             "steering queued\n",
+            false,
+        ),
+        Ok(SteerResult::Pending(data)) => crate::emit(
+            &provenant_records::CommandResult::new(
+                "steer",
+                provenant_records::Outcome::Pending,
+                data,
+            ),
+            globals,
+            "steering queued; owner verification will retry\n",
             false,
         ),
         Ok(SteerResult::Refused(message)) => crate::fail(
@@ -1464,6 +1593,26 @@ pub(crate) fn unified_graph_steer(
         }
         Err(error) => command_fail("steer", error.as_ref(), globals),
     }
+}
+
+fn graph_steer_operation_id(
+    caller: Option<&provenant_core::OperationId>,
+    work_key: &provenant_records::WorkKey,
+) -> Result<provenant_core::OperationId, FacadeError> {
+    if caller.is_none() {
+        let bytes = provenant_os::fs::entropy_128()
+            .map_err(|_| FacadeError::io("create steer operation"))?;
+        return provenant_core::OperationId::parse(&format!(
+            "steer-{}",
+            provenant_core::hex(&bytes)
+        ))
+        .map_err(|_| FacadeError::StateCorrupt);
+    }
+    let digest =
+        provenant_records::CanonicalV1::record_digest("graph-steer", 2, &(caller, work_key))
+            .map_err(|_| FacadeError::StateCorrupt)?;
+    provenant_core::OperationId::parse(&format!("steer-{}", provenant_core::hex(digest.as_bytes())))
+        .map_err(|_| FacadeError::StateCorrupt)
 }
 
 /// One graph in the default listing.
@@ -1695,9 +1844,7 @@ pub(crate) fn graph_listing(
                 .map_or(i64::MAX, provenant_core::WallTime::as_micros);
             let mut human = String::from("NAME STATE TEMPLATE NODES AGE\n");
             for graph in &listing.rows {
-                let age = graph
-                    .changed_micros
-                    .map_or_else(|| "-".to_owned(), |changed| age_text(now - changed));
+                let age = graph_age(now, graph);
                 human.push_str(&format!(
                     "{} {} {} {} {age}\n",
                     graph.name,
@@ -1793,6 +1940,12 @@ fn age_text(micros: i64) -> String {
     }
 }
 
+fn graph_age(now_micros: i64, graph: &ListedGraph) -> String {
+    graph
+        .created_micros
+        .map_or_else(|| "-".to_owned(), |created| age_text(now_micros - created))
+}
+
 /// Read the retained graph journal without consulting live providers. A
 /// numbered target keeps only that attempt's events.
 pub(crate) fn unified_graph_trace(
@@ -1811,7 +1964,13 @@ pub(crate) fn unified_graph_trace(
             add_cache_share(&mut data);
             return Ok(data);
         }
-        let factory = read_factory(globals, workers)?;
+        let factory = read_factory(globals, workers).map_err(|error| {
+            if missing_graph_context(error.as_ref()) {
+                Box::new(outside_project_fault(target)) as Box<dyn std::error::Error>
+            } else {
+                error
+            }
+        })?;
         let attempt = if factory.context.in_lane {
             None
         } else {
@@ -1896,9 +2055,7 @@ pub(crate) fn unified_graph_output(
         let read = || -> Result<provenant_cli::run::Reply, Box<dyn std::error::Error>> {
             let factory = read_factory(globals, workers).map_err(|error| {
                 if missing_graph_context(error.as_ref()) {
-                    Box::new(target_fault(ResolveError::NotFound(
-                        command.target.to_string(),
-                    )))
+                    Box::new(outside_project_fault(&command.target))
                 } else {
                     error
                 }
@@ -3118,6 +3275,23 @@ mod tests {
         assert_eq!(first.rows[0].name, "s4");
         let second = select_listing(graphs, 3 * day, true, 2, first.next);
         assert_eq!(second.rows[0].name, "s2");
+    }
+
+    #[test]
+    fn graph_age_uses_creation_time_after_later_changes() {
+        let mut graph = listed("running", false, 110_000_000);
+        graph.created_micros = Some(10_000_000);
+        assert_eq!(graph_age(120_000_000, &graph), "1m");
+    }
+
+    #[test]
+    fn missing_project_target_error_has_one_code_and_a_repair() {
+        let target = "graph-name".parse().expect("valid graph target");
+        let fault = outside_project_fault(&target);
+        assert_eq!(fault.code, "NOT_FOUND");
+        assert!(fault.message.contains("no project found"));
+        assert!(fault.message.contains("pass --project PATH"));
+        assert!(!fault.message.starts_with("NOT_FOUND:"));
     }
 
     #[test]

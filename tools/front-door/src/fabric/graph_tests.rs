@@ -1471,6 +1471,54 @@ mod graph_ask_inbox_tests {
                 .count(),
             2
         );
+        // Missing inbox request returns Ok(None).
+        let missing_ask = loop_ask("fixture", "review", 99, "chair-session");
+        let missing_link = link(&missing_ask, "018f0000000070008000000000000099".into());
+        let missing_scope = AskScope {
+            actor: &actor,
+            ask: &missing_link,
+        };
+        assert_eq!(graph_ask_poll(&service, &missing_scope, &cancel)?, None);
+        graph_ask_close(&service, &missing_scope, &cancel)?;
+
+        let empty_link = link(&missing_ask, "".into());
+        let empty_scope = AskScope {
+            actor: &actor,
+            ask: &empty_link,
+        };
+        assert_eq!(graph_ask_poll(&service, &empty_scope, &cancel)?, None);
+        graph_ask_close(&service, &empty_scope, &cancel)?;
+
+        // Stored request failing to decode returns FacadeError::StateCorruptDetail.
+        let corrupt_ask = loop_ask("fixture", "review", 100, "chair-session");
+        let corrupt_filing = AskFiling {
+            graph_id: "fixture",
+            instance_id: "instance-corrupt",
+            actor: &actor,
+            ask: &corrupt_ask,
+        };
+        let corrupt_filed = graph_ask_file(&service, &corrupt_filing, &cancel)?;
+        let corrupt_link = link(&corrupt_ask, corrupt_filed.request.clone());
+        let corrupt_scope = AskScope {
+            actor: &actor,
+            ask: &corrupt_link,
+        };
+        {
+            let conn = rusqlite::Connection::open(
+                roots.state.as_path().join("fabric").join("fabric.sqlite3"),
+            )?;
+            conn.execute(
+                "UPDATE human_requests SET record = X'deadbeef' WHERE id = ?1",
+                rusqlite::params![corrupt_filed.request],
+            )?;
+        }
+        match graph_ask_poll(&service, &corrupt_scope, &cancel) {
+            Err(FacadeError::StateCorruptDetail { detail }) => {
+                assert!(detail.contains("decode error"), "{detail}");
+            }
+            other => panic!("expected StateCorruptDetail, got {other:?}"),
+        }
+
         Ok(())
     }
 

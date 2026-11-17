@@ -83,8 +83,26 @@ replayed after publication contention without relaunching the provider.
 
 Natural completion takes precedence over budget action. A warning does not stop
 work; a hard boundary stops it. Providers without live usage expose an advisory
-limit rather than a fabricated measurement.
+limit rather than a fabricated measurement. The token-budget stop keeps its
+existing safe commit of dirty work. A wall deadline and explicit cancellation
+never create a commit: settlement records the verified head, commits ahead of
+the launch-bound remote observation, dirty path count, and push result in the optional
+`AttemptRecord.stop_work` summary. Explicit cancellation imports and publishes
+only commits already present at the stop; dirty paths remain in the worktree.
+The host pushes the lane's own branch only when the persisted `lanes.publish`
+grant is enabled and the launch-bound host transport is available. A failed or
+unavailable push leaves the committed head and unpushed count visible.
+
+| Record field | Reader compatibility |
+| --- | --- |
+| `AttemptRecord.stop_work` | Optional; older records read as absent, and older readers retain it as an unknown field. |
+
 - Why: budget enforcement must preserve completed work and report its evidence.
+
+## Lane verification and the host build cap
+
+A writer preamble's verification paragraph is `lanes.verification` (`check`, `targeted` or `full`). Unset, the paragraph is the historical compile-check wording and names no source. A brief line `Verification scope: targeted` (or `check` or `full`) overrides the knob and the paragraph names source `brief`. When the knob and that line disagree, the paragraph follows the brief and the stop cause names both scopes. The host build cap is `domains.fabric.lanes.max_concurrent_builds`: unset, the count is derived from cores and memory (source `default`); a set value is source `host`; `0` disables the cap. A compiling cargo command that finds every slot busy waits a bounded time, then warns and proceeds.
+- Why: a chair brief must be able to widen what a lane verifies, and parallel lanes must share one host cap instead of each taking the machine.
 
 ## Every limit names the layer that set it
 
@@ -113,6 +131,27 @@ the selected token, and `ambient` preserves the native host environment.
 The [attribution contract](run-attribution.md) governs contribution records.
 The [contribution owner](../../tools/front-door/crates/run/src/pr_contribution.rs)
 and [command renderer](../../tools/front-door/src/pr/contributions.rs) define the payload.
+
+## Stop intent
+
+Supervisor owns one typed stop-intent protocol. `stop-intent.json` names the
+attempt scope, reason, requester and operation ID; guardian, admission,
+import, publication and continuation readers use `read_stop_intent`.
+`cancel.json` is reserved for explicit cancellation and cannot carry a steer.
+A valid explicit cancellation takes precedence over steering. A foreign,
+malformed or unreadable intent grants no continuation or publication authority.
+
+A delivered steer may preserve committed work while its exact authorised
+intent still matches. A current explicit owner cancellation separately permits
+preservation under proven quiescent custody, including after an earlier steer
+or natural exit. It vetoes continuation without changing the provider's sealed
+stop cause. A replacement request invalidates an in-flight preservation token;
+recovery must validate the new intent before acting. Stop delivery
+ordering belongs to the provider exit: requesting a stop after a natural exit
+does not turn the finished attempt into a cancellation.
+- Why: every stop reader needs the same meaning, and a steering request must
+  never accidentally cancel the work it intends to continue.
+- Owner: `crates/supervisor/src/custody.rs`, `crates/run/src/settlement.rs`
 
 ## What follows a stop
 
@@ -185,3 +224,4 @@ pauses for the chair. A `blocked` stop always goes to the chair.
 | `unsettled` | `chair` | no | 0 |
 | `quarantined` | `chair` | no | 0 |
 | `steered` | `chair` | yes | 0 |
+| `unclassified` | `new_route` | no | 0 |

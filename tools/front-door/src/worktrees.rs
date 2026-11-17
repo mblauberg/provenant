@@ -137,6 +137,7 @@ impl Error {
                 WorktreeError::Dirty(_)
                 | WorktreeError::DetachedPrimary
                 | WorktreeError::DetachedUnmerged { .. }
+                | WorktreeError::UnprovenLanding { .. }
                 | WorktreeError::IgnoredPaths(_)
                 | WorktreeError::GitOperationInProgress
                 | WorktreeError::LockBusy
@@ -2021,7 +2022,12 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                         append_gc_subpass_removals(&mut report, recovered);
                     }
                     report.upstream_error = upstream_error;
-                    if !unsettled.removals.is_empty() {
+                    if unsettled.removals.iter().any(|removal| {
+                        matches!(
+                            removal.outcome,
+                            provenant_records::custody::RemovalOutcome::Removed { .. }
+                        )
+                    }) {
                         report.byte_errors.push(provenant_config::RetentionIssue {
                             path: project.path.clone(),
                             operation: "account recovered settlement".into(),

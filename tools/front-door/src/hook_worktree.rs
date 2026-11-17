@@ -241,9 +241,9 @@ pub fn create(globals: &Globals) -> u8 {
         Err(error) => return fail("worktree-create", &error),
     };
     let result = (|| -> Result<PathBuf, Error> {
-        let deadline = Instant::now() + WORK_TIME;
         let executor = SystemExecutor::new(1)?;
         let cli = Cli::new(globals, &input.cwd, &executor)?;
+        let deadline = cli.deadline_after(WORK_TIME);
         let state = state_root(globals, &input.cwd)?;
         let created = cli.data(&["worktree", "create", &branch], WORK_TIME, deadline);
         let path = match created {
@@ -317,9 +317,9 @@ pub fn remove(globals: &Globals) -> u8 {
             .filter(|cwd| !cwd.starts_with(&target))
             .or_else(|| target.parent().map(Path::to_path_buf))
             .ok_or("no directory to run from")?;
-        let deadline = Instant::now() + WORK_TIME;
         let executor = SystemExecutor::new(1)?;
         let cli = Cli::new(globals, &cwd, &executor)?;
+        let deadline = cli.deadline_after(WORK_TIME);
         let list = cli.data(&["worktree", "list"], LIST_TIME, deadline)?;
         // Only a linked worktree this project's owner lists is removable; the
         // first entry is the primary checkout.

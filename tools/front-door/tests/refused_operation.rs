@@ -64,7 +64,7 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
                     "id":"writer", "use":"write", "worktree":writer,
                     "write_scope":["."]
                 }], "templates":{"write":{
-                    "brief":"PROMPT_SENTINEL", "tier":"senior",
+                    "prompt":"PROMPT_SENTINEL", "tier":"senior",
                     "access":"worktree_write", "outputs":["result"]
                 }}
             }))?,

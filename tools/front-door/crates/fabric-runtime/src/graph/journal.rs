@@ -1209,6 +1209,7 @@ impl GraphJournal for FileJournal {
 fn stored_pending(stored: &StoredCheckpoint) -> bool {
     let checkpoint = &stored.checkpoint;
     next_step::pending(checkpoint)
+        || checkpoint.pending_steers.has_pending()
         || checkpoint
             .nodes
             .iter()

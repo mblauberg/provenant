@@ -20,12 +20,32 @@ use std::{
     time::Duration,
 };
 
+/// Launch delivery fields a test compares across stop-publish preparation:
+/// git, gh, the launch binding digest, the stop binding digest and the
+/// environment.
+#[cfg(test)]
+pub(crate) type LaunchStateForTest = (
+    Option<PathBuf>,
+    Option<PathBuf>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Vec<(Vec<u8>, Vec<u8>)>,
+);
+
 /// Transport-only context. Debug deliberately omits all environment values.
 #[derive(Serialize, Deserialize)]
 pub struct HostDeliveryContext {
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     tools: Option<HostTools>,
     bound: Option<BoundDelivery>,
+    /// Separate launch-bound destination for stop preservation. It never shares
+    /// the task's explicit delivery target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_publish_bound: Option<BoundDelivery>,
+    /// Tools and environment that stop publication prepared for itself. The
+    /// launch delivery fields above stay exactly as the launch prepared them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_publish_host: Option<StopPublishHost>,
     #[serde(skip)]
     lane_path: Option<FilteredLanePath>,
     /// Where the lane can write: its worktree and the project's lane areas.
@@ -56,6 +76,7 @@ struct BoundDelivery {
     destination: WriterDeliveryRequest,
 }
 const BINDING_FILE: &str = "delivery-binding.json";
+const STOP_PUBLISH_BINDING_FILE: &str = "stop-publish-binding.json";
 pub(crate) const HEAD_MISMATCH: &str = "worktree head differs from sealed delivery head";
 const BINDING_MISMATCH: &str = "delivery destination differs from the launch binding";
 const BINDING_MISSING: &str = "delivery launch binding was not sealed";
@@ -116,6 +137,24 @@ impl PartialEq for LaunchBinding {
     }
 }
 impl Eq for LaunchBinding {}
+/// Host state prepared only for stop publication.
+#[derive(Clone, Serialize, Deserialize)]
+struct StopPublishHost {
+    environment: Vec<(Vec<u8>, Vec<u8>)>,
+    tools: Option<HostTools>,
+    #[serde(default)]
+    lane_roots: Vec<PathBuf>,
+    #[serde(skip)]
+    lane_path: Option<FilteredLanePath>,
+}
+impl PartialEq for StopPublishHost {
+    fn eq(&self, other: &Self) -> bool {
+        self.environment == other.environment
+            && self.tools == other.tools
+            && self.lane_roots == other.lane_roots
+    }
+}
+impl Eq for StopPublishHost {}
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct HostTools {
     git: PathBuf,
@@ -278,6 +317,8 @@ impl Clone for HostDeliveryContext {
             environment: self.environment.clone(),
             tools: self.tools.clone(),
             bound: self.bound.clone(),
+            stop_publish_bound: self.stop_publish_bound.clone(),
+            stop_publish_host: self.stop_publish_host.clone(),
             lane_path: self.lane_path.clone(),
             lane_roots: self.lane_roots.clone(),
             cancellation: self.cancellation.clone(),
@@ -291,6 +332,8 @@ impl PartialEq for HostDeliveryContext {
         self.environment == other.environment
             && self.tools == other.tools
             && self.bound == other.bound
+            && self.stop_publish_bound == other.stop_publish_bound
+            && self.stop_publish_host == other.stop_publish_host
     }
 }
 impl Eq for HostDeliveryContext {}
@@ -324,6 +367,116 @@ impl HostDeliveryContext {
             .base_head = base;
         Ok(host)
     }
+    /// Bind the lane's own branch for best-effort stop preservation, separate
+    /// from any user-selected delivery destination.
+    pub(crate) fn has_stop_publish(&self) -> bool {
+        self.stop_publish_bound.is_some()
+    }
+    pub(crate) fn prepare_stop_publish(
+        mut self,
+        writer: &WriterRequest,
+        request: &WriterDeliveryRequest,
+    ) -> Result<Self> {
+        if request.mode != crate::DeliveryMode::Push || request.open_pr {
+            return Err(RunError::Validation(
+                "stop publishing requires a branch push",
+            ));
+        }
+        // Preparation runs on a copy: only its sealed binding and the tools it
+        // validated are kept, in stop-only fields. The launch binding, host
+        // tools and environment stay as the launch prepared them.
+        let prepared = self.clone().prepare(writer, request)?;
+        self.attach_stop_publish(prepared);
+        Ok(self)
+    }
+    #[cfg(test)]
+    pub(crate) fn launch_state_for_test(&self) -> LaunchStateForTest {
+        let scope = provenant_records::custody::Scope {
+            attempt: provenant_core::AttemptId::from_bytes([0x54; 16]),
+            generation: 1,
+        };
+        (
+            self.tools.as_ref().map(|tools| tools.git.clone()),
+            self.tools.as_ref().and_then(|tools| tools.gh.clone()),
+            self.bound
+                .as_ref()
+                .and_then(|bound| crate::db::bytes(&LaunchBinding::new(scope, bound)).ok()),
+            self.stop_publish_bound
+                .as_ref()
+                .and_then(|bound| crate::db::bytes(&LaunchBinding::new(scope, bound)).ok()),
+            self.environment.clone(),
+        )
+    }
+    fn attach_stop_publish(&mut self, prepared: Self) {
+        self.stop_publish_bound = prepared.bound;
+        self.stop_publish_host = Some(StopPublishHost {
+            environment: prepared.environment,
+            tools: prepared.tools,
+            lane_roots: prepared.lane_roots,
+            lane_path: prepared.lane_path,
+        });
+    }
+    /// Rebuild stop-publish transport from its immutable launch binding.
+    pub(crate) fn prepare_stop_publish_recovery(
+        mut self,
+        writer: &WriterRequest,
+        request: &WriterDeliveryRequest,
+        attempt: &Directory,
+        scope: provenant_records::custody::Scope,
+        head: GitOid,
+        base: GitOid,
+    ) -> Result<Self> {
+        let mut prepared = self.clone().prepare(writer, request)?;
+        let bound = prepared
+            .bound
+            .as_ref()
+            .ok_or(RunError::Validation("stop publish binding missing"))?;
+        prepared.verify_binding(attempt, scope, bound, STOP_PUBLISH_BINDING_FILE)?;
+        if prepared.head(writer)? != head {
+            return Err(RunError::Validation(HEAD_MISMATCH));
+        }
+        prepared
+            .bound
+            .as_mut()
+            .ok_or(RunError::Validation("stop publish binding missing"))?
+            .base_head = base;
+        self.attach_stop_publish(prepared);
+        Ok(self)
+    }
+    pub(crate) fn push_stopped_head(
+        &self,
+        writer: &WriterRequest,
+        attempt: &Directory,
+        scope: provenant_records::custody::Scope,
+        head: GitOid,
+    ) -> Result<()> {
+        self.verify_stop_publish_binding(attempt, scope)?;
+        let bound = self
+            .stop_publish_bound
+            .as_ref()
+            .ok_or(RunError::Validation("stop publish binding missing"))?;
+        let stop = self
+            .stop_publish_host
+            .as_ref()
+            .ok_or(RunError::Validation("stop publish tools missing"))?;
+        // Push with the stop-prepared tools and environment, not the launch's.
+        let mut host = self.clone();
+        host.environment = stop.environment.clone();
+        host.tools = stop.tools.clone();
+        host.lane_roots = stop.lane_roots.clone();
+        host.lane_path = stop.lane_path.clone();
+        if bound.destination.mode != crate::DeliveryMode::Push
+            || bound.destination.open_pr
+            || bound.destination.branch != bound.lane_branch
+            || host.head(writer)? != head
+        {
+            return Err(RunError::Validation(HEAD_MISMATCH));
+        }
+        host.bound = Some(bound.clone());
+        host.push_with_clean(writer, &bound.destination, head, "", false)
+            .map(|_| ())
+    }
+
     /// Seal the destination bound at launch, replacing an earlier launch's.
     pub(crate) fn seal_launch_binding(
         &self,
@@ -334,10 +487,28 @@ impl HostDeliveryContext {
             .bound
             .as_ref()
             .ok_or(RunError::Validation("delivery binding missing"))?;
+        self.seal_binding(attempt, scope, bound, BINDING_FILE)
+    }
+    pub(crate) fn seal_stop_publish_binding(
+        &self,
+        attempt: &Directory,
+        scope: provenant_records::custody::Scope,
+    ) -> Result<()> {
+        let bound = self
+            .stop_publish_bound
+            .as_ref()
+            .ok_or(RunError::Validation("stop publish binding missing"))?;
+        self.seal_binding(attempt, scope, bound, STOP_PUBLISH_BINDING_FILE)
+    }
+    fn seal_binding(
+        &self,
+        attempt: &Directory,
+        scope: provenant_records::custody::Scope,
+        bound: &BoundDelivery,
+        file: &str,
+    ) -> Result<()> {
         let mut binding = LaunchBinding::new(scope, bound);
-        if let Some(raw) =
-            crate::artifacts::read_sealed(attempt, BINDING_FILE, crate::RECORD_LIMIT)?
-        {
+        if let Some(raw) = crate::artifacts::read_sealed(attempt, file, crate::RECORD_LIMIT)? {
             let previous: LaunchBinding = crate::db::decode(&raw)?;
             if previous != binding {
                 return Err(RunError::Validation(BINDING_MISMATCH));
@@ -346,7 +517,7 @@ impl HostDeliveryContext {
         }
         attempt
             .atomic_write(
-                OsStr::new(BINDING_FILE),
+                OsStr::new(file),
                 ".binding-",
                 &crate::db::bytes(&binding)?,
                 provenant_os::fs::PublishMode::Replace,
@@ -359,13 +530,33 @@ impl HostDeliveryContext {
         attempt: &Directory,
         scope: provenant_records::custody::Scope,
     ) -> Result<()> {
-        let sealed = crate::artifacts::read_sealed(attempt, BINDING_FILE, crate::RECORD_LIMIT)?
-            .ok_or(RunError::Validation(BINDING_MISSING))?;
-        let sealed: LaunchBinding = crate::db::decode(&sealed)?;
         let bound = self
             .bound
             .as_ref()
             .ok_or(RunError::Validation("delivery binding missing"))?;
+        self.verify_binding(attempt, scope, bound, BINDING_FILE)
+    }
+    fn verify_stop_publish_binding(
+        &self,
+        attempt: &Directory,
+        scope: provenant_records::custody::Scope,
+    ) -> Result<()> {
+        let bound = self
+            .stop_publish_bound
+            .as_ref()
+            .ok_or(RunError::Validation("stop publish binding missing"))?;
+        self.verify_binding(attempt, scope, bound, STOP_PUBLISH_BINDING_FILE)
+    }
+    fn verify_binding(
+        &self,
+        attempt: &Directory,
+        scope: provenant_records::custody::Scope,
+        bound: &BoundDelivery,
+        file: &str,
+    ) -> Result<()> {
+        let sealed = crate::artifacts::read_sealed(attempt, file, crate::RECORD_LIMIT)?
+            .ok_or(RunError::Validation(BINDING_MISSING))?;
+        let sealed: LaunchBinding = crate::db::decode(&sealed)?;
         if sealed != LaunchBinding::new(scope, bound) {
             return Err(RunError::Validation(BINDING_MISMATCH));
         }
@@ -856,6 +1047,8 @@ impl HostDeliveryContext {
                 .map(|(k, v)| (k.into_vec(), v.into_vec()))
                 .collect(),
             bound: None,
+            stop_publish_bound: None,
+            stop_publish_host: None,
             tools: None,
             lane_path: None,
             lane_roots: Vec::new(),
@@ -2271,6 +2464,16 @@ impl HostDeliveryContext {
         head: GitOid,
         body: &str,
     ) -> Result<Published> {
+        self.push_with_clean(writer, request, head, body, true)
+    }
+    fn push_with_clean(
+        &self,
+        writer: &WriterRequest,
+        request: &WriterDeliveryRequest,
+        head: GitOid,
+        body: &str,
+        require_clean: bool,
+    ) -> Result<Published> {
         if self.head(writer)? != head {
             return Err(RunError::Delivery(Stage::Head));
         }
@@ -2279,7 +2482,9 @@ impl HostDeliveryContext {
                 RunError::DeliveryLimit { .. } | RunError::DeliveryFact { .. } => error,
                 _ => RunError::Delivery(Stage::Prepare),
             })?;
-        self.clean(writer)?;
+        if require_clean {
+            self.clean(writer)?;
+        }
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
             return Ok(Published {
                 pull_request: None,

@@ -184,7 +184,7 @@ fn merge_calls(rig: &TestRig) -> Result<usize> {
 }
 
 // Spec: docs/specs/cli.md#merge-guard
-fn rest_merge_refusal(flag: &str, expected_messages: &[&str]) -> Result {
+fn rest_merge_refusal(flag: &str, cause: &str, expected_message: &str) -> Result {
     let rig = self::rig()?;
     let head = live_pr_origin(&rig)?;
     fs::write(
@@ -199,25 +199,30 @@ fn rest_merge_refusal(flag: &str, expected_messages: &[&str]) -> Result {
     assert_eq!(report["status"], "refused", "{report}");
     assert_eq!(report["data"]["merged"], false, "{report}");
     assert_eq!(report["data"]["steps"], serde_json::json!([]));
-    for &expected in expected_messages {
-        assert!(
-            report["error"]["message"]
-                .as_str()
-                .is_some_and(|message| message.contains(expected)),
-            "{report}"
-        );
-    }
+    assert_eq!(report["error"]["cause"], cause, "{report}");
+    assert!(
+        report["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| !repair.is_empty()),
+        "{report}"
+    );
+    assert!(
+        report["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(expected_message)),
+        "{report}"
+    );
     assert_eq!(merge_calls(&rig)?, 1);
     assert!(!rig.project.join("merged").exists());
     Ok(())
 }
 
 fn land_refuses_a_rest_merge_409_as_head_moved() -> Result {
-    rest_merge_refusal("merge-conflict", &["pull request head moved"])
+    rest_merge_refusal("merge-conflict", "HEAD_MOVED", "pull request head moved")
 }
 
 fn land_refuses_a_rest_merge_405_with_a_next_step() -> Result {
-    rest_merge_refusal("merge-not-allowed", &["not mergeable", "next:"])
+    rest_merge_refusal("merge-not-allowed", "MERGE_NOT_ALLOWED", "not mergeable")
 }
 
 fn land_plain_singleton_uses_batch_driver() -> Result {

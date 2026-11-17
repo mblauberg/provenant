@@ -13,6 +13,7 @@
       "lanes.publish",
       "lanes.local_cargo",
       "lanes.ci_scope",
+      "lanes.verification",
       "lanes.gh_budget",
       "lanes.isolation",
       "lanes.supervision",
@@ -352,7 +353,7 @@
     "settings": {
       "start_spacing_ms": {"type": "int", "min": 0, "max": 600000, "default": 0, "effect": "Advisory spacing window between starts of the same class, enforced through policy.ADMISSION_SPACING (warn by default)."},
       "memory_pressure_threshold": {"effect": "Kernel memory pressure threshold for policy.ADMISSION_PRESSURE. The rule defaults to warn; never disables its observation."},
-      "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))", "effect": "A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Slots are advisory: a compiling command tries once, then warns and proceeds when busy. Cargo owns its build-lock queue. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated."},
+      "max_concurrent_builds": {"type": "int", "min": 0, "max": 64, "auto_value": -1, "default": "max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))", "effect": "Host-wide cap on lane cargo builds that compile, shared by every project on this state directory. Unset, the count is derived from cores and memory (source: default). A set value, including one from the host file, is source host. Over the cap a build waits a bounded time, then warns and proceeds. 0 disables the cap. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated."},
       "lane_port_base": {"type": "int", "min": 1024, "max": 65535, "auto_value": -1, "default": 30000, "effect": "First port of the range split into per-writer-lane blocks. A writer with an allocated block holds it for its lifetime and sees PROVENANT_LANE_PORT_BASE and PROVENANT_LANE_PORT_COUNT. Unreadable lane-port settings or allocation I/O errors warn and skip allocation."},
       "lane_port_block": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": 16, "effect": "Ports in each writer lane's block (PROVENANT_LANE_PORT_COUNT)."},
       "lane_port_blocks": {"type": "int", "min": 0, "max": 1024, "auto_value": -1, "default": 64, "effect": "Blocks in the range, so the most writer lanes that hold a block at once; the base plus blocks times block size must be at most 65536. 0 turns allocation off. A writer launched while every block is held is not started and reports no free port block."},
@@ -579,6 +580,15 @@
       "reader": "tools/front-door/crates/run/src/ci_scope.rs",
       "effect": "What CI a writer lane runs or waits for, stated in its preamble and recorded with its value and source in the launch receipt and status. none: push the branch and report without dispatching, rerunning or waiting for CI; the chair runs CI once for the integrated batch. targeted: wait only for the checks that cover the change. full: wait for the full CI on the lane's pull request and fix what it reports. Set per run with --knob lanes.ci_scope=targeted, per graph node with `attempt.ci_scope` (`--set attempt.ci_scope=full`), or for the host under [knobs].",
       "trade_off": "Advisory guidance, not enforcement: it grants no CI dispatch authority and removes none. none saves runner minutes and the chair's waits; targeted or full lets a writer find its own CI failures before handoff at the cost of a CI run per lane."
+    },
+    "lanes.verification": {
+      "type": "enum",
+      "values": ["check", "targeted", "full"],
+      "default": "check",
+      "status": "wired",
+      "reader": "tools/front-door/crates/run/src/verification.rs",
+      "effect": "Local verification a writer lane is told to run before it commits. check (default) is one cargo check of the package it changed, then commit and push; the preamble keeps today's wording and does not name a source. targeted runs the tests that cover the change. full runs the repository's documented local checks. A brief line `Verification scope: targeted` (or check or full) overrides the knob; the preamble then names source brief. Host and project [knobs] name source host or project. Set per run with --knob lanes.verification=targeted.",
+      "trade_off": "Advisory guidance. The cargo shim still enforces lanes.local_cargo. A wider scope spends the host build cap."
     },
     "lanes.gh_budget": {
       "type": "int",

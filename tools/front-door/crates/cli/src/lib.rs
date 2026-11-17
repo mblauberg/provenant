@@ -2532,6 +2532,8 @@ mod tests {
     #[test]
     fn wait_and_output_bounds() {
         valid(&["wait"]);
+        valid(&["wait", "--all"]);
+        valid(&["wait", "--fail-fast"]);
         valid(&[
             "wait",
             "fix-login",
@@ -2541,6 +2543,8 @@ mod tests {
             "--any",
         ]);
         valid(&["wait", "--pr", "2721", "--follow", "--timeout", "2m"]);
+        invalid(&["wait", "--all", "--any"]);
+        invalid(&["wait", "--any", "--fail-fast"]);
         for timeout in ["1", "4h", "14400"] {
             valid(&["wait", "fix-login", "--timeout", timeout]);
         }

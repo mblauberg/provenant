@@ -636,6 +636,15 @@ impl Holder for HostHolder<'_> {
         self.inner.provider_exited(context, reason)?;
         self.stop()
     }
+    fn outcome(
+        &self,
+        context: &[u8],
+        attempt: &Directory,
+        exit: &custody::ExitObservation,
+        recovery: Option<&custody::Recovery>,
+    ) -> custody::Result<()> {
+        self.inner.outcome(context, attempt, exit, recovery)
+    }
     fn terminal(
         &self,
         context: &[u8],

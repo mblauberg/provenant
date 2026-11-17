@@ -193,22 +193,17 @@ impl Driver<'_> {
         warnings: &mut Vec<String>,
         omitted: &mut u64,
     ) -> Option<machine::StopReason> {
-        match read_record::<CancelRequest>(&self.attempt, "cancel.json", RECORD_LIMIT) {
-            Ok(request)
-                if request.schema_version == 1
-                    && request.scope == self.reservation.scope
-                    && request.requester == self.requester
-                    && provenant_core::OperationId::parse(request.request_id.as_str()).is_ok() =>
-            {
+        match read_stop_intent(&self.attempt, self.reservation.scope) {
+            Ok(StopIntentState::Requested(request)) if request.requester == self.requester => {
                 Some(request.reason)
             }
+            Ok(StopIntentState::Absent) => None,
             Ok(_) => {
-                push_warning(warnings, omitted, "stale cancellation ignored");
+                push_warning(warnings, omitted, "stale or invalid stop intent ignored");
                 None
             }
-            Err(CustodyError::Filesystem(error)) if error.is_not_found() => None,
             Err(_) => {
-                push_warning(warnings, omitted, "cancel request unreadable");
+                push_warning(warnings, omitted, "stop intent unreadable");
                 None
             }
         }

@@ -1065,7 +1065,8 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
 fn malformed_handoff_is_a_typed_failure_and_prevents_delivery() {
     for output in [
         "```handoff\n{}\n```".to_owned(),
-        format!("{STOP}\n{STOP}"),
+        // Adjacent repeats are one declaration since #3341; prose between them is not.
+        format!("{STOP}\nMore text\n{STOP}"),
         STOP.replace("stopped_early", "TOKEN_SENTINEL/private"),
         STOP.trim_end_matches("\n```").to_owned(),
         format!(
@@ -2121,6 +2122,39 @@ fn fragment_gate_recovery_is_a_completion_dependency_for_consumers() {
         assert!(run.checkpoint.successful());
         assert_eq!(owner.calls.last().unwrap().0.node_id, "after");
     }
+}
+
+// Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
+#[test]
+fn order_only_planner_consumer_waits_for_failed_fragment_without_blocking() {
+    let mut document = planner(1);
+    document.nodes[1].depends_on.clear();
+    document.nodes[1].after_settled.push("plan".into());
+    let output = result(vec![slice("child", &[])]);
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &output),
+            terminal(AttemptOutcome::TaskFailed),
+            terminal_with_result(AttemptOutcome::Succeeded, "checked"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.calls.last().unwrap().0.node_id, "after");
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "after")
+            .unwrap()
+            .state,
+        NodeState::Succeeded
+    );
+    assert_eq!(run.checkpoint.outcome(), GraphOutcome::Failed);
+    let replay = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(replay.checkpoint, run.checkpoint);
 }
 
 #[test]

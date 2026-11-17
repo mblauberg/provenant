@@ -40,59 +40,45 @@ fn cancellation_outcome_is_consistent(
     }
 }
 
-/// Whether `cancel.json` stops this attempt scope. Steer and owner stops
-/// share the marker; any marker other than this scope's Steered request,
-/// including an unreadable one, is a stop.
+/// Writer and admission gates consume the supervisor's one stop protocol.
 pub(crate) fn cancel_requested(
     attempt: &provenant_os::fs::Directory,
     scope: provenant_records::custody::Scope,
 ) -> bool {
-    CancelMarker::read(attempt, scope).map_or(true, CancelMarker::stops)
+    StopMarker::read(attempt, scope).map_or(true, StopMarker::stops)
 }
 
-/// What a sealed `cancel.json` means for one attempt scope. Only a
-/// well-formed Steered request for exactly this scope and its request id is
-/// not a stop. Any other present marker, including a foreign, explicit or
-/// undecodable one, fails closed as a stop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CancelMarker {
+pub(crate) enum StopMarker {
     Absent,
     Steered { requester: provenant_core::ActorId },
     Stop,
 }
-
-impl CancelMarker {
+impl StopMarker {
     pub(crate) fn read(
         attempt: &provenant_os::fs::Directory,
         scope: provenant_records::custody::Scope,
     ) -> Result<Self> {
-        Ok(read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
-            .map_or(Self::Absent, |raw| Self::classify(&raw, scope)))
-    }
-
-    pub(crate) fn classify(raw: &[u8], scope: provenant_records::custody::Scope) -> Self {
-        match decode::<CancellationEvidence>(raw) {
-            Ok(request)
-                if request.scope == scope
-                    && request.reason == provenant_supervisor::machine::StopReason::Steered
-                    && cancel_request_id(scope).as_ref() == Some(&request._request_id) =>
+        use provenant_supervisor::custody::{StopIntentState, read_stop_intent};
+        Ok(
+            match read_stop_intent(attempt, scope)
+                .map_err(|error| RunError::Io(std::io::Error::other(error)))?
             {
-                Self::Steered {
-                    requester: request.requester,
+                StopIntentState::Absent => Self::Absent,
+                StopIntentState::Requested(request)
+                    if request.reason == provenant_supervisor::machine::StopReason::Steered =>
+                {
+                    Self::Steered {
+                        requester: request.requester,
+                    }
                 }
-            }
-            _ => Self::Stop,
-        }
+                _ => Self::Stop,
+            },
+        )
     }
-
     pub(crate) fn stops(self) -> bool {
         self == Self::Stop
     }
-}
-
-/// The request id the supervisor writes for a stop of this scope.
-pub(crate) fn cancel_request_id(scope: provenant_records::custody::Scope) -> Option<OperationId> {
-    OperationId::parse(&format!("{}.{}.cancel", scope.attempt, scope.generation)).ok()
 }
 
 pub(crate) fn import_cancelled(
@@ -106,7 +92,7 @@ pub(crate) fn import_cancelled(
     if !marked {
         return Ok(false);
     }
-    Ok(CancelMarker::read(attempt, scope)?.stops())
+    Ok(StopMarker::read(attempt, scope)?.stops())
 }
 
 /// One launch: exactly one attempt, its request and its scanned prompt.
@@ -430,23 +416,38 @@ impl RunStore {
         if crate::holder::object_import_refused(&attempt, Self::scope(record))?.is_some() {
             return Ok(true);
         }
-        // Only a failed import that can still be retried holds custody. A
-        // pending receipt is a decision sealed without import tracking.
-        Ok(self
-            .record(record.attempt_id, call)?
-            .settlement_receipts
-            .is_none_or(|receipts| {
-                !matches!(
-                    receipts.git_import,
-                    EffectDisposition::Failed {
-                        retryable: true,
-                        ..
-                    } | EffectDisposition::Cancelled {
-                        retryable: true,
-                        ..
-                    }
-                )
-            }))
+        let current = self.record(record.attempt_id, call)?;
+        let Some(receipts) = current.settlement_receipts else {
+            return Ok(true);
+        };
+        if matches!(
+            receipts.git_import,
+            EffectDisposition::Failed {
+                retryable: true,
+                ..
+            } | EffectDisposition::Cancelled {
+                retryable: true,
+                ..
+            }
+        ) {
+            return Ok(false);
+        }
+        if receipts.git_import == EffectDisposition::Pending
+            && let Some(raw) = read_sealed(&attempt, "terminal-effects.json", RECORD_LIMIT)?
+        {
+            let effects: TerminalEffects = decode(&raw)?;
+            if effects.schema_version != 1 || effects.scope != Self::scope(record) {
+                return Err(RunError::Conflict);
+            }
+            // Unlike an untracked prelaunch receipt, outcome-only settlement
+            // explicitly defers Git import. It must run before release.
+            if effects.effects.iter().any(|(effect, disposition)| {
+                *effect == SettlementEffect::GitImport && *disposition == EffectDisposition::Pending
+            }) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Only a succeeded or review-required lane has anything to deliver.
@@ -579,8 +580,17 @@ impl RunStore {
         {
             return Err(RunError::Conflict);
         }
-        if sealed_exit(&dir, exit)? != pending.exit_evidence.ok_or(RunError::Conflict)? {
-            return Err(RunError::Conflict);
+        let verified = sealed_exit(&dir, exit)?;
+        let intended = pending.exit_evidence.ok_or(RunError::Conflict)?;
+        if verified != intended {
+            // Both declared exit artifact classes carry the same scoped
+            // provider observation. Its verified bytes, not its storage name,
+            // identify a pre-existing terminal intent during crash recovery.
+            if self.artifact_bytes(&verified, RECORD_LIMIT)?
+                != self.artifact_bytes(&intended, RECORD_LIMIT)?
+            {
+                return Err(RunError::Conflict);
+            }
         }
         self.replay_terminal(id, call)
     }
@@ -647,9 +657,7 @@ impl RunStore {
                 _ => None,
             };
             if stored.scope != Self::scope(&current)
-                || stored.unresolved_cleanup
-                || stored.settlement_evidence
-                    == provenant_supervisor::custody::SettlementEvidence::Unresolved
+                || (stored.termination.is_none() && !stored.never_spawned)
                 || observed != exit_code
                 || pending.provider_launched != Some(!stored.never_spawned)
             {
@@ -918,7 +926,7 @@ impl RunStore {
                 profile: task.profile.clone(),
                 limits: None,
                 schema_version: 2, attempt_id, project_id: context.project_id, attempt_number: u64::from(key.attempt()), revision: 1, generation: 0,
-                delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, steering: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
+                delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, steering: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, stop_work: None, verified_owner: Some(context.actor_id), session: None,
                 queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
                 terminal_evidence: None, settlement_reason: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
                 prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: input.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
@@ -997,7 +1005,6 @@ impl RunStore {
         if exit.scope.attempt != old.attempt_id
             || exit.scope.attempt != id
             || exit.scope.generation != old.generation
-            || exit.unresolved_cleanup
         {
             return Err(RunError::Validation(
                 "exit/cleanup evidence is unresolved or out of scope",
@@ -1586,18 +1593,17 @@ impl RunStore {
             && (!launched || cancellation_delivered == Some(true))
         {
             next.cancellation_disposition = Some(CancellationDisposition::Effective);
-        } else if let Some(raw) = read_sealed(&attempt, "cancel.json", RECORD_LIMIT)? {
-            if let Ok(request) = decode::<CancellationEvidence>(&raw) {
-                if request.requests_stop(
-                    Self::scope(&old),
-                    old.verified_owner.unwrap_or(self.context.actor_id),
-                ) {
+        } else {
+            use provenant_supervisor::custody::{StopIntentState, read_stop_intent};
+            match read_stop_intent(&attempt, Self::scope(&old)) {
+                Ok(StopIntentState::Requested(request))
+                    if request.reason
+                        == provenant_supervisor::machine::StopReason::ExplicitCancellation
+                        && request.requester
+                            == old.verified_owner.unwrap_or(self.context.actor_id) =>
+                {
                     next.cancellation_disposition = Some(
                         if publication.terminal_cause == Some(TerminalCause::Steered) {
-                            // `cancel_delivered_before_exit` belongs to the
-                            // sealed first Steered stop, not this later cancel
-                            // request. Preserve the signal fact and leave this
-                            // request's delivery unknown.
                             CancellationDisposition::Unknown
                         } else {
                             match cancellation_delivered {
@@ -1608,13 +1614,16 @@ impl RunStore {
                         },
                     );
                 }
-            } else {
-                next.cancellation_disposition = Some(CancellationDisposition::Unknown);
+                Err(_) | Ok(StopIntentState::Invalid) => {
+                    next.cancellation_disposition = Some(CancellationDisposition::Unknown);
+                }
+                _ => {}
             }
         }
         if let Some(raw) = read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)? {
             let writer: crate::writer::WriterTerminal = decode(&raw)?;
             next.head = Some(writer.head);
+            next.stop_work = writer.stop_work;
         }
         if classification.outcome == Outcome::Succeeded {
             // Recovery reports uncertainty from the sealed start marker without
@@ -2103,7 +2112,7 @@ impl RunStore {
         // A stop sealed later is acknowledged by `cancel` seeing the terminal row.
         if next.cancellation_disposition.is_none()
             && let Ok(attempt) = self.attempt_dir(id, false)
-            && CancelMarker::read(&attempt, Self::scope(old)).is_ok_and(CancelMarker::stops)
+            && StopMarker::read(&attempt, Self::scope(old)).is_ok_and(StopMarker::stops)
         {
             let _ = self.record_cancellation(
                 id,
@@ -2235,34 +2244,13 @@ struct SealedExit {
     unresolved_cleanup: bool,
     settlement_evidence: provenant_supervisor::custody::SettlementEvidence,
 }
-#[derive(serde::Deserialize)]
-pub(crate) struct CancellationEvidence {
-    #[serde(rename = "request_id")]
-    pub(crate) _request_id: provenant_core::OperationId,
-    pub(crate) scope: provenant_records::custody::Scope,
-    pub(crate) requester: provenant_core::ActorId,
-    pub(crate) reason: provenant_supervisor::machine::StopReason,
-}
-impl CancellationEvidence {
-    /// The owner's own explicit stop request for exactly this attempt scope.
-    pub(crate) fn requests_stop(
-        &self,
-        scope: provenant_records::custody::Scope,
-        owner: provenant_core::ActorId,
-    ) -> bool {
-        self.scope == scope
-            && self.requester == owner
-            && self.reason == provenant_supervisor::machine::StopReason::ExplicitCancellation
-    }
-}
 fn sealed_exit(
     dir: &provenant_os::fs::Directory,
     exit: &ExitObservation,
 ) -> Result<ArtifactRecord> {
     use provenant_supervisor::custody::PublicationState;
-    use provenant_supervisor::custody::SettlementEvidence;
     if !matches!(exit.publication, PublicationState::Durable)
-        || exit.settlement_evidence == SettlementEvidence::Unresolved
+        || (exit.termination.is_none() && !exit.never_spawned)
     {
         return Err(RunError::Validation(
             "supervisor exit publication is unresolved",
@@ -2286,7 +2274,7 @@ fn sealed_exit(
             != exit.provider_identity_evidence_incomplete
         || stored.provider_identity_eof_fragment != exit.provider_identity_eof_fragment
         || stored.terminal_observed != exit.terminal_observed
-        || stored.unresolved_cleanup
+        || stored.unresolved_cleanup != exit.unresolved_cleanup
         || stored.settlement_evidence != exit.settlement_evidence
     {
         return Err(RunError::Validation(
@@ -2295,11 +2283,33 @@ fn sealed_exit(
     }
     file.sync()?;
     dir.sync()?;
+    // Cleanup may later replace process-exit.json. The outcome names its own
+    // immutable provider snapshot so crash replay never follows mutable bytes.
+    let name = AttemptFile::ProviderExit.name();
+    let saved = if let Some(saved) = read_sealed(dir, name, RECORD_LIMIT)? {
+        let snapshot: SealedExit = decode(&saved)?;
+        if snapshot.scope != stored.scope
+            || snapshot.termination != stored.termination
+            || snapshot.never_spawned != stored.never_spawned
+            || snapshot.stop_reason != stored.stop_reason
+            || snapshot.cancel_delivered_before_exit != stored.cancel_delivered_before_exit
+            || snapshot.provider_identity_conflict != stored.provider_identity_conflict
+            || snapshot.provider_identity_evidence_incomplete
+                != stored.provider_identity_evidence_incomplete
+            || snapshot.provider_identity_eof_fragment != stored.provider_identity_eof_fragment
+        {
+            return Err(RunError::Conflict);
+        }
+        saved
+    } else {
+        seal(dir, name, &raw, RECORD_LIMIT)?;
+        raw
+    };
     Ok(ArtifactRecord {
         extra: Default::default(),
-        path: artifact_path(exit.scope.attempt, AttemptFile::ProcessExit.name())?,
-        digest: CanonicalV1::file_digest(&raw),
-        bytes: raw.len() as u64,
+        path: artifact_path(exit.scope.attempt, name)?,
+        digest: CanonicalV1::file_digest(&saved),
+        bytes: saved.len() as u64,
         complete: true,
         redacted: true,
     })

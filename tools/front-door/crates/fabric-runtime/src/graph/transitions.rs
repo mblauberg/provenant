@@ -355,8 +355,19 @@ pub(super) fn apply_attempt_observation(
                     outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(2));
                     outputs.warnings.extend(marker_warnings);
                 }
-                let review_contract_error =
-                    review::contract_error(node, &upstream_findings, &outputs, result.as_deref());
+                // A lens that stopped without any reply has no verdict to
+                // correct: settlement names it unavailable instead of relaunching
+                // it for an isolated verdict correction.
+                let stopped_without_reply = result.is_none()
+                    && matches!(
+                        outcome,
+                        AttemptOutcome::DeclaredStop | AttemptOutcome::StoppedNoWork
+                    );
+                let review_contract_error = if stopped_without_reply {
+                    None
+                } else {
+                    review::contract_error(node, &upstream_findings, &outputs, result.as_deref())
+                };
                 if node.access == AccessMode::ReadOnly
                     && template::review_node(node)
                     && attempt.attempt_ref.is_some()
@@ -730,7 +741,8 @@ pub(super) fn apply_attempt_observation(
                     AttemptOutcome::AuthRequired
                     | AttemptOutcome::UsageLimited
                     | AttemptOutcome::AdapterUnavailable
-                    | AttemptOutcome::PreparationRefused(_) => {
+                    | AttemptOutcome::PreparationRefused(_)
+                    | AttemptOutcome::Unclassified => {
                         let review_limit_reached = review_preparation_substitution(node, attempt)
                             && progress
                                 .attempts
@@ -814,6 +826,7 @@ pub(super) fn initial_checkpoint(
         extra: Default::default(),
         cancellation_request_receipt: None,
         pending_writer_provisioning: Default::default(),
+        pending_steers: Default::default(),
         expansions: Vec::new(),
         remaining: None,
         instance_id,
@@ -1381,7 +1394,10 @@ pub(super) fn dependency_state(
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Option<NodeState> {
-    let mut waiting = false;
+    let mut waiting = node
+        .after_settled
+        .iter()
+        .any(|parent| !checkpoint.nodes[positions[parent]].state.settled());
     let mut skipped = false;
     let mut blocked = false;
     if node

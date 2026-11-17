@@ -559,6 +559,15 @@ fn nearest_name<'a>(key: &str, accepted: impl IntoIterator<Item = &'a str>) -> O
         .map(|(_, name)| name.to_owned())
 }
 
+fn nearest_names<'a>(key: &str, accepted: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut matches = accepted
+        .into_iter()
+        .map(|name| (edit_distance(key, name), name))
+        .collect::<Vec<_>>();
+    matches.sort_unstable();
+    matches.into_iter().take(3).map(|(_, name)| name).collect()
+}
+
 fn edit_distance(left: &str, right: &str) -> usize {
     let right: Vec<char> = right.chars().collect();
     let mut row: Vec<usize> = (0..=right.len()).collect();
@@ -711,7 +720,7 @@ impl ReviewBehaviour {
     fn apply(self, node: &mut Map<String, Value>) {
         let instruction = match self {
             Self::Lens => {
-                "Report concrete defects against the pinned subject and base. Include id, severity, file, summary, status, evidence and proposed_fix for each finding; line is optional. Include trigger {sequence: real steps reaching the state, reach: default_path or operator_mistake or attacker_or_unreachable, observed: boolean}. Findings without a trigger are notes; off-default-path findings are notes except ADR 0035 boundary breaches (class boundary) and data loss (class data_loss). Use kind spec_defect for evidenced specification problems routed to the chair. Set design_defect=true with evidence when the design cannot hold or findings share a flaw, and name the invariant and structural alternative."
+                "Report concrete defects against the pinned subject and base. Include id, severity, file, summary, status, evidence and proposed_fix for each finding; line is optional. Include trigger {sequence: one string naming the real steps reaching the state in order, reach: default_path or operator_mistake or attacker_or_unreachable, observed: boolean}. Findings without a trigger are notes; off-default-path findings are notes except ADR 0035 boundary breaches (class boundary) and data loss (class data_loss). Use kind spec_defect for evidenced specification problems routed to the chair. Set design_defect=true with evidence when the design cannot hold or findings share a flaw, and name the invariant and structural alternative."
             }
             Self::Verify => {
                 "Check every input finding against the pinned subject and its callers. Preserve its exact qualified id and evidence. Set verification to upheld, falsified or unverifiable, and include a non-empty top-level `reason` explaining that verification; this field is separate from `triage.reason`. For newly discovered findings set verification=new and include a non-empty top-level `reason`. For every finding emit triage {decision: confirmed or rejected, reason: code evidence, worth_fixing: boolean, root_cause: invariant under repair, blocking_class: acceptance or default_path_defect or boundary or data_loss or none, shared_flaw: boolean}. Rejected findings stay in the record. Check the trigger sequence and reach; absent or off-default triggers are notes except ADR 0035 boundaries and data loss."
@@ -767,6 +776,14 @@ pub enum CompositeBehaviour {
     ReviewRepair,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewCoverageFloor {
+    hard: bool,
+    minimum: usize,
+    required_lenses: Vec<String>,
+}
+
 /// One template document. A leaf sets `brief` (and usually `tier`); a
 /// composite sets `nodes`. Nodes stay JSON until their parameters are bound,
 /// because a typed list field such as `write_scope` may be one `${scope}`.
@@ -786,7 +803,7 @@ pub struct Template {
     pub doc: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub parameters: BTreeMap<String, TemplateParameter>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "prompt", skip_serializing_if = "Option::is_none")]
     pub brief: Option<String>,
     /// Route alias for the leaf: `junior`, `senior`, `principal` or `web`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1336,6 +1353,41 @@ impl TemplateLibrary {
         self.entries.keys().map(String::as_str)
     }
 
+    fn unknown_name_message(&self, name: &str, base: Option<&str>) -> String {
+        let list_all = base.is_some();
+        let (label, candidates): (String, Vec<&str>) = match base {
+            Some(base) => (
+                format!("known {base} flavours"),
+                self.names()
+                    .filter(|candidate| {
+                        candidate
+                            .strip_prefix(base)
+                            .is_some_and(|suffix| suffix.starts_with('.'))
+                    })
+                    .collect(),
+            ),
+            None => ("known templates".into(), self.names().collect()),
+        };
+        let suggestions = if list_all {
+            candidates
+        } else {
+            nearest_names(name, candidates)
+        };
+        if suggestions.is_empty() {
+            match base {
+                Some(base) => {
+                    format!("unknown template {name}; base template {base} has no known flavours")
+                }
+                None => format!("unknown template {name}; no known templates are available"),
+            }
+        } else {
+            format!(
+                "unknown template {name}; {label}: {}",
+                suggestions.join(", ")
+            )
+        }
+    }
+
     /// The layer that supplies `name` itself, ignoring its base.
     pub fn layer(&self, name: &str) -> Option<Layer> {
         self.entries
@@ -1359,13 +1411,19 @@ impl TemplateLibrary {
         let own = self.own(name);
         match name.rsplit_once('.') {
             Some((base, _)) => {
+                if self.own(base).is_none() {
+                    return Err(self.unknown_name_message(name, None));
+                }
                 let base = self.resolve(base)?;
-                let own = own.ok_or_else(|| format!("unknown template flavour {name}"))?;
+                let own = own.ok_or_else(|| {
+                    let base_name = name.rsplit_once('.').map(|(base, _)| base);
+                    self.unknown_name_message(name, base_name)
+                })?;
                 Ok(Template::flavour(base, own))
             }
             None => own
                 .cloned()
-                .ok_or_else(|| format!("unknown template {name}")),
+                .ok_or_else(|| self.unknown_name_message(name, None)),
         }
     }
 }
@@ -1812,6 +1870,7 @@ impl<'a> Compiler<'a> {
             "title",
             "after",
             "depends_on",
+            "after_settled",
             "inputs",
             "source",
             "read_roots",
@@ -1846,14 +1905,24 @@ impl<'a> Compiler<'a> {
         }
         let mut ids = BTreeSet::new();
         let mut children = Vec::with_capacity(items.len());
-        let panel_routes = if over.as_str() == Some("@review-panel")
+        let lens_panel = over.as_str() == Some("@review-panel")
             && copy
                 .get("use")
                 .and_then(Value::as_str)
                 .and_then(|name| self.library.resolve(name).ok())
-                .is_some_and(|template| template.review == Some(ReviewBehaviour::Lens))
-        {
+                .is_some_and(|template| template.review == Some(ReviewBehaviour::Lens));
+        let panel_routes = if lens_panel {
             self.resolvers.get("review-panel-routes")
+        } else {
+            None
+        };
+        let coverage_floor = if lens_panel {
+            self.resolvers
+                .get("review-coverage-floor")
+                .and_then(|values| values.first())
+                .map(|value| serde_json::from_str::<ReviewCoverageFloor>(value))
+                .transpose()
+                .map_err(|_| "invalid review coverage floor")?
         } else {
             None
         };
@@ -1898,6 +1967,18 @@ impl<'a> Compiler<'a> {
         composite.insert("exports".into(), Value::Array(exports));
         if let Some(min_ok) = min_ok {
             composite.insert("min_successful".into(), min_ok);
+        }
+        if let Some(floor) = coverage_floor {
+            composite.insert("soft_review_coverage".into(), Value::Bool(true));
+            composite.insert("min_successful".into(), Value::from(floor.minimum));
+            if floor.hard {
+                composite.insert("hard_review_coverage".into(), Value::Bool(true));
+                composite.insert(
+                    "required_review_lenses".into(),
+                    serde_json::to_value(floor.required_lenses)
+                        .map_err(|_| "invalid review coverage floor")?,
+                );
+            }
         }
         if let Some(reduce_verdict) = reduce_verdict {
             composite.insert("reduce_verdict".into(), reduce_verdict);
@@ -1973,6 +2054,7 @@ impl<'a> Compiler<'a> {
             "title",
             "after",
             "depends_on",
+            "after_settled",
             "inputs",
             "skip_without_findings",
             "on_fail",
@@ -2040,6 +2122,17 @@ impl<'a> Compiler<'a> {
                 library: self.library,
                 resolvers: &resolvers,
             };
+            let review_coverage_floor =
+                if template.composite_behaviour == Some(CompositeBehaviour::ReviewPanel) {
+                    self.resolvers
+                        .get("review-coverage-floor")
+                        .and_then(|values| values.first())
+                        .map(|value| serde_json::from_str::<ReviewCoverageFloor>(value))
+                        .transpose()
+                        .map_err(|_| "invalid review coverage floor")?
+                } else {
+                    None
+                };
             for member in &compiler.bounded_plan_consumers(&template.nodes) {
                 children.push(compiler.lower_in(member, parameters, stack)?);
             }
@@ -2193,6 +2286,18 @@ impl<'a> Compiler<'a> {
             let mut composite = Map::new();
             composite.insert("nodes".into(), Value::Array(children));
             composite.insert("exports".into(), Value::Array(exports));
+            if let Some(floor) = review_coverage_floor {
+                composite.insert("soft_review_coverage".into(), Value::Bool(true));
+                composite.entry("min_successful").or_insert(Value::from(1));
+                if floor.hard {
+                    composite.insert("hard_review_coverage".into(), Value::Bool(true));
+                    composite.insert(
+                        "required_review_lenses".into(),
+                        serde_json::to_value(floor.required_lenses)
+                            .map_err(|_| "invalid review coverage floor")?,
+                    );
+                }
+            }
             if let Some(min_ok) = overrides
                 .remove("min_ok")
                 .or_else(|| template.min_ok.map(Value::from))
@@ -2289,6 +2394,7 @@ impl<'a> Compiler<'a> {
             "title",
             "after",
             "depends_on",
+            "after_settled",
             "inputs",
             "when",
             "source",

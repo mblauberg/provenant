@@ -1740,7 +1740,14 @@ mod tests {
         assert!(names.contains(&"tests"));
         assert!(names.contains(&"security-privacy"));
         assert!(names.contains(&"correctness-spec"));
-        assert!(names.len() >= 8);
+        // Floors raise the shape to the one `crucial` resolves to; the panel
+        // holds at least that shape's reviewer slots, plus floor lenses.
+        let crucial_reviewers: usize = review.shapes[&review.select.by_risk["crucial"]]
+            .reviewers
+            .iter()
+            .map(|group| group.count)
+            .sum();
+        assert!(names.len() >= crucial_reviewers, "{names:?}");
         assert!(
             review
                 .path_floors(&paths)
@@ -1813,13 +1820,7 @@ mod tests {
         review.floors.clear();
         assert_eq!(
             resolved_names(&review, "standard", None, &[], false, &[]),
-            [
-                "correctness-spec",
-                "tests",
-                "design-fit-reuse",
-                "simplicity",
-                "reliability"
-            ]
+            ["correctness-spec", "tests", "reliability"]
         );
         assert_eq!(
             resolved_names(&review, "quick", Some("refactor"), &[], false, &[]),
@@ -1942,7 +1943,7 @@ mod tests {
         review.shapes.insert("custom".into(), shape);
         assert_eq!(
             resolved_names(&review, "custom", None, &[], false, &[]),
-            ["tests", "correctness-spec", "design-fit-reuse"]
+            ["tests", "correctness-spec", "reliability"]
         );
     }
 

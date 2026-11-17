@@ -771,6 +771,7 @@ error_kinds! {
     HostClock => "HOST_CLOCK", "Startup spacing cannot be judged: the monotonic clock or boot identity is unreadable.";
     RetainedWriterImport => "WRITER_IMPORT_RETAINED", "A predecessor writer import remains unresolved.";
     ObjectImportLimit => "OBJECT_IMPORT_LIMIT", "A lane's Git object import exceeded its limits.";
+    LaneTipUnrooted => "LANE_TIP_UNROOTED", "A lane tip descends from no branch the host knows, so it cannot be published.";
 }
 impl ErrorKind {
     /// Safe projection for refusal kinds that do not need additional facts.
@@ -902,6 +903,7 @@ impl From<&RunError> for ErrorKind {
             RunError::RetainedWriterImport { .. } => Self::RetainedWriterImport,
             RunError::GitUnavailable => Self::Git,
             RunError::ObjectImportLimit(_) => Self::ObjectImportLimit,
+            RunError::LaneTipUnrooted { .. } => Self::LaneTipUnrooted,
             RunError::Validation(_)
             | RunError::Handoff(_)
             | RunError::WriterLineage(_)

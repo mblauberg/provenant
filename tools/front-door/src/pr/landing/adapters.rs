@@ -63,17 +63,40 @@ fn failed(error: Box<dyn std::error::Error>) -> LandingError {
 /// A lost or slow mutation leaves the outcome unknown rather than failed.
 fn mutation_failed(error: Box<dyn std::error::Error>) -> LandingError {
     if error.is::<TimedOut>() {
-        LandingError::PublicationUnknown
-    } else if error
-        .downcast_ref::<wait::Failure>()
-        .is_some_and(|failure| matches!(failure.code, "HEAD_MOVED" | "MERGE_NOT_ALLOWED"))
-        || ["HTTP 405", "HTTP 409", "HTTP 422"]
-            .iter()
-            .any(|code| error.to_string().contains(code))
+        return LandingError::PublicationUnknown;
+    }
+    if let Some(failure) = error.downcast_ref::<wait::Failure>()
+        && let Some((cause, repair)) = refusal_leaf(failure.code)
+    {
+        return LandingError::RefusedWith {
+            cause,
+            message: error.to_string(),
+            repair,
+        };
+    }
+    if ["HTTP 405", "HTTP 409", "HTTP 422"]
+        .iter()
+        .any(|code| error.to_string().contains(code))
     {
         LandingError::Refused(error.to_string())
     } else {
         failed(error)
+    }
+}
+
+/// The typed leaf cause of a refused publication, and the next step for the
+/// operator. The unified `LAND_REFUSED` code carries both.
+fn refusal_leaf(code: &str) -> Option<(&'static str, &'static str)> {
+    match code {
+        "HEAD_MOVED" => Some((
+            "HEAD_MOVED",
+            "inspect the pull request's current head, then rerun `provenant land` for it",
+        )),
+        "MERGE_NOT_ALLOWED" => Some((
+            "MERGE_NOT_ALLOWED",
+            "resolve the pull request's mergeability problem, then rerun `provenant land`",
+        )),
+        _ => None,
     }
 }
 fn object_id(value: &str) -> Result<&str, LandingError> {
@@ -1908,6 +1931,29 @@ esac
         assert!(matches!(
             mutation_failed(Box::new(TimedOut)),
             LandingError::PublicationUnknown
+        ));
+    }
+
+    // Spec: docs/specs/cli.md#merge-guard
+    #[test]
+    fn mutation_failures_keep_typed_refusal_leaves() {
+        for code in ["HEAD_MOVED", "MERGE_NOT_ALLOWED"] {
+            let error = mutation_failed(wait::failure(code, "pull request refused"));
+            let LandingError::RefusedWith {
+                cause,
+                message,
+                repair,
+            } = error
+            else {
+                panic!("{code} should keep its leaf cause");
+            };
+            assert_eq!(cause, code);
+            assert!(message.contains("pull request refused"), "{message}");
+            assert!(!repair.is_empty(), "{code} needs a next step");
+        }
+        assert!(matches!(
+            mutation_failed(wait::failure("MERGE_FAILED", "unclassified")),
+            LandingError::Failed(_)
         ));
     }
 

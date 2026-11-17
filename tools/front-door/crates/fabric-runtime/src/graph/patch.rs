@@ -1414,6 +1414,9 @@ pub(super) fn prepare(
         if node.depends_on.is_empty() {
             node.depends_on.clone_from(&target.depends_on);
         }
+        if node.after_settled.is_empty() {
+            node.after_settled.clone_from(&target.after_settled);
+        }
         replaced.push(node);
     }
     // Every node a lane or planner adds or replaces names it, whatever the

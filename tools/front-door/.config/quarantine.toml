@@ -17,29 +17,8 @@ expires = 2026-12-14
 
 [[test]]
 package = "provenant"
-name = "lane_cleanup::tests::ancient_unlanded_local_and_remote_refs_survive_automatic_cleanup"
-issue = "#3296"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
 name = "pr::landing::adapters::tests::captured_async_stack_responses_drive_real_forge"
 issue = "#3305"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant-cli"
-name = "run::provider::tests::opencode_stale_auth_prepares_with_an_unverified_warning"
-issue = "#3293"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant-cli"
-name = "run::provider::tests::partial_account_estimates_allow_launch_without_swapping_a_pinned_account"
-issue = "#3293"
 owner = "chair"
 expires = 2026-12-14
 
@@ -150,13 +129,6 @@ expires = 2026-12-14
 
 [[test]]
 package = "provenant"
-name = "completion_and_sweep_retain_unlanded_or_dirty_lanes"
-issue = "#3296"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
 name = "gc_fetches_default_and_removes_only_clean_merged_worktrees"
 issue = "#3295"
 owner = "chair"
@@ -194,34 +166,6 @@ expires = 2026-12-14
 package = "provenant"
 name = "lane_prepare_isolates_nested_claude_state"
 issue = "#3299"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "pr_contribution_roundtrip"
-issue = "#3298"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "pr_land_refuses_each_unsafe_step_and_reports_the_rest"
-issue = "#3297"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "read_only_lane_builds_and_tests_swift_in_scratch"
-issue = "#3300"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "read_only_lane_builds_and_tests_cargo_in_scratch"
-issue = "#3300"
 owner = "chair"
 expires = 2026-12-14
 

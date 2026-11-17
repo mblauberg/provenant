@@ -475,10 +475,18 @@ fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> Tes
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     // The operator cancelled before the provider spawned. An over-long `://`
     // run makes the session scrub refuse a transcript.
+    // The scoped stop-intent reader (b290fda595) accepts only a complete
+    // record; a bare reason fragment no longer names a cancellation.
     artifacts::seal(
         &dir,
         "cancel.json",
-        br#"{"reason":"explicit_cancellation"}"#,
+        &serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "scope": RunStore::scope(&store.record(id, &call)?),
+            "requester": store.context.actor_id,
+            "request_id": "scrub-cancel",
+            "reason": "explicit_cancellation",
+        }))?,
         RECORD_LIMIT,
     )?;
     let attempt = store

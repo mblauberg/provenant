@@ -14,7 +14,8 @@ fn quota_readiness_projection_covers_every_declared_reason() {
             | Reason::UncalibratedPartialCoverage
             | Reason::InvalidEvidence
             | Reason::UnreachablePeer
-            | Reason::UnsupportedPeerVersion => Excluded::UnknownAvailability,
+            | Reason::UnsupportedPeerVersion
+            | Reason::ProbedNoFigures => Excluded::UnknownAvailability,
             Reason::MissingExecutable => Excluded::MissingExecutable,
             Reason::SignedOut => Excluded::AuthRequired,
             Reason::LoginExpired => Excluded::LoginExpired,
@@ -833,5 +834,104 @@ fn pool_refusal_covers_its_pool_and_a_model_refusal_only_its_model()
     let account = vec![refused("*")];
     assert!(!ready(account.clone(), sonnet)?);
     assert!(!ready(account, gemini)?);
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#unknown-never-means-ready
+#[test]
+fn failed_probe_ranks_last_warns_expires_and_can_refuse() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_quota::{ReadinessReason as Why, ReadinessState as State};
+    use provenant_records::policy::{Source, Strength};
+
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    let accounts = ["a", "b"].map(|key| AvailabilityRecord {
+        account_key: Some(key.into()),
+        ..availability()
+    });
+    let access = readiness_access();
+    let failed = |window| {
+        observation(
+            "codex",
+            "a",
+            "codex/gpt-6-luna",
+            State::Unavailable,
+            Some(Why::CommandFailure),
+            window,
+        )
+    };
+    let ready = observation(
+        "codex",
+        "b",
+        "codex/gpt-6-luna",
+        State::Ready,
+        None,
+        (80, 120),
+    );
+    let lookup = readiness_over(vec![failed((80, 120)), ready]);
+    let ctx = RoutingContext {
+        availability: &accounts,
+        access: &access,
+        readiness: Some(&lookup),
+        ..context(&catalogue, &config, now()?)
+    };
+    let selected = resolve(&request("codex/gpt-6-luna")?, &ctx)?;
+    assert_eq!(selected.account_key.as_deref(), Some("b"));
+
+    let only_a = &accounts[..1];
+    let ctx = RoutingContext {
+        availability: only_a,
+        ..ctx
+    };
+    let selected = resolve(&request("codex/gpt-6-luna")?, &ctx)?;
+    assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
+    assert!(
+        selected
+            .diagnostics
+            .launch_warnings
+            .iter()
+            .any(|warning| warning.contains("a") && warning.contains("command failure"))
+    );
+    assert_eq!(
+        config.launch_policy.rule("PROBE_FAILURE").rule.strength,
+        Strength::Warn
+    );
+    assert_eq!(
+        config.launch_policy.rule("PROBE_FAILURE").source,
+        Source::CompiledDefault
+    );
+
+    let stale = readiness_over(vec![failed((80, 100))]);
+    let ctx = RoutingContext {
+        readiness: Some(&stale),
+        ..ctx
+    };
+    let selected = resolve(&request("codex/gpt-6-luna")?, &ctx)?;
+    assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
+    assert!(selected.diagnostics.launch_warnings.is_empty());
+
+    config.launch_policy.overlay(
+        &BTreeMap::from([("PROBE_FAILURE".into(), Strength::Refuse)]),
+        Source::Dispatch,
+    );
+    assert_eq!(
+        config.launch_policy.rule("PROBE_FAILURE").source,
+        Source::Dispatch
+    );
+    let ctx = RoutingContext {
+        availability: only_a,
+        access: &access,
+        readiness: Some(&lookup),
+        ..context(&catalogue, &config, now()?)
+    };
+    let selected = resolve(&request("codex/gpt-6-luna")?, &ctx)?;
+    assert!(matches!(
+        selected.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::UnknownAvailability,
+            ..
+        }
+    ));
     Ok(())
 }

@@ -27,6 +27,26 @@ pub struct FabricConfig {
     /// The planner front-end: whether `provenant run --preset` runs a planner.
     #[serde(default)]
     pub plan: PlanConfig,
+    /// Behaviour when same-session steering cannot continue because state is unavailable.
+    #[serde(default)]
+    pub steer: SteerConfig,
+}
+
+/// Fallback after an accepted steer cannot resume its provider session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SteerFallback {
+    /// Start fresh with the accepted brief, handoff and steering text.
+    #[default]
+    FreshWithHandoff,
+    /// Leave the steering text recorded without starting a successor.
+    Refuse,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SteerConfig {
+    pub fallback: SteerFallback,
 }
 
 /// Whether a preset run puts a principal planner in front of its graph.
@@ -904,12 +924,13 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     ),
     FieldMetadata::int("graph.launch_wait_seconds", 1, 14_400),
     FieldMetadata::int("graph.writer_provision_seconds", 1, 14_400),
+    FieldMetadata::enumeration("steer.fallback", &["fresh_with_handoff", "refuse"]),
     FieldMetadata::enumeration(
         "lanes.memory_pressure_threshold",
         &["warning", "critical", "never"],
     ),
     FieldMetadata::int("lanes.start_spacing_ms", 0, 600_000),
-    FieldMetadata::int("lanes.max_concurrent_builds", 1, 64),
+    FieldMetadata::int("lanes.max_concurrent_builds", 0, 64),
     FieldMetadata::int("lanes.cargo_build_jobs", 1, 1024),
     FieldMetadata::int("lanes.max_lanes", 1, 64),
     FieldMetadata::int("lanes.max_project_lanes", 1, 32),
@@ -1113,7 +1134,7 @@ mod tests {
         assert_eq!(lanes.max_concurrent_builds, None);
         assert_eq!(lanes.cargo_build_jobs, None);
         let mut config = config();
-        config.lanes.max_concurrent_builds = Some(0);
+        config.lanes.max_concurrent_builds = Some(65);
         config.lanes.cargo_build_jobs = Some(1025);
         config.lanes.max_lanes = Some(65);
         config.lanes.max_project_lanes = Some(0);
@@ -1217,6 +1238,7 @@ mod tests {
             graph: GraphConfig::default(),
             lanes: Lanes::default(),
             plan: Default::default(),
+            steer: Default::default(),
             limits: Limits {
                 body_bytes: 65536,
                 input_frame_bytes: 1048576,
@@ -1230,6 +1252,17 @@ mod tests {
                 store_busy_timeout_ms: 30_000,
             },
         }
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn steer_fallback_defaults_to_fresh_with_handoff_and_can_be_overridden() {
+        let config = config();
+        assert_eq!(config.steer.fallback, SteerFallback::FreshWithHandoff);
+        let mut encoded = serde_json::to_value(config).unwrap();
+        encoded["steer"]["fallback"] = "refuse".into();
+        let decoded: FabricConfig = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.steer.fallback, SteerFallback::Refuse);
     }
 
     #[test]

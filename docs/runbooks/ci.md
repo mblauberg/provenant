@@ -40,7 +40,9 @@ From `tools/front-door`, use `--features fixture` for development: `cargo build
 --workspace --all-targets --features fixture -- -D warnings`, and `cargo nextest
 run --locked --workspace --features fixture`. Each manifest forwards this feature
 to its dependencies; release and reference-generation commands keep empty
-defaults so they contain no test helpers. The root manifest's dev profile keeps
+defaults so they contain no test helpers. CI's lint job also runs `cargo check`
+and `cargo clippy --workspace --lib --bins --locked -- -D warnings` without the
+feature, so the shipped build is linted as well. The root manifest's dev profile keeps
 workspace line tables, removes dependency/build-script debuginfo and optimises
 proc-macros; test inherits it. CI cache keys name the feature set and profile;
 Linux build and both archives upload Cargo timings for comparison with the prior

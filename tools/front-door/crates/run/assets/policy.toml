@@ -259,6 +259,15 @@ threshold = "domains.routing.pacing.free"
 justification = "A free-pool pacing profile can override the reserve for its selected window."
 
 [[rule]]
+code = "PROBE_FAILURE"
+site = "routing/src/resolve.rs#account_reason"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.PROBE_FAILURE"
+justification = "A failed quota probe warns and proceeds by default; Refuse excludes the account."
+
+[[rule]]
 code = "DISPATCH_PREPAREDPROVIDER_CHECK_POLICY_AUTHORITY"
 site = "cli/src/run/launch.rs#PreparedProvider::identity_refusal"
 boundary = "authority"

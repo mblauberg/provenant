@@ -52,6 +52,9 @@ acceptance_items = 6 # more acceptance items than this turns planning on
 write_crates = 2 # a write scope spanning more crates than this turns it on
 batch_issues = 2 # this many distinct issues in one brief turns it on
 
+[steer]
+fallback = "fresh_with_handoff" # fresh_with_handoff or refuse when a stopped session is unavailable
+
 [graph]
 launch_wait_seconds = 55 # general launch and read/wait allowance
 writer_provision_seconds = 55 # independent allowance for each writer provisioning

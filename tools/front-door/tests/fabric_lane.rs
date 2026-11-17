@@ -245,7 +245,7 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
         return Err("expected child admission".into());
     };
     assert_eq!(child.template, "explore");
-    assert_eq!(child.brief, "Inspect the child");
+    assert_eq!(child.prompt, "Inspect the child");
     assert_eq!(child.tier.as_deref(), Some("junior"));
     assert!(!child.detached);
     host(
@@ -263,7 +263,7 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
     let RelayOp::Add(repeated) = serde_json::from_value(frame)? else {
         return Err("expected repeated child admission".into());
     };
-    assert_eq!(repeated.brief, child.brief);
+    assert_eq!(repeated.prompt, child.prompt);
     assert_ne!(repeated.id, child.id);
     assert_ne!(repeated.idempotency_key, child.idempotency_key);
     // The legacy CLI recognised the parent marker on its own. Keep that
@@ -278,7 +278,7 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
     let RelayOp::Add(child) = serde_json::from_value(frame)? else {
         return Err("expected child admission from parent marker".into());
     };
-    assert_eq!(child.brief, "Parent marker only");
+    assert_eq!(child.prompt, "Parent marker only");
     assert_eq!(child.template, "task");
     let stopped = host(&rig, &["stop", "lane-graph/parent--child", "--json"])?;
     assert_eq!(stopped["data"]["parent_attempt"], attempt.to_string());
@@ -486,10 +486,10 @@ fn lane_run_receipt_carries_no_observation_even_when_observation_fails() -> Resu
         move |arguments, _, _| match serde_json::from_value::<RelayOp>(arguments)? {
             RelayOp::Add(child) => {
                 assert!(matches!(
-                    child.brief.as_str(),
+                    child.prompt.as_str(),
                     "Observe child" | "Delayed child"
                 ));
-                if child.brief == "Delayed child" {
+                if child.prompt == "Delayed child" {
                     // Admission may outlast the original observation deadline.
                     let clock = SystemClock;
                     clock
@@ -551,7 +551,7 @@ fn child_relay_preserves_a_configured_allowance_above_default() -> Result {
         provenant_records::Limits::CONFIG,
         |_, _, _| unreachable!("expected graph request"),
         move |arguments, _, within| match serde_json::from_value::<RelayOp>(arguments)? {
-            RelayOp::Add(child) if child.brief == "Delayed child" => {
+            RelayOp::Add(child) if child.prompt == "Delayed child" => {
                 assert!(
                     within > std::time::Duration::from_secs(default_allowance),
                     "{within:?}"

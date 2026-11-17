@@ -116,6 +116,21 @@ pub(super) fn output_summary(
     {
         lines.push("declared result excerpt is incomplete".into());
     }
+    if headed && let Some(work) = data.get("stop_work").filter(|value| !value.is_null()) {
+        let head = work["head"].as_str().unwrap_or("unknown");
+        let ahead = work["ahead"].as_u64();
+        let pushed = work["push"] == "pushed";
+        let mut line = match (ahead, pushed) {
+            (Some(commits), true) => format!("{commits} commits pushed at {head}"),
+            (Some(commits), false) => format!("{commits} commits unpushed at {head}"),
+            (None, true) => format!("committed work pushed at {head}"),
+            (None, false) => format!("stopped work at {head}; unpushed count unavailable"),
+        };
+        if let Some(dirty) = work["dirty_paths"].as_u64().filter(|count| *count > 0) {
+            line.push_str(&format!("; {dirty} dirty paths left uncommitted"));
+        }
+        lines.push(line);
+    }
     if headed && let Some(state) = data["state"].as_str() {
         let reason = data["reason"].as_str();
         lines.push(match reason {
@@ -518,15 +533,16 @@ fn output_read_part(
     {
         // There may be useful admission evidence before a result exists. Do
         // not invent an artefact length, digest or completeness for it.
-        return Ok((
-            json!({
-                "attempt_id": id, "state": state_and_reason(&record.state).0,
-                "reason": reason, "part": "result", "offset": 0, "next_offset": 0,
-                "length": null, "eof": true, "clipped": null, "complete": null,
-                "digest": null, "bytes": json!({"encoding":"utf8", "data":""}),
-            }),
-            format!("{reason}\n"),
-        ));
+        let mut data = json!({
+            "attempt_id": id, "state": state_and_reason(&record.state).0,
+            "reason": reason, "part": "result", "offset": 0, "next_offset": 0,
+            "length": null, "eof": true, "clipped": null, "complete": null,
+            "digest": null, "bytes": json!({"encoding":"utf8", "data":""}),
+        });
+        if let Some(stop_work) = &record.stop_work {
+            data["stop_work"] = json!(stop_work);
+        }
+        return Ok((data, format!("{reason}\n")));
     }
     let evicted = status::artifact(
         session.context.state_root.as_path(),
@@ -628,6 +644,11 @@ fn output_read_part(
         let (paths, total) = changed_file_evidence(session, &record, call);
         data["changed_files"] = paths;
         data["changed_files_total"] = total;
+        // The wire schema declares `stop_work` an optional object: absent,
+        // never null, when no stop evidence was recorded.
+        if let Some(stop_work) = &record.stop_work {
+            data["stop_work"] = json!(stop_work);
+        }
     }
     if let Some(reason) = fallback_reason {
         add_planner_fallback(&mut data, &mut text, reason);
@@ -1046,6 +1067,30 @@ mod tests {
                 Some("provenant wait repair/writer#2")
             );
         }
+    }
+
+    #[test]
+    fn output_summary_reports_stopped_commits_and_dirty_paths() {
+        let unpushed = serde_json::json!({
+            "state":"cancelled",
+            "stop_work":{"head":"abcdef0123456789","ahead":2,"dirty_paths":3,"push":"not_granted"}
+        });
+        let summary = output_summary(&unpushed, "", true, None);
+        assert!(
+            summary.lines.iter().any(|line| line
+                == "2 commits unpushed at abcdef0123456789; 3 dirty paths left uncommitted")
+        );
+        let pushed = serde_json::json!({
+            "state":"cancelled",
+            "stop_work":{"head":"abcdef0123456789","ahead":2,"dirty_paths":null,"push":"pushed"}
+        });
+        let summary = output_summary(&pushed, "", true, None);
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line == "2 commits pushed at abcdef0123456789")
+        );
     }
 
     #[test]

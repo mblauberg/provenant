@@ -960,6 +960,7 @@ fn live_provider_publishes_initial_checkpoint(root: &Path) -> Result<()> {
     Ok(())
 }
 fn held_custody_is_released_only_after_guardian_exit(root: &Path) -> Result<()> {
+    // Spec: docs/specs/run-launch.md#admission-and-custody
     for index in 0..3 {
         let name = format!("custody-{index}");
         let socket = root.join(format!("custody-{index}.sock"));
@@ -974,11 +975,28 @@ fn held_custody_is_released_only_after_guardian_exit(root: &Path) -> Result<()> 
         let mut provider = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
         byte(&mut provider, b'R')?;
         assert!(!handle.custody_released(&identity));
+        let evidence = Directory::open_anchor(&root.join(format!("{name}-writer")))?;
+        let evidence = attempt_evidence(&evidence, scope())?;
+        assert!(matches!(
+            evidence.try_lock_existing(
+                OsStr::new("guardian.lock"),
+                provenant_os::fs::LockMode::Exclusive
+            ),
+            Err(provenant_os::fs::FsError::LockTimeout { .. })
+        ));
         let guardian = reservation_identity(&root.join(format!("{name}-writer")), "guardian")?;
         stop(&handle, StopReason::ExplicitCancellation)?;
         exited(&handle)?;
         fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(5))?;
         assert!(handle.custody_released(&identity));
+        assert!(
+            evidence
+                .try_lock_existing(
+                    OsStr::new("guardian.lock"),
+                    provenant_os::fs::LockMode::Exclusive
+                )
+                .is_ok()
+        );
     }
     Ok(())
 }
@@ -1128,11 +1146,14 @@ fn held_stop_ignores_lane_written_summary_and_cancel_request(root: &Path) -> Res
     let planted = serde_json::json!({
         "schema_version": 1,
         "scope": scope,
-        "request_id": format!("{}.{}.cancel", scope.attempt, scope.generation),
+        "request_id": format!("{}.{}.stop", scope.attempt, scope.generation),
         "requester": provenant_core::ActorId::from_bytes([66; 16]),
         "reason": "explicit_cancellation",
     });
-    std::fs::write(attempt.join("cancel.json"), serde_json::to_vec(&planted)?)?;
+    std::fs::write(
+        attempt.join("stop-intent.json"),
+        serde_json::to_vec(&planted)?,
+    )?;
     let handle = hold(
         Directory::open_anchor(&attempt)?,
         scope,
@@ -1155,7 +1176,7 @@ fn cancel_request(scope: Scope, requester: provenant_core::ActorId) -> serde_jso
     serde_json::json!({
         "schema_version": 1,
         "scope": scope,
-        "request_id": format!("{}.{}.cancel", scope.attempt, scope.generation),
+        "request_id": format!("{}.{}.stop", scope.attempt, scope.generation),
         "requester": requester,
         "reason": "explicit_cancellation",
     })
@@ -1206,7 +1227,7 @@ fn held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation(
     for (name, plant) in plants {
         let attempt = root.join(format!("{name}-attempt"));
         std::fs::create_dir(&attempt)?;
-        plant(&attempt.join("cancel.json"))?;
+        plant(&attempt.join("stop-intent.json"))?;
         let handle = hold(Directory::open_anchor(&attempt)?, scope(), requester);
         assert_eq!(
             stop(&handle, StopReason::ExplicitCancellation)?,
@@ -1214,13 +1235,13 @@ fn held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation(
             "{name}"
         );
         let written: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(attempt.join("cancel.json"))?)?;
+            serde_json::from_slice(&std::fs::read(attempt.join("stop-intent.json"))?)?;
         assert_eq!(written, cancel_request(scope(), requester), "{name}");
     }
     assert_eq!(std::fs::read(&outside)?, b"untouched");
     // A directory refuses the rename, so it stays an accepted limit.
     let blocked = root.join("directory-attempt");
-    std::fs::create_dir_all(blocked.join("cancel.json"))?;
+    std::fs::create_dir_all(blocked.join("stop-intent.json"))?;
     assert!(
         stop(
             &hold(Directory::open_anchor(&blocked)?, scope(), requester),
@@ -1236,7 +1257,7 @@ fn held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation(
         serde_json::json!({"schema_version": 1, "scope": scope(), "requester": requester});
     std::fs::write(attempt.join("launch.json"), serde_json::to_vec(&summary)?)?;
     std::fs::write(
-        attempt.join("cancel.json"),
+        attempt.join("stop-intent.json"),
         serde_json::to_vec(&cancel_request(later, requester))?,
     )?;
     let handle = reattach(Directory::open_anchor(&attempt)?, scope())?;
@@ -1245,7 +1266,7 @@ fn held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation(
         Err(CustodyError::InvalidRecord)
     ));
     let kept: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(attempt.join("cancel.json"))?)?;
+        serde_json::from_slice(&std::fs::read(attempt.join("stop-intent.json"))?)?;
     assert_eq!(kept, cancel_request(later, requester));
     Ok(())
 }
@@ -2686,6 +2707,7 @@ fn retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive(root: &Path) -
 }
 
 fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> Result<()> {
+    // Spec: docs/specs/run-settlement.md#guardian-loss-proof
     let path = root.join("crash.sock");
     let listener = UnixListener::bind(&path)?;
     let (writer, _handle) = start(
@@ -2714,7 +2736,16 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
         fixture::recovery_observation(&locked),
         RecoveryState::Unknown
     );
-    drop(locked);
+    assert!(
+        locked
+            .after_guardian_loss(
+                &Directory::open_anchor(&root.join("crash-attempt"))?,
+                &fixture::RecordedBootObserver,
+                || Ok(true),
+            )?
+            .is_none(),
+        "a surviving provider prevents same-boot loss proof"
+    );
     assert!(!root.join("crash-attempt/process-exit.json").exists());
     drop(held);
     wait_for_identity_absence(&provider)?;
@@ -2736,7 +2767,16 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
             .verify_settlement(&Directory::open_anchor(unrelated.path())?)
             .is_err()
     );
-    drop(recovery);
+    let proof = recovery.after_guardian_loss(
+        &Directory::open_anchor(&root.join("crash-attempt"))?,
+        &fixture::RecordedBootObserver,
+        || Ok(true),
+    )?;
+    assert!(
+        proof.is_some(),
+        "the kernel releases the guardian life lock after its death"
+    );
+    drop(proof);
     assert!(
         root.join("crash-writer")
             .join(scope().attempt.to_string())

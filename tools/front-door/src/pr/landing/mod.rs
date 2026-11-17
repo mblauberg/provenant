@@ -56,6 +56,14 @@ pub enum LandingError {
     PullRequestChanged(u64),
     #[error("publication refused: {0}")]
     Refused(String),
+    /// A refusal with a typed leaf cause (for example `HEAD_MOVED`) and the
+    /// operator's next step. Displays exactly as `Refused` does.
+    #[error("publication refused: {message}")]
+    RefusedWith {
+        cause: &'static str,
+        message: String,
+        repair: &'static str,
+    },
     #[error("publication outcome is unknown")]
     PublicationUnknown,
     #[error(
@@ -79,6 +87,15 @@ pub enum LandingError {
         report: Box<driver::Report>,
     },
 }
+
+impl LandingError {
+    /// A definite publication refusal: nothing was published, so the outcome is
+    /// known and the attempt settles as refused rather than failed.
+    pub(crate) fn is_refusal(&self) -> bool {
+        matches!(self, Self::Refused(_) | Self::RefusedWith { .. })
+    }
+}
+
 use provenant_confinement::review_exempt::ReviewExempt;
 pub mod adapters;
 pub mod approval;
@@ -206,9 +223,11 @@ fn batch_response(
         Some(LandingError::Contention | LandingError::TargetMoved) => {
             (Outcome::Refused, "LAND_CONTENTION")
         }
-        Some(LandingError::Refused(_) | LandingError::PullRequestChanged(_)) => {
-            (Outcome::Refused, "LAND_REFUSED")
-        }
+        Some(
+            LandingError::Refused(_)
+            | LandingError::RefusedWith { .. }
+            | LandingError::PullRequestChanged(_),
+        ) => (Outcome::Refused, "LAND_REFUSED"),
         Some(LandingError::UnmetGate(_)) => (Outcome::Failed, "LAND_GATE_UNMET"),
         Some(LandingError::CiUnavailable(_)) => (Outcome::Unavailable, "CI_UNAVAILABLE"),
         Some(LandingError::RateLimited(_)) => (Outcome::Unavailable, "RATE_LIMITED"),
@@ -228,6 +247,10 @@ fn batch_response(
             (Outcome::Ok, "")
         }
         None => (Outcome::Failed, ""),
+    };
+    let (cause, repair) = match failure.as_ref() {
+        Some(LandingError::RefusedWith { cause, repair, .. }) => (Some(*cause), Some(*repair)),
+        _ => (None, None),
     };
     let mut value = serde_json::json!({"receipts": report.receipts, "outcomes": report.outcomes, "warnings": report.warnings, "local_follow_up": report.local_steps});
     if let Some(LandingError::Unavailable { id, reason }) = &failure {
@@ -266,8 +289,8 @@ fn batch_response(
         response.error = Some(CommandError {
             code: code.into(),
             message: error.to_string(),
-            cause: None,
-            repair: None,
+            cause: cause.map(str::to_owned),
+            repair: repair.map(str::to_owned),
             diagnostic: None,
         });
     }

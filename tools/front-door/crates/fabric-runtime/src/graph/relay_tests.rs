@@ -32,7 +32,7 @@ fn live_with_session(
 }
 
 fn child(id: &str, key: &str) -> ChildRequest {
-    serde_json::from_value(json!({"id":id, "brief":"Fix the parser", "idempotency_key":key}))
+    serde_json::from_value(json!({"id":id, "prompt":"Fix the parser", "idempotency_key":key}))
         .unwrap()
 }
 
@@ -396,7 +396,7 @@ fn child_admission_refusals_leave_the_graph_unchanged() {
             "a",
             {
                 let mut request = child("secret", "secret-child");
-                request.brief = "Use sk-abcdefghijklmnopqrstuvwx".into();
+                request.prompt = "Use sk-abcdefghijklmnopqrstuvwx".into();
                 request
             },
             "secret",
@@ -539,7 +539,7 @@ fn cancelling_a_parent_cancels_its_subtree_except_detached_children() {
 #[test]
 fn relay_frames_are_tagged_and_strict() {
     let add: relay::RelayOp = serde_json::from_value(
-        json!({"op":"add","id":"fix","brief":"Fix","idempotency_key":"k","writer":true}),
+        json!({"op":"add","id":"fix","prompt":"Fix","idempotency_key":"k","writer":true}),
     )
     .unwrap();
     assert!(
@@ -552,13 +552,14 @@ fn relay_frames_are_tagged_and_strict() {
     for malformed in [
         json!({"op":"launch","id":"x"}),
         json!({"op":"wait","waiting":"yes"}),
-        json!({"id":"x","brief":"b","idempotency_key":"k"}),
+        json!({"id":"x","prompt":"b","idempotency_key":"k"}),
+        json!({"op":"add","id":"x","brief":"b","idempotency_key":"k"}),
     ] {
         assert!(serde_json::from_value::<relay::RelayOp>(malformed).is_err());
     }
     assert!(
         serde_json::from_value::<relay::RelayOp>(
-            json!({"op":"add","id":"x","brief":"b","idempotency_key":"k","future":1})
+            json!({"op":"add","id":"x","prompt":"b","idempotency_key":"k","future":1})
         )
         .is_ok()
     );
@@ -758,13 +759,13 @@ fn composite_child_timeout_reaches_every_provider_leaf_and_retains_template_evid
     assert_eq!(leaves.len(), 2);
     for leaf in leaves {
         assert_eq!(leaf.deadline_seconds, Some(23));
-        assert_eq!(leaf.prompt, request.brief);
+        assert_eq!(leaf.prompt, request.prompt);
         assert_eq!(leaf.template.as_deref(), Some("task"));
         assert!(!leaf.extra.contains_key("extensions"));
     }
     let evidence = &checkpoint.expansions[0].uses[0];
     assert_eq!(evidence.name, "task-chain");
-    assert_eq!(evidence.parameters["brief"], request.brief);
+    assert_eq!(evidence.parameters["brief"], request.prompt);
     assert!(
         add(&document, &mut checkpoint, "a", &request)
             .unwrap()
@@ -898,7 +899,7 @@ fn review_panel_child_resolves_host_lenses_preserves_subject_and_replays() {
     };
     let mut request = child("panel", "resolved-panel");
     request.template = "review-panel".into();
-    request.brief = "Review the parser at commit 1111111111111111111111111111111111111111".into();
+    request.prompt = "Review the parser at commit 1111111111111111111111111111111111111111".into();
     let receipt = admit_child(
         &mut patch::LiveGraph {
             document: &document,
@@ -925,7 +926,7 @@ fn review_panel_child_resolves_host_lenses_preserves_subject_and_replays() {
         assert!(
             leaves.iter().any(
                 |node| node.prompt.contains(&format!("through the {lens} lens"))
-                    && node.prompt.contains(&request.brief)
+                    && node.prompt.contains(&request.prompt)
             ),
             "missing lens {lens}"
         );
@@ -933,7 +934,7 @@ fn review_panel_child_resolves_host_lenses_preserves_subject_and_replays() {
     assert!(
         leaves
             .iter()
-            .all(|node| node.prompt.contains(&request.brief))
+            .all(|node| node.prompt.contains(&request.prompt))
     );
     let before = checkpoint.clone();
     let replay = admit_child(
@@ -1034,7 +1035,7 @@ fn child_receipt_replay_uses_original_request_after_template_and_parent_changes(
             .code,
         "parent_settled"
     );
-    request.brief = "Different brief".into();
+    request.prompt = "Different brief".into();
     assert_eq!(
         add(&document, &mut checkpoint, "a", &request)
             .unwrap_err()
@@ -1689,7 +1690,7 @@ fn bound_document_child_preserves_explicit_worktree_and_upstream_source() {
         worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
     };
     let request: ChildRequest = serde_json::from_value(json!({
-        "id":"bound", "brief":"", "writer":true, "idempotency_key":"bound", "launch":{
+        "id":"bound", "prompt":"", "writer":true, "idempotency_key":"bound", "launch":{
             "node":{"id":"bound", "use":"implement", "prompt":"Preserve existing work", "worktree":".worktrees/existing",
                 "source":{"type":"node", "node":"a"}, "depends_on":["a"], "delivery":"push"}
         }

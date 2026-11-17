@@ -556,7 +556,7 @@ impl RunStore {
                 old.retry_of.is_some() && old.continuation.as_deref() == Some("fresh");
             if (old.retry_of.is_some() && !same_session_continuation && !fresh_continuation)
                 || (same_session_continuation != continuation_expectation.is_some())
-                || (graph_steer && !same_session_continuation)
+                || (graph_steer && !same_session_continuation && !fresh_continuation)
             {
                 return Err(RunError::Validation("continuation session expectation"));
             }
@@ -820,7 +820,7 @@ impl RunStore {
         let record = self.record(id, &call)?;
         // A steer interrupt uses the same marker as an owner stop. Only this
         // scope's Steered request admits; any other marker vetoes admission.
-        if crate::store::CancelMarker::read(attempt, Self::scope(&record))?.stops() {
+        if crate::store::StopMarker::read(attempt, Self::scope(&record))?.stops() {
             return Err(RunError::Cancelled);
         }
         let ticket = self.ticket(&self.db, id)?;

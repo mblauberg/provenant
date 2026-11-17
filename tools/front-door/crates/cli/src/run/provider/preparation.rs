@@ -2940,6 +2940,8 @@ pub(super) fn prepare_candidates(
                         if strategy == provenant_records::LoginReprobe::ExecutableOnly {
                             // The version probe established executable availability,
                             // not login health. Let the selected launch check auth.
+                            record.fixture_ref =
+                                format!("installed/{}/login-unverified", entry.adapter);
                             login_unverified.insert((entry.adapter.clone(), entry.key.clone()));
                         } else {
                             let healthy = match strategy {
@@ -3153,7 +3155,10 @@ pub(super) fn prepare_candidates(
         if queue.is_empty() {
             let next = if named_pool {
                 match redraw_candidates(
-                    resolve(&availability, &rejected),
+                    resolve(
+                        &without_refused_accounts(&availability, &refused_accounts),
+                        &rejected,
+                    ),
                     &mut reasons,
                     &mut rejected,
                 ) {
@@ -3535,16 +3540,15 @@ pub(super) fn prepare_candidates(
             );
             refused_accounts.insert((route.adapter.clone(), key));
             let remaining = without_refused_accounts(&availability, &refused_accounts);
-            if remaining
-                .iter()
-                .any(|record| record.adapter == route.adapter)
+            if let Ok(model) = provenant_routing::ModelId::parse(&label)
+                && remaining
+                    .iter()
+                    .any(|record| record.adapter == route.adapter)
             {
-                if let Ok(model) = provenant_routing::ModelId::parse(&label) {
-                    rejected.retain(|tried| *tried != model);
-                }
-                if let Ok(next) = resolve(&remaining, &rejected) {
-                    queue.extend(candidates(next));
-                }
+                rejected.retain(|tried| *tried != model);
+            }
+            if let Ok(next) = resolve(&remaining, &rejected) {
+                queue.extend(candidates(next));
             }
             continue;
         }
@@ -3733,6 +3737,18 @@ pub(super) fn prepare_candidates(
                     .and_then(|provider| provider.runtime_deadline_seconds),
             },
         );
+        let lanes = provenant_config::LaneBuildSettings::read(state_root).unwrap_or_default();
+        let total = provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
+        let extras = run::PreambleExtras {
+            verification: Some(run::VerificationResolution::resolve(
+                &task.profile,
+                prompt_text,
+            )),
+            build_cap: Some(run::BuildCap {
+                slots: lanes.build_limit(total),
+                source: lanes.build_limit_source(),
+            }),
+        };
         let text = format!(
             "{}\n{text}",
             run::lane_preamble_with_policy(
@@ -3743,6 +3759,7 @@ pub(super) fn prepare_candidates(
                     .then(|| run::ResolvedCiScope::resolve(&task.profile)),
                 writable_handoff.then_some(handoff.as_path()),
                 &launch_policy,
+                &extras,
             )
         );
         let prompt = match launch_prompt(

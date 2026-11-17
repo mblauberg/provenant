@@ -832,7 +832,7 @@ mod tests {
         let request = Request {
             tool: GRAPH_TOOL.into(),
             arguments: json!({
-                "id":"writer","brief":"Fix parser","writer":true,"idempotency_key":"add-1"
+                "id":"writer","prompt":"Fix parser","writer":true,"idempotency_key":"add-1"
             }),
         };
         let first = {

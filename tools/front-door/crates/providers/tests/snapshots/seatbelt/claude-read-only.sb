@@ -86,6 +86,7 @@
 (allow file-read* (literal "/fixture/provenant/release.json"))
 (allow file-read* (literal "/fixture/state/config.toml"))
 (allow file-read* (literal "/fixture/state/host-id"))
+(allow file-read* (literal "/fixture/state/ports.json"))
 (allow file-read* (subpath "/fixture/state/projects"))
 (allow file-read* (literal "/fixture/state/fabric/fabric.sqlite3"))
 (allow file-read* (literal "/fixture/state/fabric/fabric.sqlite3-wal"))

@@ -931,6 +931,15 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                         .filter(|message| !message.is_empty())
                         .unwrap_or_else(|| "provider overloaded (HTTP 529)".into()),
                 }
+            } else if (error.kind == "unknown" || error.kind.is_empty())
+                && error.status.is_none()
+                && !auth
+                && !limited
+            {
+                let message = error
+                    .message
+                    .unwrap_or_else(|| "unclassified provider error".into());
+                E::Unclassified { message }
             } else {
                 E::Error
             };
@@ -952,6 +961,21 @@ crate::quota_source!(
 mod tests {
     use super::*;
     use crate::Adapter;
+
+    // Spec: docs/specs/routing.md#capacity-is-not-quota
+    #[test]
+    fn unknown_error_without_http_status_preserves_unclassified_message() {
+        let mut stream = OpenCode.stream(None).unwrap();
+        let events = OpenCode.observe(&mut stream, b"{\"type\":\"error\",\"error\":{\"type\":\"unknown\",\"message\":\"fixture failure\"}}\n").unwrap();
+        assert!(events.contains(&E::Unclassified {
+            message: "fixture failure".into()
+        }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, E::QuotaLimited { .. }))
+        );
+    }
 
     #[test]
     fn structured_errors_classify_auth_and_quota() {

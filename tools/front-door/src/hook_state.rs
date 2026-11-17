@@ -4,6 +4,8 @@
 //! is missing, slow or failing leaves its section marked unavailable. The
 //! calls run in parallel under one deadline.
 use provenant_cli::Globals;
+use provenant_core::{Clock, MonoTime};
+use provenant_os::clock::SystemClock;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_workflow::session::{
     CommandPrefix, LaneLine, SessionState, Unavailable, WorktreeLine,
@@ -19,6 +21,7 @@ const OUTPUT_CAP: usize = 512 * 1024;
 const LANE_PAGE: &str = "100";
 const LISTING_TIME: Duration = Duration::from_secs(3);
 const COLLECTION_EXECUTOR_CONCURRENCY: usize = 4;
+static SYSTEM_CLOCK: SystemClock = SystemClock;
 
 pub struct Want {
     pub worktrees: bool,
@@ -28,17 +31,19 @@ pub struct Want {
 }
 
 /// This binary's own read commands, run in `cwd` with the hook's state root.
+/// Deadlines are read from `clock`, so a test drives them without wall time.
 pub struct Cli<'a> {
     exe: PathBuf,
     state_dir: Option<&'a Path>,
     cwd: &'a Path,
-    executor: &'a SystemExecutor,
+    executor: &'a dyn Executor,
+    clock: &'a dyn Clock,
 }
 impl<'a> Cli<'a> {
     pub fn new(
         globals: &'a Globals,
         cwd: &'a Path,
-        executor: &'a SystemExecutor,
+        executor: &'a dyn Executor,
     ) -> std::io::Result<Self> {
         let exe = std::env::current_exe()?;
         Ok(Self {
@@ -46,7 +51,22 @@ impl<'a> Cli<'a> {
             state_dir: globals.state_dir.as_deref(),
             cwd,
             executor,
+            clock: &SYSTEM_CLOCK,
         })
+    }
+
+    /// A monotonic deadline `budget` from now on this clock.
+    pub fn deadline_after(&self, budget: Duration) -> MonoTime {
+        let micros = u64::try_from(budget.as_micros()).unwrap_or(u64::MAX);
+        MonoTime::from_micros(self.clock.mono_now().as_micros().saturating_add(micros))
+    }
+
+    /// The real-time budget a child may use before `deadline`.
+    fn remaining(&self, deadline: MonoTime) -> Duration {
+        let micros = deadline
+            .as_micros()
+            .saturating_sub(self.clock.mono_now().as_micros());
+        Duration::from_micros(micros)
     }
 
     fn argv(&self, args: &[&str]) -> Vec<OsString> {
@@ -60,11 +80,14 @@ impl<'a> Cli<'a> {
     }
 
     /// The `data` of a successful command envelope, or a short cause.
-    // The child's real-time budget is the hook's deadline.
-    #[allow(clippy::disallowed_methods)]
-    pub fn data(&self, args: &[&str], limit: Duration, deadline: Instant) -> Result<Value, String> {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let time = limit.min(remaining);
+    /// The child's budget is the hook's deadline, so it never outlives the hook.
+    pub fn data(
+        &self,
+        args: &[&str],
+        limit: Duration,
+        deadline: MonoTime,
+    ) -> Result<Value, String> {
+        let time = limit.min(self.remaining(deadline));
         if time < Duration::from_millis(50) {
             return Err("hook deadline reached".into());
         }
@@ -99,9 +122,8 @@ impl<'a> Cli<'a> {
     }
 
     /// Preserve complete inventory records even when the child hits its budget.
-    #[allow(clippy::disallowed_methods)]
-    fn worktree_listing(&self, deadline: Instant) -> Result<(Vec<WorktreeLine>, usize), String> {
-        let time = LISTING_TIME.min(deadline.saturating_duration_since(Instant::now()));
+    fn worktree_listing(&self, deadline: MonoTime) -> Result<(Vec<WorktreeLine>, usize), String> {
+        let time = LISTING_TIME.min(self.remaining(deadline));
         if time < Duration::from_millis(50) {
             return Err("hook deadline reached".into());
         }
@@ -122,13 +144,12 @@ impl<'a> Cli<'a> {
         })
     }
 
-    #[allow(clippy::disallowed_methods)]
     fn lane_listing(
         &self,
-        deadline: Instant,
+        deadline: MonoTime,
         settled_after: Option<i64>,
     ) -> Result<(Vec<LaneLine>, Option<String>, usize), String> {
-        let time = LISTING_TIME.min(deadline.saturating_duration_since(Instant::now()));
+        let time = LISTING_TIME.min(self.remaining(deadline));
         if time < Duration::from_millis(50) {
             return Err("hook deadline reached".into());
         }
@@ -167,6 +188,8 @@ fn unavailable_sources(state: &mut SessionState, want: &Want, reason: String) {
     }
 }
 
+// The hook's real-time deadline is read once here, at the process edge.
+#[allow(clippy::disallowed_methods)]
 pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) -> SessionState {
     let mut state = SessionState {
         commands: CommandPrefix::new(globals.state_dir.as_deref(), cwd),
@@ -194,6 +217,7 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
             return state;
         }
     };
+    let deadline = cli.deadline_after(deadline.saturating_duration_since(Instant::now()));
     collect_with_cli(state, &cli, want, deadline)
 }
 
@@ -201,7 +225,7 @@ fn collect_with_cli(
     mut state: SessionState,
     cli: &Cli<'_>,
     want: &Want,
-    deadline: Instant,
+    deadline: MonoTime,
 ) -> SessionState {
     std::thread::scope(|scope| {
         let active = scope.spawn(move || cli.lane_listing(deadline, None));
@@ -495,45 +519,69 @@ mod tests {
     #[allow(clippy::disallowed_methods)]
     fn session_collection_keeps_lane_and_worktree_rows_after_deadline() {
         use super::*;
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir().unwrap();
-        let script = temp.path().join("inventory");
-        std::fs::write(
-            &script,
-            r##"#!/bin/sh
-case "$*" in
-  probe) exit 0 ;;
-  *worktree*) printf '%s\n' '{"total":3}' '{"worktree":{"path":"/primary"}}' '{"worktree":{"path":"/lane","branch":"refs/heads/lane"}}' ;;
-  *--all*) printf '%s\n' '{"total":0,"next":null}' ;;
-  *) printf '%s\n' '{"total":2,"next":null}' '{"cursor":2,"lane":{"key":{"graph":"g","node":"a","attempt":1},"attempt_id":"a","state":"running"}}' ;;
-esac
-/bin/sleep 5
-"##,
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-        // A process forked by a concurrent test may still hold the write
-        // descriptor until it execs, so exec can briefly fail with ETXTBSY.
-        // The descriptor is closed here, so one successful exec settles it.
-        for _ in 0..100 {
-            match std::process::Command::new(&script).arg("probe").status() {
-                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                result => {
-                    assert!(result.unwrap().success());
-                    break;
-                }
+        use provenant_core::{TestClock, WallTime};
+        use provenant_os::exec::{CapturedStream, ExecError, ExecOutcome};
+
+        const ACTIVE: &str = concat!(
+            "{\"total\":2,\"next\":null}\n",
+            "{\"cursor\":2,\"lane\":{\"key\":{\"graph\":\"g\",\"node\":\"a\",\"attempt\":1},\"attempt_id\":\"a\",\"state\":\"running\"}}\n",
+        );
+        const SETTLED: &str = "{\"total\":0,\"next\":null}\n";
+        const WORKTREES: &str = concat!(
+            "{\"total\":3}\n",
+            "{\"worktree\":{\"path\":\"/primary\"}}\n",
+            "{\"worktree\":{\"path\":\"/lane\",\"branch\":\"refs/heads/lane\"}}\n",
+        );
+
+        /// Stands in for the inventory children. Each answers with its partial
+        /// output and reports that its budget ran out, as a child stopped at
+        /// its deadline does. Records the budget each child was given.
+        #[derive(Default)]
+        struct StoppedChildren(std::sync::Mutex<Vec<Duration>>);
+        impl Executor for StoppedChildren {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                self.0.lock().unwrap().push(options.timeout);
+                let args: Vec<&str> = options.argv.iter().filter_map(|arg| arg.to_str()).collect();
+                let stdout = if args.contains(&"worktree") {
+                    WORKTREES
+                } else if args.contains(&"--all") {
+                    SETTLED
+                } else {
+                    ACTIVE
+                };
+                Ok(ExecOutcome {
+                    termination: Termination::Signal(15),
+                    stdout: CapturedStream {
+                        bytes: stdout.as_bytes().to_vec(),
+                        total_bytes: stdout.len() as u64,
+                        ..Default::default()
+                    },
+                    stderr: CapturedStream::default(),
+                    timed_out: true,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
             }
         }
-        let executor = SystemExecutor::new(COLLECTION_EXECUTOR_CONCURRENCY).unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
+        let executor = StoppedChildren::default();
         let cli = Cli {
-            exe: script,
+            exe: PathBuf::from("provenant"),
             state_dir: None,
             cwd: temp.path(),
             executor: &executor,
+            clock: &clock,
         };
-        let host_deadline = Instant::now() + Duration::from_secs(2);
+        // The hook's two-second deadline less its rendering reserve, computed
+        // from one base so no wall time reaches the collection itself.
+        let start = Instant::now();
+        let budget = crate::hooks::session_collection_deadline(start + Duration::from_secs(2))
+            .duration_since(start);
+        let deadline = cli.deadline_after(budget);
         let state = collect_with_cli(
             SessionState::default(),
             &cli,
@@ -542,7 +590,7 @@ esac
                 settled_after_unix: 0,
                 session: None,
             },
-            crate::hooks::session_collection_deadline(host_deadline),
+            deadline,
         );
         let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
         assert!(digest.contains("g/a#1"), "{digest}");
@@ -555,9 +603,15 @@ esac
             digest.contains("1 worktree skipped during inventory"),
             "{digest}"
         );
-        // The child budget has expired, but the hook still has time to render
-        // the partial digest into its native SessionStart response.
-        assert!(Instant::now() < host_deadline);
+        // Every child was given exactly the hook's collection budget, so the
+        // partial digest is rendered inside the hook's own deadline.
+        let budgets = executor.0.lock().unwrap();
+        assert!(!budgets.is_empty());
+        assert!(
+            budgets.iter().all(|timeout| *timeout == budget),
+            "{budgets:?}"
+        );
+        drop(budgets);
         let root = std::fs::canonicalize(temp.path()).unwrap();
         for name in ["home", "checkout", "state"] {
             std::fs::create_dir(root.join(name)).unwrap();
@@ -579,13 +633,10 @@ esac
                 digest: &digest,
                 commands: &commands,
                 client: None,
+                in_lane: false,
             },
         );
         let output = String::from_utf8(context.stdout).unwrap();
-        assert!(
-            Instant::now() < host_deadline,
-            "hook response missed its deadline"
-        );
         for text in [
             "g/a#1",
             "/lane",
@@ -611,9 +662,10 @@ esac
             state_dir: None,
             cwd: temp.path(),
             executor: &executor,
+            clock: &SYSTEM_CLOCK,
         };
         let (lanes, next, skipped) = cli
-            .lane_listing(Instant::now() + Duration::from_secs(1), None)
+            .lane_listing(cli.deadline_after(Duration::from_secs(1)), None)
             .unwrap();
         assert_eq!(lanes[0].id, "g/a#1");
         assert_eq!(next.as_deref(), Some("20"));
@@ -668,9 +720,10 @@ esac
             state_dir: None,
             cwd: temp.path(),
             executor: &executor,
+            clock: &SYSTEM_CLOCK,
         };
         let (trees, skipped) = cli
-            .worktree_listing(Instant::now() + Duration::from_secs(1))
+            .worktree_listing(cli.deadline_after(Duration::from_secs(1)))
             .unwrap();
         assert_eq!(trees.len(), 1);
         assert_eq!(trees[0].path, "/one");

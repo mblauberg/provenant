@@ -151,6 +151,7 @@ fn delivery_restart_recovers_pending_retryable_and_uncertain_receipts()
             &db::bytes(&writer::WriterTerminal {
                 schema_version: 1,
                 head,
+                stop_work: None,
             })?,
             RECORD_LIMIT,
         )?;
