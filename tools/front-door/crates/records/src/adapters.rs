@@ -1059,7 +1059,7 @@ adapter_specs! { $;
         local_account: ("default", "local"),
         argv_prompt: true,
         authentication: Some("login"),
-        credential_files: &["state.vscdb", "state.vscdb-wal", "cli-config.json"],
+        credential_files: &["state.vscdb", "state.vscdb-wal", "state.vscdb-shm", "cli-config.json"],
         credential_profile_sibling: false,
         credential_host_keychain: false,
         login_hint: "agent login",

@@ -685,7 +685,7 @@ pub(super) fn verify_shared_writes(
             || mandatory_for_plan(plan, anchors.home, None)?
                 .credentials()
                 .iter()
-                .any(|root| grant.overlaps(root))
+                .any(|root| root.overlaps(grant))
         {
             return Err(PermissionError::ProtectedOverlap);
         }
@@ -1044,7 +1044,7 @@ fn mandatory_for_plan(
         .or_else(|| plan.read_roots.first().map(|root| root.path.as_path()))
         .unwrap_or(&missing_source);
     let mut mandatory = MandatoryRoots::new(home, &state, source)?;
-    mandatory.set_credential_roots(plan.credential_roots.clone());
+    mandatory.set_credential_roots(plan.credential_roots.clone())?;
     Ok(mandatory)
 }
 
@@ -1093,9 +1093,10 @@ fn selected_authentication<'a>(
 fn push_denial(
     source: &mut String,
     operation: &str,
-    root: &PathGrant,
+    root: impl Into<DenialRoot>,
     exceptions: &[PathGrant],
 ) -> Result<(), PermissionError> {
+    let root = root.into();
     let exceptions: Vec<_> = exceptions
         .iter()
         .filter(|grant| {
@@ -1138,9 +1139,10 @@ fn push_denial(
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 fn push_socket_denial(
     source: &mut String,
-    root: &PathGrant,
+    root: impl Into<DenialRoot>,
     exceptions: &[PathGrant],
 ) -> Result<(), PermissionError> {
+    let root = root.into();
     let filter = |scope| match scope {
         PathScope::Exact => "path-literal",
         PathScope::Subtree => "subpath",
@@ -1169,9 +1171,10 @@ fn push_socket_denial(
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 fn push_ancestor_guards(
     source: &mut String,
-    root: &PathGrant,
+    root: impl Into<DenialRoot>,
     ancestors: &mut std::collections::BTreeSet<std::path::PathBuf>,
 ) -> Result<(), PermissionError> {
+    let root = root.into();
     for ancestor in root.path.ancestors() {
         if !ancestors.insert(ancestor.to_owned()) {
             continue;
@@ -1201,21 +1204,6 @@ fn push_boundaries(
 ) -> Result<(), PermissionError> {
     let mut ancestors = std::collections::BTreeSet::new();
     let mut mandatory = mandatory_for_plan(plan, home, worktree)?;
-    // Every credential root the plan declares (a relocated Cargo home, for
-    // example) is denied explicitly, as the home-derived stores are.
-    for root in plan.credential_roots.entries() {
-        mandatory.add_declared_credential(
-            PathGrant {
-                path: root.path.clone(),
-                scope: match root.scope {
-                    provenant_core::CredentialScope::Exact => PathScope::Exact,
-                    provenant_core::CredentialScope::Subtree => PathScope::Subtree,
-                },
-            },
-            root.source.clone(),
-            root.kind.clone(),
-        )?;
-    }
     // Every declared authentication family is private, selected or otherwise.
     for root in profile
         .spec
@@ -1247,7 +1235,6 @@ fn push_boundaries(
         if gh {
             credential_reads.extend(mandatory.github().iter().cloned());
         }
-        credential_reads.extend(mandatory.credential_alias_reads(&credential_reads));
     }
     // A shared store is a protection with lane carve-outs, never a broad
     // authentication grant. Discard broad reads overlapping it before checking
@@ -1257,8 +1244,11 @@ fn push_boundaries(
             || !mandatory
                 .credentials()
                 .iter()
-                .any(|root| !mandatory.lane_exceptions(root).is_empty() && grant.overlaps(root))
+                .any(|root| !mandatory.lane_exceptions(root).is_empty() && root.overlaps(grant))
     });
+    // Only retained exact authentication endpoints can authorise an alias.
+    // Ambient GitHub configuration reads confer no authority over link targets.
+    credential_reads.extend(mandatory.credential_alias_reads(&credential_reads));
     // A package grant passes the existing standalone validator; it never opens
     // the credential/config/session siblings in the enclosing Codex home.
     let packages: Vec<_> = reads
@@ -1327,7 +1317,7 @@ fn push_boundaries(
     // Only the typed native keychain mechanism can read the exact login
     // keychain. Other mandatory stores and aliases retain their denials.
     for root in mandatory.non_exempt() {
-        let lanes = mandatory.lane_exceptions(root);
+        let lanes = mandatory.lane_exceptions(&root.clone().into());
         for operation in [
             "file-read*",
             "file-clone",
@@ -1344,7 +1334,7 @@ fn push_boundaries(
         push_socket_denial(source, root, &lanes)?;
     }
     for root in mandatory.github() {
-        let lanes = mandatory.lane_exceptions(root);
+        let lanes = mandatory.lane_exceptions(&root.clone().into());
         push_denial(source, "file-write*", root, &lanes)?;
     }
     let private: Vec<_> = std::iter::once(&plan.scratch)

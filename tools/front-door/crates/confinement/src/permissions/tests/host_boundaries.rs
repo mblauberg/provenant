@@ -66,16 +66,18 @@ fn native_host_inventory_protects_aliases_and_later_worktrees()
         },
     }));
     plan.network = NetworkAccess::Open;
-    profile.spec.process_executables.push(PathGrant {
-        path: "/bin/sh".into(),
-        scope: PathScope::Exact,
-    });
+    for shell in ["/bin/sh", "/bin/bash"] {
+        profile.spec.process_executables.push(PathGrant {
+            path: shell.into(),
+            scope: PathScope::Exact,
+        });
+    }
     profile.spec.authentication = vec![AuthenticationProfile {
         mechanism: "login".into(),
         keychain: None,
         roots: vec![PathGrant {
-            path: home.join(".config/cursor"),
-            scope: PathScope::Subtree,
+            path: home.join(".config/cursor/state.vscdb"),
+            scope: PathScope::Exact,
         }],
         in_place_writes: Vec::new(),
     }];
@@ -102,6 +104,10 @@ fn native_host_inventory_protects_aliases_and_later_worktrees()
         assert!(source.contains(&format!(
             "(deny file-read* (literal \"{}\"))",
             secret.display()
+        )));
+        assert!(source.contains(&format!(
+            "(deny file-read* (literal \"{}\"))",
+            github.display()
         )));
         assert_eq!(
             source.contains(&format!(
@@ -151,7 +157,7 @@ if printf foreign > "$8/blocked"; then exit 86; fi
 if printf foreign > "$2/blocked"; then exit 81; fi
 if /bin/cat "$3"; then exit 82; fi
 if printf overwrite > "$3"; then exit 83; fi
-/bin/cat "$4" > /dev/null
+if /bin/cat "$4" > /dev/null; then exit 87; fi
 if printf overwrite > "$4"; then exit 84; fi
 printf ambient > "$5/allowed"
 if /bin/cat "$6" > /dev/null; then
@@ -204,6 +210,7 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
     std::fs::create_dir_all(&state)?;
     let state_secret = state.join("host-secret");
     std::fs::write(&state_secret, b"synthetic host state\n")?;
+    std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let executor = SystemExecutor::new(2)?;
     for store in [
         home.clone(),
@@ -216,8 +223,16 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
         std::fs::create_dir_all(&cwd)?;
         std::fs::create_dir_all(&scratch)?;
         let allowed = cwd.join("ordinary");
-        let secret = store.join("unlisted-secret");
+        let secret = store.join(".config/cursor/sibling-credential");
         let project_file = project.join("ordinary");
+        let login = store.join(".config/cursor/state.vscdb");
+        let github = store.join(".config/gh");
+        let outside = root.join("outside-github-credential");
+        std::fs::create_dir_all(login.parent().ok_or("login parent")?)?;
+        std::fs::create_dir_all(&github)?;
+        std::fs::write(&login, b"selected\n")?;
+        std::fs::write(&outside, b"sibling credential\n")?;
+        std::os::unix::fs::symlink(&outside, github.join("hosts.yml"))?;
         std::fs::write(&project_file, b"ordinary\n")?;
         std::fs::write(&allowed, b"ordinary\n")?;
         std::fs::write(&secret, b"synthetic credential\n")?;
@@ -231,6 +246,24 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
         let (mut plan, mut profile) = write_grants_fixture();
         plan.credential_roots =
             credentials.with_lane_roots(vec![project.clone(), cwd.clone(), scratch.clone()]);
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let mandatory = MandatoryRoots::for_host_with_scratch_mode(
+            &roots,
+            &home,
+            &project,
+            &scratch,
+            &plan.credential_roots,
+            &[PathGrant {
+                path: github,
+                scope: PathScope::Subtree,
+            }],
+            &[],
+            true,
+        )?;
+        plan.policy = Some(HostPolicySettings::resolve(None, &state, mandatory));
+        plan.network = NetworkAccess::Open;
         plan.read_roots = vec![PathGrant {
             path: project.clone(),
             scope: PathScope::Subtree,
@@ -240,15 +273,16 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
             scope: PathScope::Subtree,
         };
         plan.private_state = None;
-        // Broad selected authentication cannot turn the store protection into
-        // an enclosing grant, including when default state is below HOME.
+        // The selected Cursor endpoint stays readable; neither the sibling
+        // store nor its external symlink target becomes authentication.
         profile.spec.authentication[1].roots = vec![PathGrant {
-            path: store.clone(),
-            scope: PathScope::Subtree,
+            path: login.clone(),
+            scope: PathScope::Exact,
         }];
+        profile.spec.authentication[1].in_place_writes.clear();
         profile.spec.allow_process_fork = true;
         profile.spec.process_executables = vec![PathGrant {
-            path: "/bin/sh".into(),
+            path: "/bin/bash".into(),
             scope: PathScope::Exact,
         }];
         let rendered = render(&GrantSet::build(&plan, &profile, &home, None)?)?;
@@ -267,9 +301,9 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
             };
             let command = launch.command(
                 &[
-                    "/bin/sh".into(), "-c".into(),
-                    "IFS= read -r value < \"$1\" || exit 81; test \"$value\" = ordinary || exit 82; if IFS= read -r value < \"$2\"; then exit 83; fi; printf lane > \"$3\" || exit 84; if IFS= read -r value < \"$4\"; then exit 85; fi; IFS= read -r value < \"$5\" || exit 86; test \"$value\" = ordinary || exit 87".into(),
-                    "shared-store".into(), allowed.as_os_str().to_owned(), secret.as_os_str().to_owned(), scratch.join("output").into_os_string(), state_secret.as_os_str().to_owned(), project_file.as_os_str().to_owned(),
+                    "/bin/bash".into(), "-c".into(),
+                    "IFS= read -r value < \"$1\" || exit 81; test \"$value\" = ordinary || exit 82; if IFS= read -r value < \"$2\"; then exit 83; fi; printf lane > \"$3\" || exit 84; if IFS= read -r value < \"$4\"; then exit 85; fi; IFS= read -r value < \"$5\" || exit 86; test \"$value\" = ordinary || exit 87; IFS= read -r value < \"$6\" || exit 88; test \"$value\" = selected || exit 89; if IFS= read -r value < \"$7\"; then exit 90; fi".into(),
+                    "shared-store".into(), allowed.as_os_str().to_owned(), secret.as_os_str().to_owned(), scratch.join("output").into_os_string(), state_secret.as_os_str().to_owned(), project_file.as_os_str().to_owned(), login.as_os_str().to_owned(), outside.as_os_str().to_owned(),
                 ],
                 &provenant_core::AttemptId::from_bytes([10;16]),
                 &provenant_os::fs::Directory::open_anchor(&root)?,

@@ -269,7 +269,7 @@ impl InventorySummary {
 #[allow(clippy::too_many_arguments)]
 fn inventory_links(
     mandatory: &mut MandatoryRoots,
-    root: &PathGrant,
+    root: &super::DenialRoot,
     home: &Path,
     source: &Path,
     scratch: &Path,
@@ -365,13 +365,13 @@ fn inventory_links(
                 }
                 if !profile_path_representable(&path)
                     || !profile_path_representable(&target)
-                    || (PathGrant {
+                    || (super::DenialRoot {
                         path: target.clone(),
                         scope,
                     })
                     .validate()
                     .is_err()
-                    || (PathGrant {
+                    || (super::DenialRoot {
                         path: path.clone(),
                         scope,
                     })
@@ -476,7 +476,7 @@ impl MandatoryRoots {
             scope: PathScope::Subtree,
         };
         let mut mandatory = Self::new(home, roots.state.as_path(), source)?;
-        mandatory.set_credential_roots(credentials.clone());
+        mandatory.set_credential_roots(credentials.clone())?;
         for path in SYSTEM_SHELL_STARTUP
             .iter()
             .map(PathBuf::from)
@@ -558,7 +558,7 @@ impl MandatoryRoots {
                         if target != path
                             && (!profile_path_representable(&path)
                                 || !profile_path_representable(&target)
-                                || (PathGrant {
+                                || (super::DenialRoot {
                                     path: target.clone(),
                                     scope: PathScope::Exact,
                                 })
@@ -718,7 +718,7 @@ mod tests {
                 path: cargo.join(name),
                 scope: PathScope::Exact,
             };
-            assert!(mandatory.credentials().contains(&credential));
+            assert!(mandatory.credentials().contains(&credential.clone().into()));
             assert_eq!(
                 mandatory
                     .validate_extra_write(&credential)
@@ -770,7 +770,10 @@ mod tests {
                 &[],
                 sandboxed,
             )?;
-            assert_eq!(inventory.credentials().contains(&alias), sandboxed);
+            assert_eq!(
+                inventory.credentials().contains(&alias.clone().into()),
+                sandboxed
+            );
         }
         Ok(())
     }
@@ -811,7 +814,11 @@ mod tests {
             (key, PathScope::Exact),
             (dotfiles.join("keys"), PathScope::Subtree),
         ] {
-            assert!(inventory.credentials().contains(&PathGrant { path, scope }));
+            assert!(
+                inventory
+                    .credentials()
+                    .contains(&(PathGrant { path, scope }).into())
+            );
         }
         for path in [root.join("source"), scratch] {
             assert!(
@@ -861,7 +868,9 @@ mod tests {
             PathBuf::from("/etc/profile"),
         ] {
             assert!(
-                inventory.credentials().contains(&exact(path.clone())),
+                inventory
+                    .credentials()
+                    .contains(&(exact(path.clone())).into()),
                 "{}",
                 path.display()
             );
@@ -901,7 +910,7 @@ mod tests {
             };
             inventory_links(
                 &mut mandatory,
-                &grant,
+                &super::super::DenialRoot::from(&grant),
                 &home,
                 &base.join("source"),
                 &base.join("scratch"),
@@ -913,10 +922,15 @@ mod tests {
         assert_eq!(summary.unresolved.get(&home.join("second")), Some(&2));
         assert_eq!(summary.depth.get(&home.join("first")), Some(&1));
         assert_eq!(summary.depth.get(&home.join("second")), Some(&1));
-        assert!(mandatory.credentials().contains(&PathGrant {
-            path: target,
-            scope: PathScope::Exact
-        }));
+        assert!(
+            mandatory.credentials().contains(
+                &(PathGrant {
+                    path: target,
+                    scope: PathScope::Exact
+                })
+                .into()
+            )
+        );
         inventory_summarises_skipped_links_and_inspection_failures()?;
         inventory_summarises_directory_inspection_errors()?;
         Ok(())
@@ -945,7 +959,7 @@ mod tests {
             }
             inventory_links(
                 &mut mandatory,
-                &PathGrant {
+                &super::super::DenialRoot {
                     path: store,
                     scope: PathScope::Subtree,
                 },
@@ -977,7 +991,7 @@ mod tests {
         // overlong component; create it so both platforms reach that error.
         std::fs::create_dir(&home)?;
         let mut mandatory = MandatoryRoots::new(&home, &base.join("state"), &base.join("source"))?;
-        let root = PathGrant {
+        let root = super::super::DenialRoot {
             path: home.join("x".repeat(1024)),
             scope: PathScope::Subtree,
         };
@@ -1043,7 +1057,7 @@ mod tests {
         let mut summary = InventorySummary::default();
         inventory_links(
             &mut mandatory,
-            &PathGrant {
+            &super::super::DenialRoot {
                 path: store,
                 scope: PathScope::Subtree,
             },
@@ -1059,10 +1073,15 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&warnings)
         );
-        assert!(mandatory.credentials().contains(&PathGrant {
-            path: target,
-            scope: PathScope::Exact
-        }));
+        assert!(
+            mandatory.credentials().contains(
+                &(PathGrant {
+                    path: target,
+                    scope: PathScope::Exact
+                })
+                .into()
+            )
+        );
         Ok(())
     }
 
@@ -1086,10 +1105,15 @@ mod tests {
             &[],
             &[],
         )?;
-        assert!(inventory.credentials().contains(&PathGrant {
-            path: target,
-            scope: PathScope::Exact,
-        }));
+        assert!(
+            inventory.credentials().contains(
+                &(PathGrant {
+                    path: target,
+                    scope: PathScope::Exact,
+                })
+                .into()
+            )
+        );
         Ok(())
     }
 
@@ -1125,7 +1149,7 @@ mod tests {
         let mut summary = InventorySummary::default();
         inventory_links(
             &mut mandatory,
-            &huge,
+            &super::super::DenialRoot::from(&huge),
             &home,
             &root.join("source"),
             &root.join("scratch"),
@@ -1146,10 +1170,15 @@ mod tests {
             &[],
             &[],
         )?;
-        assert!(inventory.credentials().contains(&PathGrant {
-            path: target,
-            scope: PathScope::Exact
-        }));
+        assert!(
+            inventory.credentials().contains(
+                &(PathGrant {
+                    path: target,
+                    scope: PathScope::Exact
+                })
+                .into()
+            )
+        );
         assert!(
             !inventory
                 .credentials()
@@ -1187,7 +1216,7 @@ mod tests {
         };
         inventory_links(
             &mut mandatory,
-            &grant,
+            &super::super::DenialRoot::from(&grant),
             &root.join("home"),
             &root.join("source"),
             &root.join("scratch"),
@@ -1360,7 +1389,7 @@ mod tests {
             std::os::unix::fs::symlink(&target, &endpoint)?;
             let inventory =
                 MandatoryRoots::for_host(&roots, &home, &root.join("source"), &[], &[], &[])?;
-            assert!(inventory.credentials().contains(&exact(target)));
+            assert!(inventory.credentials().contains(&(exact(target)).into()));
             assert!(
                 inventory
                     .credential_alias_reads(&[exact(endpoint.clone())])
@@ -1393,7 +1422,11 @@ mod tests {
             path,
             scope: PathScope::Exact,
         };
-        assert!(inventory.credentials().contains(&exact(target.clone())));
+        assert!(
+            inventory
+                .credentials()
+                .contains(&(exact(target.clone())).into())
+        );
         assert_eq!(
             inventory.credential_alias_reads(&[exact(endpoint)]),
             vec![exact(target)]
@@ -1476,7 +1509,7 @@ mod tests {
         )?;
         for ((store, endpoint), target) in endpoints.iter().zip(&targets) {
             assert!(
-                inventory.credentials().contains(target),
+                inventory.credentials().contains(&target.clone().into()),
                 "missing target for {endpoint}"
             );
             assert!(
@@ -1493,7 +1526,7 @@ mod tests {
                 Err(provenant_records::diagnostic::BoundaryClass::Credentials)
             );
         }
-        assert!(inventory.github().contains(&targets[8]));
+        assert!(!inventory.github().contains(&targets[8]));
         assert!(inventory.non_exempt().contains(&targets[9]));
         assert!(!inventory.non_exempt().contains(&targets[1]));
         #[cfg(target_os = "macos")]

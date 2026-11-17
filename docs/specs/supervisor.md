@@ -207,6 +207,10 @@ exactly at HOME does not displace Provenant's normal home-relative state tree;
 exact credential declarations there retain their hold. This host-state rule
 does not classify or narrow the later launch boundary.
 
+Mandatory credential denials use `DenialRoot`, independently of grant
+validation: denial paths must be absolute, normalised and below the filesystem
+root. A denial may cover HOME; this never relaxes broad-grant validation.
+
 A store containing no lane root retains whole-subtree protection. A store
 strictly containing lane roots retains whole-subtree protection minus those
 lane roots. In the open profile, the renderer denies the store subpath with
@@ -230,7 +234,11 @@ independent mandatory protection. Independent sibling profiles and file
 declarations keep exact scope. No grant may enclose a store or declared credential file, or open
 a store outside its lane carve-outs. Selected authentication retains its
 explicit exact-file access; a broad authentication or configuration grant
-cannot reopen a shared store.
+cannot reopen a shared store. Adapters declare the selected identity's exact
+authentication endpoints, including database sidecars when required, and stage
+only those endpoints into private authentication state. Credential read aliases
+are derived from exact endpoint declarations after shared-store filtering;
+a discarded subtree read cannot confer alias access.
 Declared credential denials follow grants in the rendered profile. The
 standalone Codex release package read exception belongs only to the built-in
 default Codex home; relocated and registered stores retain whole-store

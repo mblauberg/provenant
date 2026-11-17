@@ -1690,7 +1690,7 @@ fn mandatory_alias_categories_cannot_become_authentication_exceptions()
             path: alias.into(),
             scope,
         };
-        mandatory.add_credentials_alias(&original, alias.clone())?;
+        mandatory.add_credentials_alias(&original.clone().into(), alias.clone())?;
         let exact = PathGrant {
             path: match scope {
                 PathScope::Exact => alias.path.clone(),
@@ -1912,7 +1912,15 @@ fn host_writer_roots_inside_protected_checkouts_render_as_exceptions() -> Result
 fn shared_stores_render_subtree_denials_with_every_lane_root_carved_out()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
-    let home = Path::new("/fixture/home");
+    let home = Path::new("/Users/fixture");
+    assert!(matches!(
+        PathGrant {
+            path: home.into(),
+            scope: PathScope::Subtree
+        }
+        .validate(),
+        Err(PermissionError::BroadRoot)
+    ));
     // A home-rooted account, a relocated CODEX_HOME, and a built-in store
     // containing an alternate graph source all use the same boundary.
     for store in [

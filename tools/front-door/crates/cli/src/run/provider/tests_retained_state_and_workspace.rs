@@ -827,15 +827,25 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         &[],
     )?;
     for path in [sibling, sibling_target, root.join("other-claude.json")] {
-        assert!(mandatory.credentials().contains(&PathGrant {
-            path,
-            scope: PathScope::Exact
-        }));
+        assert!(
+            mandatory.credentials().contains(
+                &(PathGrant {
+                    path,
+                    scope: PathScope::Exact
+                })
+                .into()
+            )
+        );
     }
-    assert!(mandatory.credentials().contains(&PathGrant {
-        path: root.join("agent/socket"),
-        scope: PathScope::Exact,
-    }));
+    assert!(
+        mandatory.credentials().contains(
+            &(PathGrant {
+                path: root.join("agent/socket"),
+                scope: PathScope::Exact,
+            })
+            .into()
+        )
+    );
     // A path-shaped provider directory is protected only when declared.
     assert!(
         !mandatory

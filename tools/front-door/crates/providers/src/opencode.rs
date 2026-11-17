@@ -341,8 +341,7 @@ fn prepare(
         crate::launch::OmissionSource::ProviderConfig,
         &mut omitted_discovery,
     )?;
-    let mut authentication_roots = runtime_reads.split_off(optional_start);
-    authentication_roots.push(exact(host_data.join("auth.json")));
+    let authentication_roots = vec![exact(host_data.join("auth.json"))];
     runtime_reads.extend(skill_reads);
     let mut setup = vec![
         SetupStep::CreateDir(data.clone()),
