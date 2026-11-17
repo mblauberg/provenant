@@ -266,9 +266,36 @@ pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
 }
 
 /// The verification and slot-wait rules every writer lane is told. A writer's `cargo` commands
-/// that compile take one of the host's shared build slots, and a lane that
+/// that compile share the host's build cap, and a lane that
 /// stopped to report the wait cost a whole task (#2484).
-pub const BUILD_SLOT_GUIDANCE: &str = "Verification: where the repository has CI, CI runs the tests and lints on pull requests and the integrated branch, not on every push; the CI scope line below says what CI, if any, you wait for. Run at most one cheap compile check (`cargo check` on the one package you changed), then commit and push; do not run test suites, clippy or nextest locally, and do not restart a build that was stopped. The repository's test tiers (T0 to T3) describe what CI and a configured host run; they are not a checklist for you. A `cargo` command the host refuses because CI runs it is final: do not look for another way to run it.\nBuild slots: compiling `cargo` commands try one advisory slot. Busy or unavailable slots warn and the build proceeds; Cargo manages its own build locks.\n";
+pub const BUILD_SLOT_GUIDANCE: &str = "Verification: where the repository has CI, CI runs the tests and lints on pull requests and the integrated branch, not on every push; the CI scope line below says what CI, if any, you wait for. Run at most one cheap compile check (`cargo check` on the one package you changed), then commit and push; do not run test suites, clippy or nextest locally, and do not restart a build that was stopped. The repository's test tiers (T0 to T3) describe what CI and a configured host run; they are not a checklist for you. A `cargo` command the host refuses because CI runs it is final: do not look for another way to run it.\nBuild slots: compiling `cargo` commands share a host-wide cap (source: default; domains.fabric.lanes.max_concurrent_builds), derived from cores and memory. Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n";
+
+/// Host build cap stated in the preamble.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuildCap {
+    pub slots: u64,
+    pub source: &'static str,
+}
+
+/// Optional preamble overrides. Default keeps the historical verification paragraph.
+#[derive(Clone, Debug, Default)]
+pub struct PreambleExtras {
+    pub verification: Option<crate::VerificationResolution>,
+    pub build_cap: Option<BuildCap>,
+}
+
+fn slot_guidance(cap: Option<BuildCap>) -> String {
+    match cap {
+        Some(cap) => format!(
+            "Build slots: compiling `cargo` commands share a host-wide cap of {} (source: {}; domains.fabric.lanes.max_concurrent_builds). Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n",
+            cap.slots, cap.source
+        ),
+        None => BUILD_SLOT_GUIDANCE
+            .split_once('\n')
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_default(),
+    }
+}
 
 /// The reading rule every lane is told. Tool output stays in a lane's context and is
 /// paid for again on every later turn, so whole-file and large-range reads dominate its cost.
@@ -283,6 +310,16 @@ pub fn lane_preamble(
     ci_scope: Option<crate::ResolvedCiScope>,
     handoff: Option<&Path>,
 ) -> String {
+    lane_preamble_with(model_guidance, limits, ci_scope, handoff, &PreambleExtras::default())
+}
+
+fn lane_preamble_with(
+    model_guidance: &str,
+    limits: &provenant_records::LaneLimits,
+    ci_scope: Option<crate::ResolvedCiScope>,
+    handoff: Option<&Path>,
+    extras: &PreambleExtras,
+) -> String {
     let writer = ci_scope
         .map(|scope| {
             let budget = limits
@@ -296,7 +333,16 @@ pub fn lane_preamble(
                     )
                 })
                 .unwrap_or_default();
-            format!("{BUILD_SLOT_GUIDANCE}{}{budget}", scope.preamble())
+            let verification = extras
+                .verification
+                .as_ref()
+                .map(crate::VerificationResolution::paragraph)
+                .unwrap_or_else(|| crate::verification::CHECK_PARAGRAPH.to_string());
+            format!(
+                "{verification}{}{}{budget}",
+                slot_guidance(extras.build_cap),
+                scope.preamble()
+            )
         })
         .unwrap_or_default();
     format!(
@@ -313,10 +359,11 @@ pub fn lane_preamble_with_policy(
     ci_scope: Option<crate::ResolvedCiScope>,
     handoff: Option<&Path>,
     policy: &provenant_records::policy::Policy,
+    extras: &PreambleExtras,
 ) -> String {
     format!(
         "{}Launch policy (code, boundary, strength, source, knob):\n{}",
-        lane_preamble(model_guidance, limits, ci_scope, handoff),
+        lane_preamble_with(model_guidance, limits, ci_scope, handoff, extras),
         policy.render()
     )
 }
@@ -344,6 +391,8 @@ mod tests {
             Some(crate::ResolvedCiScope::resolve(&Default::default())),
             Some(handoff),
         );
+        assert!(writer.contains(crate::verification::CHECK_PARAGRAPH));
+        assert!(writer.contains("source: default"));
         assert!(writer.contains("Build slots:"));
         assert!(writer.contains("CI scope:"));
         assert!(writer.contains(&format!("Progress handoff JSON: {}", handoff.display())));

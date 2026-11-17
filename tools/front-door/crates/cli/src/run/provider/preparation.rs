@@ -3733,6 +3733,15 @@ pub(super) fn prepare_candidates(
                     .and_then(|provider| provider.runtime_deadline_seconds),
             },
         );
+        let lanes = provenant_config::LaneBuildSettings::read(state_root).unwrap_or_default();
+        let total = provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
+        let extras = run::PreambleExtras {
+            verification: Some(run::VerificationResolution::resolve(&task.profile, prompt_text)),
+            build_cap: Some(run::BuildCap {
+                slots: lanes.build_limit(total),
+                source: lanes.build_limit_source(),
+            }),
+        };
         let text = format!(
             "{}\n{text}",
             run::lane_preamble_with_policy(
@@ -3743,6 +3752,7 @@ pub(super) fn prepare_candidates(
                     .then(|| run::ResolvedCiScope::resolve(&task.profile)),
                 writable_handoff.then_some(handoff.as_path()),
                 &launch_policy,
+                &extras,
             )
         );
         let prompt = match launch_prompt(

@@ -32,8 +32,9 @@ SKILL.md.
   writer the user can watch is also valid. Juniors take bounded
   work (`run implement --route junior`), seniors plan (`run plan`) and review,
   principals rarely. `provenant help --all` lists commands.
-- **Continuity.** Use `session` at session start, before compaction and at
-  handoff, and `tracker` for work tracked in GitHub issues.
+- **Continuity.** The chair uses `session` at session start, before compaction
+  and at handoff. A lane does not: `workflow session save` is refused in a lane
+  (`IN_LANE`). Use `tracker` for work tracked in GitHub issues.
 - **Repository docs.** A repository's AGENTS.md, CONTRIBUTING and runbooks own
   its verify, commit and release steps; skills defer to them.
 - **Boundaries.** The real boundaries are credentials, Git isolation, data

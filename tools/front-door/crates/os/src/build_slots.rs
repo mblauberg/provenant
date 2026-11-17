@@ -150,6 +150,26 @@ impl BuildSlots {
         }
     }
 
+    /// Poll until a slot is free or `timeout` elapses. `Ok(None)` means every
+    /// slot stayed busy for the whole wait.
+    pub fn acquire_within(
+        &self,
+        limit: u64,
+        timeout: std::time::Duration,
+    ) -> Result<Option<SlotGuard>> {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(guard) = self.try_acquire(limit)? {
+                return Ok(Some(guard));
+            }
+            if start.elapsed() >= timeout {
+                return Ok(None);
+            }
+            let slice = std::time::Duration::from_millis(25).min(timeout.saturating_sub(start.elapsed()));
+            std::thread::sleep(slice);
+        }
+    }
+
     /// How many of the first `limit` slots are held now.
     pub fn held(&self, limit: u64) -> u64 {
         (0..limit)
@@ -225,6 +245,27 @@ mod tests {
         drop(first);
         assert_eq!(slots.held(2), 1);
         assert!(slots.try_acquire(2).unwrap().is_some());
+    }
+
+    #[test]
+    fn six_builds_on_a_cap_of_two_wait_then_proceed() {
+        let _serial = serial();
+        let (_state, slots) = provisioned(2);
+        let _held = [
+            slots.try_acquire(2).unwrap().unwrap(),
+            slots.try_acquire(2).unwrap().unwrap(),
+        ];
+        let wait = std::time::Duration::from_millis(200);
+        let mut threads = Vec::new();
+        for _ in 0..4 {
+            let slots = BuildSlots::open(_state.path()).unwrap();
+            threads.push(std::thread::spawn(move || {
+                slots.acquire_within(2, wait).unwrap()
+            }));
+        }
+        for thread in threads {
+            assert!(thread.join().unwrap().is_none());
+        }
     }
 
     #[test]

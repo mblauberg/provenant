@@ -1,6 +1,6 @@
 ---
 name: session
-description: "Use at session start, before compaction, at handoff, and for continuing goals or STOP missions."
+description: "Chair only. Use at session start, before compaction, at handoff, and for continuing goals or STOP missions. A lane does not run this skill: workflow session save is refused in a lane."
 ---
 
 # Session
@@ -9,6 +9,9 @@ A checkpoint is small enough to verify on arrival and points back to its
 owners: the tracker and docs own intent, runs own execution.
 
 ## Restore
+
+This skill is for the chair. A writer lane does not start or save a session;
+the host refuses `provenant workflow session save` with `IN_LANE`.
 
 Read the host-session checkpoint with `provenant workflow session show
 SESSION`, verify its claims against their owners and run a relevant smoke check

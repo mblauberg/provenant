@@ -7,8 +7,10 @@ mod completion;
 pub use board::{BoardLane, BoardPage};
 pub use completion::{
     handoff_progress_guidance, lane_preamble, lane_preamble_with_policy, sanitise_handoff,
-    sanitise_handoff_result,
+    sanitise_handoff_result, BuildCap, PreambleExtras,
 };
+mod verification;
+pub use verification::{conflict_cause, VerificationResolution};
 mod controls;
 mod correlation;
 pub use correlation::{WorkCoverage, WorkSelector, validate_work};

@@ -1474,10 +1474,11 @@ fn host_lane_build_settings_read_and_validate() {
         "schema_version=1\n[domains.fabric.lanes]\nmax_concurrent_builds=0\n",
     )
     .unwrap();
-    // Invalid optional settings warn and use the same compiled defaults as startup.
+    // Zero is the disable switch, not an invalid value.
     let settings = crate::LaneBuildSettings::read(temp.path()).unwrap();
     assert!(settings.invalid_keys().is_empty());
-    assert_eq!(settings.max_concurrent_builds, None);
+    assert_eq!(settings.max_concurrent_builds, Some(0));
+    assert_eq!(settings.build_limit(u64::MAX), 0);
     std::fs::write(
         temp.path().join("config.toml"),
         "schema_version=1\n[domains.fabric.lanes]\ncargo_build_jobs=-2\n",

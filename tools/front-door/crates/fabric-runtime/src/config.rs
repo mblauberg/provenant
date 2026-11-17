@@ -909,7 +909,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
         &["warning", "critical", "never"],
     ),
     FieldMetadata::int("lanes.start_spacing_ms", 0, 600_000),
-    FieldMetadata::int("lanes.max_concurrent_builds", 1, 64),
+    FieldMetadata::int("lanes.max_concurrent_builds", 0, 64),
     FieldMetadata::int("lanes.cargo_build_jobs", 1, 1024),
     FieldMetadata::int("lanes.max_lanes", 1, 64),
     FieldMetadata::int("lanes.max_project_lanes", 1, 32),
@@ -1113,7 +1113,7 @@ mod tests {
         assert_eq!(lanes.max_concurrent_builds, None);
         assert_eq!(lanes.cargo_build_jobs, None);
         let mut config = config();
-        config.lanes.max_concurrent_builds = Some(0);
+        config.lanes.max_concurrent_builds = Some(65);
         config.lanes.cargo_build_jobs = Some(1025);
         config.lanes.max_lanes = Some(65);
         config.lanes.max_project_lanes = Some(0);
