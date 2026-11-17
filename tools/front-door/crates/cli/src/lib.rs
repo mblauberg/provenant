@@ -1752,7 +1752,9 @@ mod tests {
         valid(&["templates", "review.security", "--file", "inline.toml"]);
         valid(&["edit", "example", "--file", "patch.toml"]);
         invalid(&["edit", "example"]);
-        for flag in ["--preset", "--prompt-file", "--manifest", "--plan"] {
+        // --plan is a graph-run flag; non-implementation templates ignore it.
+        valid(&["run", "task", "--plan", "example"]);
+        for flag in ["--preset", "--prompt-file", "--manifest"] {
             invalid(&["run", "task", flag, "example"]);
         }
     }
