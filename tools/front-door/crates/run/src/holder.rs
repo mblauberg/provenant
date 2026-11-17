@@ -4386,8 +4386,8 @@ mod writer_recovery_tests {
             let explicit = matches!(marker, ExplicitCancel | ExplicitAfterSteer);
             let fixture = PrepareFixture::new()?;
             let execution = registered_landed_writer_fixture(&fixture)?;
-            let (clock, cancel) = (clock(), CancelToken::new());
-            let call = call(&clock, &cancel);
+            let (mut clock, cancel) = (clock(), CancelToken::new());
+            let mut call = call(&clock, &cancel);
             let store = RunStore::open(&execution, &call)?;
             let mut run = input();
             run.request.task.writer = Some(fixture.writer.clone());
@@ -4752,6 +4752,17 @@ mod writer_recovery_tests {
                     &saved.head.to_string(),
                 ])?;
                 attempt.rmdir(std::ffi::OsStr::new("terminal-effects.json"))?;
+                // The failed driver armed the settlement retry backoff; replay after it.
+                let Some(crate::settlement::Refusal::RetryDeadline(deadline)) =
+                    crate::settlement::refusal(&attempt, scope, &clock)?
+                else {
+                    return Err("failed settlement did not arm its retry backoff".into());
+                };
+                let now = u64::try_from(clock.wall_now()?.unix_millis())?;
+                clock.advance(provenant_core::DurationMicros::from_micros(
+                    deadline.saturating_sub(now) * 1000,
+                ))?;
+                call = crate::tests::call(&clock, &cancel);
                 Some(raw)
             } else {
                 None
@@ -4888,12 +4899,9 @@ mod writer_recovery_tests {
                             "fresh prompt lost {retained:?}: {prompt}"
                         );
                     }
-                    assert!(
-                        store
-                            .record(child, &call)?
-                            .continuation
-                            .as_deref()
-                            .is_some_and(|reason| reason.contains("fresh_with_handoff"))
+                    assert_eq!(
+                        store.record(child, &call)?.continuation.as_deref(),
+                        Some("fresh")
                     );
                     assert_eq!(store.record(id, &call)?.superseded_by, Some(child));
                     continue;
