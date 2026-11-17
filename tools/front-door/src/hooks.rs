@@ -1211,11 +1211,14 @@ fn push_policy(
                 .flatten()
         })
         .map(|binding| binding.project_id().to_string());
-    // Without a registered project, the hook has only host policy.
-    provenant_config::policy::read(
+    // Without a registered project, the hook has only host policy. The hook
+    // keeps its contract of no output for unreadable configuration, as the
+    // local gate does; the PUSH_* row slice decides whether to warn.
+    provenant_config::policy::read_reporting(
         roots.state.as_path(),
         project_id.as_deref().unwrap_or(""),
         &Default::default(),
+        |_| {},
     )
 }
 
