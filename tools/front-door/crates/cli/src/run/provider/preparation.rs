@@ -829,6 +829,8 @@ impl PrepareError {
                 note,
             } => Box::new(run::PrepareRefusal {
                 repository_lock_busy: false,
+                repository_lock_path: None,
+                repository_lock_operation: None,
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
                 resource: None,
@@ -919,6 +921,8 @@ impl PrepareError {
                     candidate_refusal_message(&skipped_routes, fallback_outcome).unwrap_or(message);
                 let mut refusal = Box::new(run::PrepareRefusal {
                     repository_lock_busy: false,
+                    repository_lock_path: None,
+                    repository_lock_operation: None,
                     boundary_class,
                     policy_code,
                     resource: candidate_resource,
@@ -997,13 +1001,17 @@ impl PrepareError {
             }
             Self::Run(run::RunError::Plan(error)) => PlanCheckError::Plan(error).into_refusal(),
             Self::Run(error) => {
-                let repository_lock_busy = error.is_repository_lock_busy();
+                let repository_lock = error.repository_lock_identity();
                 let boundary_class = error.boundary_class();
                 let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::HandoffRefused,
                     error.to_string(),
                 );
-                refusal.repository_lock_busy = repository_lock_busy;
+                refusal.repository_lock_busy = repository_lock.is_some();
+                if let Some((path, operation)) = repository_lock {
+                    refusal.repository_lock_path = Some(path.to_path_buf());
+                    refusal.repository_lock_operation = Some(operation.to_owned());
+                }
                 refusal.boundary_class = boundary_class;
                 refusal.policy_code = policy_code_for_boundary(boundary_class).map(str::to_owned);
                 refusal

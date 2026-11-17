@@ -6222,7 +6222,7 @@ fn started_attempt(started: &Started) -> AttemptId {
     match started {
         Started::Launched(attempt)
         | Started::Refused { attempt, .. }
-        | Started::RepositoryBusy { attempt }
+        | Started::RepositoryBusy { attempt, .. }
         | Started::Skipped { attempt, .. }
         | Started::Unknown { attempt, .. }
         | Started::Blocked { attempt, .. } => *attempt,

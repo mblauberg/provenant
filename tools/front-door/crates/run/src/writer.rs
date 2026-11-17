@@ -1025,8 +1025,7 @@ pub fn prepare_writer_with_context(
     // first probed open reads config snapshots and must exclude sibling writes.
     let common = provenant_confinement::repo::VerifiedRepo::open_common_directory(&request.project)
         .map_err(worktrees::WorktreeError::from)?;
-    let _config_lock =
-        worktrees::lock_repository(&common, LockMode::Shared, launch_budget, cancel, clock)?;
+    let _config_lock = worktrees::lock_repository(&common, LockMode::Shared, cancel)?;
     let repo = utility
         .open_repo(&executor, &request.project, remaining()?, cancel)
         .map_err(utility_error(
@@ -1431,8 +1430,7 @@ fn prepare_writer_git(
     cancel: &CancelToken,
     _policy: &provenant_records::policy::Policy,
 ) -> Result<()> {
-    use provenant_core::{Clock, WaitBudget};
-    use provenant_os::{clock::SystemClock, fs::LockMode};
+    use provenant_os::fs::LockMode;
     let utility = runtime(state)?;
     let root_identity = writer.worktree.identity();
     let private_identity = writer.worktree.repo().private_identity();
@@ -1444,14 +1442,7 @@ fn prepare_writer_git(
     let path = writer.worktree.path().to_path_buf();
     let common = old_repo.common_dir().try_clone()?;
     let lock_config = |mode| -> Result<provenant_os::fs::LockGuard> {
-        let clock = SystemClock::new();
-        Ok(worktrees::lock_repository(
-            &common,
-            mode,
-            WaitBudget::nonblocking(clock.mono_now()),
-            cancel,
-            &clock,
-        )?)
+        Ok(worktrees::lock_repository(&common, mode, cancel)?)
     };
     // Sibling config replacements can exhaust even a bounded stable read.
     // Share the initial snapshot phase, then release before the fetch so

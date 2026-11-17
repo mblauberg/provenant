@@ -1260,15 +1260,8 @@ fn worktree_creation_excludes_writer_configuration_updates() -> Result<(), Box<d
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let mut context = test.context();
-    context.lock_budget = WaitBudget::nonblocking(context.clock.mono_now());
     let cancel = cancel();
-    let setup = lock_repository(
-        context.repo.common_dir(),
-        LockMode::Exclusive,
-        context.lock_budget,
-        &cancel,
-        context.clock,
-    )?;
+    let setup = lock_repository(context.repo.common_dir(), LockMode::Exclusive, &cancel)?;
     let request = WorktreeCreate {
         branch: "shared-mutation-owner".into(),
         base: Some(fixture.head()?.to_string()),

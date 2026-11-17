@@ -657,12 +657,26 @@ impl RunError {
     /// Repository contention is transient. Callers must unwind custody and
     /// coordination locks before scheduling another attempt.
     pub fn is_repository_lock_busy(&self) -> bool {
-        match self {
+        self.repository_lock_identity().is_some()
+    }
+
+    /// Lock path from a failed nonblocking repository try. The operation is
+    /// the filesystem acquire; a caller that knows the waiting phase replaces it.
+    pub fn repository_lock_identity(&self) -> Option<(&std::path::Path, &'static str)> {
+        let error = match self {
             Self::Filesystem(error)
             | Self::Writer(provenant_confinement::worktrees::WorktreeError::Filesystem(error)) => {
-                provenant_confinement::worktrees::repository_lock_busy(error)
+                error
             }
-            _ => false,
+            _ => return None,
+        };
+        match error {
+            provenant_os::fs::FsError::LockTimeout { path, .. }
+                if provenant_confinement::worktrees::repository_lock_busy(error) =>
+            {
+                Some((path.as_path(), "acquire repository lock"))
+            }
+            _ => None,
         }
     }
 

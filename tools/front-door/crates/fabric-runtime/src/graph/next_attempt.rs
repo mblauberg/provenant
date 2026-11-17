@@ -31,7 +31,7 @@ pub(crate) fn launch_contention(error: &(dyn Error + 'static)) -> bool {
         error.downcast_ref::<FacadeError>(),
         Some(
             FacadeError::Busy
-                | FacadeError::RepositoryLockBusy
+                | FacadeError::RepositoryLockBusy { .. }
                 | FacadeError::WriterLockBusy
                 | FacadeError::WriterUnknown
                 | FacadeError::WriterBusy { .. }

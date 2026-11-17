@@ -300,6 +300,10 @@ impl Decoded {
 pub struct PrepareRefusal {
     /// A repository snapshot could not be acquired; retry after unwinding.
     pub repository_lock_busy: bool,
+    /// Lock path recorded by the failed try, when `repository_lock_busy`.
+    pub repository_lock_path: Option<std::path::PathBuf>,
+    /// Operation that was waiting on the repository lock.
+    pub repository_lock_operation: Option<String>,
     /// Boundary established by the original typed preparation failure, if any.
     pub boundary_class: provenant_records::diagnostic::BoundaryClass,
     /// Stable table row for the predicate that refused preparation.
@@ -340,6 +344,8 @@ impl PrepareRefusal {
     pub fn boxed(cause: TerminalCause, message: impl Into<String>) -> Box<Self> {
         Box::new(Self {
             repository_lock_busy: false,
+            repository_lock_path: None,
+            repository_lock_operation: None,
             boundary_class: provenant_records::diagnostic::BoundaryClass::None,
             policy_code: None,
             resource: None,
@@ -889,7 +895,10 @@ enum HandOff {
     },
     Busy,
     /// Repository configuration is owned elsewhere; custody was withdrawn.
-    RepositoryBusy,
+    RepositoryBusy {
+        path: PathBuf,
+        operation: String,
+    },
     /// No guardian was contacted, but custody remains protected.
     Protected(String),
     RetainedImport {
@@ -904,6 +913,8 @@ pub enum Started {
     /// Repository lock contention; the unlaunched attempt has been requeued.
     RepositoryBusy {
         attempt: AttemptId,
+        path: std::path::PathBuf,
+        operation: String,
     },
     Launched(AttemptId),
     Refused {
@@ -1758,6 +1769,8 @@ impl RunStore {
         &self,
         record: &AttemptRecord,
         finished_at: provenant_core::WallTime,
+        path: std::path::PathBuf,
+        operation: String,
         call: &Request<'_>,
     ) -> Result<Started> {
         let id = record.attempt_id;
@@ -1777,7 +1790,11 @@ impl RunStore {
         }
         let released = self.record(id, call)?;
         match self.requeue_starting_after_admission_skip(&released, call)? {
-            Some(_) => Ok(Started::RepositoryBusy { attempt: id }),
+            Some(_) => Ok(Started::RepositoryBusy {
+                attempt: id,
+                path,
+                operation,
+            }),
             None => {
                 self.cancel_preparation_if_requested(
                     id,
@@ -2174,7 +2191,22 @@ impl RunStore {
                     }
                     let (kind, refusal) = *refused;
                     if refusal.repository_lock_busy {
-                        started.push(self.requeue_repository_busy(&record, now()?, call)?);
+                        let path = refusal.repository_lock_path.clone().unwrap_or_else(|| {
+                            std::path::PathBuf::from(
+                                provenant_confinement::worktrees::REPOSITORY_LOCK,
+                            )
+                        });
+                        let operation = refusal
+                            .repository_lock_operation
+                            .clone()
+                            .unwrap_or_else(|| "acquire repository lock".into());
+                        started.push(self.requeue_repository_busy(
+                            &record,
+                            now()?,
+                            path,
+                            operation,
+                            call,
+                        )?);
                         continue;
                     }
                     if !refusal.skipped_routes.is_empty()
@@ -2439,8 +2471,8 @@ impl RunStore {
                     call,
                 ) {
                     Ok(()) => Started::Launched(id),
-                    Err(HandOff::RepositoryBusy) => {
-                        self.requeue_repository_busy(&record, now()?, call)?
+                    Err(HandOff::RepositoryBusy { path, operation }) => {
+                        self.requeue_repository_busy(&record, now()?, path, operation, call)?
                     }
                     // Nothing reached a guardian: the attempt ends here.
                     Err(

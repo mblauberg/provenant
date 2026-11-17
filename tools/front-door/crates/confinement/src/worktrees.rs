@@ -115,9 +115,7 @@ pub fn repository_lock_busy(error: &FsError) -> bool {
 pub fn lock_repository(
     common: &Directory,
     mode: LockMode,
-    _budget: WaitBudget,
     cancel: &CancelToken,
-    _clock: &dyn Clock,
 ) -> Result<LockGuard, FsError> {
     if cancel.is_cancelled() {
         return Err(FsError::Cancelled {

@@ -520,8 +520,17 @@ pub enum FacadeError {
     },
     #[error("writer registry lock is still held after the bounded wait expired")]
     WriterLockBusy,
-    #[error("repository lock is busy")]
-    RepositoryLockBusy,
+    #[error(
+        "repository lock{} is busy during {operation}",
+        path.as_ref().map(|path| format!(" {path}")).unwrap_or_default()
+    )]
+    RepositoryLockBusy {
+        /// Lock file path when the failed try recorded one. Flock does not name a holder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        /// The operation that was waiting on the repository lock.
+        operation: String,
+    },
     #[error("writer custody is unknown")]
     WriterUnknown,
     #[error("a requested credential-root grant was refused")]
@@ -1006,7 +1015,7 @@ impl FacadeError {
                 }
                 projected = projected.next("wait for the current writer or lock holder to finish");
             }
-            Self::RepositoryLockBusy => projected = projected.detail(self.to_string()).next("retry after releasing launch locks within the launch budget"),
+            Self::RepositoryLockBusy { .. } => projected = projected.detail(self.to_string()).next("retry after releasing launch locks within the launch budget"),
             Self::WriterLockBusy => projected = projected.detail(self.to_string()).next("wait for the writer lock holder to finish, then retry"),
             Self::WriterUnknown | Self::WorktreeUnregistered { .. } => projected = projected.next("inspect worktree registration and custody before selecting a checkout with --worktree"),
             Self::ConfinementRefused { resource: Some(fact) } => projected = fact.project(projected),
@@ -1064,7 +1073,7 @@ impl FacadeError {
             Self::ConfinementRefused { .. } => "confinement_refused",
             Self::WriterBusy { .. } => "writer_busy",
             Self::WriterLockBusy => "writer_lock_busy",
-            Self::RepositoryLockBusy => "repository_lock_busy",
+            Self::RepositoryLockBusy { .. } => "repository_lock_busy",
             Self::WriterUnknown => "writer_unknown",
             Self::CredentialRoot { .. } => "credential_root",
             Self::DispatchRefused { .. } => "dispatch_refused",

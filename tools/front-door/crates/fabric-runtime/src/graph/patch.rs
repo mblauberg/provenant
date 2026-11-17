@@ -605,6 +605,7 @@ fn retry_node_scope(
                 .any(|attempt| attempt.state != AttemptState::Terminal)
             && !(progress.state == NodeState::Skipped && progress.cancelled_from.is_some())
             && !refused_before_launch(progress)
+            && !exhausted_repository_lock(progress)
         {
             return Err(PatchError::invalid(
                 "node retry requires settled subtree attempts",
@@ -856,6 +857,25 @@ fn container_brief_refusal(
 // An explicit host-proven refusal leaves a Starting row but no process to
 // stop. Apply the same proof to the selected node and every reset descendant;
 // stale launch flags alone never establish that a handoff was not accepted.
+/// Budget exhausted by late repository contention leaves a queued attempt
+/// that never started. Retry may release that reference and launch again.
+fn exhausted_repository_lock(progress: &NodeProgress) -> bool {
+    progress.state == NodeState::Blocked
+        && progress.advance_error_code.as_deref() == Some("launch_retry_exhausted")
+        && progress.advance_owner_code.as_deref() == Some("repository_lock_busy")
+        && progress.launch_retry.is_none()
+        && progress.last_launch_retry.is_some()
+        && progress
+            .attempts
+            .iter()
+            .any(|attempt| attempt.state == AttemptState::Starting && attempt.attempt_ref.is_some())
+        && progress
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.state != AttemptState::Terminal)
+            .all(|attempt| attempt.state == AttemptState::Starting && attempt.attempt_ref.is_some())
+}
+
 fn refused_before_launch(progress: &NodeProgress) -> bool {
     progress.state == NodeState::Blocked
         && progress.advance_error_code.as_deref() == Some("launch_refused")
@@ -877,6 +897,8 @@ fn reset_progress(old: &NodeProgress, container: bool) -> Result<NodeProgress, P
         .checked_add(1)
         .ok_or_else(|| PatchError::invalid("retry generation exhausted"))?;
     let mut previous = old.previous_attempts.clone();
+    // A queued repository-lock attempt is released from the live slot here.
+    // Its reference stays on the archived row and is not observed again.
     previous.extend(old.attempts.iter().cloned());
     let mut reset = serde_json::to_value(old).map_err(|e| PatchError::invalid(e.to_string()))?;
     let fields = reset

@@ -1,5 +1,12 @@
 use super::*;
 
+fn repository_lock_busy() -> crate::coordination::facade::FacadeError {
+    crate::coordination::facade::FacadeError::RepositoryLockBusy {
+        path: Some("/repo/.git/provenant-repository.lock".into()),
+        operation: "Git setup".into(),
+    }
+}
+
 #[test]
 fn uncertain_handoff_reobserves_one_guardian_on_the_same_route() {
     use crate::coordination::facade::FacadeError;
@@ -353,7 +360,7 @@ fn repository_lock_contention_retries_while_a_sibling_runs() {
     ]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
-        errors: [(1, FacadeError::RepositoryLockBusy)].into(),
+        errors: [(1, repository_lock_busy())].into(),
         observations: VecDeque::from([
             terminal(AttemptOutcome::Succeeded),
             terminal(AttemptOutcome::Succeeded),
@@ -394,7 +401,7 @@ fn cancellation_during_repository_lock_backoff_does_not_relaunch() {
     let document = graph(vec![node("writer", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
-        errors: [(2, FacadeError::RepositoryLockBusy)].into(),
+        errors: [(2, repository_lock_busy())].into(),
         observations: VecDeque::from([AttemptObservation::Pending {
             attempt_ref: Some("host/queued".into()),
         }]),
@@ -857,7 +864,7 @@ fn late_repository_lock_contention_retries_the_stored_attempt_with_its_original_
         now: Some(at(0)),
         admission_seconds: Some(60),
         launch_deadline: Some(at(60)),
-        errors: [(2, FacadeError::RepositoryLockBusy)].into(),
+        errors: [(2, repository_lock_busy())].into(),
         observations: VecDeque::from([
             AttemptObservation::Pending {
                 attempt_ref: Some("host/queued".into()),
@@ -912,7 +919,7 @@ fn late_repository_lock_contention_exhausts_the_original_budget_with_reference_i
         now_after_error: Some(at(60)),
         admission_seconds: Some(60),
         launch_deadline: Some(at(60)),
-        errors: [(2, FacadeError::RepositoryLockBusy)].into(),
+        errors: [(2, repository_lock_busy())].into(),
         observations: VecDeque::from([AttemptObservation::Pending {
             attempt_ref: Some("host/queued".into()),
         }]),
@@ -934,6 +941,12 @@ fn late_repository_lock_contention_exhausts_the_original_budget_with_reference_i
         progress.advance_owner_code.as_deref(),
         Some("repository_lock_busy")
     );
+    let detail = progress.advance_error.as_deref().expect("exhaustion detail");
+    assert!(
+        detail.contains("/repo/.git/provenant-repository.lock"),
+        "{detail}"
+    );
+    assert!(detail.contains("Git setup"), "{detail}");
     assert_eq!(progress.attempts.len(), 1);
     assert_eq!(progress.attempts[0].key, attempt.key);
     assert_eq!(progress.attempts[0].attempt_ref, attempt.attempt_ref);
@@ -949,13 +962,78 @@ fn late_repository_lock_contention_exhausts_the_original_budget_with_reference_i
     assert_eq!(owner.calls.len(), 2);
 }
 
+// Spec: docs/specs/run-launch.md#admission-and-custody
+#[test]
+fn retry_after_repository_lock_exhaustion_releases_the_queued_attempt_and_relaunches() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        now_after_error: Some(at(60)),
+        admission_seconds: Some(60),
+        launch_deadline: Some(at(60)),
+        errors: [(2, repository_lock_busy())].into(),
+        observations: VecDeque::from([AttemptObservation::Pending {
+            attempt_ref: Some("host/queued".into()),
+        }]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    owner.now = Some(at(59));
+    let exhausted = advance(&document, &mut owner, &mut journal).unwrap();
+    let queued = exhausted.checkpoint.nodes[0].attempts[0]
+        .attempt_ref
+        .clone();
+    assert_eq!(queued.as_deref(), Some("host/queued"));
+
+    let mut checkpoint = exhausted.checkpoint.clone();
+    patch::retry_node(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
+        "one",
+        None,
+        &patch::PatchContext {
+            library: &template::TemplateLibrary::bundled(),
+            resolvers: &Default::default(),
+            scan: &|_| Ok(()),
+            journal: None,
+            limits: &plans::generous(),
+            worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+        },
+    )
+    .unwrap();
+    let released = &checkpoint.nodes[0];
+    assert_eq!(released.state, NodeState::Pending);
+    assert!(released.attempts.is_empty());
+    assert_eq!(
+        released.previous_attempts[0].attempt_ref.as_deref(),
+        Some("host/queued")
+    );
+    journal.save(&checkpoint).unwrap();
+
+    owner.now = Some(at(70));
+    owner.now_after_error = None;
+    owner.admission_seconds = Some(3600);
+    owner.launch_deadline = Some(at(130));
+    owner.observations.push_back(terminal(AttemptOutcome::Succeeded));
+    let launched = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(launched.status, GraphStatus::Complete);
+    let attempt = &launched.checkpoint.nodes[0].attempts[0];
+    assert_ne!(attempt.key.attempt, exhausted.checkpoint.nodes[0].attempts[0].key.attempt);
+    assert_ne!(attempt.attempt_ref.as_deref(), Some("host/queued"));
+    assert_eq!(owner.calls.len(), 3);
+    assert_eq!(owner.stored_refs.last().map(Option::as_deref), Some(None));
+}
+
 #[test]
 fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     use crate::coordination::facade::FacadeError;
     let operation = provenant_core::OperationId::parse("op").unwrap();
     for transient in [
         FacadeError::Busy,
-        FacadeError::RepositoryLockBusy,
+        repository_lock_busy(),
         FacadeError::Timeout,
         FacadeError::HomeUnavailable,
         FacadeError::WriterUnknown,

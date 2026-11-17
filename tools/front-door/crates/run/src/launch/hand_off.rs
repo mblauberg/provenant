@@ -13,8 +13,11 @@ fn typed_local(
     phase: &str,
     error: &RunError,
 ) -> HandOff {
-    if error.is_repository_lock_busy() {
-        return HandOff::RepositoryBusy;
+    if let Some((path, _)) = error.repository_lock_identity() {
+        return HandOff::RepositoryBusy {
+            path: path.to_path_buf(),
+            operation: phase.to_owned(),
+        };
     }
     if let RunError::Admission(error) = error
         && let Some(fact) = error.resource_fact()
@@ -249,7 +252,7 @@ impl RunStore {
                             };
                             HandOff::Protected(format!("{cause}; custody withdrawal: {release}"))
                         })?;
-                        if matches!(&error, HandOff::RepositoryBusy) {
+                        if matches!(&error, HandOff::RepositoryBusy { .. }) {
                             let publication = &publication_directory;
                             publication
                                 .unlink(std::ffi::OsStr::new("reserve"))
@@ -1099,7 +1102,7 @@ mod tests {
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }
-            Err(HandOff::RepositoryBusy) => panic!("repository busy"),
+            Err(HandOff::RepositoryBusy { .. }) => panic!("repository busy"),
             Err(HandOff::Busy) => panic!("custody busy"),
             Err(HandOff::RetainedImport { .. }) => {
                 panic!("unexpected refusal")
@@ -1145,7 +1148,7 @@ mod tests {
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }
-            Err(HandOff::RepositoryBusy) => panic!("repository busy"),
+            Err(HandOff::RepositoryBusy { .. }) => panic!("repository busy"),
             Err(HandOff::Busy) => panic!("busy"),
             Err(HandOff::RetainedImport { .. }) => {
                 panic!("unexpected refusal")
@@ -1188,7 +1191,7 @@ mod tests {
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }
-            Err(HandOff::RepositoryBusy) => panic!("repository busy"),
+            Err(HandOff::RepositoryBusy { .. }) => panic!("repository busy"),
             Err(HandOff::Busy) => panic!("busy"),
             Err(HandOff::RetainedImport { .. }) => {
                 panic!("unexpected refusal")
@@ -1232,7 +1235,7 @@ mod tests {
         )?;
         assert!(matches!(
             started.as_slice(),
-            [Started::RepositoryBusy { attempt }] if *attempt == request.attempt_id
+            [Started::RepositoryBusy { attempt, .. }] if *attempt == request.attempt_id
         ));
 
         let record = store.record(request.attempt_id, &call)?;
@@ -1323,7 +1326,7 @@ mod tests {
         )?;
         assert!(matches!(
             started.as_slice(),
-            [Started::RepositoryBusy { attempt }] if *attempt == request.attempt_id
+            [Started::RepositoryBusy { attempt, .. }] if *attempt == request.attempt_id
         ));
         let record = store.record(request.attempt_id, &call)?;
         assert!(matches!(record.state, AttemptState::Queued { .. }));

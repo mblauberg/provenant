@@ -3071,7 +3071,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         .is_some_and(|error| {
                                             matches!(
                                                 error,
-                                                crate::coordination::facade::FacadeError::RepositoryLockBusy
+                                                crate::coordination::facade::FacadeError::RepositoryLockBusy { .. }
                                             )
                                         });
                                 failed_before_acceptance || repository_retry_of_stored_attempt

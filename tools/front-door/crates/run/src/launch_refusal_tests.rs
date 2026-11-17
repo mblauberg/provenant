@@ -22,6 +22,8 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             if self.disk {
                 return Err(Box::new(PrepareRefusal {
                 repository_lock_busy: false,
+                repository_lock_path: None,
+                repository_lock_operation: None,
                     boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                     policy_code: None,
                     resource: None,

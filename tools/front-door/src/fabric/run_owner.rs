@@ -445,8 +445,11 @@ pub(crate) fn events_within<T: serde::Serialize>(
     Ok(events.len())
 }
 pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
-    if error.is_repository_lock_busy() {
-        return FacadeError::RepositoryLockBusy;
+    if let Some((path, operation)) = error.repository_lock_identity() {
+        return FacadeError::RepositoryLockBusy {
+            path: Some(path.display().to_string()),
+            operation: operation.to_owned(),
+        };
     }
     // Preserve resource contention through the public error boundary; an
     // immediate repository probe must schedule a retry, not fail the writer.
@@ -772,11 +775,16 @@ pub(crate) fn launch_refusal(
     started: &[provenant_run::Started],
     lanes: &[provenant_run::AttemptRecord],
 ) -> Option<FacadeError> {
-    if started
-        .iter()
-        .any(|item| matches!(item, provenant_run::Started::RepositoryBusy { .. }))
-    {
-        return Some(FacadeError::RepositoryLockBusy);
+    if let Some((path, operation)) = started.iter().find_map(|item| match item {
+        provenant_run::Started::RepositoryBusy {
+            path, operation, ..
+        } => Some((path, operation)),
+        _ => None,
+    }) {
+        return Some(FacadeError::RepositoryLockBusy {
+            path: Some(path.display().to_string()),
+            operation: operation.clone(),
+        });
     }
     let blocked = started
         .iter()

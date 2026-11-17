@@ -3558,7 +3558,10 @@ impl BoundGraphOwner<'_> {
                 return Err(if self.cancel.is_cancelled() {
                     FacadeError::Cancelled
                 } else {
-                    FacadeError::RepositoryLockBusy
+                    FacadeError::RepositoryLockBusy {
+                        path: None,
+                        operation: "relaunch queued attempt".into(),
+                    }
                 });
             }
             let session = owner.session_with_facts(self.cancel, &self.repo_facts)?;
@@ -3577,7 +3580,10 @@ impl BoundGraphOwner<'_> {
             // again at the launch boundary rather than renewing setup time.
             let remaining = budget.remaining(self.factory.clock.mono_now());
             if remaining.as_micros() < 1_000_000 {
-                return Err(FacadeError::RepositoryLockBusy);
+                return Err(FacadeError::RepositoryLockBusy {
+                    path: None,
+                    operation: "relaunch queued attempt".into(),
+                });
             }
             let started = owner.with_edge(|edge| {
                 provenant_cli::run::relaunch_queued_on_host(
@@ -3597,7 +3603,10 @@ impl BoundGraphOwner<'_> {
                 attempt.state,
                 provenant_records::run::AttemptState::Queued { .. }
             ) {
-                return Err(FacadeError::RepositoryLockBusy);
+                return Err(FacadeError::RepositoryLockBusy {
+                    path: None,
+                    operation: "relaunch queued attempt".into(),
+                });
             }
         }
         // A remote parent is one origin node until its receiver-owned graph

@@ -258,13 +258,7 @@ fn inspect_submodules(
             ));
         }
         if hold {
-            let guard = lock_repository(
-                child.common_dir(),
-                LockMode::Shared,
-                WaitBudget::nonblocking(context.clock.mono_now()),
-                cancel,
-                context.clock,
-            )
+            let guard = lock_repository(child.common_dir(), LockMode::Shared, cancel)
             // Preserve repository-lock identity across this boundary. The
             // launcher treats it as transient; `LockBusy` also means a writer
             // lease and would incorrectly turn repository contention terminal.
@@ -769,14 +763,7 @@ pub(super) fn repository_lock<'a>(
     mode: LockMode,
     cancel: &CancelToken,
 ) -> Result<LockGuard, WorktreeError> {
-    lock_repository(
-        context.repo.common_dir(),
-        mode,
-        context.lock_budget,
-        cancel,
-        context.clock,
-    )
-    .map_err(|error| match error {
+    lock_repository(context.repo.common_dir(), mode, cancel).map_err(|error| match error {
         FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
         other => other.into(),
     })

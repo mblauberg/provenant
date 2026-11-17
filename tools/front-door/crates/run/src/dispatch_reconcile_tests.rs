@@ -137,6 +137,8 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
         ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
             Err(Box::new(crate::PrepareRefusal {
                 repository_lock_busy: false,
+                repository_lock_path: None,
+                repository_lock_operation: None,
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
                 resource: None,
@@ -234,6 +236,8 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
         ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
             Err(Box::new(crate::PrepareRefusal {
                 repository_lock_busy: false,
+                repository_lock_path: None,
+                repository_lock_operation: None,
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
                 resource: None,
