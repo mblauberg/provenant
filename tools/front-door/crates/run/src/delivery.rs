@@ -3473,7 +3473,9 @@ mod stored_format_tests {
         }
 
         let temp = tempfile::tempdir()?;
-        let root = temp.path();
+        // The filtered PATH holds canonical directories; a canonical root keeps
+        // expected lookups comparable where the temporary directory is a link.
+        let root = &std::fs::canonicalize(temp.path())?;
         let project = root.join("project");
         let worktree = root.join("worktree");
         let retained = root.join("retained-bin");

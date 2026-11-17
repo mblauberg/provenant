@@ -1,7 +1,6 @@
 //! Host Git conformance with a linked worktree and a local bare remote.
 use super::delivery::*;
 use super::*;
-use provenant_confinement::worktrees;
 use provenant_core::{CancelToken, GitOid, ProjectId};
 use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_os::fs::Directory;
@@ -360,14 +359,8 @@ impl PrepareFixture {
         )?;
         assert_eq!(head.termination, Termination::Exit(0));
         let base = GitOid::parse(std::str::from_utf8(&head.stdout.bytes)?.trim())?;
-        let layout = worktrees::project_layout_for_common(
-            &executor,
-            repo.common_git_dir(),
-            utility.git_program_path(),
-            &worktrees::project_layout_git_environment(),
-            Duration::from_secs(5),
-            &cancel,
-        )?;
+        let layout =
+            utility.project_layout_for_common(&executor, repo.common_git_dir(), budget, &cancel)?;
         let executor_root = repo.root_path().to_path_buf();
         let executor_root_identity = repo.root_identity();
         let launch = writer::WriterLaunch {
@@ -867,12 +860,10 @@ fn unpublished_lane_leaves_the_worktree_clean_and_names_the_commit_and_branch()
         provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
         &CancelToken::new(),
     )?;
-    let layout = worktrees::project_layout_for_common(
+    let layout = utility.project_layout_for_common(
         &executor,
         repo.common_git_dir(),
-        utility.git_program_path(),
-        &worktrees::project_layout_git_environment(),
-        Duration::from_secs(5),
+        provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
         &CancelToken::new(),
     )?;
     let executor_root = repo.root_path().to_path_buf();
