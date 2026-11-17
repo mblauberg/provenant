@@ -146,9 +146,19 @@ limit holds the whole account until its reset. One function,
 `Admission::account_block`, decides account blocks for both resolution and
 the pre-launch recheck. Readiness is stored apart from quota records; a failed
 publication leaves readiness unknown and never erases held refusals.
+A fresh probe failure (`command_failure` or `probe_timeout`) ranks its account
+below ready or untested accounts during its validity window; if only failed-probe
+accounts remain, launch proceeds with a warning unless the `PROBE_FAILURE`
+policy knob refuses. Readiness display distinguishes "not probed" (with a tick hint)
+from "probed, provider reports no figures" and "probed, failed" (both without hint).
+Unknown provider errors whose kind and status are absent or unknown settle as
+`unclassified`, not `usage_limited`: they preserve the provider message, retry once
+without marking the account exhausted, and fall back across eligible routes and
+providers at the same tier before stopping at the chair.
 - Why: one probe outage or model limit must not take a provider offline, and
   no stale evidence may admit a launch.
-- Owner: `crates/quota/src/admission.rs`, `crates/quota/src/readiness.rs`
+- Owner: `crates/quota/src/admission.rs`, `crates/quota/src/readiness.rs`,
+  `crates/routing/src/resolve.rs`
 
 ## Revisioned, bounded refresh
 

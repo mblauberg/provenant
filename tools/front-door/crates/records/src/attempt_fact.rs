@@ -24,6 +24,7 @@ pub enum AttemptOutcome {
     Unsettled,
     Uncommitted,
     InputRequired,
+    Unclassified,
 }
 
 /// Route details resolved for an attempt. Unknown provider observations remain

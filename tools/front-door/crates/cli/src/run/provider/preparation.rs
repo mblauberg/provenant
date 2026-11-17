@@ -3155,7 +3155,10 @@ pub(super) fn prepare_candidates(
         if queue.is_empty() {
             let next = if named_pool {
                 match redraw_candidates(
-                    resolve(&availability, &rejected),
+                    resolve(
+                        &without_refused_accounts(&availability, &refused_accounts),
+                        &rejected,
+                    ),
                     &mut reasons,
                     &mut rejected,
                 ) {
@@ -3537,16 +3540,13 @@ pub(super) fn prepare_candidates(
             );
             refused_accounts.insert((route.adapter.clone(), key));
             let remaining = without_refused_accounts(&availability, &refused_accounts);
-            if remaining
-                .iter()
-                .any(|record| record.adapter == route.adapter)
-            {
-                if let Ok(model) = provenant_routing::ModelId::parse(&label) {
+            if let Ok(model) = provenant_routing::ModelId::parse(&label) {
+                if remaining.iter().any(|record| record.adapter == route.adapter) {
                     rejected.retain(|tried| *tried != model);
                 }
-                if let Ok(next) = resolve(&remaining, &rejected) {
-                    queue.extend(candidates(next));
-                }
+            }
+            if let Ok(next) = resolve(&remaining, &rejected) {
+                queue.extend(candidates(next));
             }
             continue;
         }

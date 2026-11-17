@@ -730,7 +730,8 @@ pub(super) fn apply_attempt_observation(
                     AttemptOutcome::AuthRequired
                     | AttemptOutcome::UsageLimited
                     | AttemptOutcome::AdapterUnavailable
-                    | AttemptOutcome::PreparationRefused(_) => {
+                    | AttemptOutcome::PreparationRefused(_)
+                    | AttemptOutcome::Unclassified => {
                         let review_limit_reached = review_preparation_substitution(node, attempt)
                             && progress
                                 .attempts

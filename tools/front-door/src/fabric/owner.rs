@@ -3690,6 +3690,7 @@ impl BoundGraphOwner<'_> {
                             }
                             Outcome::TimedOut => AttemptOutcome::OtherFailure,
                             Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
+                            Outcome::Unclassified => AttemptOutcome::Unclassified,
                             Outcome::Rejected if !launched => preparation_cause
                                 .map_or(AttemptOutcome::OtherFailure, AttemptOutcome::PreparationRefused),
                             Outcome::ReviewRequired if matches!(

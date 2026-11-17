@@ -69,6 +69,7 @@ pub enum AttemptOutcome {
     AdapterUnavailable,
     PreparationRefused(TerminalCause),
     DeadlineExceeded,
+    Unclassified,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
