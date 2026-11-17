@@ -913,7 +913,7 @@ fn oversized_source_frame_remains_malformed_after_redaction() {
 // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
 #[test]
 fn declared_stream_contract_preserves_long_command_tail_but_rejects_provider_line() {
-    use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, PROVIDER_LINE_LIMIT};
+    use provenant_os::exec::{FRAME_LIMIT, PROVIDER_LINE_LIMIT};
     let diagnostic = "tail diagnostic: command completed";
     let source = format!(
         "{{\"type\":\"thread.started\",\"thread_id\":\"t\"}}\n{}{diagnostic}\n",

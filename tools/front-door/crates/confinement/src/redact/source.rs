@@ -105,25 +105,20 @@ impl SourceMap {
     }
 }
 
+/// Receives each decoded byte run with the source bytes it came from.
+type SpanSink<'a> = dyn FnMut(&[u8], &[u8]) -> Result<(), FilterError> + 'a;
+
 #[derive(Default)]
 struct Unescape {
     // At most one surrogate pair, including both source escapes (12 bytes).
     pending: Vec<u8>,
 }
 impl Unescape {
-    fn push(
-        &mut self,
-        byte: u8,
-        sink: &mut dyn FnMut(&[u8], &[u8]) -> Result<(), FilterError>,
-    ) -> Result<(), FilterError> {
+    fn push(&mut self, byte: u8, sink: &mut SpanSink<'_>) -> Result<(), FilterError> {
         self.pending.push(byte);
         self.drain(false, sink)
     }
-    fn drain(
-        &mut self,
-        eof: bool,
-        sink: &mut dyn FnMut(&[u8], &[u8]) -> Result<(), FilterError>,
-    ) -> Result<(), FilterError> {
+    fn drain(&mut self, eof: bool, sink: &mut SpanSink<'_>) -> Result<(), FilterError> {
         while !self.pending.is_empty() {
             let p = &self.pending;
             if p[0] == b'\\' && p.len() == 1 && !eof {
