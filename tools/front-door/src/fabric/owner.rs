@@ -190,8 +190,47 @@ fn selected_writer_project(
     )?;
     let directory = checked.source_root.ok_or(FacadeError::StateCorrupt)?;
     let context = Context::open(factory.context.roots.clone(), &factory.home, &directory)
-        .map_err(|_| FacadeError::invalid(InvalidInputDetail::Field("worktree".into())))?;
+        .map_err(writer_context_error)?;
     Ok((directory, context.identity.project))
+}
+
+// Context discovery performs filesystem and Git probes while sibling writers
+// can change repository metadata. Preserve those typed transient failures so
+// the graph can schedule another binding attempt; malformed inputs still fail.
+fn writer_context_error(error: provenant_cli::fabric::EdgeError) -> FacadeError {
+    use provenant_cli::fabric::EdgeError;
+    use provenant_confinement::{repo::RepoError, utility::UtilityError};
+    use provenant_os::{exec::ExecError, fs::FsError};
+
+    fn contention(error: &FsError) -> bool {
+        matches!(
+            error,
+            FsError::LockTimeout { .. } | FsError::RaceRefused { .. }
+        )
+    }
+    match error {
+        EdgeError::Fs(ref error) if contention(error) => FacadeError::Busy,
+        EdgeError::Config(provenant_config::ConfigError::ProjectBindingFilesystem(ref error))
+            if contention(error) =>
+        {
+            FacadeError::Busy
+        }
+        EdgeError::Utility(UtilityError::Filesystem(ref error)) if contention(error) => {
+            FacadeError::Busy
+        }
+        EdgeError::Utility(UtilityError::Repo(RepoError::Fs(ref error))) if contention(error) => {
+            FacadeError::Busy
+        }
+        EdgeError::Utility(UtilityError::Repo(RepoError::IdentityChanged)) => FacadeError::Busy,
+        EdgeError::Utility(UtilityError::TimedOut) => FacadeError::Busy,
+        EdgeError::Exec(
+            ExecError::Busy | ExecError::ProcessBudget { .. } | ExecError::CleanupPending,
+        )
+        | EdgeError::Utility(UtilityError::Execution(
+            ExecError::Busy | ExecError::ProcessBudget { .. } | ExecError::CleanupPending,
+        )) => FacadeError::Busy,
+        _ => FacadeError::invalid(InvalidInputDetail::Field("worktree".into())),
+    }
 }
 
 fn stored_graph_refusal(
@@ -3971,6 +4010,43 @@ pub(crate) fn restore_scratch_source(
 
 #[cfg(test)]
 mod journal_error_tests {
+    // Spec: docs/specs/run-launch.md#admission-and-custody
+    #[test]
+    fn writer_context_distinguishes_contention_from_invalid_input() {
+        use provenant_cli::fabric::EdgeError;
+        use provenant_confinement::{repo::RepoError, utility::UtilityError};
+        use provenant_fabric_runtime::coordination::facade::FacadeError;
+        use provenant_os::fs::FsError;
+
+        for error in [
+            EdgeError::Fs(FsError::RaceRefused {
+                name: "entry".into(),
+            }),
+            EdgeError::Config(provenant_config::ConfigError::ProjectBindingFilesystem(
+                FsError::LockTimeout {
+                    path: "/lock".into(),
+                    timeout: std::time::Duration::ZERO,
+                },
+            )),
+            EdgeError::Utility(UtilityError::Repo(RepoError::IdentityChanged)),
+        ] {
+            assert!(matches!(
+                super::writer_context_error(error),
+                FacadeError::Busy
+            ));
+        }
+        assert!(matches!(
+            super::writer_context_error(EdgeError::Utility(UtilityError::TimedOut)),
+            FacadeError::Busy
+        ));
+        assert!(matches!(
+            super::writer_context_error(EdgeError::Utility(UtilityError::Repo(
+                RepoError::InvalidGitMarker
+            ))),
+            FacadeError::InvalidInput { .. }
+        ));
+    }
+
     #[test]
     fn graph_review_uses_merge_base_of_advanced_named_ref() -> Result<(), Box<dyn std::error::Error>>
     {
