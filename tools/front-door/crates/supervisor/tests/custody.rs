@@ -1146,11 +1146,14 @@ fn held_stop_ignores_lane_written_summary_and_cancel_request(root: &Path) -> Res
     let planted = serde_json::json!({
         "schema_version": 1,
         "scope": scope,
-        "request_id": format!("{}.{}.cancel", scope.attempt, scope.generation),
+        "request_id": format!("{}.{}.stop", scope.attempt, scope.generation),
         "requester": provenant_core::ActorId::from_bytes([66; 16]),
         "reason": "explicit_cancellation",
     });
-    std::fs::write(attempt.join("cancel.json"), serde_json::to_vec(&planted)?)?;
+    std::fs::write(
+        attempt.join("stop-intent.json"),
+        serde_json::to_vec(&planted)?,
+    )?;
     let handle = hold(
         Directory::open_anchor(&attempt)?,
         scope,
@@ -1173,7 +1176,7 @@ fn cancel_request(scope: Scope, requester: provenant_core::ActorId) -> serde_jso
     serde_json::json!({
         "schema_version": 1,
         "scope": scope,
-        "request_id": format!("{}.{}.cancel", scope.attempt, scope.generation),
+        "request_id": format!("{}.{}.stop", scope.attempt, scope.generation),
         "requester": requester,
         "reason": "explicit_cancellation",
     })
@@ -1224,7 +1227,7 @@ fn held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation(
     for (name, plant) in plants {
         let attempt = root.join(format!("{name}-attempt"));
         std::fs::create_dir(&attempt)?;
-        plant(&attempt.join("cancel.json"))?;
+        plant(&attempt.join("stop-intent.json"))?;
         let handle = hold(Directory::open_anchor(&attempt)?, scope(), requester);
         assert_eq!(
             stop(&handle, StopReason::ExplicitCancellation)?,
@@ -1232,13 +1235,13 @@ fn held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation(
             "{name}"
         );
         let written: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(attempt.join("cancel.json"))?)?;
+            serde_json::from_slice(&std::fs::read(attempt.join("stop-intent.json"))?)?;
         assert_eq!(written, cancel_request(scope(), requester), "{name}");
     }
     assert_eq!(std::fs::read(&outside)?, b"untouched");
     // A directory refuses the rename, so it stays an accepted limit.
     let blocked = root.join("directory-attempt");
-    std::fs::create_dir_all(blocked.join("cancel.json"))?;
+    std::fs::create_dir_all(blocked.join("stop-intent.json"))?;
     assert!(
         stop(
             &hold(Directory::open_anchor(&blocked)?, scope(), requester),
@@ -1254,7 +1257,7 @@ fn held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation(
         serde_json::json!({"schema_version": 1, "scope": scope(), "requester": requester});
     std::fs::write(attempt.join("launch.json"), serde_json::to_vec(&summary)?)?;
     std::fs::write(
-        attempt.join("cancel.json"),
+        attempt.join("stop-intent.json"),
         serde_json::to_vec(&cancel_request(later, requester))?,
     )?;
     let handle = reattach(Directory::open_anchor(&attempt)?, scope())?;
@@ -1263,7 +1266,7 @@ fn held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation(
         Err(CustodyError::InvalidRecord)
     ));
     let kept: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(attempt.join("cancel.json"))?)?;
+        serde_json::from_slice(&std::fs::read(attempt.join("stop-intent.json"))?)?;
     assert_eq!(kept, cancel_request(later, requester));
     Ok(())
 }

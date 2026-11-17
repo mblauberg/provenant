@@ -1033,7 +1033,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
         let before = std::fs::read(&reservation).ok();
         assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
         let request: serde_json::Value = serde_json::from_slice(
-            &artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+            &artifacts::read_sealed(&attempt, "stop-intent.json", RECORD_LIMIT)?
                 .ok_or("cancel request missing")?,
         )?;
         assert_eq!(request["scope"], serde_json::to_value(scope)?);

@@ -951,6 +951,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
+            stop_work: None,
         })?,
         RECORD_LIMIT,
     )?;

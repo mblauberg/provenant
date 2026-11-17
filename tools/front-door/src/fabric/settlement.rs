@@ -127,6 +127,43 @@ pub(crate) fn advance_graphs_after_settlement(
     ) && !store.steer_intent(settled.attempt_id, &call)?.is_empty()
     {
         let successor = match store.prepare_steer_continuation(settled.attempt_id, &call) {
+            Ok(successor) => Ok(successor),
+            Err(error)
+                if matches!(
+                    &error,
+                    provenant_run::RunError::SteerSessionUnavailable
+                        | provenant_run::RunError::ProviderStateExpired
+                ) =>
+            {
+                let config = provenant_cli::config_reads::read_for(&roots, "fabric context")?;
+                if config.domains.fabric.steer.fallback
+                    == provenant_fabric_runtime::config::SteerFallback::FreshWithHandoff
+                {
+                    let source = match config.origins.get("domains.fabric.steer.fallback") {
+                        Some(provenant_config::Origin::User { .. }) => {
+                            "config.toml (domains.fabric.steer.fallback)".to_owned()
+                        }
+                        Some(provenant_config::Origin::Compiled { profile }) => {
+                            format!("compiled {profile:?} profile (domains.fabric.steer.fallback)")
+                        }
+                        None => "compiled defaults (domains.fabric.steer.fallback)".to_owned(),
+                    };
+                    {
+                        use std::io::Write as _;
+                        let _ = writeln!(
+                            std::io::stderr().lock(),
+                            "{}",
+                            steer_fallback_warning(&source)
+                        );
+                    }
+                    store.prepare_fresh_steer_continuation(settled.attempt_id, &call)
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error),
+        };
+        let successor = match successor {
             Ok(successor) => successor,
             Err(error) => {
                 if let Some(cause) = steer_refusal_cause(&error) {
@@ -635,4 +672,25 @@ pub(crate) fn settle_attempt(
         cancel: &cancel,
     };
     Ok(store.worktree_settlement(id, &call)?)
+}
+
+fn steer_fallback_warning(source: &str) -> String {
+    format!(
+        "warning: steer.fallback=fresh_with_handoff (source: {source}); provider session unavailable, continuing with the accepted brief, prior handoff and steering instructions"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn fresh_steer_fallback_warning_names_the_setting_source() {
+        let warning =
+            steer_fallback_warning("compiled Balanced profile (domains.fabric.steer.fallback)");
+        assert!(warning.starts_with("warning: steer.fallback=fresh_with_handoff"));
+        assert!(warning.contains("source: compiled Balanced profile"));
+        assert!(warning.contains("accepted brief, prior handoff and steering instructions"));
+    }
 }

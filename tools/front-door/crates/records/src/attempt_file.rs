@@ -24,6 +24,7 @@ pub enum AttemptFile {
     Stderr,
     Launch,
     ProcessExit,
+    ProviderExit,
     Process,
     Reservation,
     CustodyLock,
@@ -32,6 +33,7 @@ pub enum AttemptFile {
     TerminalCommit,
     Release,
     Cancel,
+    StopIntent,
     Delivery,
     DeliveryStarted,
     ProviderStateExpired,
@@ -50,13 +52,14 @@ pub enum AttemptFile {
 }
 
 impl AttemptFile {
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 31] = [
         Self::Prompt,
         Self::Result,
         Self::Stdout,
         Self::Stderr,
         Self::Launch,
         Self::ProcessExit,
+        Self::ProviderExit,
         Self::Process,
         Self::Reservation,
         Self::CustodyLock,
@@ -65,6 +68,7 @@ impl AttemptFile {
         Self::TerminalCommit,
         Self::Release,
         Self::Cancel,
+        Self::StopIntent,
         Self::Delivery,
         Self::DeliveryStarted,
         Self::ProviderStateExpired,
@@ -91,6 +95,7 @@ impl AttemptFile {
             Self::Stderr => "stderr.log",
             Self::Launch => "launch.json",
             Self::ProcessExit => "process-exit.json",
+            Self::ProviderExit => "provider-exit.json",
             Self::Process => "process.json",
             Self::Reservation => "reservation.json",
             Self::CustodyLock => "custody.lock",
@@ -99,6 +104,7 @@ impl AttemptFile {
             Self::TerminalCommit => "terminal-commit.json",
             Self::Release => "release.json",
             Self::Cancel => "cancel.json",
+            Self::StopIntent => "stop-intent.json",
             Self::Delivery => "delivery.json",
             Self::DeliveryStarted => "delivery-started.json",
             Self::ProviderStateExpired => "provider-state-expired.json",

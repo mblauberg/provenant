@@ -3,6 +3,63 @@ use provenant_os::clock::SystemClock;
 use std::error::Error;
 use std::os::unix::fs::PermissionsExt;
 
+// Spec: docs/specs/run.md#stop-intent
+#[test]
+fn every_stop_uses_one_intent_and_cancel_file_cannot_carry_a_steer() -> TestResult {
+    for reason in [
+        StopReason::ExplicitCancellation,
+        StopReason::Steered,
+        StopReason::WallDeadline,
+        StopReason::TokenBudget,
+        StopReason::ContextHandoff,
+        StopReason::SupervisorSignal,
+        StopReason::ProtocolRejected,
+        StopReason::PostTerminalCleanup,
+    ] {
+        let root = tempfile::tempdir()?;
+        let directory = Directory::open_anchor(root.path())?;
+        let requester = ActorId::from_bytes([3; 16]);
+        assert_eq!(
+            request_stop(directory.try_clone()?, scope(), requester, reason)?,
+            StopReceipt::Requested
+        );
+        assert!(
+            directory
+                .metadata_at(OsStr::new("cancel.json"), false)
+                .is_err_and(|e| e.is_not_found())
+        );
+        let StopIntentState::Requested(intent) = read_stop_intent(&directory, scope())? else {
+            return Err("missing stop intent".into());
+        };
+        assert_eq!(
+            (intent.scope, intent.requester, intent.reason),
+            (scope(), requester, reason)
+        );
+        assert_eq!(intent.request_id, stop_operation(scope())?);
+        assert_eq!(
+            read_stop_intent(
+                &directory,
+                Scope {
+                    generation: scope().generation + 1,
+                    ..scope()
+                }
+            )?,
+            StopIntentState::Invalid
+        );
+        if reason == StopReason::Steered {
+            // Moving the exact valid steer bytes into cancel.json cannot grant
+            // continuation authority or become a guardian steering request.
+            write_record(&directory, "cancel.json", &intent, PublishMode::NoReplace)?
+                .require_durable()?;
+            assert_eq!(
+                read_stop_intent(&directory, scope())?,
+                StopIntentState::Invalid
+            );
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn admission_clock_error_stays_an_admission_refusal() {
     let error = CustodyError::from(AdmissionError::Clock);
@@ -1467,6 +1524,7 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
         "replaced_during_census",
         "replaced_after_proof",
         "drop_without_commit",
+        "retain_through_settlement",
     ] {
         let root = tempfile::tempdir()?;
         let attempt_root = tempfile::tempdir()?;
@@ -1615,6 +1673,7 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                     | "before_guardian_spawn"
                     | "drop_without_commit"
                     | "replaced_after_proof"
+                    | "retain_through_settlement"
             ),
             "{case}"
         );
@@ -1651,6 +1710,33 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                     )?
                     .require_durable()?;
                 proof.release()?;
+                assert!(
+                    evidence
+                        .metadata_at(OsStr::new("reservation.json"), false)
+                        .is_err_and(|error| error.is_not_found())
+                );
+                continue;
+            }
+            if case == "retain_through_settlement" {
+                let mut recovery = proof.into_recovery()?;
+                recovery.prepare_settlement()?;
+                for (directory, name) in [(&evidence, "guardian.lock"), (&attempt, "custody.lock")]
+                {
+                    assert!(matches!(
+                        directory.try_lock_existing(OsStr::new(name), LockMode::Exclusive),
+                        Err(FsError::LockTimeout { .. })
+                    ));
+                }
+                assert!(recovery.holds_writer_lock(&Directory::open_anchor(root.path())?)?);
+                // The trusted Run owner commits before requesting release.
+                write_record(
+                    &attempt,
+                    "test-terminal.json",
+                    &serde_json::json!({"committed": true}),
+                    PublishMode::NoReplace,
+                )?
+                .require_durable()?;
+                recovery.release_lost()?;
                 assert!(
                     evidence
                         .metadata_at(OsStr::new("reservation.json"), false)
@@ -1988,11 +2074,11 @@ fn stored_custody_shapes_round_trip_additive_fields_through_bounded_decode() -> 
         "future_import"
     );
     check!(
-        CancelRequest,
+        StopIntent,
         serde_json::json!({
             "schema_version": 1,
             "scope": scope(),
-            "request_id": format!("{}.{}.cancel", scope().attempt, scope().generation),
+            "request_id": format!("{}.{}.stop", scope().attempt, scope().generation),
             "requester": ActorId::from_bytes([3; 16]),
             "reason": "explicit_cancellation",
             "future_cancel": marker.clone(),

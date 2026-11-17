@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write;
 
 #[cfg(test)]
 thread_local! {
@@ -319,6 +320,51 @@ impl RunStore {
                 Ok(context) => holder_context = context,
                 Err(error) => {
                     local_or_withdraw!(Err::<(), _>(typed_local(&policy, "delivery", &error)));
+                }
+            }
+        }
+        // Host stop publication is an overridable default granted only for an
+        // open-network lane. Bind a second destination to the lane's own branch;
+        // it must not replace an explicit delivery destination.
+        let publish_granted = provenant_records::run::host_publishing_requested(
+            task.access.network(task.writer.is_some()),
+            &task.profile.knobs,
+        );
+        if publish_granted
+            && let (Some(writer_request), Some(writer_launch)) = (
+                task.writer.as_ref(),
+                plan.confinement
+                    .as_ref()
+                    .and_then(|plan| plan.writer.as_ref()),
+            )
+        {
+            let prepared = (|| -> Result<Vec<u8>> {
+                let branch = writer_launch
+                    .branch
+                    .as_str()
+                    .strip_prefix("refs/heads/")
+                    .ok_or(RunError::Validation("writer needs a local branch"))?;
+                let mut holder: HolderContext = decode(&holder_context)?;
+                let request =
+                    crate::HostDeliveryContext::destination(crate::DeliveryMode::Push, branch)?
+                        .ok_or(RunError::Validation("stop publication destination missing"))?;
+                let host = holder.host_delivery.take().unwrap_or_else(|| {
+                    crate::HostDeliveryContext::capture()
+                        .with_repo_facts(self.repo_facts())
+                        .with_host_state(self.context.state_root.as_path())
+                });
+                let host = host.prepare_stop_publish(writer_request, &request)?;
+                host.seal_stop_publish_binding(&self.attempt_dir(id, false)?, scope)?;
+                holder.host_delivery = Some(host);
+                holder.encode()
+            })();
+            match prepared {
+                Ok(context) => holder_context = context,
+                Err(error) => {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: stop publication is unavailable: {error}"
+                    );
                 }
             }
         }

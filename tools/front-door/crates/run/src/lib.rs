@@ -10,6 +10,7 @@ pub use completion::{
     sanitise_handoff_result,
 };
 mod controls;
+pub use controls::release_progress;
 mod correlation;
 pub use correlation::{WorkCoverage, WorkSelector, validate_work};
 mod db;

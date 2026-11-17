@@ -627,7 +627,7 @@ fn repeat_cancel_while_the_launcher_holds_keeps_one_request_and_settles_on_relea
     )?;
     assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
     let attempt = store.attempt_dir(id, false)?;
-    let first = artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+    let first = artifacts::read_sealed(&attempt, "stop-intent.json", RECORD_LIMIT)?
         .ok_or("cancel request missing")?;
     // A repeat while the launcher still holds the writer neither settles the
     // lane nor writes a second request.
@@ -636,7 +636,7 @@ fn repeat_cancel_while_the_launcher_holds_keeps_one_request_and_settles_on_relea
         CancelReceipt::AlreadyRequested
     );
     assert_eq!(
-        artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?.as_deref(),
+        artifacts::read_sealed(&attempt, "stop-intent.json", RECORD_LIMIT)?.as_deref(),
         Some(first.as_slice())
     );
     assert!(matches!(

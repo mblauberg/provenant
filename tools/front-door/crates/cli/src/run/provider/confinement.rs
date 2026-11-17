@@ -1551,11 +1551,14 @@ pub(super) fn publishing_requested(
     open_network: bool,
     knobs: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> bool {
-    open_network
-        && knobs
-            .get("lanes.publish")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true)
+    provenant_records::run::host_publishing_requested(
+        if open_network {
+            NetworkAccess::Open
+        } else {
+            NetworkAccess::Provider
+        },
+        knobs,
+    )
 }
 
 pub(super) fn publishing_executable(

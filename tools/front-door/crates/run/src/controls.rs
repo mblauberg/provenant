@@ -533,6 +533,77 @@ fn attempt_presence_inner(
     })
 }
 
+/// Read-only release diagnostics. The committed outcome remains authoritative;
+/// unresolved descendants explain why its writer reservation is still held.
+pub fn release_progress(
+    root: &std::path::Path,
+    record: &AttemptRecord,
+    census: Option<&provenant_supervisor::census::Census>,
+) -> Option<String> {
+    if !matches!(record.state, AttemptState::Terminal { .. }) {
+        return None;
+    }
+    let attempt = provenant_os::fs::Directory::open_anchor(
+        &root.join(format!("attempts/{}", record.attempt_id)),
+    )
+    .ok()?;
+    if read_sealed(&attempt, "release.json", RECORD_LIMIT)
+        .ok()?
+        .is_some()
+    {
+        return None;
+    }
+    let raw = read_sealed(&attempt, "process-exit.json", RECORD_LIMIT).ok()??;
+    #[derive(serde::Deserialize)]
+    struct Cleanup {
+        scope: Scope,
+        unresolved_cleanup: bool,
+        unresolved_pids: Vec<i64>,
+        #[serde(default)]
+        unresolved_identities: Vec<provenant_supervisor::census::ProcessIdentity>,
+    }
+    let exit: Cleanup = crate::db::decode(&raw).ok()?;
+    if exit.scope != RunStore::scope(record) {
+        return None;
+    }
+    if !exit.unresolved_cleanup {
+        return None;
+    }
+    let names = exit
+        .unresolved_pids
+        .iter()
+        .take(16)
+        .map(|pid| {
+            let name = census
+                .and_then(|census| match census.process(*pid) {
+                    provenant_supervisor::census::ProcessLookup::Present(fact)
+                        if exit
+                            .unresolved_identities
+                            .iter()
+                            .any(|identity| *identity == fact.identity) =>
+                    {
+                        fact.command.as_deref()
+                    }
+                    _ => None,
+                })
+                .map(|name| provenant_confinement::redact::bounded_line(name, 128));
+            name.map_or_else(
+                || format!("pid {pid}"),
+                |name| format!("{name} (pid {pid})"),
+            )
+        })
+        .collect::<Vec<_>>();
+    Some(format!(
+        "releasing ({} survivors: {})",
+        exit.unresolved_pids.len(),
+        if names.is_empty() {
+            "census pending".into()
+        } else {
+            names.join(", ")
+        }
+    ))
+}
+
 /// Whether a running attempt is past its runtime deadline plus the grace.
 pub fn overdue_at(record: &AttemptRecord, now: WallTime) -> bool {
     let (AttemptState::Running { .. }, Some(deadline)) = (&record.state, record.runtime_deadline)
@@ -555,7 +626,7 @@ pub fn holder_absent(root: &std::path::Path, record: &AttemptRecord) -> bool {
 fn running_attempt_reapable(presence: Option<AttemptPresence>) -> bool {
     matches!(
         presence,
-        Some(AttemptPresence::Unattended | AttemptPresence::Settling)
+        Some(AttemptPresence::Unattended | AttemptPresence::Settling | AttemptPresence::Unknown)
     )
 }
 
@@ -813,6 +884,116 @@ mod reboot_tests {
             &call,
             &SystemProcessObserver,
         )?;
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-settlement.md#guardian-loss-proof
+    #[test]
+    fn tick_queues_unknown_and_consumes_prepared_guardian_loss_proof()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use provenant_supervisor::census::{Census, CensusError, ProcessObservation};
+        struct Gone(String);
+        impl ProcessObserver for Gone {
+            fn boot_identity(&self) -> std::result::Result<String, CensusError> {
+                Ok(self.0.clone())
+            }
+            fn observe(&self, _: i64) -> ProcessObservation {
+                ProcessObservation::Absent
+            }
+            fn census(&self, _: usize) -> std::result::Result<Census, CensusError> {
+                Census::from_observations([], [], [], true, false, 64)
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let input = crate::tests::input();
+        let id = input.attempt_id;
+        store.create(&input, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let record = store.record(id, &call)?;
+        let scope = RunStore::scope(&record);
+        let attempt = store.attempt_dir(id, false)?;
+        let lease = custody::acquire_reader(
+            attempt.try_clone()?,
+            scope,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        let evidence = custody::attempt_evidence(&attempt, scope)?;
+        let native_custody = attempt.try_lock(
+            std::ffi::OsStr::new("custody.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        let guardian = evidence.try_lock(
+            std::ffi::OsStr::new("guardian.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        let identity = |meta: provenant_os::fs::Metadata| serde_json::json!({"device": meta.device, "inode": meta.inode});
+        let raw = evidence.read_bounded(std::ffi::OsStr::new("reservation.json"), RECORD_LIMIT)?;
+        let mut reservation: serde_json::Value = serde_json::from_slice(&raw)?;
+        reservation["launch_state"] = "handing_off".into();
+        reservation["attempt_device"] = attempt.metadata()?.device.into();
+        reservation["attempt_inode"] = attempt.metadata()?.inode.into();
+        let observer = Gone(reservation["boot"].as_str().ok_or("boot")?.to_owned());
+        evidence
+            .atomic_write(
+                std::ffi::OsStr::new("reservation.json"),
+                ".test-",
+                &serde_json::to_vec(&reservation)?,
+                provenant_os::fs::PublishMode::Replace,
+            )?
+            .require_durable()?;
+        crate::artifacts::seal(
+            &evidence,
+            "guardian-lock.json",
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1, "scope": scope, "guardian_process": null,
+                "attempt": identity(attempt.metadata()?), "guardian": identity(guardian.metadata()?),
+                "writer": identity(attempt.metadata_at(std::ffi::OsStr::new("writer.lock"), false)?),
+                "custody": identity(native_custody.metadata()?)
+            }))?,
+            RECORD_LIMIT,
+        )?;
+        // Neither stale process checkpoints nor PID values establish loss.
+        let queued = std::cell::Cell::new(0);
+        store.reap_with_census_and_spawn(
+            &call,
+            &observer,
+            Some(&observer.census(64)?),
+            |_, _| {
+                queued.set(queued.get() + 1);
+                Ok(())
+            },
+        )?;
+        assert_eq!(queued.get(), 1);
+        assert_eq!(
+            store.settle_holderless(&record, &call, &observer)?,
+            None,
+            "held original locks veto settlement"
+        );
+        drop(guardian);
+        drop(native_custody);
+        drop(lease);
+        assert_eq!(
+            store.settle_holderless(&record, &call, &observer)?,
+            Some(Reconciled::Finished)
+        );
+        assert!(
+            matches!(store.record(id, &call)?.state, AttemptState::Terminal { outcome: Outcome::Lost, ref reason, .. } if reason.as_ref().is_some_and(|reason| reason.contains("guardian lost")))
+        );
+        assert!(!custody::reservation_present(&attempt, scope)?);
         Ok(())
     }
 
@@ -1448,7 +1629,7 @@ mod reboot_tests {
             (AttemptPresence::Settling, 1),
             (AttemptPresence::Unattended, 1),
             (AttemptPresence::Live, 0),
-            (AttemptPresence::Unknown, 0),
+            (AttemptPresence::Unknown, 1),
         ] {
             let temp = tempfile::tempdir()?;
             let clock = crate::tests::clock();
@@ -1609,7 +1790,7 @@ mod reboot_tests {
             if found == cause));
         assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
         let request: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path.join("cancel.json"))?)?;
+            serde_json::from_slice(&std::fs::read(path.join("stop-intent.json"))?)?;
         assert_eq!(
             request["scope"],
             serde_json::to_value(RunStore::scope(&store.record(id, &call)?))?
@@ -3119,6 +3300,24 @@ impl RunStore {
             } else {
                 ("resumed", None)
             }
+        } else if self.request(successor, call)?.fresh_continuation.is_some() {
+            // A fresh fallback resumes the task in a new session. It still
+            // requires the original route and an observed conflict-free child.
+            if route_is_missing || evidence_incomplete || session.is_none() {
+                (
+                    "not_continued",
+                    Some(provenant_records::run::SteeringCause::SessionProofIncomplete),
+                )
+            } else if parent_route_digest != child_route_digest
+                || route_digest != child_route_digest.as_deref()
+            {
+                (
+                    "not_continued",
+                    Some(provenant_records::run::SteeringCause::SessionMismatch),
+                )
+            } else {
+                ("resumed", None)
+            }
         } else {
             (
                 "not_continued",
@@ -3372,7 +3571,15 @@ impl RunStore {
             (false, Some(_)) => return Err(RunError::Validation("steer outcome state")),
             (false, None) => return Err(RunError::Validation("steer outcome missing")),
         };
+        let fresh_session = successor
+            .map(|successor| {
+                self.request(successor, call)
+                    .map(|request| request.fresh_continuation.is_some())
+            })
+            .transpose()?
+            .unwrap_or(false);
         Ok(Some(provenant_records::run::SteeringStatus {
+            fresh_session,
             state,
             operations: ledger
                 .into_iter()
@@ -3741,9 +3948,90 @@ impl RunStore {
         )
         .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))
     }
-    /// Settle an attempt with no durable exit only when a changed boot proves
-    /// its prior process tree cannot remain alive. Same-boot absence is not
-    /// quiescence proof because the last checkpoint may miss an escaped child.
+    /// A durable provider exit survives guardian loss; only cleanup is recovered.
+    fn settle_proven_guardian_exit(
+        &self,
+        record: &AttemptRecord,
+        providers: &dyn Providers,
+        call: &Request<'_>,
+        observer: &dyn ProcessObserver,
+    ) -> Result<Option<Reconciled>> {
+        use provenant_confinement::worktrees::WorkerObserver;
+        let attempt = self.attempt_dir(record.attempt_id, false)?;
+        if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_none() {
+            return Ok(None);
+        }
+        let scope = Self::scope(record);
+        let request = self.request(record.attempt_id, call)?;
+        let directory = match request.task.writer.as_ref() {
+            Some(writer) => {
+                match provenant_os::fs::Directory::open_anchor(&self.writer_slot(writer)?) {
+                    Ok(directory) => directory,
+                    Err(error) if error.is_not_found() => return Ok(None),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            None => attempt.try_clone()?,
+        };
+        let Ok(recovery) = custody::acquire_recovery(
+            directory,
+            scope,
+            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+            call.cancel,
+            call.clock,
+        ) else {
+            return Ok(None);
+        };
+        let workers = provenant_confinement::worktrees::SystemWorkerObserver;
+        let proof = recovery
+            .after_guardian_loss(&attempt, observer, || {
+                let Some(writer) = request.task.writer.as_ref() else {
+                    return Ok(true);
+                };
+                workers.invalidate();
+                Ok(workers
+                    .observe_roots(std::slice::from_ref(&writer.worktree))
+                    .get(&writer.worktree)
+                    .is_some_and(|state| state.is_available()))
+            })
+            .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+        let Some(proof) = proof else {
+            return Ok(None);
+        };
+        let handle = custody::reattach(attempt.try_clone()?, scope)
+            .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+        let Observation::Exited(exit) =
+            custody::observe(&handle, call.lock_budget(), call.cancel, call.clock)
+                .map_err(|error| RunError::Io(std::io::Error::other(error)))?
+        else {
+            return Ok(None);
+        };
+        crate::artifacts::seal(
+            &attempt,
+            "guardian-loss.json",
+            &crate::db::bytes(&serde_json::json!({
+                "schema_version": 1, "scope": scope,
+                "warning": "guardian lost on this boot; original free locks, writer lease and empty worktree census prove cleanup; provider outcome retained"
+            }))?,
+            RECORD_LIMIT,
+        )?;
+        let recovery = proof
+            .into_recovery()
+            .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+        if self.finish_recovered_terminal(
+            record.attempt_id,
+            &attempt,
+            &exit,
+            recovery,
+            providers,
+            call,
+        )? {
+            Ok(Some(Reconciled::Finished))
+        } else {
+            Ok(Some(crate::settlement::settling(&attempt, scope)?))
+        }
+    }
+    /// Settle a missing exit only under native death proof and writer exclusion.
     /// Writer exclusion is taken without waiting, so an inheritor of the
     /// lease still keeps the attempt open.
     fn settle_holderless(
@@ -3752,11 +4040,23 @@ impl RunStore {
         call: &Request<'_>,
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
+        self.settle_holderless_with_workers(
+            record,
+            call,
+            observer,
+            &provenant_confinement::worktrees::SystemWorkerObserver,
+        )
+    }
+    fn settle_holderless_with_workers(
+        &self,
+        record: &AttemptRecord,
+        call: &Request<'_>,
+        observer: &dyn ProcessObserver,
+        workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+    ) -> Result<Option<Reconciled>> {
         let scope = Self::scope(record);
         let attempt = self.attempt_dir(record.attempt_id, false)?;
-        if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
-            || !custody::holder_gone(&attempt, scope, observer)
-        {
+        if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some() {
             return Ok(None);
         }
         // Name the slot from the recorded binding; a lost writer's repository
@@ -3794,15 +4094,39 @@ impl RunStore {
         let attempt = self.attempt_dir(record.attempt_id, false)?;
         if recovery.scope() != scope
             || read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
-            || !custody::holder_gone(&attempt, scope, observer)
-            || recovery.observe_with(observer) != RecoveryState::Absent
         {
             return Ok(None);
         }
-        self.commit_lost(scope, LostReason::Holderless.message(), call)?;
-        recovery
-            .release_lost()
-            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        if custody::holder_gone(&attempt, scope, observer)
+            && recovery.observe_with(observer) == RecoveryState::Absent
+        {
+            self.commit_lost(scope, LostReason::Holderless.message(), call)?;
+            recovery
+                .release_lost()
+                .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+        } else {
+            let proof = recovery
+                .after_guardian_loss(&attempt, observer, || {
+                    let Some(writer) = writer else {
+                        return Ok(true);
+                    };
+                    workers.invalidate();
+                    Ok(workers
+                        .observe_roots(std::slice::from_ref(&writer.worktree))
+                        .get(&writer.worktree)
+                        .is_some_and(|state| state.is_available()))
+                })
+                .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+            let Some(proof) = proof else {
+                return Ok(None);
+            };
+            self.commit_lost(scope,
+                "warning: guardian lost on this boot; original guardian and custody locks, writer lease and empty worktree census prove the attempt gone; committed work retained",
+                call)?;
+            proof
+                .release()
+                .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+        }
         self.set_temporary_retained(record.attempt_id, false, call)?;
         Ok(Some(Reconciled::Finished))
     }
@@ -4213,6 +4537,29 @@ impl RunStore {
         )
         .map(|(run, _)| run)
     }
+    /// Fresh graph continuation when the caller already holds the predecessor
+    /// publication fence. It reuses the exact graph work key without provider
+    /// retention or a second lock acquisition.
+    pub(crate) fn resume_graph_fresh_with_parent_publication_lock(
+        &self,
+        input: &Resume,
+        context: &provenant_records::run::WorkContext,
+        reason: &str,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        self.resume_mode(
+            input,
+            call,
+            ResumeOptions {
+                fresh: Some(reason),
+                graph_context: Some(context),
+                parent_publication_locked: true,
+                ..Default::default()
+            },
+        )
+        .map(|(run, _)| run)
+    }
+
     /// Same-session graph continuation when the caller already holds the
     /// predecessor's exclusive publication fence. That fence itself protects
     /// provider state from retention, so this path must not reacquire it.
@@ -4942,8 +5289,8 @@ impl RunStore {
                     AttemptState::Starting { .. } => self
                         .attempt_dir(attempt.attempt_id, false)
                         .is_ok_and(|dir| {
-                            crate::store::CancelMarker::read(&dir, Self::scope(&attempt))
-                                .is_ok_and(|marker| marker != crate::store::CancelMarker::Absent)
+                            crate::store::StopMarker::read(&dir, Self::scope(&attempt))
+                                .is_ok_and(|marker| marker != crate::store::StopMarker::Absent)
                                 || self.launcher_gone(&attempt, &dir, true, call)
                         }),
                     AttemptState::Terminal {
@@ -4952,6 +5299,12 @@ impl RunStore {
                     } if attempt.provider_launched == Some(false) => self
                         .request(run, call)
                         .is_ok_and(|request| request.task.writer.is_some()),
+                    AttemptState::Terminal { .. } => {
+                        !self
+                            .import_release_permitted(&attempt, call)
+                            .unwrap_or(false)
+                            || !self.custody_released(&attempt, call).unwrap_or(false)
+                    }
                     _ => false,
                 });
             if reapable && self.queue_reconcile_with(run, call, &spawn).is_ok() {
@@ -5587,6 +5940,11 @@ impl RunStore {
                 return Ok(Some(state));
             }
             let directory = self.attempt_dir(id, false)?;
+            if let Some(state) =
+                self.settle_proven_guardian_exit(&record, providers, call, observer)?
+            {
+                return Ok(Some(state));
+            }
             let scope = Self::scope(&record);
             let effects_retained = read_sealed(&directory, "terminal-effects.json", RECORD_LIMIT)?
                 .is_some()
@@ -5647,6 +6005,9 @@ impl RunStore {
         let scope = Self::scope(record);
         if matches!(record.state, AttemptState::Queued { .. }) {
             return Ok(Reconciled::Queued);
+        }
+        if let Some(state) = self.settle_proven_guardian_exit(record, providers, call, observer)? {
+            return Ok(state);
         }
         if let Some(state) = self.settle_rebooted(record, call, observer)? {
             return Ok(state);
@@ -7184,8 +7545,8 @@ mod tests {
         )?);
 
         let attempt = store.attempt_dir(id, false)?;
-        let steered: crate::store::CancellationEvidence = crate::db::decode(
-            &crate::artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+        let steered: provenant_supervisor::custody::StopIntent = crate::db::decode(
+            &crate::artifacts::read_sealed(&attempt, "stop-intent.json", RECORD_LIMIT)?
                 .ok_or("session readiness did not request the steer stop")?,
         )?;
         assert_eq!(steered.reason, StopReason::Steered);
@@ -7193,8 +7554,8 @@ mod tests {
             store.cancel(id, "owner cancellation after steer", &call)?,
             CancelReceipt::Requested
         ));
-        let explicit: crate::store::CancellationEvidence = crate::db::decode(
-            &crate::artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+        let explicit: provenant_supervisor::custody::StopIntent = crate::db::decode(
+            &crate::artifacts::read_sealed(&attempt, "stop-intent.json", RECORD_LIMIT)?
                 .ok_or("explicit cancel request missing")?,
         )?;
         assert_eq!(explicit.reason, StopReason::ExplicitCancellation);
@@ -7325,8 +7686,8 @@ mod tests {
                 assert_eq!(cancelled, parent);
                 assert_eq!(receipt, CancelReceipt::AlreadyTerminal);
                 let attempt = store.attempt_dir(parent, false)?;
-                let request: crate::store::CancellationEvidence = crate::db::decode(
-                    &crate::artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+                let request: provenant_supervisor::custody::StopIntent = crate::db::decode(
+                    &crate::artifacts::read_sealed(&attempt, "stop-intent.json", RECORD_LIMIT)?
                         .ok_or("terminal graph cancel intent was not persisted")?,
                 )?;
                 assert_eq!(request.scope, RunStore::scope(&running));
@@ -7426,6 +7787,10 @@ mod tests {
         assert!(matches!(running.state, AttemptState::Terminal { .. }));
         assert!(matches!(
             store.prepare_steer_continuation(id, &call),
+            Err(RunError::SteerSessionMismatch)
+        ));
+        assert!(matches!(
+            store.prepare_fresh_steer_continuation(id, &call),
             Err(RunError::SteerSessionMismatch)
         ));
         store.record_steer_not_continued(

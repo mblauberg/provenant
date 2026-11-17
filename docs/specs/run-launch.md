@@ -25,6 +25,9 @@ Only the guardian holds the life lock after preparation;
 the provider and its descendants never inherit it. The guardian retains it
 through terminal publication and custody release. Kernel process teardown
 releases it even when the guardian cannot publish an exit.
+Tick's settlement driver consumes that proof under writer exclusion and a
+fresh worktree occupancy census. A retained or unknown process observation
+cannot substitute for the original free locks or positive non-occupancy.
 - Why: a stale process checkpoint cannot prove same-boot guardian death; the
   original kernel lock can supply that evidence without PID-reuse heuristics.
 

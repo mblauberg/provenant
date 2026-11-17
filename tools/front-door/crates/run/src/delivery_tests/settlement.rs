@@ -99,6 +99,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
+            stop_work: None,
         })?,
         RECORD_LIMIT,
     )?;
@@ -271,6 +272,7 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
+            stop_work: None,
         })?,
         RECORD_LIMIT,
     )?;

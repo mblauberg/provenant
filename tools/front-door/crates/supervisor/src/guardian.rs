@@ -143,6 +143,7 @@ fn settlement_recovery(
         lease: Some(writer.take().ok_or(CustodyError::Fenced)?),
         reservation: reservation.clone(),
         guardian_quiescent: true,
+        loss_locks: None,
     })
 }
 
@@ -350,6 +351,19 @@ pub trait Holder {
     }
     /// Durable overrun evidence, also used by status and chair notification.
     fn budget_crossed(&self, _context: &[u8], _tokens: u64, _budget: u64) -> Result<()> {
+        Ok(())
+    }
+    /// Commit the provider outcome after durable captures/exit, even while
+    /// descendants retain custody. Without a native recovery capability this
+    /// grants no import or release authority. A quiescent recovery lets the
+    /// shared driver finish writer effects before the separate terminal release.
+    fn outcome(
+        &self,
+        _context: &[u8],
+        _attempt: &Directory,
+        _exit: &ExitObservation,
+        _recovery: Option<&crate::custody::Recovery>,
+    ) -> Result<()> {
         Ok(())
     }
     fn terminal(
@@ -1972,6 +1986,7 @@ impl Driver<'_> {
         // deliberately skipped: `terminal` would only retry against a missing
         // directory. The writer reservation remains as recovery evidence in
         // the lock slot. A rename is not a removal and still settles.
+        let mut outcome_committed = !published || self.commit_outcome(&record);
         if cleanup_complete && published {
             self.release(&record)?;
         }
@@ -1981,6 +1996,9 @@ impl Driver<'_> {
             // and for the group emptying, and republish a settled exit.
             let mut cancelled = false;
             loop {
+                if !outcome_committed && published {
+                    outcome_committed = self.commit_outcome(&record);
+                }
                 cancelled |= self.read_cancel(&mut warnings, &mut omitted_warnings)
                     == Some(machine::StopReason::ExplicitCancellation);
                 if let Ok(true) = self.cleanup(
@@ -1995,7 +2013,7 @@ impl Driver<'_> {
                     &mut omitted_warnings,
                 ) {
                     if published {
-                        self.republish_settled(record, cancelled)?;
+                        self.republish_settled(record)?;
                     }
                     break;
                 }
@@ -2021,7 +2039,7 @@ impl Driver<'_> {
                             &mut omitted_warnings,
                         ) && published
                         {
-                            self.republish_settled(record, cancelled)?;
+                            self.republish_settled(record)?;
                         }
                         break;
                     }
@@ -2044,7 +2062,7 @@ impl Driver<'_> {
     /// Replace the unresolved exit with the settled facts once cleanup proves
     /// the group gone. The reservation is made resolved first, so a crash in
     /// between leaves only the conservative unresolved exit visible.
-    fn republish_settled(&mut self, mut record: ProcessExit, cancelled: bool) -> Result<()> {
+    fn republish_settled(&mut self, mut record: ProcessExit) -> Result<()> {
         self.reservation.unresolved_cleanup = false;
         if !self.persist_reservation() {
             self.reservation.unresolved_cleanup = true;
@@ -2059,9 +2077,6 @@ impl Driver<'_> {
         record.delivered_signals = self.delivered_signals.clone();
         record.failed_deliveries = self.failed_deliveries.clone();
         record.omitted_failed_deliveries = self.omitted_failed_deliveries;
-        if cancelled && record.stop_reason.is_none() {
-            record.stop_reason = Some(machine::StopReason::ExplicitCancellation);
-        }
         let Ok(bytes) = record.bounded_bytes() else {
             return Ok(());
         };
@@ -2161,6 +2176,24 @@ impl Driver<'_> {
         }
         Ok(())
     }
+    fn commit_outcome(&self, record: &ProcessExit) -> bool {
+        if let Some(holder) = self.holder
+            && let Err(error) = holder.outcome(
+                &self.holder_context,
+                &self.attempt,
+                &record.durable_observation(),
+                None,
+            )
+        {
+            let _ = crate::settlement_progress::terminal_failed(
+                &self.attempt,
+                self.reservation.scope,
+                &error.to_string(),
+            );
+            return false;
+        }
+        true
+    }
     /// Hand the durable exit to the holder while retaining writer.lock through
     /// import, publication and verified terminal settlement.
     /// Failures leave the durable fence available to a resumed supervisor.
@@ -2200,9 +2233,12 @@ impl Driver<'_> {
         drop(self._custody.take());
         // Worktree exclusion spans settlement retries; attempt custody is free.
         let settled = (|| {
-            if let Err(error) =
-                holder.terminal(&self.holder_context, &self.attempt, &exit, &recovery)
-            {
+            let terminal = holder
+                .outcome(&self.holder_context, &self.attempt, &exit, Some(&recovery))
+                .and_then(|()| {
+                    holder.terminal(&self.holder_context, &self.attempt, &exit, &recovery)
+                });
+            if let Err(error) = terminal {
                 if let Err(persist_error) = crate::settlement_progress::terminal_failed(
                     &self.attempt,
                     self.reservation.scope,

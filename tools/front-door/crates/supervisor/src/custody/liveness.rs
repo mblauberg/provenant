@@ -24,7 +24,7 @@ impl Identity {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct GuardianLock {
     schema_version: u64,
     scope: Scope,
@@ -110,6 +110,22 @@ pub(crate) fn hold_guardian_lifetime(
     Ok(guardian)
 }
 
+#[derive(Debug)]
+pub(crate) struct LossLocks {
+    record: GuardianLock,
+    attempt: Directory,
+    _guardian: LockGuard,
+    pub(crate) custody: std::sync::Arc<LockGuard>,
+}
+impl LossLocks {
+    pub(crate) fn validate(&self, recovery: &Recovery) -> Result<()> {
+        if !self.record.names_match(recovery, &self.attempt)? {
+            return Err(CustodyError::Fenced);
+        }
+        Ok(())
+    }
+}
+
 /// Same-boot loss capability. All three original lock inodes remain held while
 /// Run commits its canonical Lost outcome; dropping this retains the fence.
 pub struct GuardianLossRecovery {
@@ -122,6 +138,21 @@ pub struct GuardianLossRecovery {
 impl GuardianLossRecovery {
     pub fn scope(&self) -> Scope {
         self.recovery.scope()
+    }
+    /// Retain writer exclusion for the shared settlement driver. Native proof
+    /// covers cleanup even when the guardian died before republishing its exit.
+    pub fn into_recovery(mut self) -> Result<Recovery> {
+        if !self.record.names_match(&self.recovery, &self.attempt)? {
+            return Err(CustodyError::Fenced);
+        }
+        self.recovery.guardian_quiescent = true;
+        self.recovery.loss_locks = Some(LossLocks {
+            record: self.record,
+            attempt: self.attempt,
+            _guardian: self._guardian,
+            custody: std::sync::Arc::new(self._custody),
+        });
+        Ok(self.recovery)
     }
     /// Call only after the trusted Run owner's terminal transaction commits.
     /// No attempt artefacts, private Git or worktree contents are removed.

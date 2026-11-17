@@ -541,6 +541,7 @@ impl CustodyLease {
             lease: Some(self.lease.ok_or(CustodyError::Fenced)?),
             reservation,
             guardian_quiescent: false,
+            loss_locks: None,
         })
     }
 }
@@ -1323,7 +1324,7 @@ pub fn launch(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CancelRequest {
+pub struct StopIntent {
     pub schema_version: u64,
     pub scope: Scope,
     pub request_id: provenant_core::OperationId,
@@ -1332,6 +1333,42 @@ pub(crate) struct CancelRequest {
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
+/// One interpretation of every host stop. Only explicit cancellation may live
+/// in `cancel.json`; a steer there is invalid, never continuation authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StopIntentState {
+    Absent,
+    Requested(StopIntent),
+    Invalid,
+}
+
+pub fn read_stop_intent(directory: &Directory, scope: Scope) -> Result<StopIntentState> {
+    for (file, cancel_only) in [("cancel.json", true), ("stop-intent.json", false)] {
+        let request = match read_record::<StopIntent>(directory, file, RECORD_LIMIT) {
+            Ok(request) => request,
+            Err(CustodyError::Filesystem(error)) if error.is_not_found() => continue,
+            Err(CustodyError::InvalidRecord) => return Ok(StopIntentState::Invalid),
+            Err(error) => return Err(error),
+        };
+        if request.schema_version != 1
+            || request.scope != scope
+            || (cancel_only && request.reason != StopReason::ExplicitCancellation)
+            || (!cancel_only
+                && request.reason == StopReason::Steered
+                && request.request_id != stop_operation(scope)?)
+        {
+            return Ok(StopIntentState::Invalid);
+        }
+        return Ok(StopIntentState::Requested(request));
+    }
+    Ok(StopIntentState::Absent)
+}
+
+fn stop_operation(scope: Scope) -> Result<provenant_core::OperationId> {
+    provenant_core::OperationId::parse(&format!("{}.{}.stop", scope.attempt, scope.generation))
+        .map_err(|_| CustodyError::InvalidRecord)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopReceipt {
     Requested,
@@ -1357,11 +1394,11 @@ pub fn request_stop(
 }
 
 pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
-    let request = CancelRequest {
+    let request = StopIntent {
         schema_version: 1,
         scope: handle.scope,
         request_id: provenant_core::OperationId::parse(&format!(
-            "{}.{}.cancel",
+            "{}.{}.stop",
             handle.scope.attempt, handle.scope.generation
         ))
         .map_err(|_| CustodyError::InvalidRecord)?,
@@ -1371,7 +1408,7 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
     };
     match write_record(
         &handle.directory,
-        "cancel.json",
+        "stop-intent.json",
         &request,
         PublishMode::NoReplace,
     ) {
@@ -1380,7 +1417,7 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
             Ok(StopReceipt::Requested)
         }
         Err(CustodyError::Filesystem(error)) if error.is_exists() => {
-            match read_record::<CancelRequest>(&handle.directory, "cancel.json", RECORD_LIMIT) {
+            match read_record::<StopIntent>(&handle.directory, "stop-intent.json", RECORD_LIMIT) {
                 Ok(previous) if previous == request => return Ok(StopReceipt::AlreadyRequested),
                 Ok(previous)
                     if request.reason == StopReason::Steered
@@ -1410,12 +1447,12 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
             // Replace it and confirm the replacement is the one now visible.
             Publication::require_durable(write_record(
                 &handle.directory,
-                "cancel.json",
+                "stop-intent.json",
                 &request,
                 PublishMode::Replace,
             )?)?;
-            let visible: CancelRequest =
-                read_record(&handle.directory, "cancel.json", RECORD_LIMIT)?;
+            let visible: StopIntent =
+                read_record(&handle.directory, "stop-intent.json", RECORD_LIMIT)?;
             if visible != request {
                 return Err(CustodyError::InvalidRecord);
             }
@@ -2089,6 +2126,7 @@ pub struct Recovery {
     pub(crate) reservation: Reservation,
     // The guardian's durable cleanup or native reboot proof establishes this.
     pub(crate) guardian_quiescent: bool,
+    pub(crate) loss_locks: Option<liveness::LossLocks>,
 }
 
 /// Both exclusions and native evidence that a reboot ended this attempt's
@@ -2137,6 +2175,7 @@ pub fn acquire_recovery(
         lease: Some(lease),
         reservation,
         guardian_quiescent: false,
+        loss_locks: None,
     })
 }
 
@@ -2206,6 +2245,7 @@ pub(crate) fn acquire_reboot_recovery_with(
         lease: Some(lease),
         reservation,
         guardian_quiescent: false,
+        loss_locks: None,
     })
 }
 /// Writer exclusion over an attempt directory that holds no reservation, launch
@@ -2401,7 +2441,8 @@ impl Recovery {
         if matches!(
             self.reservation.binding,
             StoredWriterBinding::ReadOnly { .. }
-        ) {
+        ) && self.loss_locks.is_none()
+        {
             drop(self.lease.take());
         }
         Ok(())
@@ -2432,6 +2473,9 @@ impl Recovery {
     /// Clear an already verified release while retaining writer exclusion.
     pub(crate) fn clear_settled_reservation(&mut self) -> Result<()> {
         self.ensure_writer_lock()?;
+        if let Some(proof) = &self.loss_locks {
+            proof.validate(self)?;
+        }
         clear_reservation(&self.directory, self.scope())
     }
     /// Release custody of an attempt the Run owner has committed Lost after
@@ -2581,7 +2625,7 @@ fn previous_boot(reservation: &Reservation, observer: &dyn ProcessObserver) -> b
 #[derive(Debug)]
 pub struct SettlementCommit {
     scope: Scope,
-    _custody: LockGuard,
+    _custody: std::sync::Arc<LockGuard>,
 }
 #[derive(Serialize, Deserialize)]
 struct ReleaseReceipt {
@@ -2620,7 +2664,7 @@ impl SettlementCommit {
         verify_release(scope, receipt, terminal, quarantine)?;
         Ok(Self {
             scope,
-            _custody: custody,
+            _custody: std::sync::Arc::new(custody),
         })
     }
 }
@@ -2770,6 +2814,14 @@ impl Recovery {
             return Err(CustodyError::InvalidRecord);
         }
         let quarantine = attempt.open_verified_directory(OsStr::new("quarantine"))?;
+        if let Some(proof) = &self.loss_locks {
+            proof.validate(self)?;
+            verify_release(self.scope(), attempt, attempt, &quarantine)?;
+            return Ok(SettlementCommit {
+                scope: self.scope(),
+                _custody: std::sync::Arc::clone(&proof.custody),
+            });
+        }
         let clock = provenant_os::clock::SystemClock::new();
         let budget =
             WaitBudget::cli(clock.mono_now(), 1).map_err(|_| CustodyError::InvalidRecord)?;
@@ -2930,6 +2982,9 @@ impl Recovery {
     fn finish_settlement(mut self, scratch: &mut provenant_os::scratch::Scratch) -> Result<()> {
         self.ensure_writer_lock()?;
         scratch.settle()?;
+        if let Some(proof) = &self.loss_locks {
+            proof.validate(&self)?;
+        }
         clear_reservation(&self.directory, self.scope())?;
         drop(self.lease);
         Ok(())

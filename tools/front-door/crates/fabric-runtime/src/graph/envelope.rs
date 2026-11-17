@@ -90,6 +90,7 @@ pub(super) fn checkpoint_bound(
         extra: Default::default(),
         cancellation_request_receipt: None,
         pending_writer_provisioning: Default::default(),
+        pending_steers: Default::default(),
         expansions: expansions.to_vec(),
         remaining: Some(RemainingBudgets {
             extra: Default::default(),
@@ -148,6 +149,8 @@ pub(super) fn checkpoint_bound(
         DIRECTORY_BYTES,
         prompt_store::compacted_len(document),
         prompt_store::compacted_len(&skeleton),
+        // A graph steer can be admitted while its exact owner is still appearing.
+        MAX_PENDING_GRAPH_STEER_ENCODED_BYTES,
         // instance ID, ask actor, PR URL, integration pin, pause reason and plan digest
         64 + HOST_ID_BYTES
             + OUTPUT_FIELD_BYTES

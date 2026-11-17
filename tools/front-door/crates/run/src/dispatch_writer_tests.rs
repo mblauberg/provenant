@@ -188,7 +188,7 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
     assert!(matches!(queued.as_slice(), [(found, Reconciled::Settling { .. })] if *found == id));
     assert!(
         attempt
-            .read_stable(OsStr::new("cancel.json"), RECORD_LIMIT)?
+            .read_stable(OsStr::new("stop-intent.json"), RECORD_LIMIT)?
             .len()
             > 10
     );

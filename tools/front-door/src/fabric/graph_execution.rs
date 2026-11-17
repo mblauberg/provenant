@@ -149,7 +149,7 @@ pub(crate) fn tick_graphs(
                     )) => return Ok(false),
                     Err(error) => return Err(error.into()),
                 };
-                let Some(checkpoint) = journal.load(&id)? else {
+                let Some(mut checkpoint) = journal.load(&id)? else {
                     return Ok(false);
                 };
                 // Execution can be rebound to another worktree by a manual
@@ -194,7 +194,7 @@ pub(crate) fn tick_graphs(
                 // binding, have the configured launch allowance.
                 let budget =
                     WaitBudget::cli(clock.mono_now(), context.config.graph.launch_wait_seconds)?;
-                let factory = Factory {
+                let mut factory = Factory {
                     project_attribution: crate::usage::attribution_enabled(&context.roots),
                     context,
                     clock: SystemClock::new(),
@@ -206,6 +206,15 @@ pub(crate) fn tick_graphs(
                     host_launch: None,
                     workers,
                 };
+                report
+                    .warnings
+                    .extend(super::steer::dispatch_pending_steers(
+                        &mut factory,
+                        &mut journal,
+                        &mut checkpoint,
+                        budget,
+                        &cancel,
+                    )?);
                 let mut owner = BoundGraphOwner {
                     writer_launch_budget: None,
                     admission_timeout: None,
@@ -264,6 +273,9 @@ pub(super) fn graph_wake_due(
     checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
     now: provenant_core::WallTime,
 ) -> bool {
+    if checkpoint.pending_steers.has_pending() {
+        return true;
+    }
     if checkpoint.cancelled {
         checkpoint.nodes.iter().any(|node| {
             matches!(
@@ -685,6 +697,7 @@ impl Factory {
                 checkpoint: GraphCheckpoint {
                     cancellation_request_receipt: None,
                     pending_writer_provisioning: Default::default(),
+                    pending_steers: Default::default(),
 
                     bases: None,
                     extra: Default::default(),
