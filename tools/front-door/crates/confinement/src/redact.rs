@@ -437,10 +437,21 @@ fn marker_match(bytes: &[u8], marker: &[u8]) -> MarkerMatch {
         }
         if bytes[index] == b'\\' {
             let remaining = &bytes[index..];
-            let encoded = format!("\\u{:04x}", expected);
+            // Escaped JSON can contain a backslash at every other byte.
+            // Compare the fixed-width Unicode form without allocating once
+            // per candidate marker on that hot path.
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let encoded = [
+                b'\\',
+                b'u',
+                b'0',
+                b'0',
+                HEX[usize::from(expected >> 4)],
+                HEX[usize::from(expected & 0x0f)],
+            ];
             let width = remaining.len().min(6);
             if remaining[..width].get(1).is_some_and(|byte| *byte != b'u')
-                || !remaining[..width].eq_ignore_ascii_case(&encoded.as_bytes()[..width])
+                || !remaining[..width].eq_ignore_ascii_case(&encoded[..width])
             {
                 return MarkerMatch::Mismatch;
             }

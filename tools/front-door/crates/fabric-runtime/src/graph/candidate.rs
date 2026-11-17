@@ -9,6 +9,8 @@ pub enum CandidateError {
     Input,
     #[error("graph candidate schema or topology is invalid")]
     Plan,
+    #[error("{CLOUD_PLACEMENT_REMOVED}")]
+    CloudPlacementRemoved,
     #[error("graph schema is invalid")]
     Schema,
     #[error("graph composite is invalid")]
@@ -44,6 +46,7 @@ pub enum CandidateError {
 impl CandidateError {
     fn from_admission(error: AdmissionError) -> Self {
         match error {
+            AdmissionError::CloudPlacementRemoved => Self::CloudPlacementRemoved,
             AdmissionError::Cycle { node } => Self::Cycle { node },
             AdmissionError::WriterWorktree { node } => Self::WriterWorktree { node },
             AdmissionError::Schema(_) => Self::Schema,
@@ -221,7 +224,7 @@ fn admit(
                 .is_some_and(AttemptSpec::names_cloud_placement)
         })
     {
-        return Err(CandidateError::Plan);
+        return Err(CandidateError::CloudPlacementRemoved);
     }
     let (plan, _) =
         validate_flat_plan(&expanded, &generous).map_err(CandidateError::from_admission)?;

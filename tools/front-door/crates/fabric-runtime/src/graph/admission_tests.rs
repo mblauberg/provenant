@@ -406,6 +406,7 @@ fn admission_structural_limits_name_the_key() {
 
 #[test]
 fn cloud_placement_is_refused_at_admission_but_a_persisted_graph_still_replays() {
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     for field in ["cloud", "placement"] {
         let graph = document(
             2,
@@ -413,7 +414,25 @@ fn cloud_placement_is_refused_at_admission_but_a_persisted_graph_still_replays()
                 "attempt":{field: {"target":"t","provider":"claude"}}}]),
         );
         let limits = crate::config::GraphLimits::default();
-        assert!(matches!(graph.admit(&limits), Err(AdmissionError::Plan(_))));
+        assert!(matches!(
+            graph.admit(&limits),
+            Err(AdmissionError::CloudPlacementRemoved)
+        ));
+        let candidate = admit_candidate(&graph, None, &[], &limits, &Default::default(), None)
+            .err()
+            .expect("cloud placement must be refused");
+        assert!(matches!(candidate, CandidateError::CloudPlacementRemoved));
+        for refusal in [
+            crate::coordination::facade::FacadeError::graph_admission(
+                graph.admit(&limits).unwrap_err(),
+            ),
+            crate::coordination::facade::FacadeError::graph_candidate(candidate),
+        ] {
+            assert_eq!(
+                refusal.diagnostic().detail.as_deref(),
+                Some(CLOUD_PLACEMENT_REMOVED)
+            );
+        }
         // Replay must plan, so the node reaches launch and blocks with the
         // typed refusal instead of failing every advance.
         assert!(validate_replay_plan(&graph, &limits).is_ok(), "{field}");

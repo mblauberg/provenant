@@ -829,6 +829,8 @@ pub enum AdmissionError {
     Composite(String),
     #[error("{0}")]
     Plan(String),
+    #[error("{CLOUD_PLACEMENT_REMOVED}")]
+    CloudPlacementRemoved,
     #[error("node {node}: dependency cycle")]
     Cycle { node: refusal::GraphIdentifier },
     #[error("node {node}: writer worktree")]
@@ -899,7 +901,7 @@ impl GraphDocument {
                 .as_ref()
                 .is_some_and(AttemptSpec::names_cloud_placement)
         }) {
-            return Err(AdmissionError::Plan(CLOUD_PLACEMENT_REMOVED.into()));
+            return Err(AdmissionError::CloudPlacementRemoved);
         }
         let (plan, _) = validate_flat_plan(&expanded, &expansion_limits)?;
         if let Some(reason) = structural_limit(&expanded, &plan, limits) {

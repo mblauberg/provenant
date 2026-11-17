@@ -889,6 +889,9 @@ impl FacadeError {
             CandidateError::Plan => {
                 Self::graph_admission(crate::graph::AdmissionError::Plan(String::new()))
             }
+            CandidateError::CloudPlacementRemoved => {
+                Self::invalid(InvalidInputDetail::CloudPlacementRemoved)
+            }
             CandidateError::Checkpoint => Self::StateCorrupt,
             CandidateError::CheckpointTopology { node, invariant } => Self::StateCorruptDetail {
                 detail: format!("graph checkpoint node {node}: {invariant}"),
@@ -945,6 +948,9 @@ impl FacadeError {
     pub fn graph_admission(error: crate::graph::AdmissionError) -> Self {
         use crate::graph::AdmissionError;
         let fact = match &error {
+            AdmissionError::CloudPlacementRemoved => {
+                return Self::invalid(InvalidInputDetail::CloudPlacementRemoved);
+            }
             AdmissionError::Schema(_) => DispatchRefusalFact::GraphSchema,
             AdmissionError::Composite(_) => DispatchRefusalFact::GraphComposite,
             AdmissionError::Plan(reason) => reason

@@ -84,7 +84,20 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
 fn patch_refused(error: provenant_fabric_runtime::graph::patch::PatchError) -> ServiceError {
     use provenant_fabric_runtime::coordination::facade::InvalidInputDetail;
     if let Some(candidate) = error.candidate.clone() {
-        return ServiceError::Facade(FacadeError::graph_candidate(*candidate));
+        return ServiceError::Facade(match *candidate {
+            provenant_fabric_runtime::graph::CandidateError::Secret(cause) => {
+                FacadeError::GraphRelayRefused {
+                    refusal_code: "secret".into(),
+                    detail: Some(InvalidInputDetail::GraphRelayCause(
+                        provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
+                            field: cause.field,
+                            rule: cause.rule,
+                        },
+                    )),
+                }
+            }
+            other => FacadeError::graph_candidate(other),
+        });
     }
     if let (Some(field), Some(rule)) = (error.field.clone(), error.rule) {
         return ServiceError::Facade(FacadeError::GraphRelayRefused {
