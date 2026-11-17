@@ -716,7 +716,7 @@ fn factory_mode(
     })
 }
 
-mod graph_execution;
+pub(crate) mod graph_execution;
 use graph_execution::*;
 pub(crate) use graph_execution::{Announce, tick_graphs, tick_launch_retry};
 
@@ -1061,6 +1061,3 @@ mod test_presentation {
         }
     }
 }
-
-#[cfg(test)]
-pub(crate) use graph_execution::scheduler_task;

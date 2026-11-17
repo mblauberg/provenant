@@ -1794,7 +1794,7 @@ mod tests {
             let (release, resume) = mpsc::channel();
             // Hold the execution at preparation, using the exact scheduler
             // lifetime factory used by tick_launch_retry, until observation ends.
-            let receipt = crate::fabric::scheduler_task(move |cancel| {
+            let receipt = crate::fabric::graph_execution::scheduler_task(move |cancel| {
                 preparing.send(()).unwrap();
                 resume.recv_timeout(Duration::from_secs(5)).unwrap();
                 assert!(
