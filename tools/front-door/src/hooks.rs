@@ -1272,6 +1272,21 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
         resolved.roots.state.as_path(),
         |runtime, executor, budget, cancel| {
             let repo = runtime.open_read_repo(executor, &project, budget, cancel)?;
+            let project_id = runtime
+                .project_location(executor, &project, budget, cancel)
+                .ok()
+                .and_then(|location| {
+                    provenant_config::lookup_project(&resolved.roots, &location.location)
+                        .ok()
+                        .flatten()
+                })
+                .map(|binding| binding.project_id().to_string());
+            // Without a registered project, the hook has only host policy.
+            let policy = provenant_config::policy::read(
+                resolved.roots.state.as_path(),
+                project_id.as_deref().unwrap_or(""),
+                &Default::default(),
+            );
             // The default-branch check contacts the remote and needs a network budget.
             let budget = UtilityBudget::bounded(Duration::from_secs(30))?;
             let result = PushContext {
@@ -1280,6 +1295,7 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
                 executor,
                 budget,
                 cancel,
+                policy: &policy,
                 check_conflict_markers,
             }
             .check(remote, &updates);
