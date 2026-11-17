@@ -6,6 +6,57 @@ fn stored() -> Value {
     serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap()
 }
 
+// Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
+#[test]
+fn deployed_2_0_5_checkpoint_and_external_prompts_still_read() {
+    const CHECKPOINT: &[u8] = include_bytes!("../fixtures/checkpoint-2.0.5/graph-smoke205-ro.json");
+    let value: Value = serde_json::from_slice(CHECKPOINT).unwrap();
+    let graph_id = value["checkpoint"]["graph_id"].as_str().unwrap();
+    let fixture_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fixtures/checkpoint-2.0.5");
+    let temp = crate::test_support::tempdir().unwrap();
+
+    // The checked-in fixture keeps the original envelope and every content-
+    // addressed prompt blob byte-for-byte from the deployed 2.0.5 graph.
+    let mut blobs = std::collections::BTreeSet::new();
+    for digest in value["stored_text"].as_object().unwrap().values() {
+        let digest = digest.as_str().unwrap();
+        if blobs.insert(digest.to_owned()) {
+            let name = format!("graph-{graph_id}.prompt-{digest}");
+            let bytes = std::fs::read(fixture_dir.join(&name)).unwrap();
+            assert_eq!(
+                provenant_confinement::redact::known_shapes(&bytes).unwrap(),
+                bytes,
+                "fixture blob contains credential-shaped text"
+            );
+            std::fs::write(temp.path().join(name), bytes).unwrap();
+        }
+    }
+    assert_eq!(
+        provenant_confinement::redact::known_shapes(CHECKPOINT).unwrap(),
+        CHECKPOINT,
+        "fixture checkpoint contains credential-shaped text"
+    );
+
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    let stored = decode_checkpoint_in(&directory, CHECKPOINT, graph_id).unwrap();
+    assert_eq!(stored.schema_version, 2);
+    assert_eq!(stored.execution.document.graph_id, graph_id);
+    let (plan, _) = validate_plan_with_limits(&stored.execution.document, &Default::default())
+        .expect("deployed document remains valid");
+    let plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
+        .unwrap()
+        .to_string();
+    assert_eq!(stored.checkpoint.plan_digest, plan_digest);
+    validate_checkpoint::<std::convert::Infallible, JournalError>(
+        &stored.execution.document,
+        &stored.checkpoint,
+        &plan,
+        &plan_digest,
+    )
+    .expect("deployed checkpoint still validates");
+}
+
 #[test]
 fn review_schema_versions_and_stored_digests() {
     let fixture = stored();

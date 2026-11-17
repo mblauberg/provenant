@@ -1,0 +1,3 @@
+Caller brief: ${brief}
+
+Check dispositions against the code and group confirmed worthwhile findings by the invariant and shared root cause. Preserve exact qualified ids; every findings entry needs a top-level disposition and non-empty top-level reason, separate from triage.reason. Retain rejected findings in the record; send only grouped checked repair-eligible items to a writer.

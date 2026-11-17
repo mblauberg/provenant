@@ -71,6 +71,8 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
                                 | "detail"
                                 | "reason"
                                 | "question"
+                                | "expected"
+                                | "verdict_error"
                                 | "note"
                                 | "remaining"
                                 | "decisions"
@@ -102,6 +104,13 @@ pub(super) fn capture(
     capture.excerpt = text(&capture.excerpt)?;
     capture.tail = text(&capture.tail)?;
     capture.findings = capture.findings.as_deref().map(text).transpose()?;
+    capture.verdict = capture
+        .verdict
+        .as_deref()
+        .map(text)
+        .transpose()?
+        .map(String::into_boxed_str);
+    capture.verdict_cause = capture.verdict_cause.as_deref().map(text).transpose()?;
     capture.handoff = match &capture.handoff {
         Ok(handoff) => Ok(normalise(handoff)?),
         Err(error) => {
@@ -145,8 +154,10 @@ mod tests {
     fn captured_findings_and_handoff_use_the_same_normal_form() {
         let secret = "AKIAIOSFODNN7EXAMPLE";
         let mut input = crate::result_capture::ResultCapture::new(None);
-        input.push(format!("Result {secret}\n```findings\n{{\"schema_version\":1,\"findings\":[{{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"file.rs\",\"summary\":\"{secret}\",\"status\":\"open\"}}]}}\n```\n").as_bytes());
+        input.push(format!("VERDICT: {secret}\nResult {secret}\n```findings\n{{\"schema_version\":1,\"findings\":[{{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"file.rs\",\"summary\":\"{secret}\",\"status\":\"open\"}}]}}\n```\n").as_bytes());
         let mut input = input.finish();
+        assert_eq!(input.verdict.as_deref(), Some(secret));
+        input.verdict_cause = Some(format!("untrusted verdict diagnostic {secret}"));
         input.handoff = Ok(Some(
             serde_json::from_value(serde_json::json!({
                 "schema_version": 2, "status": "done", "note": secret,
@@ -156,6 +167,8 @@ mod tests {
         ));
         let safe = capture(&input).unwrap();
         assert_eq!(safe.digest, input.digest);
+        assert!(!safe.verdict.as_deref().unwrap().contains(secret));
+        assert!(!safe.verdict_cause.as_deref().unwrap().contains(secret));
         assert!(
             !serde_json::to_string(safe.handoff.as_ref().unwrap())
                 .unwrap()

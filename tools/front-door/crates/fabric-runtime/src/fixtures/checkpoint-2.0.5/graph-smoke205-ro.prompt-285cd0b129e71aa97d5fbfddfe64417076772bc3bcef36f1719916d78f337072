@@ -1,0 +1,3 @@
+Caller brief: ${brief}
+
+Check every finding against reachable code, its trigger, practical consequence and shared cause before any writer starts. Preserve its exact qualified id and evidence. Each findings entry needs a non-empty top-level reason explaining verification, separate from triage.reason. Confirm or reject with evidence, decide worth fixing, and name the invariant under repair.
