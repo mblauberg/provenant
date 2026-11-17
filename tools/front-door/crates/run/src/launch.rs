@@ -117,6 +117,8 @@ pub struct ContinuationDecodeContext<'a> {
     pub context: Option<&'a HolderContext>,
     /// The retained session that the child must prove it continued.
     pub expectation: Option<&'a ContinuationExpectation>,
+    /// The attempt request containing its sealed launch policy.
+    pub task: Option<&'a TaskRequest>,
 }
 
 pub struct PreparedLaunch {

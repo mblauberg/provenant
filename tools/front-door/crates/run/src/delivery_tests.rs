@@ -377,7 +377,12 @@ impl PrepareFixture {
             generation: 1,
             ..tests::exit().scope
         };
-        launch.snapshot(&state, &attempt, scope)?;
+        launch.snapshot(
+            &state,
+            &attempt,
+            scope,
+            &provenant_records::policy::Policy::default(),
+        )?;
         let binding = WriterBinding::from_verified(
             launch.worktree.repo().root_dir(),
             launch.worktree.repo().private_dir(),
@@ -452,6 +457,7 @@ impl PrepareFixture {
                 base,
                 None,
                 tip,
+                &provenant_records::policy::Policy::default(),
             )?;
             if advance_after_publish {
                 std::fs::write(self.writer.worktree.join("AGENTS.md"), "later writer\n")?;
@@ -503,8 +509,10 @@ impl PrepareFixture {
             &recovery,
             &mut settlement,
             crate::writer::TerminalPolicy {
+                enforcement: &provenant_records::policy::Policy::default(),
                 budget_stop,
-                ..Default::default()
+                preservation_stop: None,
+                work: None,
             },
         )?;
         let archive = attempt.open_verified_directory(OsStr::new("quarantine"))?;

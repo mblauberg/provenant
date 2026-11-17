@@ -965,7 +965,9 @@ mod tests {
     // Spec: docs/specs/routing.md#capacity-is-not-quota
     #[test]
     fn unknown_error_without_http_status_preserves_unclassified_message() {
-        let mut stream = OpenCode.stream(None).unwrap();
+        let mut stream = OpenCode
+            .stream(None, &provenant_records::policy::Policy::default())
+            .unwrap();
         let events = OpenCode.observe(&mut stream, b"{\"type\":\"error\",\"error\":{\"type\":\"unknown\",\"message\":\"fixture failure\"}}\n").unwrap();
         assert!(events.contains(&E::Unclassified {
             message: "fixture failure".into()
@@ -1114,7 +1116,9 @@ mod tests {
 
     #[test]
     fn unavailable_model_is_a_typed_refusal() {
-        let mut stream = OpenCode.stream(None).unwrap();
+        let mut stream = OpenCode
+            .stream(None, &provenant_records::policy::Policy::default())
+            .unwrap();
         let mut events = Vec::new();
         for chunk in
             include_bytes!("../../../tests/fixtures/providers/opencode/model-unavailable.jsonl")
@@ -1264,7 +1268,9 @@ mod tests {
 
             let observed_session = match case.source {
                 ModelSource::Stream(bytes) => {
-                    let mut stream = OpenCode.stream(None).unwrap();
+                    let mut stream = OpenCode
+                        .stream(None, &provenant_records::policy::Policy::default())
+                        .unwrap();
                     for chunk in bytes.chunks(17) {
                         OpenCode.observe(&mut stream, chunk).unwrap();
                     }
@@ -1377,7 +1383,9 @@ mod tests {
             (true, false, None, false, OutcomeStatus::Failed),
             (true, false, Some(0), true, OutcomeStatus::Partial),
         ] {
-            let mut stream = OpenCode.stream(None).unwrap();
+            let mut stream = OpenCode
+                .stream(None, &provenant_records::policy::Policy::default())
+                .unwrap();
             let mut events = Vec::new();
             let raw = if answer {
                 FINAL_TEXT_WITHOUT_FINISH
@@ -1403,7 +1411,9 @@ mod tests {
     fn final_text_does_not_hide_error_events() {
         let error = b"{\"type\":\"error\",\"error\":{\"type\":\"APIError\"}}\n";
         for error_first in [true, false] {
-            let mut stream = OpenCode.stream(None).unwrap();
+            let mut stream = OpenCode
+                .stream(None, &provenant_records::policy::Policy::default())
+                .unwrap();
             let text = FINAL_TEXT_WITHOUT_FINISH.as_bytes();
             let parts = if error_first {
                 [error.as_slice(), text]
@@ -1576,7 +1586,7 @@ mod tests {
             &input,
             Access::ReadOnly,
             Session::Fresh,
-            OpenCode.stream(None)?,
+            OpenCode.stream(None, &provenant_records::policy::Policy::default())?,
         )?;
         let tool = spec
             .prepared_tools()
@@ -1814,7 +1824,7 @@ mod tests {
             &input,
             Access::ReadOnly,
             Session::Fresh,
-            OpenCode.stream(None)?,
+            OpenCode.stream(None, &provenant_records::policy::Policy::default())?,
         )?;
         let requirement = spec
             .prepared_tools()
@@ -1949,7 +1959,9 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
                 &input,
                 Access::ReadOnly,
                 Session::Fresh,
-                OpenCode.stream(None).unwrap(),
+                OpenCode
+                    .stream(None, &provenant_records::policy::Policy::default())
+                    .unwrap(),
             )
             .unwrap();
             let expected = expected_parents
@@ -2003,7 +2015,9 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
             &input,
             Access::ReadOnly,
             Session::Fresh,
-            OpenCode.stream(None).unwrap(),
+            OpenCode
+                .stream(None, &provenant_records::policy::Policy::default())
+                .unwrap(),
         )
         .unwrap();
         let path = &spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
@@ -2013,7 +2027,9 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
             &input,
             Access::WorktreeWrite,
             Session::Fresh,
-            OpenCode.stream(None).unwrap(),
+            OpenCode
+                .stream(None, &provenant_records::policy::Policy::default())
+                .unwrap(),
         )
         .expect("OpenCode's provider builder leaves Git wrapper setup to shared finalisation");
         assert_eq!(
@@ -2044,7 +2060,9 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
             &input,
             Access::WorktreeWrite,
             Session::Fresh,
-            OpenCode.stream(None).unwrap(),
+            OpenCode
+                .stream(None, &provenant_records::policy::Policy::default())
+                .unwrap(),
         )
         .unwrap();
         let path = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
@@ -2070,7 +2088,9 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
             &input,
             Access::WorktreeWrite,
             Session::Fresh,
-            OpenCode.stream(None).unwrap(),
+            OpenCode
+                .stream(None, &provenant_records::policy::Policy::default())
+                .unwrap(),
         )
         .unwrap();
         let path = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
@@ -2187,7 +2207,9 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
                 &input,
                 access,
                 Session::Fresh,
-                OpenCode.stream(None).unwrap(),
+                OpenCode
+                    .stream(None, &provenant_records::policy::Policy::default())
+                    .unwrap(),
             )
             .unwrap();
             for step in &spec.setup {
@@ -2294,7 +2316,9 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
             &input,
             Access::ReadOnly,
             Session::Fresh,
-            OpenCode.stream(None).unwrap(),
+            OpenCode
+                .stream(None, &provenant_records::policy::Policy::default())
+                .unwrap(),
         )
         .unwrap();
         let env = |key: &str| {
@@ -2324,7 +2348,9 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
             &custom,
             Access::ReadOnly,
             Session::Fresh,
-            OpenCode.stream(None).unwrap(),
+            OpenCode
+                .stream(None, &provenant_records::policy::Policy::default())
+                .unwrap(),
         )
         .unwrap();
         assert!(

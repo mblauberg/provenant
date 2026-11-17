@@ -2380,7 +2380,7 @@ fn full_database_retains_admission_and_recovers_original_terminal_intent() -> Te
     Ok(())
 }
 
-fn seal_exit_fixture(store: &RunStore, input: &PreparedRun) -> TestResult {
+pub(super) fn seal_exit_fixture(store: &RunStore, input: &PreparedRun) -> TestResult {
     seal_observation(store, input, &exit())
 }
 

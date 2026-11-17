@@ -103,6 +103,19 @@ fi
 grep -F 'fragment is empty' "$tmp/err" > /dev/null
 rm -f "$dir/empty.md"
 
+# A patch cut with breaking changes warns that it needs a minor release; a
+# minor cut does not.
+rm -f "$dir"/*.md
+printf 'Intro.\n' > "$dir/_intro.md"
+printf '## Breaking changes\n\n- Removed a flag.\n' > "$dir/a.md"
+"$script" v9.9.1 2> "$tmp/err"
+grep -F 'patch release but has breaking changes' "$tmp/err" > /dev/null
+printf 'Intro.\n' > "$dir/_intro.md"
+printf '## Breaking changes\n\n- Removed a flag.\n' > "$dir/a.md"
+"$script" v9.10.0 2> "$tmp/err"
+if grep -F 'patch release' "$tmp/err" > /dev/null; then exit 1; fi
+rm -f docs/release-notes/v9.9.1.md docs/release-notes/v9.10.0.md
+
 # A release cut records one milestone when a session is known, and a missing
 # logger cannot turn a completed cut into a failure.
 rm -f "$dir"/*.md

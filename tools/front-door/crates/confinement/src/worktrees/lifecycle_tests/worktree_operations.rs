@@ -278,13 +278,17 @@ fn clean_linked_worktree_reports_and_retains_in_progress_git_operations()
     )?;
     let verified = verify_worktree(&fixture.repo, &created.path)?;
     check_writer_terminal(verified.repo())?;
+    let stale_rebase = verified.repo().private_git_dir().join("REBASE_HEAD");
+    fs::write(&stale_rebase, format!("{}\n", created.head))?;
+    check_writer_terminal(verified.repo())?;
+    fs::remove_file(stale_rebase)?;
     for (marker, directory) in [
         ("CHERRY_PICK_HEAD", false),
         ("REVERT_HEAD", false),
-        ("REBASE_HEAD", false),
         ("rebase-merge", true),
         ("rebase-apply", true),
         ("MERGE_HEAD", false),
+        ("BISECT_START", false),
         ("sequencer", true),
     ] {
         let marker_path = verified.repo().private_git_dir().join(marker);

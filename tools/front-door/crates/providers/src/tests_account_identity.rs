@@ -42,7 +42,7 @@ fn replay_live(
         Some(fresh) => Some(adapter.continuation(&replay(adapter, fresh, EXIT)?.1, &route, "g")?),
         None => None,
     };
-    let mut state = adapter.stream(continuation.as_ref())?;
+    let mut state = adapter.stream(continuation.as_ref(), &provenant_records::policy::Policy::default())?;
     for chunk in bytes.as_bytes().chunks(17) {
         adapter.observe(&mut state, chunk)?;
     }
@@ -147,11 +147,11 @@ fn resumed_stream_rejects_session_or_answering_model_changes() -> Result<(), Pro
         b"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"changed\",\"model\":\"selector\"}\n".as_slice(),
         b"{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"changed\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]},\"session_id\":\"FIXTURE_SESSION_IDENTIFIER_004\",\"parent_tool_use_id\":null}\n{\"type\":\"result\",\"session_id\":\"FIXTURE_SESSION_IDENTIFIER_004\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"answer\"}\n".as_slice(),
     ] {
-        let mut stream = claude::Claude.stream(Some(&continuation))?;
+        let mut stream = claude::Claude.stream(Some(&continuation), &provenant_records::policy::Policy::default())?;
         assert!(matches!(claude::Claude.observe(&mut stream, changed), Err(ProviderError::IdentityMismatch)));
         assert_eq!(claude::Claude.finish(stream, EXIT)?.status(), OutcomeStatus::Malformed);
     }
-    let mut stream = claude::Claude.stream(Some(&continuation))?;
+    let mut stream = claude::Claude.stream(Some(&continuation), &provenant_records::policy::Policy::default())?;
     claude::Claude.observe(
         &mut stream,
         fixture!("claude/direct-model.jsonl").as_bytes(),
@@ -165,7 +165,7 @@ fn resumed_stream_rejects_session_or_answering_model_changes() -> Result<(), Pro
         ContinuationField, ContinuationGuard, ContinuationIssue, ContinuationRule,
     };
     assert!(matches!(
-        cursor::Cursor.stream(Some(&continuation)),
+        cursor::Cursor.stream(Some(&continuation), &provenant_records::policy::Policy::default()),
         Err(ProviderError::ContinuationRefused(ContinuationGuard {
             rule: ContinuationRule::Contract,
             field: ContinuationField::Provider,
@@ -177,7 +177,7 @@ fn resumed_stream_rejects_session_or_answering_model_changes() -> Result<(), Pro
 
 #[test]
 fn structured_http_auth_failure_is_not_generic_error_or_success() -> Result<(), ProviderError> {
-    let mut state = claude::Claude.stream(None)?;
+    let mut state = claude::Claude.stream(None, &provenant_records::policy::Policy::default())?;
     claude::Claude.observe(&mut state, b"{\"type\":\"result\",\"session_id\":\"fixture\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"api_error_status\":401,\"result\":\"OAuth access token has expired\"}\n")?;
     assert_eq!(
         claude::Claude.account(&state)?,

@@ -45,7 +45,12 @@ impl Fixture {
         // environment mutation or access to real config/state.
         inputs.environment_state_dir = Some(base.join("state"));
         let roots = inputs.resolve(&IdentityPathResolver).unwrap();
-        let targets = Targets::new(roots, &home, &[Harness::Codex]);
+        let targets = Targets::new(
+            roots,
+            &home,
+            &[Harness::Codex],
+            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+        );
         Self {
             _tmp: tmp,
             base,
@@ -149,6 +154,42 @@ struct Smoke;
 #[path = "account_sync_tests.rs"]
 mod account_sync;
 
+// Spec: docs/specs/state.md#config-never-widens-authority
+#[test]
+fn targets_retain_supplied_project_policy() {
+    use provenant_records::policy::{Source, Strength};
+    let fixture = Fixture::new();
+    let mut settings = crate::policy::Settings::default();
+    settings.projects.insert(
+        "project".into(),
+        crate::policy::Project {
+            rules: std::collections::BTreeMap::from([(
+                "INSTALL_HOOKS_UNAVAILABLE".into(),
+                Strength::Refuse,
+            )]),
+        },
+    );
+    let policy = std::sync::Arc::new(settings.resolve("project", &Default::default()));
+    let targets = Targets::new(
+        fixture.targets.roots.clone(),
+        &fixture.home,
+        &[Harness::Codex],
+        policy,
+    );
+    assert_eq!(
+        targets
+            .policy
+            .rule("INSTALL_HOOKS_UNAVAILABLE")
+            .rule
+            .strength,
+        Strength::Refuse
+    );
+    assert_eq!(
+        targets.policy.rule("INSTALL_HOOKS_UNAVAILABLE").source,
+        Source::Project
+    );
+}
+
 #[test]
 fn first_install_cleans_declared_legacy_names_and_foreign_release_links() {
     let mut f = Fixture::new();
@@ -170,6 +211,7 @@ fn first_install_cleans_declared_legacy_names_and_foreign_release_links() {
             Harness::Agy,
             Harness::Opencode,
         ],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
     );
     let release = f.release();
     let old_root = f
@@ -429,8 +471,13 @@ fn peer_agent_accepts_a_symlinked_home() {
 #[test]
 fn uninstall_prunes_empty_managed_hook_groups() {
     let mut f = Fixture::new();
-    f.targets.harnesses =
-        Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
+    f.targets.harnesses = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Claude],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    )
+    .harnesses;
     f.targets.hooks = true;
     f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let clock = SystemClock::new();
@@ -452,8 +499,13 @@ fn uninstall_prunes_empty_managed_hook_groups() {
 #[test]
 fn uninstall_keeps_hook_siblings_and_groups_with_extra_keys() {
     let mut f = Fixture::new();
-    f.targets.harnesses =
-        Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
+    f.targets.harnesses = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Claude],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    )
+    .harnesses;
     f.targets.hooks = true;
     f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let clock = SystemClock::new();
@@ -507,8 +559,13 @@ fn uninstall_keeps_hook_siblings_and_groups_with_extra_keys() {
 #[test]
 fn install_keeps_the_settings_indent_and_leaves_unchanged_settings_alone() {
     let mut f = Fixture::new();
-    f.targets.harnesses =
-        Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
+    f.targets.harnesses = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Claude],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    )
+    .harnesses;
     f.targets.hooks = true;
     f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     fs::create_dir_all(f.home.join(".claude")).unwrap();
@@ -546,6 +603,7 @@ fn missing_peer_and_tick_agents_wait_for_the_last_harness() {
             f.targets.roots.clone(),
             &f.home,
             &[Harness::Claude, Harness::Codex],
+            std::sync::Arc::new(provenant_records::policy::Policy::default()),
         )
         .harnesses;
         let clock = SystemClock::new();
@@ -623,7 +681,12 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
     let roots = RootInputs::new(moved_home.clone(), f.base.join("checkout"))
         .resolve(&IdentityPathResolver)
         .unwrap();
-    let mut targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
+    let mut targets = Targets::new(
+        roots,
+        &moved_home,
+        &[Harness::Codex],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     targets.peer_agent = Some(b"new home plist\n".to_vec());
     let plist = peer_agent_plist(targets.roots.state.as_path()).unwrap();
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
@@ -767,6 +830,7 @@ fn home_rename_with_custom_state_layout_preserves_old_home_canaries() {
                 inputs.resolve(&IdentityPathResolver).unwrap(),
                 &moved_home,
                 &[Harness::Codex],
+                std::sync::Arc::new(provenant_records::policy::Policy::default()),
             );
             // A --bin-dir install flag is not available to uninstall.
             let inspection =
@@ -818,6 +882,7 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
         f.targets.roots.clone(),
         &f.home,
         &[Harness::Claude, Harness::Codex],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
     )
     .harnesses;
     // A mixed target must lose its outside-home selector ownership too when
@@ -833,7 +898,12 @@ fn direct_reinstall_after_home_rename_drops_old_targets() {
     let old_receipt = read_receipt(&f.targets).unwrap().unwrap();
     let moved_home = f.base.join("home-moved");
     fs::rename(&f.home, &moved_home).unwrap();
-    let mut targets = Targets::new(f.targets.roots.clone(), &moved_home, &[Harness::Codex]);
+    let mut targets = Targets::new(
+        f.targets.roots.clone(),
+        &moved_home,
+        &[Harness::Codex],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     targets.adopt_existing = true;
     targets.hook_specs = f.targets.hook_specs.clone();
     // State stayed outside the home, so these links still resolve. The old
@@ -910,7 +980,12 @@ fn check_after_home_rename_never_inspects_old_config_paths() {
     let roots = RootInputs::new(moved_home.clone(), f.base.join("checkout"))
         .resolve(&IdentityPathResolver)
         .unwrap();
-    let targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
+    let targets = Targets::new(
+        roots,
+        &moved_home,
+        &[Harness::Codex],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
     assert!(inspection.error.is_none(), "{:?}", inspection.error);
     assert!(
@@ -973,7 +1048,12 @@ fn partial_uninstall_after_home_rename_retains_unselected_stale_entries() {
     let roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
         .resolve(&IdentityPathResolver)
         .unwrap();
-    f.targets = Targets::new(roots, &f.home, &[Harness::Claude, Harness::Codex]);
+    f.targets = Targets::new(
+        roots,
+        &f.home,
+        &[Harness::Claude, Harness::Codex],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     f.targets.peer_agent = Some(b"old home plist\n".to_vec());
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -984,7 +1064,12 @@ fn partial_uninstall_after_home_rename_retains_unselected_stale_entries() {
     let roots = RootInputs::new(moved_home.clone(), f.base.join("checkout"))
         .resolve(&IdentityPathResolver)
         .unwrap();
-    let targets = Targets::new(roots, &moved_home, &[Harness::Codex]);
+    let targets = Targets::new(
+        roots,
+        &moved_home,
+        &[Harness::Codex],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     let mut environment_targets = targets.clone();
     environment_targets.environment_homes.insert(Harness::Codex);
     let result = uninstall(&environment_targets, &ctx, &mut Reporter::default()).unwrap();
@@ -1174,8 +1259,13 @@ fn peer_and_tick_agents_are_removed_only_on_an_exact_match() {
 #[test]
 fn inherited_hook_refresh_tracks_event_identity_and_removes_the_old_leaf() {
     let mut f = Fixture::new();
-    f.targets.harnesses =
-        Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
+    f.targets.harnesses = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Claude],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    )
+    .harnesses;
     f.targets.hooks = true;
     f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let clock = SystemClock::new();
@@ -1222,8 +1312,13 @@ fn inherited_hook_refresh_tracks_event_identity_and_removes_the_old_leaf() {
 fn edited_inherited_hook_is_relinquished_but_explicit_on_names_recovery() {
     for (edit_command, move_bin) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut f = Fixture::new();
-        f.targets.harnesses =
-            Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]).harnesses;
+        f.targets.harnesses = Targets::new(
+            f.targets.roots.clone(),
+            &f.home,
+            &[Harness::Claude],
+            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+        )
+        .harnesses;
         f.targets.hooks = true;
         f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
         let clock = SystemClock::new();
@@ -3365,7 +3460,12 @@ fn install_refuses_a_binary_whose_version_identity_differs_from_manifest() {
 #[test]
 fn declared_hooks_render_and_symlinked_configs_refuse_before_any_write() {
     let mut f = Fixture::new();
-    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
+    f.targets = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Claude],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     f.targets.hooks = true;
     let release = f.release();
     assert!(Snapshots::capture(&release, &f.targets).is_ok());
@@ -3375,7 +3475,12 @@ fn declared_hooks_render_and_symlinked_configs_refuse_before_any_write() {
         f.targets.validate(),
         Err(InstallError::HooksUnavailable)
     ));
-    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
+    f.targets = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Opencode],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     let config = f.targets.harnesses[0].config_file.clone();
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     let regular = f.home.join("foreign.jsonc");
@@ -3403,6 +3508,7 @@ fn five_client_install_preserves_foreign_hooks_comments_and_reapplies() {
             Harness::Agy,
             Harness::Opencode,
         ],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
     );
     for target in &f.targets.harnesses {
         fs::create_dir_all(&target.skills_dir).unwrap();
@@ -3479,7 +3585,12 @@ fn hook_installation_uses_declared_protocols_and_owns_the_plugin_artifact() {
         .filter(|spec| spec.install.is_some())
         .map(|spec| spec.id)
         .collect();
-    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &harnesses);
+    f.targets = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &harnesses,
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     f.targets.hooks = true;
     fs::create_dir_all(f.source.join("instructions")).unwrap();
     let instruction = f.source.join("instructions/AGENTS.md");
@@ -3573,7 +3684,12 @@ fn hook_installation_uses_declared_protocols_and_owns_the_plugin_artifact() {
 #[test]
 fn edited_opencode_plugin_is_relinquished_and_preserved() {
     let mut f = Fixture::new();
-    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
+    f.targets = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Opencode],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     f.targets.hooks = true;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -3605,7 +3721,12 @@ fn edited_opencode_plugin_is_relinquished_and_preserved() {
 #[test]
 fn duplicate_owned_instruction_values_refuse_before_writes() {
     let mut f = Fixture::new();
-    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
+    f.targets = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Opencode],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     fs::create_dir_all(f.source.join("instructions")).unwrap();
     fs::write(
         f.source.join("instructions/AGENTS.md"),
@@ -3661,7 +3782,12 @@ fn explicit_user_install_paths_win_over_harness_environment_even_when_default() 
 #[test]
 fn claude_config_dir_moves_its_config_file() {
     let mut f = Fixture::new();
-    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
+    f.targets = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Claude],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     assert_eq!(
         f.targets.harnesses[0].config_file,
         f.home.join(".claude.json")
@@ -3673,7 +3799,12 @@ fn claude_config_dir_moves_its_config_file() {
         alternate.join(".claude.json")
     );
     assert_eq!(f.targets.harnesses[0].skills_dir, alternate.join("skills"));
-    let mut direct = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
+    let mut direct = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Claude],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     direct
         .apply_account_environment(Harness::Claude, &alternate)
         .unwrap();
@@ -3699,7 +3830,12 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
     fs::set_permissions(asset, fs::Permissions::from_mode(0o600)).unwrap();
     let (roots, home) = (f.targets.roots.clone(), f.home.clone());
     let claude = |dir: Option<&Path>| {
-        let mut targets = Targets::new(roots.clone(), &home, &[Harness::Claude]);
+        let mut targets = Targets::new(
+            roots.clone(),
+            &home,
+            &[Harness::Claude],
+            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+        );
         targets.hooks = true;
         targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
         targets.apply_environment(dir, None).unwrap();
@@ -3784,7 +3920,12 @@ fn claude_config_dirs_accumulate_and_uninstall_removes_only_the_selected_dir() {
 #[test]
 fn claude_settings_fixture_is_pretty_and_keeps_existing_key_order() {
     let mut f = Fixture::new();
-    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
+    f.targets = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Claude],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     f.targets.hooks = true;
     f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let settings = f.home.join(".claude/settings.json");
@@ -3995,7 +4136,12 @@ fn uninstall_without_receipt_reports_nothing_installed() {
 #[test]
 fn opencode_reapply_drops_old_release_and_keeps_receipt_ownership() {
     let mut f = Fixture::new();
-    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Opencode]);
+    f.targets = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Opencode],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     fs::create_dir_all(f.source.join("instructions")).unwrap();
     fs::write(f.source.join("instructions/AGENTS.md"), b"instructions").unwrap();
     let config = f.targets.harnesses[0].config_file.clone();
@@ -4157,7 +4303,12 @@ impl InstallReporter for Racing {
 }
 fn claude_fixture() -> Fixture {
     let mut f = Fixture::new();
-    f.targets = Targets::new(f.targets.roots.clone(), &f.home, &[Harness::Claude]);
+    f.targets = Targets::new(
+        f.targets.roots.clone(),
+        &f.home,
+        &[Harness::Claude],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     f.targets.hooks = true;
     f.targets.hook_specs = crate::hooks::registrations(&[Harness::Claude]);
     let settings = f.home.join(".claude/settings.json");

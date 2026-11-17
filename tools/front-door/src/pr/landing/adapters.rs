@@ -71,7 +71,7 @@ fn mutation_failed(error: Box<dyn std::error::Error>) -> LandingError {
         return LandingError::RefusedWith {
             cause,
             message: error.to_string(),
-            repair,
+            repair: repair.to_string(),
         };
     }
     if ["HTTP 405", "HTTP 409", "HTTP 422"]
@@ -455,6 +455,7 @@ fn pull_info(number: u64, pull: RestPull) -> PullRequestInfo {
             position: stack.position,
             base_branch: stack.base.branch,
         }),
+        draft: pull.draft,
     }
 }
 
@@ -1064,6 +1065,8 @@ impl Repo for GitRepo<'_> {
             "land",
             &self.project,
             &self.host_state,
+            // TODO(#3371 seam): caller owner supplies the operation-scoped policy.
+            std::sync::Arc::new(provenant_records::policy::Policy::default()),
         )
         .map_err(|error| LandingError::Refused(format!("prepare repository publisher: {error}")))?;
         let execution = forge

@@ -255,7 +255,13 @@ fn receipt_targets(
             warning = Some(format!(
                 "warning: configuration ignored for uninstall ({error}); removing recorded targets only"
             ));
-            let mut targets = Targets::new(environment.roots, &environment.home, harnesses);
+            // Uninstall is host-only, including its configuration fallback.
+            let policy = std::sync::Arc::new(provenant_config::policy::read(
+                environment.roots.state.as_path(),
+                "",
+                &Default::default(),
+            ));
+            let mut targets = Targets::new(environment.roots, &environment.home, harnesses, policy);
             targets
                 .apply_environment(
                     environment.claude_config.as_deref(),
@@ -807,7 +813,12 @@ fn orphaned_targets(
             if !record.harness.spec().account_config_dir {
                 return false;
             }
-            let mut defaults = Targets::new(environment.roots.clone(), &home, &[record.harness]);
+            let mut defaults = Targets::new(
+                environment.roots.clone(),
+                &home,
+                &[record.harness],
+                base.policy.clone(),
+            );
             let Some(default_dir) = defaults
                 .harnesses
                 .first()
@@ -981,7 +992,12 @@ fn detected_batches(
     directories.sort_by(|left, right| left.0.cmp(&right.0));
     for (directory, harness) in directories {
         let mut batch = base.clone();
-        let mut defaults = Targets::new(environment.roots.clone(), &environment.home, &[harness]);
+        let mut defaults = Targets::new(
+            environment.roots.clone(),
+            &environment.home,
+            &[harness],
+            base.policy.clone(),
+        );
         defaults
             .apply_account_environment(harness, &directory)
             .map_err(EdgeError::Install)?;
@@ -2231,7 +2247,12 @@ mod tests {
             claude_config: Some(home.join("environment")),
             codex_home: None,
         };
-        let mut base = Targets::new(roots, &home, &[]);
+        let mut base = Targets::new(
+            roots,
+            &home,
+            &[],
+            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+        );
         base.accounts.push(provenant_config::AccountHome {
             harness: Harness::Claude,
             label: "registered".into(),

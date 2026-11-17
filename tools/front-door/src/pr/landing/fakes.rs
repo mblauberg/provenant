@@ -9,6 +9,7 @@ pub struct FakeForge {
     pub shared_target: Option<std::rc::Rc<std::cell::RefCell<String>>>,
     pub move_after_merge: Option<(u64, String)>,
     pub pull_requests: BTreeMap<u64, PullRequestInfo>,
+    pub draft_after_gate: Option<(u64, std::rc::Rc<std::cell::Cell<bool>>)>,
     pub stacks: BTreeMap<u64, Vec<StackMember>>,
     pub heads: BTreeMap<u64, String>,
     pub head_reads: BTreeMap<u64, VecDeque<String>>,
@@ -49,10 +50,19 @@ impl Forge for FakeForge {
         Ok("fake-repository".into())
     }
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError> {
-        self.pull_requests
+        let mut pr = self
+            .pull_requests
             .get(&number)
             .cloned()
-            .ok_or_else(|| LandingError::Failed("missing pull request".into()))
+            .ok_or_else(|| LandingError::Failed("missing pull request".into()))?;
+        if self
+            .draft_after_gate
+            .as_ref()
+            .is_some_and(|(pr, flag)| *pr == number && flag.get())
+        {
+            pr.draft = true;
+        }
+        Ok(pr)
     }
     fn target_branch(&mut self) -> Result<String, LandingError> {
         Ok(self.target_branch.clone())
@@ -437,6 +447,7 @@ impl Repo for FakeRepo {
 pub struct FakeGate {
     pub results: VecDeque<GateEvidence>,
     pub observed: Vec<String>,
+    pub set_draft_on_gate: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     pub auto: bool,
     pub red_head: Option<String>,
     pub check_result: Option<GateResult>,
@@ -454,6 +465,9 @@ impl GateRunner for FakeGate {
         _poll_seconds: u64,
     ) -> Result<GateEvidence, LandingError> {
         self.observed.push(candidate.commit.clone());
+        if let Some(flag) = &self.set_draft_on_gate {
+            flag.set(true);
+        }
         if self.auto {
             let red = self
                 .red_head
@@ -551,6 +565,7 @@ mod tests {
                 state: PullRequestState::Open,
                 merged_commit: None,
                 stack: None,
+                draft: false,
             },
         );
         assert!(forge.merge(7, "head", MergeMethod::Merge).is_err());

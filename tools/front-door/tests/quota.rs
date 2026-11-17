@@ -948,6 +948,7 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
         });
         let records = [record];
         let admission = Admission {
+            policy: &provenant_records::policy::Policy::default(),
             policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
             now_unix_seconds: at,
             records: &records,

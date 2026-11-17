@@ -23,14 +23,14 @@ pub fn scan_snapshot(bytes: &[u8], known_secrets: &[Vec<u8>]) -> Result<(), Disc
         Redactor::new(known_secrets.iter().cloned()).map_err(DisclosureError::InvalidSecretSet)?;
     for chunk in bytes.chunks(BUFFER_SIZE) {
         redactor
-            .filter(chunk)
+            .filter(chunk, &mut |_| {})
             .map_err(|_| DisclosureError::SecretMatch)?;
         if redactor.has_redaction() {
             return Err(DisclosureError::SecretMatch);
         }
     }
     redactor
-        .finish()
+        .finish(&mut |_| {})
         .map_err(|_| DisclosureError::SecretMatch)?;
     if redactor.has_redaction() {
         return Err(DisclosureError::SecretMatch);

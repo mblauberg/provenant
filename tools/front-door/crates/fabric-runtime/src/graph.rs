@@ -1385,7 +1385,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     observed_ci: &mut std::collections::BTreeSet<String>,
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
     let worktree_layout = owner.worktree_layout();
-    let mut admission_policy = None::<provenant_records::policy::Policy>;
+    // Resolve once for this graph operation, before replay and expansion.
+    let admission_policy = owner.graph_admission_policy();
     let unbounded = crate::config::GraphLimits {
         nodes: usize::MAX,
         edges: usize::MAX,
@@ -2579,8 +2580,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let mut prepared_inputs = None;
                 if needs_record {
                     let cap = limits.node_prompt_bytes;
-                    let policy =
-                        admission_policy.get_or_insert_with(|| owner.graph_admission_policy());
                     match transitions::admit_attempt(
                         node_index,
                         &plan,
@@ -2588,7 +2587,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         &positions,
                         limits,
                         &effective_budget,
-                        policy,
+                        // Admission checks are graph-wide, so a node's dispatch
+                        // overrides never apply to them.
+                        &admission_policy,
                     ) {
                         transitions::Admission::Ready => {}
                         transitions::Admission::WriterBusy => break,

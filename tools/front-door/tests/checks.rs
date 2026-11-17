@@ -190,7 +190,12 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
     let roots = inputs.resolve(&Resolver)?;
-    let targets = Targets::new(roots, &rig.home, &[provenant_records::Harness::Codex]);
+    let targets = Targets::new(
+        roots,
+        &rig.home,
+        &[provenant_records::Harness::Codex],
+        std::sync::Arc::new(provenant_records::policy::Policy::default()),
+    );
     let snapshots = Snapshots::capture(&release, &targets)?;
     let plan = plan_install(release, targets, snapshots)?;
     let clock = SystemClock::new();

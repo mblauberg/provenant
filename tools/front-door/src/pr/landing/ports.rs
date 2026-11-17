@@ -11,6 +11,7 @@ pub struct PullRequestInfo {
     pub state: PullRequestState,
     pub merged_commit: Option<String>,
     pub stack: Option<StackMembership>,
+    pub draft: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StackMembership {

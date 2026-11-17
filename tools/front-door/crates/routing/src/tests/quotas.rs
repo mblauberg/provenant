@@ -641,6 +641,7 @@ fn go_partial_calibration_is_advisory_to_routing_and_admission()
             record.snapshot = Some(observation.snapshot.clone());
             let records = [record];
             let admission = Admission {
+                policy: &provenant_records::policy::Policy::default(),
                 policies: &policy,
                 now_unix_seconds: 100,
                 records: &records,

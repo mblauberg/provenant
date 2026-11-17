@@ -237,7 +237,17 @@ fn managed(roots: &provenant_core::Roots, home: &Path) -> (Vec<Managed>, Option<
         Ok(config) => config,
         Err(error) => return (Vec::new(), Some(error.to_string())),
     };
-    let mut targets = provenant_config::Targets::new(roots.clone(), home, &[]);
+    let mut targets = provenant_config::Targets::new(
+        roots.clone(),
+        home,
+        &[],
+        // Host inspection has no project binding.
+        std::sync::Arc::new(provenant_config::policy::read(
+            roots.state.as_path(),
+            "",
+            &Default::default(),
+        )),
+    );
     targets.accounts = provenant_cli::accounts::homes(&config.domains.accounts);
     targets.shared_settings = crate::install::shared_settings(&config.domains.accounts, home)
         .ok()
@@ -396,7 +406,9 @@ pub(crate) fn local(
     if let Some(warning) = legacy_agent_warning(home) {
         warnings.push(warning.into());
     }
-    match provenant_config::legacy_harness_selectors(roots, home, &registered_accounts) {
+    match provenant_config::legacy_harness_selectors(roots, home, &registered_accounts,
+        // Host inspection has no project binding.
+        std::sync::Arc::new(provenant_config::policy::read(roots.state.as_path(), "", &Default::default()))) {
         Ok(leftovers) if !leftovers.is_empty() => warnings.push(
             "obsolete Provenant Fabric entries remain in harness configuration; run the 2.0 install to remove them by name".into(),
         ),

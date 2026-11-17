@@ -47,6 +47,8 @@ pub struct PushContext<'a> {
     pub executor: &'a dyn Executor,
     pub budget: UtilityBudget,
     pub cancel: &'a CancelToken,
+    /// Effective project policy for this push and its outer warning handler.
+    pub policy: &'a provenant_records::policy::Policy,
     /// Literal conflict-marker detection is advisory and may be turned off.
     pub check_conflict_markers: bool,
 }
@@ -182,14 +184,31 @@ mod tests {
             &CancelToken::new(),
         )?;
         let cancel = CancelToken::new();
+        let mut settings = provenant_config::policy::Settings::default();
+        settings.projects.insert(
+            "project".into(),
+            provenant_config::policy::Project {
+                rules: std::collections::BTreeMap::from([(
+                    "PUSH_PATCH_EVIDENCE".into(),
+                    provenant_records::policy::Strength::Refuse,
+                )]),
+            },
+        );
+        let policy = settings.resolve("project", &Default::default());
         let context = PushContext {
             repo: &repo,
             runtime: &fixture.runtime,
             executor: &fixture.executor,
             budget: fixture.budget()?,
             cancel: &cancel,
+            policy: &policy,
             check_conflict_markers: true,
         };
+        // Spec: docs/specs/cli.md#pre-push-refuses-data-loss
+        assert_eq!(
+            context.policy.rule("PUSH_PATCH_EVIDENCE").rule.strength,
+            provenant_records::policy::Strength::Refuse,
+        );
         let update = PushUpdate {
             local: first,
             remote_ref: "refs/heads/topic".to_owned(),
@@ -226,6 +245,7 @@ mod tests {
             executor: &fixture.executor,
             budget: fixture.budget()?,
             cancel: &cancel,
+            policy: &provenant_records::policy::Policy::default(),
             check_conflict_markers: true,
         };
         let update = PushUpdate {
@@ -266,6 +286,7 @@ mod tests {
             executor: &fixture.executor,
             budget: fixture.budget()?,
             cancel: &cancel,
+            policy: &provenant_records::policy::Policy::default(),
             check_conflict_markers: true,
         };
         let update = PushUpdate {
