@@ -7149,6 +7149,8 @@ mod writer_recovery_tests {
                             .recover_writer_exit(directory, scope, &call)?
                             .ok_or("released custody must be recoverable")?;
                         recovery.prepare_settlement()?;
+                    } else {
+                        break;
                     }
                 }
                 let mut spawned = false;

@@ -2564,9 +2564,10 @@ impl Factory {
                                 .with_writer_registry(self.context.roots.state.as_path()),
                         );
                     }
-                    store
-                        .as_ref()
-                        .unwrap()
+                    let Some(opened) = store.as_ref() else {
+                        return Err(FacadeError::StateCorrupt);
+                    };
+                    opened
                         .fence_graph_retry(attempt, &key, &call)
                         .map_err(run_error)?;
                     archived.state = provenant_fabric_runtime::graph::AttemptState::Terminal;
@@ -3005,15 +3006,14 @@ fn retry_archived_attempts<'a>(
             .expansions
             .get(index)
             .is_some_and(|old| old.retired.is_none())
+            && let Some(retired) = expansion.retired.as_mut()
         {
-            if let Some(retired) = expansion.retired.as_mut() {
-                destinations.extend(
-                    retired
-                        .progress
-                        .iter_mut()
-                        .flat_map(|row| row.attempts.iter_mut().map(|attempt| (false, attempt))),
-                );
-            }
+            destinations.extend(
+                retired
+                    .progress
+                    .iter_mut()
+                    .flat_map(|row| row.attempts.iter_mut().map(|attempt| (false, attempt))),
+            );
         }
     }
     let mut archived = Vec::new();

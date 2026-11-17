@@ -352,8 +352,6 @@ fn writer_lock_contention_retries_the_same_attempt_after_release() {
 // Spec: docs/specs/run-launch.md#admission-and-custody
 #[test]
 fn repository_lock_contention_retries_while_a_sibling_runs() {
-    use crate::coordination::facade::FacadeError;
-
     let document = graph(vec![
         node("writer", route("first")),
         node("sibling", route("first")),
@@ -396,8 +394,6 @@ fn repository_lock_contention_retries_while_a_sibling_runs() {
 // Spec: docs/specs/run-launch.md#admission-and-custody
 #[test]
 fn cancellation_during_repository_lock_backoff_does_not_relaunch() {
-    use crate::coordination::facade::FacadeError;
-
     let document = graph(vec![node("writer", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
