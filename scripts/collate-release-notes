@@ -191,14 +191,14 @@ case "${1:-}" in
     ;;
   v[0-9]*.[0-9]*.[0-9]*)
     check
-    # Evolving consumer items change only in a minor release
+    # Breaking changes need a minor or major release
     # (docs/specs/consumer-contract.md#stability-tiers), so a patch cut with
-    # breaking changes is probably mis-versioned. Warn; the owner decides.
+    # them is probably mis-versioned. Warn; the owner decides.
     case "$1" in
       v*.*.0) ;;
       *)
         if [ "$(section_count '## Breaking changes')" -gt 0 ]; then
-          echo "collate-release-notes: warning: $1 is a patch release but has breaking changes; evolving items change only in a minor release (docs/specs/consumer-contract.md#stability-tiers)" >&2
+          echo "collate-release-notes: warning: $1 is a patch release but has breaking changes; breaking changes need a minor or major release (docs/specs/consumer-contract.md#stability-tiers)" >&2
         fi
         ;;
     esac

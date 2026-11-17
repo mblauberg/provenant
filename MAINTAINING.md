@@ -109,9 +109,9 @@ provenant check release \
   --head "$(git rev-parse --verify --end-of-options 'HEAD^{commit}')"
 ```
 
-A release whose notes have breaking changes is a minor release (X.Y.0), since
-evolving consumer items change only in a minor release
-([consumer contract](docs/specs/consumer-contract.md#stability-tiers));
+A release whose notes have breaking changes is never a patch: evolving
+consumer items change in a minor release and stable items only in a major one
+([consumer contract](docs/specs/consumer-contract.md#stability-tiers)).
 `scripts/collate-release-notes` warns on a patch cut that has them.
 
 Keep secrets, private paths and inappropriate third-party material out of
