@@ -1350,6 +1350,7 @@ impl TemplateLibrary {
     }
 
     fn unknown_name_message(&self, name: &str, base: Option<&str>) -> String {
+        let list_all = base.is_some();
         let (label, candidates): (String, Vec<&str>) = match base {
             Some(base) => (
                 format!("known {base} flavours"),
@@ -1363,7 +1364,11 @@ impl TemplateLibrary {
             ),
             None => ("known templates".into(), self.names().collect()),
         };
-        let suggestions = nearest_names(name, candidates);
+        let suggestions = if list_all {
+            candidates
+        } else {
+            nearest_names(name, candidates)
+        };
         if suggestions.is_empty() {
             format!("unknown template {name}; no close {label} names were found")
         } else {
