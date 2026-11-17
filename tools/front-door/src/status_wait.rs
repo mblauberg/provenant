@@ -79,12 +79,14 @@ fn terminal_data(
     targets: Vec<Value>,
     timed_out: bool,
     local_observation: Option<&str>,
+    warnings: &[String],
 ) -> Value {
     json!({
         "mode": mode.as_str(),
         "targets": targets,
         "timed_out": timed_out,
         "local_observation": local_observation,
+        "warnings": warnings,
     })
 }
 
@@ -1145,7 +1147,8 @@ pub(crate) fn run(
             Source::Pr { .. } => None,
         })
         .collect::<Vec<_>>();
-    let done = std::thread::scope(|scope| {
+    let warnings = std::sync::Mutex::new(Vec::<String>::new());
+    let done = std::thread::scope(|scope| -> std::io::Result<bool> {
         if !graph_indices.is_empty() {
             let sender = sender.clone();
             let edge = &edge;
@@ -1153,6 +1156,7 @@ pub(crate) fn run(
             let resolved = &resolved;
             let observation = Arc::clone(&observation);
             let cadence = &cadence;
+            let warnings = &warnings;
             let pending = graph_indices
                 .iter()
                 .copied()
@@ -1273,8 +1277,13 @@ pub(crate) fn run(
                                     u64::try_from(deadline.saturating_duration_since(Instant::now()).as_micros()).unwrap_or(u64::MAX),
                                 ));
                                 match crate::fabric::tick_launch_retry(resolved, project, &graph, workers, budget, &stop.cancel) {
-                                    Ok(report) => for error in report.errors { eprintln!("warning: launch retry could not advance: {error}"); },
-                                    Err(error) => eprintln!("warning: launch retry for {graph} could not advance: {error}"),
+                                    Ok(report) => if let Ok(mut warnings) = warnings.lock() {
+                                        warnings.extend(report.warnings);
+                                        warnings.extend(report.errors.into_iter().map(|error| format!("launch retry could not advance: {error}")));
+                                    },
+                                    Err(error) => if let Ok(mut warnings) = warnings.lock() {
+                                        warnings.push(format!("launch retry for {graph} could not advance: {error}"));
+                                    },
                                 }
                                 // A concurrent owner may hold the journal. Retry promptly without spinning.
                                 until_retry = until_retry.min(Duration::from_millis(250));
@@ -1396,7 +1405,7 @@ pub(crate) fn run(
                         next_remote_poll = Instant::now() + interval;
                     }
                 }
-            }).expect("start graph wait worker");
+            })?;
         }
         for (index, source) in sources.iter().enumerate() {
             if !matches!(source, Source::Pr { .. })
@@ -1457,8 +1466,20 @@ pub(crate) fn run(
         );
         stop.stop();
         drop(receiver);
-        done
+        Ok(done)
     });
+    let done = match done {
+        Ok(done) => done,
+        Err(error) => {
+            return crate::fail(
+                "wait",
+                Outcome::Error,
+                "IO",
+                &format!("start graph wait worker: {error}"),
+                globals,
+            );
+        }
+    };
     let mut final_session = None;
     let done = done
         || final_snapshot(
@@ -1515,6 +1536,10 @@ pub(crate) fn run(
     if !graph_indices.is_empty() {
         human.push_str(&format!("local observation: {observation}\n"));
     }
+    let warnings = warnings.into_inner().unwrap_or_default();
+    for warning in &warnings {
+        human.push_str(&format!("warning: {warning}\n"));
+    }
     crate::emit(
         &provenant_records::CommandResult::new(
             "wait",
@@ -1524,6 +1549,7 @@ pub(crate) fn run(
                 rows,
                 !done,
                 (!graph_indices.is_empty()).then_some(observation.as_str()),
+                &warnings,
             ),
         ),
         globals,
@@ -2076,7 +2102,7 @@ mod tests {
             (WaitMode::FailFast, "fail-fast"),
         ] {
             assert_eq!(mode_heading(mode), format!("wait mode: {label}\n"));
-            let data = terminal_data(mode, Vec::new(), false, None);
+            let data = terminal_data(mode, Vec::new(), false, None, &[]);
             assert_eq!(data["mode"], label);
             assert_eq!(data["timed_out"], false);
             assert!(data["local_observation"].is_null());

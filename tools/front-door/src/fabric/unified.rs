@@ -2708,15 +2708,14 @@ fn wait_remaining(
     }
 }
 
+type LocalLaunchRetry = (provenant_core::ProjectId, String, provenant_core::WallTime);
+
 /// Resolve the target's local graph and its earliest persisted launch retry.
 pub(crate) fn local_launch_retry(
     target: &provenant_cli::Target,
     edge: &provenant_cli::run::Edge<'_>,
     session: &mut Option<Context>,
-) -> Result<
-    Option<(provenant_core::ProjectId, String, provenant_core::WallTime)>,
-    Box<dyn std::error::Error>,
-> {
+) -> Result<Option<LocalLaunchRetry>, Box<dyn std::error::Error>> {
     if provenant_cli::fabric::in_lane() {
         return Ok(None);
     }

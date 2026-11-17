@@ -487,6 +487,15 @@ pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
     ) {
         return FacadeError::WriterLockBusy;
     }
+    if match &error {
+        provenant_run::RunError::Writer(writer) => writer.git_lock_contention(),
+        provenant_run::RunError::Filesystem(error) => {
+            provenant_confinement::worktrees::git_lock_file_collision(error)
+        }
+        _ => false,
+    } {
+        return FacadeError::WriterLockBusy;
+    }
     if let provenant_run::RunError::Writer(writer) = &error
         && let Some((operation, lock_failure)) = writer.mutation_failure()
     {

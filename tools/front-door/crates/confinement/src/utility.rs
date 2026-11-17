@@ -1385,6 +1385,22 @@ pub(crate) fn fetch_missing_remote_branch(
     })
 }
 
+/// Git reports lock contention in its own bounded stderr. Only lock-specific
+/// failures with a transient cause are retryable; permissions and other I/O
+/// failures remain terminal. No Git output is carried in the typed signal.
+pub fn git_lock_contention(stderr: &[u8]) -> bool {
+    let stderr = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    stderr.lines().any(|line| {
+        let lock = line.contains(".lock")
+            || line.contains("cannot lock")
+            || line.contains("could not lock")
+            || line.contains("unable to lock");
+        lock && (line.contains("file exists")
+            || line.contains("already exists")
+            || line.contains("resource busy"))
+    })
+}
+
 /// Bounded, sanitised Git stderr, shared by fetches and mutations.
 fn git_stderr_excerpt(bytes: &[u8]) -> String {
     crate::redact::bounded_line(&String::from_utf8_lossy(bytes), MAX_FETCH_STDERR)

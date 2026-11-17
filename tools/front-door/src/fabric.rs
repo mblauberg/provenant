@@ -96,6 +96,9 @@ fn graph_writer_initialisation_error(
     error: provenant_confinement::worktrees::WorktreeError,
 ) -> FacadeError {
     use provenant_confinement::worktrees::WorktreeError;
+    if error.git_lock_contention() {
+        return FacadeError::WriterLockBusy;
+    }
     if let Some((operation, lock_failure)) = error.mutation_failure() {
         return FacadeError::GitMutationFailed {
             operation,

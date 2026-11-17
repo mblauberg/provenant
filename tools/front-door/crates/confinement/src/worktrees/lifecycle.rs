@@ -931,11 +931,7 @@ pub(super) fn execute_mutation(
     if exit_code(&outcome)? != 0 {
         // Classify bounded captured stderr, then discard it. Paths, config
         // values and credentials in Git's prose must never become error facts.
-        let stderr = String::from_utf8_lossy(&outcome.stderr.bytes).to_ascii_lowercase();
-        let lock_failure = stderr.contains("cannot lock")
-            || stderr.contains("could not lock")
-            || stderr.contains("unable to create") && stderr.contains(".lock")
-            || stderr.contains("unable to lock");
+        let lock_failure = crate::utility::git_lock_contention(&outcome.stderr.bytes);
         return Err(WorktreeError::MutationFailed {
             operation,
             lock_failure,

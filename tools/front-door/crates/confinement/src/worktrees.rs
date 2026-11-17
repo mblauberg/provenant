@@ -379,7 +379,47 @@ fn dirty_suffix(paths: &str) -> String {
     }
 }
 
+/// Recognise a transient collision only where the failing path identifies a
+/// Git lock. A permission error or an unrelated lock is not contention here.
+pub fn git_lock_file_collision(error: &provenant_os::fs::FsError) -> bool {
+    use provenant_os::fs::FsError;
+    let FsError::Io { path, source, .. } = error else {
+        return false;
+    };
+    let transient = matches!(
+        source.kind(),
+        std::io::ErrorKind::AlreadyExists
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::ResourceBusy
+    );
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let git_path = path.components().any(|part| {
+        let name = part.as_os_str().to_string_lossy();
+        name == ".git" || name.ends_with(".git") || name == "worktrees" || name == "refs"
+    });
+    transient
+        && git_path
+        && (matches!(
+            name,
+            "index.lock" | "packed-refs.lock" | "config.lock" | "HEAD.lock"
+        ) || name.ends_with(".lock")
+            && path.components().any(|part| part.as_os_str() == "refs"))
+}
+
 impl WorktreeError {
+    /// A direct filesystem collision on a Git lock path, kept distinct from
+    /// unrelated I/O errors. Git invocation failures use `mutation_failure`.
+    pub fn git_lock_contention(&self) -> bool {
+        match self {
+            Self::CreateFailed { cause, .. } => cause.git_lock_contention(),
+            Self::Filesystem(error) => git_lock_file_collision(error),
+            _ => false,
+        }
+    }
+
     pub fn mutation_failure(&self) -> Option<(GitMutationOperation, bool)> {
         match self {
             Self::MutationFailed {

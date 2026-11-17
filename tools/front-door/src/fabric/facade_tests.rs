@@ -1722,6 +1722,26 @@ fn failed_worktree_add_retains_safe_operation_and_lock_facts_through_relay()
         error.mutation_failure(),
         Some((GitMutationOperation::WorktreeAdd, true))
     );
+    // Git lock diagnostics become a typed retry signal; unrelated I/O remains terminal.
+    for (stderr, expected) in [
+        ("fatal: Unable to create '/repo/.git/worktrees/lane/index.lock': File exists.", true),
+        ("error: cannot lock ref 'refs/heads/lane': Unable to create '/repo/.git/refs/heads/lane.lock': File exists", true),
+        ("fatal: Unable to create '/repo/.git/packed-refs.lock': Resource busy", true),
+        ("fatal: Unable to create '/repo/.git/index.lock': Permission denied", false),
+        ("fatal: cannot create file: File exists", false),
+    ] {
+        assert_eq!(provenant_confinement::utility::git_lock_contention(stderr.as_bytes()), expected);
+    }
+    for (path, kind, expected) in [
+        (".git/worktrees/lane/index.lock", std::io::ErrorKind::AlreadyExists, true),
+        (".git/refs/heads/lane.lock", std::io::ErrorKind::WouldBlock, true),
+        (".git/packed-refs.lock", std::io::ErrorKind::PermissionDenied, false),
+        ("other-file", std::io::ErrorKind::AlreadyExists, false),
+        ("other/index.lock", std::io::ErrorKind::AlreadyExists, false),
+    ] {
+        let error = provenant_os::fs::FsError::Io { operation: "create", path: path.into(), source: std::io::Error::from(kind) };
+        assert_eq!(worktrees::git_lock_file_collision(&error), expected);
+    }
     let facade = graph_writer_initialisation_error("HEAD", error);
     let relayed = interface::relay_error(ServiceError::Facade(facade));
     assert!(matches!(
