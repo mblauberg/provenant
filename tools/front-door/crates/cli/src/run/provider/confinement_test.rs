@@ -338,6 +338,18 @@ fn registered_credential_roots_protect_lane_tokens_for_dedicated_and_shared_root
             }
             && root.scope == scope));
     }
+    let undeclared_dedicated = dedicated.join("undeclared.txt");
+    assert!(
+        roots
+            .refusal(&undeclared_dedicated, CredentialScope::Exact, true)
+            .is_some()
+    );
+    let undeclared_shared = shared.join("undeclared.txt");
+    assert!(
+        roots
+            .refusal(&undeclared_shared, CredentialScope::Exact, true)
+            .is_none()
+    );
     assert!(!roots.entries().iter().any(|root| root.path == shared
         && root.scope == CredentialScope::Subtree
         && root.source.starts_with("account registry:")));
@@ -361,5 +373,70 @@ fn unresolvable_registered_store_names_its_account() -> Result<(), Box<dyn std::
         .expect_err("dangling store must refuse");
     assert!(error.contains("claude/work"), "{error}");
     assert!(error.contains("provenant-lane-token"), "{error}");
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[test]
+fn host_declared_codex_home_equal_to_home_is_narrowed_and_admits_project_below_home()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::CredentialScope;
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let project = home.join("project");
+    let state = base.join("state");
+    for dir in [&home, &project, &state] {
+        std::fs::create_dir_all(dir)?;
+    }
+    let host = run::HostLaunchContext {
+        credential_roots: vec![provenant_core::CredentialRoot {
+            path: home.clone(),
+            scope: CredentialScope::Subtree,
+            source: "provider environment: CODEX_HOME".into(),
+            kind: provenant_core::CredentialKind::Store,
+        }],
+        ..run::HostLaunchContext::from_environment(&state, &project, PathBuf::from("git"))
+    };
+    let registry = Registry {
+        home: Some(&home),
+        cwd: Some(&project),
+        state_root: Some(&state),
+        host: Some(&host),
+        ..Registry::default()
+    };
+    let settings = provenant_providers::accounts::Settings::default();
+    let roots = credential_roots(&registry, &home, &settings, &[&project])?;
+    assert!(!roots.entries().iter().any(|r| r.path == home && r.scope == CredentialScope::Subtree));
+    assert!(roots.entries().iter().any(|r| r.path == home.join("auth.json") && r.scope == CredentialScope::Exact));
+    assert!(roots.entries().iter().any(|r| r.path == home.join("config.toml") && r.scope == CredentialScope::Exact));
+    let admission = crate::run::admit_source_root(
+        &project,
+        &state,
+        &project,
+        &roots,
+        crate::run::SourceAdmissionMode::Live,
+    );
+    assert!(admission.is_ok(), "project below home must be admitted, got: {admission:?}");
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+#[test]
+fn dangling_account_directory_that_is_also_the_source_root_refuses_naming_account()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let account = base.join("dangling-account");
+    std::fs::create_dir(&home)?;
+    std::os::unix::fs::symlink(base.join("nonexistent"), &account)?;
+    let settings: provenant_providers::accounts::Settings = serde_json::from_value(
+        serde_json::json!({"entries": {"work": {"adapter":"claude", "label":"work", "key":"work", "directory":account}}}),
+    )?;
+    let error = credential_roots(&Registry::default(), &home, &settings, &[&account])
+        .expect_err("dangling account directory that is also source root must refuse");
+    assert!(error.contains("claude/work"), "{error}");
+    assert!(error.contains("dangling-account"), "{error}");
     Ok(())
 }

@@ -198,8 +198,8 @@ Git-internal roots. Credential declarations name concrete resolved paths and
 their source: built-in secret stores, provider configuration and data stores,
 every registered account's stores and the resolved Cargo home's credential
 files. The core root table owns these declarations; state-root selection and
-lane grant validation consume it. Dedicated registered account directories retain
-subtree protection. A registered directory equal to HOME or containing a lane
+lane grant validation consume it. Dedicated credential directories retain
+subtree protection. A declared directory equal to HOME or containing or equal to a lane
 root uses exact adapter-declared and Provenant-owned account files instead,
 including Claude lane tokens and refresh locks; sibling profiles remain exact
 stores. File declarations retain exact scope.

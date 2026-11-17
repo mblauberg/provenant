@@ -13,57 +13,63 @@ pub(crate) fn credential_directories(
     std::iter::once(entry.directory.as_path()).chain(entry.directories.iter().map(PathBuf::as_path))
 }
 
+/// Resolve precise credential store paths for a directory declared for an adapter.
+pub(crate) fn exact_directory_credential_paths(
+    directory: &Path,
+    adapter: &str,
+    source_description: &str,
+) -> Result<Vec<PathBuf>, String> {
+    let fail = |reason: &str| {
+        format!(
+            "{source_description} at {} cannot be resolved precisely: {reason}",
+            directory.display()
+        )
+    };
+    let spec = provenant_records::AdapterSpec::get(adapter)
+        .ok_or_else(|| fail("adapter has no store declaration"))?;
+    if spec.credential_files.is_empty() {
+        return Err(fail("adapter declares no precise credential files"));
+    }
+    let mut paths = Vec::new();
+    for relative in spec.credential_files {
+        let path = Path::new(relative);
+        if path.as_os_str().is_empty()
+            || path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(fail(
+                "adapter credential path is not a precise relative file",
+            ));
+        }
+        paths.push(directory.join(path));
+    }
+    if adapter == "claude" {
+        paths.push(directory.join(provenant_providers::claude::LANE_TOKEN_FILE));
+        paths.push(directory.join(provenant_providers::claude::OAUTH_REFRESH_LOCK));
+    }
+    if spec.credential_profile_sibling {
+        paths.push(directory.with_extension("json"));
+    }
+    Ok(paths)
+}
+
 /// Resolve the registered account's credential stores from the adapter's
 /// declared file inventory and files owned by Provenant itself.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn credential_store_paths(
     entry: &provenant_providers::accounts::Registration,
 ) -> Result<Vec<PathBuf>, String> {
     let account = format!("{}/{}", entry.adapter, entry.label);
-    let fail = |path: &Path, reason: &str| {
-        format!(
-            "account registry: {account} credential store at {} cannot be resolved precisely: {reason}",
-            path.display()
-        )
-    };
-    let spec = provenant_records::AdapterSpec::get(&entry.adapter)
-        .filter(|spec| spec.registered_account)
-        .ok_or_else(|| {
-            fail(
-                &entry.directory,
-                "adapter has no registered-account store declaration",
-            )
-        })?;
-    if spec.credential_files.is_empty() {
-        return Err(fail(
-            &entry.directory,
-            "adapter declares no precise credential files",
-        ));
-    }
-    let directories = credential_directories(entry).collect::<Vec<_>>();
+    let source = format!("account registry: {account} credential store");
     let mut paths = Vec::new();
-    for directory in directories {
-        for relative in spec.credential_files {
-            let path = Path::new(relative);
-            if path.as_os_str().is_empty()
-                || path.is_absolute()
-                || path
-                    .components()
-                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
-            {
-                return Err(fail(
-                    directory,
-                    "adapter credential path is not a precise relative file",
-                ));
-            }
-            paths.push(directory.join(path));
-        }
-        if entry.adapter == "claude" {
-            paths.push(directory.join(provenant_providers::claude::LANE_TOKEN_FILE));
-            paths.push(directory.join(provenant_providers::claude::OAUTH_REFRESH_LOCK));
-        }
-        if spec.credential_profile_sibling {
-            paths.push(directory.with_extension("json"));
-        }
+    for directory in credential_directories(entry) {
+        paths.extend(exact_directory_credential_paths(
+            directory,
+            &entry.adapter,
+            &source,
+        )?);
     }
     Ok(paths)
 }

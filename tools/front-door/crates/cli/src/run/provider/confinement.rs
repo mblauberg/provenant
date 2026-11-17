@@ -695,6 +695,48 @@ pub(super) fn protected_worktrees(
     Ok(protected)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DeclarationOrigin {
+    Account { adapter: String, label: String },
+    Default { adapter: String },
+    HostVariable { variable: String },
+}
+
+impl DeclarationOrigin {
+    fn source_name(&self) -> String {
+        match self {
+            Self::Account { adapter, label } => {
+                format!("account registry: {adapter}/{label} credential store")
+            }
+            Self::Default { adapter } => {
+                format!("provider declaration: {adapter} default account directory")
+            }
+            Self::HostVariable { variable } => {
+                if variable.starts_with("host environment:")
+                    || variable.starts_with("provider environment:")
+                {
+                    variable.clone()
+                } else if variable == "SSH_AUTH_SOCK"
+                    || variable.starts_with("ZDOTDIR")
+                    || variable.starts_with("CARGO_HOME")
+                {
+                    format!("host environment: {variable}")
+                } else {
+                    format!("provider environment: {variable}")
+                }
+            }
+        }
+    }
+}
+
+struct CredentialDeclaration {
+    origin: DeclarationOrigin,
+    path: PathBuf,
+    adapter: Option<String>,
+    kind: provenant_core::CredentialKind,
+    scope: provenant_core::CredentialScope,
+}
+
 /// Inventory names and registration metadata only; credential contents are
 /// never needed to establish the mandatory boundary.
 pub(super) fn credential_roots(
@@ -704,65 +746,31 @@ pub(super) fn credential_roots(
     lane_roots: &[&Path],
 ) -> Result<provenant_core::CredentialRoots, String> {
     use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
-    let mut roots = CredentialRoots::for_home(home);
     let resolve = |path: &Path| {
         provenant_confinement::permissions::resolve_boundary_path(path)
             .map_err(|error| error.to_string())
     };
-    let resolved_home = resolve(home)?;
-    let resolved_lanes = lane_roots
-        .iter()
-        .map(|path| resolve(path))
-        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut declarations = Vec::new();
+
+    // 1. Registered accounts
     for entry in settings.entries.values() {
-        let source = format!(
-            "account registry: {}/{} credential store",
-            entry.adapter, entry.label
-        );
-        let account_resolve = |path: &Path| {
-            resolve(path).map_err(|error| {
-                format!(
-                    "{source} at {} cannot be resolved precisely: {error}",
-                    path.display()
-                )
-            })
+        let origin = DeclarationOrigin::Account {
+            adapter: entry.adapter.clone(),
+            label: entry.label.clone(),
         };
         for directory in crate::accounts::credential_directories(entry) {
-            let resolved = account_resolve(directory)?;
-            let shared = resolved == resolved_home
-                || resolved_lanes
-                    .iter()
-                    .any(|lane| lane.starts_with(&resolved));
-            if !shared {
-                roots.add(
-                    directory.to_owned(),
-                    CredentialScope::Subtree,
-                    source.clone(),
-                    CredentialKind::Store,
-                );
-            }
-        }
-        for path in crate::accounts::credential_store_paths(entry)? {
-            // Validate here so a later alias-resolution refusal identifies the account.
-            account_resolve(&path)?;
-            roots.add(
-                path,
-                CredentialScope::Exact,
-                source.clone(),
-                CredentialKind::Store,
-            );
+            declarations.push(CredentialDeclaration {
+                origin: origin.clone(),
+                path: directory.to_path_buf(),
+                adapter: Some(entry.adapter.clone()),
+                kind: CredentialKind::Store,
+                scope: CredentialScope::Subtree,
+            });
         }
     }
-    // Preserve each adapter's declared kind for its implicit default root;
-    // registered-account roots above are credential stores.
-    let kind = |adapter: &str, path: &Path| {
-        AdapterSpec::get(adapter)
-            .and_then(|spec| {
-                let (_, fallback) = spec.default_account_directory?;
-                (path == home.join(fallback)).then(|| (*spec.default_account_root_kind).clone())
-            })
-            .unwrap_or(CredentialKind::Store)
-    };
+
+    // 2. Compiled defaults & default directories
     let default_directories = registry
         .host
         .map(|host| host.default_account_directories.clone())
@@ -771,52 +779,222 @@ pub(super) fn credential_roots(
         let Some((environment, fallback)) = spec.default_account_directory else {
             continue;
         };
-        let path = default_directories
+        let host_override = default_directories
             .get(spec.name)
             .cloned()
-            .or_else(|| host_provider_var(registry, environment).map(PathBuf::from))
-            .unwrap_or_else(|| home.join(fallback));
-        let source = if default_directories.contains_key(spec.name)
-            || host_provider_var(registry, environment).is_some()
-        {
-            format!("provider environment: {environment}")
+            .or_else(|| host_provider_var(registry, environment).map(PathBuf::from));
+        if let Some(path) = host_override {
+            declarations.push(CredentialDeclaration {
+                origin: DeclarationOrigin::HostVariable {
+                    variable: environment.to_owned(),
+                },
+                path,
+                adapter: Some(spec.name.to_owned()),
+                kind: (*spec.default_account_root_kind).clone(),
+                scope: CredentialScope::Subtree,
+            });
         } else {
-            format!(
-                "provider declaration: {} default account directory",
-                spec.name
-            )
-        };
-        let kind = kind(spec.name, &path);
-        roots.add(path, CredentialScope::Subtree, source, kind);
+            declarations.push(CredentialDeclaration {
+                origin: DeclarationOrigin::Default {
+                    adapter: spec.name.to_owned(),
+                },
+                path: home.join(fallback),
+                adapter: Some(spec.name.to_owned()),
+                kind: (*spec.default_account_root_kind).clone(),
+                scope: CredentialScope::Subtree,
+            });
+        }
     }
+
+    // 3. Host-discovered declarations
     let host_roots = registry
         .host
         .map(|host| host.credential_roots.clone())
         .unwrap_or_else(run::HostLaunchContext::credential_roots);
     for root in host_roots {
-        roots.add(root.path, root.scope, root.source, root.kind);
+        let origin = DeclarationOrigin::HostVariable {
+            variable: root.source.clone(),
+        };
+        let adapter = if root.source.contains("CODEX_HOME") {
+            Some("codex".to_owned())
+        } else if root.source.contains("CLAUDE_CONFIG_DIR") {
+            Some("claude".to_owned())
+        } else if root.source.contains("cursor") {
+            Some("cursor".to_owned())
+        } else if root.source.contains("opencode") {
+            Some("opencode".to_owned())
+        } else {
+            None
+        };
+        let kind = if root.source.contains("CODEX_HOME") {
+            CredentialKind::CodexHome
+        } else {
+            root.kind
+        };
+        declarations.push(CredentialDeclaration {
+            origin,
+            path: root.path,
+            adapter,
+            kind,
+            scope: root.scope,
+        });
     }
-    // Keep both the declaration and its resolved alias, and give every
-    // spelling of one location all of its declarations. A candidate can use
-    // either spelling, and no credential file contents are opened here.
-    let account_sources = roots
+
+    // Deduplicate declarations by (path, scope, source_name)
+    let mut seen_decls = std::collections::HashSet::new();
+    declarations.retain(|decl| {
+        seen_decls.insert((
+            decl.path.clone(),
+            matches!(decl.scope, CredentialScope::Subtree),
+            decl.origin.source_name(),
+        ))
+    });
+
+    // Validate that every declaration's path can be resolved precisely.
+    // Resolution errors carry the declaration's origin.
+    for decl in &declarations {
+        resolve(&decl.path).map_err(|error| {
+            format!(
+                "{} at {} cannot be resolved precisely: {error}",
+                decl.origin.source_name(),
+                decl.path.display()
+            )
+        })?;
+    }
+
+    // Resolve HOME and lane roots.
+    let resolved_home = resolve(home).map_err(|error| {
+        format!(
+            "home directory at {} cannot be resolved precisely: {error}",
+            home.display()
+        )
+    })?;
+    let resolved_lanes = lane_roots
+        .iter()
+        .map(|lane| {
+            resolve(lane).map_err(|error| {
+                if let Some(decl) = declarations.iter().find(|d| d.path == **lane) {
+                    format!(
+                        "{} at {} cannot be resolved precisely: {error}",
+                        decl.origin.source_name(),
+                        lane.display()
+                    )
+                } else {
+                    error
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut roots = CredentialRoots::for_home(home);
+
+    // One classifier turns each declaration into either a whole-directory root (dedicated)
+    // or exact paths (the store is a shared root: home, or containing or equal to a lane root).
+    for decl in &declarations {
+        if decl.scope == CredentialScope::Exact {
+            roots.add(
+                decl.path.clone(),
+                CredentialScope::Exact,
+                decl.origin.source_name(),
+                decl.kind.clone(),
+            );
+            continue;
+        }
+
+        let resolved_store = resolve(&decl.path).map_err(|error| {
+            format!(
+                "{} at {} cannot be resolved precisely: {error}",
+                decl.origin.source_name(),
+                decl.path.display()
+            )
+        })?;
+
+        let is_shared = resolved_store == resolved_home
+            || resolved_lanes
+                .iter()
+                .any(|lane| lane.starts_with(&resolved_store));
+
+        if !is_shared {
+            // Dedicated directory root
+            roots.add(
+                decl.path.clone(),
+                CredentialScope::Subtree,
+                decl.origin.source_name(),
+                decl.kind.clone(),
+            );
+        }
+
+        if let Some(adapter) = &decl.adapter {
+            if is_shared {
+                // Shared root: turns into exact paths covering adapter declared files + Provenant-owned per-account files
+                let exact_paths = crate::accounts::exact_directory_credential_paths(
+                    &decl.path,
+                    adapter,
+                    &decl.origin.source_name(),
+                )?;
+                for path in exact_paths {
+                    resolve(&path).map_err(|error| {
+                        format!(
+                            "{} at {} cannot be resolved precisely: {error}",
+                            decl.origin.source_name(),
+                            path.display()
+                        )
+                    })?;
+                    roots.add(
+                        path,
+                        CredentialScope::Exact,
+                        decl.origin.source_name(),
+                        CredentialKind::Store,
+                    );
+                }
+            } else {
+                // Dedicated root: validate exact paths and sibling profile if applicable
+                if let Ok(exact_paths) = crate::accounts::exact_directory_credential_paths(
+                    &decl.path,
+                    adapter,
+                    &decl.origin.source_name(),
+                ) {
+                    for path in exact_paths {
+                        resolve(&path).map_err(|error| {
+                            format!(
+                                "{} at {} cannot be resolved precisely: {error}",
+                                decl.origin.source_name(),
+                                path.display()
+                            )
+                        })?;
+                        roots.add(
+                            path,
+                            CredentialScope::Exact,
+                            decl.origin.source_name(),
+                            CredentialKind::Store,
+                        );
+                    }
+                }
+            }
+        } else if is_shared {
+            return Err(format!(
+                "{} at {} cannot be resolved precisely: shared credential root has no adapter store declaration",
+                decl.origin.source_name(),
+                decl.path.display()
+            ));
+        }
+    }
+
+    // Keep both the declaration and its resolved alias.
+    let sources: std::collections::BTreeMap<PathBuf, String> = roots
         .entries()
         .iter()
-        .filter(|root| root.source.starts_with("account registry:"))
         .map(|root| (root.path.clone(), root.source.clone()))
-        .collect::<Vec<_>>();
+        .collect();
     roots.with_aliases(|path| {
-        resolve(path).map_err(|error| {
-            match account_sources
-                .iter()
-                .find(|(declared, _)| declared == path)
-            {
-                Some((_, source)) => format!(
+        resolve(path).map_err(|error| match sources.get(path) {
+            Some(source) => {
+                format!(
                     "{source} at {} cannot be resolved precisely: {error}",
                     path.display()
-                ),
-                None => error,
+                )
             }
+            None => error,
         })
     })
 }
