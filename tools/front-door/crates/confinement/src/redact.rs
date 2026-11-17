@@ -863,9 +863,14 @@ impl AssignmentScanner {
                             let ends = if line {
                                 byte == b'\n' || byte == b'\r'
                             } else {
-                                // A backslash continues the credential, including
-                                // after an otherwise exact redaction marker.
-                                byte != b'\\' && is_delimiter(byte)
+                                // Backslashes and escaped delimiters continue the
+                                // credential, even after an exact marker. Raw line
+                                // endings still bound every unquoted value.
+                                byte == b'\n'
+                                    || byte == b'\r'
+                                    || (byte != b'\\'
+                                        && backslashes.is_multiple_of(2)
+                                        && is_delimiter(byte))
                             };
                             if ends {
                                 self.finish_marker(marker_length, 0, output);
@@ -878,7 +883,11 @@ impl AssignmentScanner {
                             self.state = Assignment::Value {
                                 quote: None,
                                 quote_slashes: 0,
-                                backslashes: 0,
+                                backslashes: if byte == b'\\' {
+                                    backslashes.saturating_add(1)
+                                } else {
+                                    0
+                                },
                                 pending_slashes: 0,
                                 line,
                                 masked,
@@ -1975,6 +1984,16 @@ mod tests {
         let cases: &[(&str, &str)] = &[
             (r"token=[REDACTED]\suffix", "token=[REDACTED]"),
             (r"token=[REDACTED]\\suffix", "token=[REDACTED]"),
+            (r"token=[REDACTED]\ suffix", "token=[REDACTED]"),
+            (r#"token=[REDACTED]\"suffix"#, "token=[REDACTED]"),
+            (r"token=[REDACTED]\'suffix", "token=[REDACTED]"),
+            (r"token=[REDACTED]\]suffix", "token=[REDACTED]"),
+            (r"token=[REDACTED]\ suffix next", "token=[REDACTED] next"),
+            (
+                r#"token=[REDACTED]\"suffix" next"#,
+                r#"token=[REDACTED]" next"#,
+            ),
+            (r"token=[REDACTED]\\ next", "token=[REDACTED] next"),
             (r"token=[REDACTED]\suffix next", "token=[REDACTED] next"),
             (r"token=[REDACTED]\", "token=[REDACTED]"),
             ("token=[REDACTED]\\\nnext", "token=[REDACTED]\nnext"),
