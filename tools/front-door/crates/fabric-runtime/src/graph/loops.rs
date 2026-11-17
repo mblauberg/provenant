@@ -283,11 +283,12 @@ pub(super) fn check_expanded_ids(
 
 fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<GraphDocument, String> {
     let declared: std::collections::BTreeSet<_> = document.nodes.iter().map(|n| &n.id).collect();
-    if document
-        .nodes
-        .iter()
-        .any(|n| n.depends_on.iter().any(|parent| !declared.contains(parent)))
-    {
+    if document.nodes.iter().any(|n| {
+        n.depends_on
+            .iter()
+            .chain(&n.after_settled)
+            .any(|parent| !declared.contains(parent))
+    }) {
         return Err("dependency".into());
     }
     expanded_node_count(document, extensions)?;
@@ -454,6 +455,11 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                     .iter()
                     .map(|name| id(&node.id, round, name))
                     .collect();
+                child.after_settled = child
+                    .after_settled
+                    .iter()
+                    .map(|name| id(&node.id, round, name))
+                    .collect();
                 child.after_expansion = child
                     .after_expansion
                     .iter()
@@ -508,6 +514,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                 if child.depends_on.is_empty() {
                     if round == 1 {
                         child.depends_on.extend(node.depends_on.clone());
+                        child.after_settled.extend(node.after_settled.clone());
                     } else {
                         child.depends_on.push(id(&node.id, round - 1, &spec.until));
                     }

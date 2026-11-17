@@ -650,6 +650,9 @@ pub struct GraphNode {
     pub prompt: String,
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// Wait for these nodes to settle without propagating their outcome.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after_settled: Vec<String>,
     /// Allow dependants to proceed after this node fails or is blocked.
     #[serde(default, skip_serializing_if = "is_false")]
     pub advisory: bool,
@@ -715,11 +718,12 @@ impl GraphNode {
     }
 
     pub(super) fn dependencies(&self) -> impl Iterator<Item = &String> {
-        self.depends_on.iter().chain(
-            self.after_expansion
-                .iter()
-                .filter(|name| !self.depends_on.contains(name)),
-        )
+        self.depends_on
+            .iter()
+            .chain(self.after_settled.iter())
+            .chain(self.after_expansion.iter().filter(|name| {
+                !self.depends_on.contains(name) && !self.after_settled.contains(name)
+            }))
     }
     pub(super) fn content_bytes(&self) -> usize {
         plans::prompt(self)

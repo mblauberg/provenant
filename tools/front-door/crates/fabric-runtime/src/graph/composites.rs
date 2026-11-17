@@ -39,6 +39,7 @@ fn expand_document(
         &BTreeMap::new(),
         &[],
         &[],
+        &[],
         None,
         &[],
         &[],
@@ -202,6 +203,7 @@ fn children(
     prefix: &str,
     inherited_names: &BTreeMap<String, String>,
     incoming: &[String],
+    incoming_settled: &[String],
     inputs: &[GraphInput],
     source: Option<&SourceBinding>,
     read_roots: &[String],
@@ -242,6 +244,9 @@ fn children(
             ));
         }
         for parent in &mut node.depends_on {
+            *parent = reference(prefix, parent, &locals, incoming).ok_or("dependency")?;
+        }
+        for parent in &mut node.after_settled {
             *parent = reference(prefix, parent, &locals, incoming).ok_or("dependency")?;
         }
         for input in &mut node.inputs {
@@ -327,6 +332,11 @@ fn children(
                     node.depends_on.push(parent.clone());
                 }
             }
+            for parent in incoming_settled {
+                if !node.after_settled.contains(parent) && !node.depends_on.contains(parent) {
+                    node.after_settled.push(parent.clone());
+                }
+            }
             for input in inputs {
                 if let Some(own) = node.inputs.iter_mut().find(|own| own.node == input.node) {
                     for kind in &input.outputs {
@@ -381,6 +391,7 @@ fn children(
                 &spec.body,
                 "",
                 &visible_names,
+                &[],
                 &[],
                 &[],
                 None,
@@ -451,6 +462,7 @@ fn children(
                 &node.id,
                 &visible_names,
                 &node.depends_on,
+                &node.after_settled,
                 &node.inputs,
                 node.source.as_ref(),
                 &node.read_roots,
@@ -1117,6 +1129,13 @@ fn state(
     {
         // The group's own dependencies decide first; the rules below judge
         // its members, whose failures are the point of a partial group.
+        if node
+            .after_settled
+            .iter()
+            .any(|parent| !checkpoint.nodes[positions[parent]].state.settled())
+        {
+            return NodeState::Pending;
+        }
         let upstream: Vec<_> = node
             .depends_on
             .iter()

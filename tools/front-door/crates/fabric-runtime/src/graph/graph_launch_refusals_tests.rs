@@ -642,3 +642,43 @@ fn untyped_launch_refusal_persists_reason_without_an_attempt() {
     let later = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(later.checkpoint.nodes[0].advance_error, node.advance_error);
 }
+
+// Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
+#[test]
+fn order_only_edge_waits_for_failure_without_hiding_it() {
+    let first = node("first", route("fixture"));
+    let mut second = node("second", route("fixture"));
+    second.after_settled = vec!["first".into()];
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            terminal(AttemptOutcome::TaskFailed),
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![first, second]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "first")
+            .unwrap()
+            .state,
+        NodeState::Failed
+    );
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "second")
+            .unwrap()
+            .state,
+        NodeState::Succeeded
+    );
+    assert_eq!(run.checkpoint.outcome(), GraphOutcome::Failed);
+}

@@ -148,6 +148,10 @@ An occupied concurrency threshold warns and proceeds unless its declared policy 
 - Why: a graph that starts must be able to finish within its bounds.
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
+`after_settled` orders a node after its predecessors settle in any state without
+propagating their failure. The predecessors remain visible in the graph outcome.
+Success dependencies and selected inputs retain their existing failure semantics.
+
 ### Implementation planning
 
 An `implement` or `implement.issue` brief is sized by a read-only plan node
