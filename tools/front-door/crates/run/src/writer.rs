@@ -3457,6 +3457,13 @@ impl WriterLaunch {
                 &crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
                     .ok_or(RunError::NotFound)?,
             )?;
+            let project = request
+                .task
+                .profile
+                .policy_project
+                .map(|project| project.to_string())
+                .unwrap_or_default();
+            let policy = crate::launch_policy(state, &project, &request.task);
             let ancestor = crate::objects::publish_branch(
                 &git_executable,
                 self.worktree.repo(),
@@ -3464,6 +3471,7 @@ impl WriterLaunch {
                 base,
                 request.task.base_ref.as_deref(),
                 verified_tip,
+                &policy,
             )?;
             if let Some(warning) = ancestor.warning(self.branch.as_str(), base, verified_tip) {
                 // Best effort: the ancestor is also in the branch reflog.
