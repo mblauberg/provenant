@@ -4742,6 +4742,10 @@ mod writer_recovery_tests {
                 fake.outcome = Some(Outcome::Failed);
                 fake.complete = Some(true);
             }
+            if marker == Marker::Deadline {
+                // A host deadline kill is not a provider success.
+                fake.outcome = Some(Outcome::Failed);
+            }
             let note = if changed {
                 "No commit was made; acceptance remains unfinished"
             } else {
