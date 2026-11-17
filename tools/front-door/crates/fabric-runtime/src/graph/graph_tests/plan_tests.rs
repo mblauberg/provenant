@@ -3390,9 +3390,26 @@ fn live_patch_normalises_docs_and_extensions_once() {
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
 fn secret_scan_accepts_masked_assignments_but_refuses_remaining_values() {
-    for text in ["token=[REDACTED] next", r#"{"prompt":"token=[REDACTED] next"}"#] {
+    for text in [
+        "token=[REDACTED]",
+        "token=[REDACTED] next",
+        r#"{"prompt":"token=[REDACTED] next"}"#,
+        r#"{"token":"[REDACTED]"}"#,
+    ] {
         assert!(patch::scan_for_secrets(text).is_ok());
     }
+    let (document, mut checkpoint) = running_graph();
+    let admitted = admit_with(
+        &document,
+        &mut checkpoint,
+        None,
+        json!({"schema_version":1, "nodes":[{
+            "id":"masked", "use":"task", "prompt":"token=[REDACTED] next"
+        }]}),
+        &patch::scan_for_secrets,
+    )
+    .unwrap();
+    assert_eq!(admitted.revision, 1);
     for text in [
         "token=[REDACTED]secret",
         "token=[REDACTED",
@@ -3406,57 +3423,87 @@ fn secret_scan_accepts_masked_assignments_but_refuses_remaining_values() {
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
+fn secret_scan_is_bounded_on_large_adversarial_marker_input() {
+    // The former placeholder search rescanned this entire suffix once per X.
+    // Fixed-size scanner state now visits each byte a bounded number of times.
+    for size in [32 * 1024, 128 * 1024, 256 * 1024] {
+        let text = format!("PROVENANTMASK{} [REDACTED]", "X".repeat(size));
+        let start = std::time::Instant::now();
+        assert!(patch::scan_for_secrets(&text).is_ok());
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "adversarial scan exceeded linear-time budget for {size} bytes"
+        );
+    }
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
 fn split_credentials_are_refused_after_live_and_captured_patch_compilation() {
-    let secret = "AKIAIOSFODNN7EXAMPLE";
-    for nodes in [
-        json!([{"id":"child", "use":"joined", "with":{"prefix":"AKIA", "suffix":"IOSFODNN7EXAMPLE"}}]),
-        json!([{"id":"child", "use":"task", "prompt":"AKIA${item}", "over":["IOSFODNN7EXAMPLE"]}]),
-    ] {
-        let patch = json!({"schema_version":1,
+    // Build synthetic token shapes from parts; no usable credentials in fixtures.
+    let suffix = "Z".repeat(16);
+    let github_suffix = "q".repeat(36);
+    let bearer_suffix = "x".repeat(24);
+    let cases = [
+        ("AKIA", suffix.as_str()),
+        ("ghp_", github_suffix.as_str()),
+        ("Bearer ", bearer_suffix.as_str()),
+    ];
+    for (prefix, suffix) in cases {
+        let secret = format!("{prefix}{suffix}");
+        for marker in ["", "[REDACTED]"] {
+            let prefix = format!("{marker}{prefix}");
+            for nodes in [
+                json!([{"id":"child", "use":"joined", "with":{"prefix":prefix, "suffix":suffix}}]),
+                json!([{"id":"child", "use":"task", "prompt":format!("{prefix}${{item}}"), "over":[suffix]}]),
+            ] {
+                let patch = json!({"schema_version":1,
             "templates":{"joined":{"brief":"${prefix}${suffix}", "parameters":{
                 "prefix":{"type":"string"}, "suffix":{"type":"string"}
             }}},
             "nodes": nodes});
-        assert!(!patch.to_string().contains(secret));
-        let (document, mut checkpoint) = running_graph();
-        let before = checkpoint.clone();
-        let error = admit_with(
-            &document,
-            &mut checkpoint,
-            None,
-            patch.clone(),
-            &patch::scan_for_secrets,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("secret pattern"), "{error}");
-        assert!(!error.to_string().contains(secret));
-        assert_eq!(checkpoint, before, "live refusal is atomic");
+                assert!(!patch.to_string().contains(&secret));
+                let (document, mut checkpoint) = running_graph();
+                let before = checkpoint.clone();
+                let error = admit_with(
+                    &document,
+                    &mut checkpoint,
+                    None,
+                    patch.clone(),
+                    &patch::scan_for_secrets,
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("secret pattern"), "{error}");
+                assert!(!error.to_string().contains(&secret));
+                assert_eq!(checkpoint, before, "live refusal is atomic");
 
-        let document = planner(8);
-        let output = format!("```fragment\n{patch}\n```");
-        let mut journal = MemoryJournal::default();
-        let run = advance(&document, &mut fixture_owner(&[&output]), &mut journal).unwrap();
-        assert_eq!(run.status, GraphStatus::Paused);
-        assert!(run.checkpoint.expansions.is_empty());
-        assert!(
-            run.checkpoint.nodes[0]
-                .outputs
-                .as_ref()
-                .unwrap()
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("secret pattern"))
-        );
-        assert!(
-            !serde_json::to_string(&run.checkpoint)
-                .unwrap()
-                .contains(secret)
-        );
-        let replay = advance(&document, &mut fixture_owner(&[]), &mut journal).unwrap();
-        assert_eq!(
-            replay.checkpoint, run.checkpoint,
-            "stored refusal replays unchanged"
-        );
+                let document = planner(8);
+                let output = format!("```fragment\n{patch}\n```");
+                let mut journal = MemoryJournal::default();
+                let run = advance(&document, &mut fixture_owner(&[&output]), &mut journal).unwrap();
+                assert_eq!(run.status, GraphStatus::Paused);
+                assert!(run.checkpoint.expansions.is_empty());
+                assert!(
+                    run.checkpoint.nodes[0]
+                        .outputs
+                        .as_ref()
+                        .unwrap()
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.contains("secret pattern"))
+                );
+                assert!(
+                    !serde_json::to_string(&run.checkpoint)
+                        .unwrap()
+                        .contains(&secret)
+                );
+                let replay = advance(&document, &mut fixture_owner(&[]), &mut journal).unwrap();
+                assert_eq!(
+                    replay.checkpoint, run.checkpoint,
+                    "stored refusal replays unchanged"
+                );
+            }
+        }
     }
 }
 
