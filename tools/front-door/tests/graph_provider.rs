@@ -844,7 +844,7 @@ fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() ->
         "--brief",
         &brief,
         "--set",
-        "bounded=true",
+        "plan=false",
         "--name",
         "public-steer-local",
         "--model",

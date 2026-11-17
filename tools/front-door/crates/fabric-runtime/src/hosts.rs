@@ -1371,6 +1371,7 @@ mod tests {
             graph: Default::default(),
             lanes: Default::default(),
             plan: Default::default(),
+            implement: Default::default(),
             steer: Default::default(),
             limits: crate::config::Limits {
                 body_bytes: 65536,

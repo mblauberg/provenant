@@ -158,14 +158,18 @@ Success dependencies and selected inputs retain their existing failure semantics
 
 ### Implementation planning
 
-An `implement` or `implement.issue` brief is sized by a read-only plan node
-before its writer starts, unless the brief is bounded. `bounded=true` gives the
-writer the brief directly; `implement.plan` and `implement.fix` never add a
-plan node. `run implement --no-plan` is shorthand for `--set bounded=true` on
-any `implement` or `implement.*` template, and other templates ignore it.
-- Why: an open brief must be split before a junior writer takes it, while a
-  brief already sized as one slice should not pay for a planner.
-- Owner: `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`
+Implementation templates compile to a writer by default. `--plan` or the
+boolean template parameter `plan=true` adds a read-only planner whose result
+the writer consumes. `domains.fabric.implement.plan` sets the default and
+`--explain` reports its source; an explicit parameter takes precedence.
+`deliver` and `batch` accept `plan`, and a batch item may override it with
+`{ item = "slice", with = { plan = true } }`. A junior writer without a plan
+input, write scope or explicit plan parameter emits the advisory
+`unbounded_brief_junior_writer` warning. Set
+`domains.fabric.implement.warn_unbounded_junior=false` to suppress it.
+- Why: single writers start without an implicit planning stage; callers choose
+  when planning adds value.
+- Owner: `src/fabric/interface.rs`, `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`
 
 ### Composite settlement
 

@@ -24,12 +24,31 @@ pub struct FabricConfig {
     pub graph: GraphConfig,
     #[serde(default)]
     pub lanes: Lanes,
+    #[serde(default)]
+    pub implement: ImplementConfig,
     /// The planner front-end: whether `provenant run --preset` runs a planner.
     #[serde(default)]
     pub plan: PlanConfig,
     /// Behaviour when same-session steering cannot continue because state is unavailable.
     #[serde(default)]
     pub steer: SteerConfig,
+}
+
+/// Defaults for implementation templates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ImplementConfig {
+    pub plan: bool,
+    pub warn_unbounded_junior: bool,
+}
+
+impl Default for ImplementConfig {
+    fn default() -> Self {
+        Self {
+            plan: false,
+            warn_unbounded_junior: true,
+        }
+    }
 }
 
 /// Fallback after an accepted steer cannot resume its provider session.
@@ -1238,6 +1257,7 @@ mod tests {
             graph: GraphConfig::default(),
             lanes: Lanes::default(),
             plan: Default::default(),
+            implement: Default::default(),
             steer: Default::default(),
             limits: Limits {
                 body_bytes: 65536,

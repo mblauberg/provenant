@@ -7,7 +7,7 @@ fn submitted_implementation_preserves_its_compiled_topology_across_replays() {
     let library = TemplateLibrary::bundled();
     let compiler = Compiler::new(&library);
     let limits = plans::generous();
-    for (template, bounded) in [
+    for (template, plan) in [
         ("implement", false),
         ("implement", true),
         ("implement.plan", false),
@@ -18,8 +18,8 @@ fn submitted_implementation_preserves_its_compiled_topology_across_replays() {
             let mut raw = json!({"id":"work", "use":template,
                 "prompt":"Meet the acceptance criteria", "worktree":"/fixture/writer",
                 "write_scope":["src"]});
-            if bounded {
-                raw["with"] = json!({"bounded":true});
+            if plan {
+                raw["with"] = json!({"plan":true});
             }
             for level in 0..depth {
                 let child = raw["id"].clone();
@@ -30,7 +30,7 @@ fn submitted_implementation_preserves_its_compiled_topology_across_replays() {
             let mut document: GraphDocument = serde_json::from_value(json!({
                 "schema_version":2, "graph_id":"submitted-implementation",
                 "nodes":[compiler.compile(&raw).unwrap()],
-                // A node's bounded marker can differ from the run's defaults.
+                // Historical checkpoint provenance remains valid after the parameter is retired.
                 "provenance":{"parameters":{"bounded":false}}
             }))
             .unwrap();

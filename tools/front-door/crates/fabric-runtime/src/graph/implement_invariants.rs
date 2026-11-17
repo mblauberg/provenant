@@ -1,168 +1,100 @@
-//! Bounded briefs keep a direct writer; open briefs must be sized first.
+//! Implementation planning is an explicit template choice.
 use super::*;
 use serde_json::json;
 
+// Spec: docs/specs/fabric.md#implementation-planning
 #[test]
-fn implementation_is_planned_unless_its_brief_is_already_bounded() {
+fn implementation_plans_only_when_requested() {
     let library = TemplateLibrary::bundled();
     let compiler = Compiler::new(&library);
-    let limits = crate::config::GraphLimits::default();
-    for (template, bounded, no_plan, expects_plan) in [
-        ("implement", false, false, true),
-        ("implement", false, true, false),
-        ("implement", true, false, false),
-        ("implement.plan", false, false, false),
-        ("implement.fix", false, false, false),
-        ("implement.issue", false, false, true),
+    for template in [
+        "implement",
+        "implement.plan",
+        "implement.fix",
+        "implement.issue",
     ] {
-        let mut raw = json!({"id":"work", "use":template, "prompt":"Meet the acceptance criteria",
+        let raw = json!({"id":"work", "use":template, "prompt":"Meet acceptance",
             "worktree":"/fixture/writer", "write_scope":["src"]});
-        if bounded || no_plan {
-            raw["with"] = json!({"bounded":true});
-        }
-        let document: GraphDocument = serde_json::from_value(json!({
-            "schema_version":1, "graph_id":"bounded", "nodes":[compiler.compile(&raw).unwrap()]
-        }))
-        .unwrap();
-        let expanded = document.expanded(&limits).unwrap();
-        let writer = expanded
-            .nodes
+        let direct = compiler.compile(&raw).unwrap();
+        assert!(direct.composite.is_none());
+        assert_eq!(direct.access, AccessMode::WorktreeWrite);
+        let mut requested = raw.clone();
+        requested["with"] = json!({"plan":true});
+        let planned = compiler.compile(&requested).unwrap();
+        let members = &planned.composite.as_ref().unwrap().nodes;
+        let planner = members
             .iter()
-            .find(|node| node.access == AccessMode::WorktreeWrite)
+            .find(|n| n.template.as_deref() == Some("plan"))
             .unwrap();
-        assert_eq!(
-            writer.route.as_ref().unwrap().alias.as_deref(),
-            Some("junior")
-        );
-        assert_eq!(writer.worktree.as_deref(), Some("/fixture/writer"));
-        assert_eq!(writer.write_scope, ["src"]);
-        let planners: Vec<_> = expanded
-            .nodes
+        let writer = members
             .iter()
-            .filter(|node| node.template.as_deref() == Some("plan"))
-            .collect();
-        if expects_plan {
-            let planner = planners.first().expect("an open brief needs a sizing plan");
-            assert_eq!(planner.access, AccessMode::ReadOnly);
-            assert!(writer.depends_on.contains(&planner.id));
-            assert!(writer.inputs.iter().any(
+            .find(|n| n.access == AccessMode::WorktreeWrite)
+            .unwrap();
+        assert!(writer.depends_on.contains(&planner.id));
+        assert!(
+            writer.inputs.iter().any(
                 |input| input.node == planner.id && input.outputs.contains(&OutputKind::Result)
-            ));
-            let boundary = expanded
-                .nodes
-                .iter()
-                .find(|node| node.id == "work")
-                .unwrap();
-            assert!(
-                boundary
-                    .composite
-                    .as_ref()
-                    .unwrap()
-                    .exports
-                    .iter()
-                    .any(|export| export.node == writer.id
-                        && export.outputs.contains(&OutputKind::Commit))
-            );
-        } else {
-            assert!(planners.is_empty());
-        }
-    }
-    // A plan result bounds the consumer; an arbitrary task's result does not.
-    for source in ["plan", "task"] {
-        let raw = [
-            json!({"id":"source", "use":source}),
-            json!({"id":"work", "use":"implement", "inputs":[{"node":"source","outputs":["result"]}],
-                "worktree":"/fixture/writer", "write_scope":["src"]}),
-        ];
-        let nodes = compiler.compile_all(&raw).unwrap();
-        assert_eq!(nodes[1].composite.is_some(), source != "plan");
-        // A raw composite must use the same sibling inference as a template.
-        let nested = compiler
-            .compile(
-                &json!({"id":"outer", "kind":"composite", "access":"read_only",
-            "composite":{"nodes":raw, "exports":[{"node":"work","outputs":["result"]}]}}),
             )
-            .unwrap();
-        assert_eq!(
-            nested.composite.unwrap().nodes[1].composite.is_some(),
-            source != "plan"
         );
-        // The consumer may sit below several composites while its producer
-        // stays visible in the enclosing scope.
-        for depth in 1..=3 {
-            let mut group = raw[1].clone();
-            for level in 0..depth {
-                let child = group["id"].clone();
-                group = json!({"id":format!("group-{level}"), "kind":"composite", "access":"read_only",
-                    "composite":{"nodes":[group],"exports":[{"node":child,"outputs":["result"]}]}});
-            }
-            let outer = compiler
-                .compile(
-                    &json!({"id":"outer", "kind":"composite", "access":"read_only",
-                "composite":{"nodes":[raw[0],group],"exports":[]}}),
-                )
-                .unwrap();
-            let mut member = outer.composite.unwrap().nodes.remove(1);
-            for _ in 0..depth {
-                member = member.composite.unwrap().nodes.remove(0);
-            }
-            assert_eq!(member.composite.is_some(), source != "plan");
-        }
-        let mut scoped_library = library.clone();
-        scoped_library
-            .insert(
-                Layer::Inline,
-                "group",
-                Template {
-                    nodes: vec![raw[1].clone()],
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let outer = Compiler::new(&scoped_library)
-            .compile(
-                &json!({"id":"outer", "kind":"composite", "access":"read_only",
-            "composite":{"nodes":[raw[0],{"id":"group","use":"group"}],"exports":[]}}),
-            )
-            .unwrap();
-        assert_eq!(
-            outer.composite.unwrap().nodes[1]
+        assert!(
+            planned
                 .composite
                 .as_ref()
                 .unwrap()
-                .nodes[0]
-                .composite
-                .is_some(),
-            source != "plan"
+                .exports
+                .iter()
+                .any(|export| export.node == writer.id
+                    && export.outputs.contains(&OutputKind::Commit))
         );
+        let mut retired = raw;
+        retired["with"] = json!({"bounded":true});
+        assert!(compiler.compile(&retired).is_err());
     }
-    let shadow = compiler.compile(&json!({"id":"outer", "kind":"composite", "access":"read_only",
-        "composite":{"nodes":[{"id":"source","use":"plan"},
-            {"id":"group","kind":"composite","access":"read_only","composite":{
-                "nodes":[{"id":"source","use":"task"},
-                    {"id":"work","use":"implement","worktree":"/fixture/writer","write_scope":["src"],
-                        "inputs":[{"node":"source","outputs":["result"]}]}],"exports":[]}}],"exports":[]}})).unwrap();
+}
+
+// Spec: docs/specs/fabric.md#implementation-planning
+#[test]
+fn batch_slice_can_override_plan_default() {
+    let library = TemplateLibrary::bundled();
+    let compiler = Compiler::new(&library);
+    let slices = compiler
+        .compile(&json!({"id":"slices", "use":"implement", "over":[
+        "direct", {"item":"planned", "with":{"plan":true}}
+    ], "with":{"plan":false}, "worktree":"/fixture/writer"}))
+        .unwrap();
+    let members = &slices.composite.unwrap().nodes;
     assert!(
-        shadow.composite.unwrap().nodes[1]
-            .composite
-            .as_ref()
+        members
+            .iter()
+            .find(|node| node.id == "direct")
             .unwrap()
-            .nodes[1]
+            .composite
+            .is_none()
+    );
+    assert!(
+        members
+            .iter()
+            .find(|node| node.id == "planned")
+            .unwrap()
             .composite
             .is_some()
     );
-    let over = compiler
-        .compile(
-            &json!({"id":"slices", "use":"implement", "over":["one", "two"],
-        "worktree":"/fixture/writer", "write_scope":["src"]}),
-        )
-        .unwrap();
-    assert!(
-        over.composite
-            .unwrap()
-            .nodes
-            .iter()
-            .all(|node| node.composite.is_none()
-                && node.route.as_ref().unwrap().alias.as_deref() == Some("junior"))
-    );
+}
+
+// Spec: docs/specs/fabric.md#implementation-planning
+#[test]
+fn configured_plan_default_is_overridable() {
+    let library = TemplateLibrary::bundled();
+    let resolvers = std::collections::BTreeMap::from([(
+        template::IMPLEMENT_PLAN_DEFAULT.into(),
+        vec!["true".into()],
+    )]);
+    let compiler = Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    };
+    let mut raw = json!({"id":"work", "use":"implement", "worktree":"/fixture/writer"});
+    assert!(compiler.compile(&raw).unwrap().composite.is_some());
+    raw["with"] = json!({"plan":false});
+    assert!(compiler.compile(&raw).unwrap().composite.is_none());
 }

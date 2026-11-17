@@ -42,6 +42,10 @@ store_busy_timeout_ms = 30000 # wait for a contended store before reporting cont
 # The planner front-end for `provenant run --preset`: a principal planner shapes
 # the graph from the preset's allow-listed patterns when --plan is on, or when
 # --plan is auto and the work is large or underspecified.
+[implement]
+plan = false
+warn_unbounded_junior = true
+
 [plan]
 mode = "auto" # auto, on or off; --plan overrides it
 route = "principal" # route alias the planner node runs on
