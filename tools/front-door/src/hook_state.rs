@@ -662,9 +662,10 @@ mod tests {
             state_dir: None,
             cwd: temp.path(),
             executor: &executor,
+            clock: &SYSTEM_CLOCK,
         };
         let (lanes, next, skipped) = cli
-            .lane_listing(Instant::now() + Duration::from_secs(1), None)
+            .lane_listing(cli.deadline_after(Duration::from_secs(1)), None)
             .unwrap();
         assert_eq!(lanes[0].id, "g/a#1");
         assert_eq!(next.as_deref(), Some("20"));
@@ -719,9 +720,10 @@ mod tests {
             state_dir: None,
             cwd: temp.path(),
             executor: &executor,
+            clock: &SYSTEM_CLOCK,
         };
         let (trees, skipped) = cli
-            .worktree_listing(Instant::now() + Duration::from_secs(1))
+            .worktree_listing(cli.deadline_after(Duration::from_secs(1)))
             .unwrap();
         assert_eq!(trees.len(), 1);
         assert_eq!(trees[0].path, "/one");

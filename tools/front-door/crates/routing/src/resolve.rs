@@ -1252,9 +1252,7 @@ fn account_reason<'q>(
             .launch_policy
             .check(
                 "PROBE_FAILURE",
-                provenant_records::policy::Facts::violation(
-                    "quota probe failed for account",
-                ),
+                provenant_records::policy::Facts::violation("quota probe failed for account"),
             )
             .blocks()
     {
@@ -1927,9 +1925,9 @@ fn candidate(
         && let Some(reason_text) = account_probe_failure_reason(model, a, context)
     {
         let key = a.account_key.as_deref().unwrap_or("unknown");
-        diagnostics.launch_warnings.push(format!(
-            "probe for account `{key}` failed: {reason_text}"
-        ));
+        diagnostics
+            .launch_warnings
+            .push(format!("probe for account `{key}` failed: {reason_text}"));
     }
     if let Some(value) = dropped_effort {
         diagnostics.effort_warning = Some(EffortWarning {

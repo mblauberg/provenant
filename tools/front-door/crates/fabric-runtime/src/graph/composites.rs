@@ -1065,16 +1065,15 @@ fn review_lens_statuses(
         {
             let available = progress.state == NodeState::Succeeded;
             let reason = (!available).then(|| {
-                let detail =
-                    progress
-                        .advance_error
-                        .as_deref()
-                        .unwrap_or_else(|| match progress.state {
-                            NodeState::Failed => "review did not succeed",
-                            NodeState::Blocked => "review was blocked",
-                            NodeState::Skipped => "review was skipped",
-                            _ => "review is unavailable",
-                        });
+                let detail = progress
+                    .advance_error
+                    .as_deref()
+                    .unwrap_or(match progress.state {
+                        NodeState::Failed => "review did not succeed",
+                        NodeState::Blocked => "review was blocked",
+                        NodeState::Skipped => "review was skipped",
+                        _ => "review is unavailable",
+                    });
                 format!("{lens} (node {}): {detail}", progress.id)
             });
             statuses.entry(lens.to_owned()).or_default().push(reason);
@@ -1406,7 +1405,6 @@ pub(super) fn validate_progress(
         && spec.soft_review_coverage
         && let Some(Ok((output, _))) = &mut export
     {
-        let spec = node.composite.as_ref().expect("checked composite");
         let reason = coverage_shortfall(positions[&node.id], spec, plan, checkpoint, positions);
         if let Some(reason) = reason {
             let warning = bounded(
