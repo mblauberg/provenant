@@ -559,6 +559,15 @@ fn nearest_name<'a>(key: &str, accepted: impl IntoIterator<Item = &'a str>) -> O
         .map(|(_, name)| name.to_owned())
 }
 
+fn nearest_names<'a>(key: &str, accepted: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut matches = accepted
+        .into_iter()
+        .map(|name| (edit_distance(key, name), name))
+        .collect::<Vec<_>>();
+    matches.sort_unstable();
+    matches.into_iter().take(3).map(|(_, name)| name).collect()
+}
+
 fn edit_distance(left: &str, right: &str) -> usize {
     let right: Vec<char> = right.chars().collect();
     let mut row: Vec<usize> = (0..=right.len()).collect();
@@ -1336,6 +1345,41 @@ impl TemplateLibrary {
         self.entries.keys().map(String::as_str)
     }
 
+    fn unknown_name_message(&self, name: &str, base: Option<&str>) -> String {
+        let list_all = base.is_some();
+        let (label, candidates): (String, Vec<&str>) = match base {
+            Some(base) => (
+                format!("known {base} flavours"),
+                self.names()
+                    .filter(|candidate| {
+                        candidate
+                            .strip_prefix(base)
+                            .is_some_and(|suffix| suffix.starts_with('.'))
+                    })
+                    .collect(),
+            ),
+            None => ("known templates".into(), self.names().collect()),
+        };
+        let suggestions = if list_all {
+            candidates
+        } else {
+            nearest_names(name, candidates)
+        };
+        if suggestions.is_empty() {
+            match base {
+                Some(base) => {
+                    format!("unknown template {name}; base template {base} has no known flavours")
+                }
+                None => format!("unknown template {name}; no known templates are available"),
+            }
+        } else {
+            format!(
+                "unknown template {name}; {label}: {}",
+                suggestions.join(", ")
+            )
+        }
+    }
+
     /// The layer that supplies `name` itself, ignoring its base.
     pub fn layer(&self, name: &str) -> Option<Layer> {
         self.entries
@@ -1359,13 +1403,19 @@ impl TemplateLibrary {
         let own = self.own(name);
         match name.rsplit_once('.') {
             Some((base, _)) => {
+                if self.own(base).is_none() {
+                    return Err(self.unknown_name_message(name, None));
+                }
                 let base = self.resolve(base)?;
-                let own = own.ok_or_else(|| format!("unknown template flavour {name}"))?;
+                let own = own.ok_or_else(|| {
+                    let base_name = name.rsplit_once('.').map(|(base, _)| base);
+                    self.unknown_name_message(name, base_name)
+                })?;
                 Ok(Template::flavour(base, own))
             }
             None => own
                 .cloned()
-                .ok_or_else(|| format!("unknown template {name}")),
+                .ok_or_else(|| self.unknown_name_message(name, None)),
         }
     }
 }

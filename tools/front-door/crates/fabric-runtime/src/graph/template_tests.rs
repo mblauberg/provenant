@@ -515,6 +515,24 @@ fn flavours_and_layers_resolve_in_order() {
 }
 
 #[test]
+fn unknown_template_flavour_names_the_template_and_known_flavours() {
+    // Spec: docs/specs/cli.md#template-name-errors
+    let library = library();
+    let error = library.resolve("review.reliability").unwrap_err();
+    let known = library
+        .names()
+        .filter(|name| name.starts_with("review."))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        error,
+        format!(
+            "unknown template review.reliability; known review flavours: {}",
+            known.join(", ")
+        )
+    );
+}
+
+#[test]
 fn raw_nodes_pass_through_unchanged() {
     let bundled = library();
     let raw = json!({"id": "lane", "access": "read_only", "prompt": "Uses ${literal} text",

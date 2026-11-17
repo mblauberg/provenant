@@ -987,10 +987,28 @@ pub(crate) fn target_fault(error: ResolveError<JournalError>) -> TargetFault {
         ResolveError::Ambiguous { .. } => (provenant_records::Outcome::Invalid, "AMBIGUOUS_TARGET"),
         ResolveError::Read(_) => (provenant_records::Outcome::Error, "GRAPH_READ"),
     };
+    let message = match &error {
+        ResolveError::NotFound(target) => target.clone(),
+        ResolveError::Ambiguous { target, candidates } => format!(
+            "{target} has several nodes; use one of {}",
+            candidates.join(", ")
+        ),
+        ResolveError::Read(_) => error.to_string(),
+    };
     TargetFault {
         outcome,
         code,
-        message: error.to_string(),
+        message,
+    }
+}
+
+fn outside_project_fault(target: &provenant_cli::Target) -> TargetFault {
+    TargetFault {
+        outcome: provenant_records::Outcome::Invalid,
+        code: "NOT_FOUND",
+        message: format!(
+            "no project found for {target}; run from a project checkout or pass --project PATH"
+        ),
     }
 }
 
@@ -1037,8 +1055,13 @@ fn command_target_fault(
     }
     is_target_not_found(error).then(|| {
         let message = target.map_or_else(
-            || format!("NOT_FOUND: {error}"),
-            |target| format!("NOT_FOUND: {target}"),
+            || {
+                error
+                    .to_string()
+                    .trim_start_matches("NOT_FOUND: ")
+                    .to_owned()
+            },
+            |target| format!("{target} was not found in this project"),
         );
         (provenant_records::Outcome::Invalid, "NOT_FOUND", message)
     })
@@ -1695,9 +1718,7 @@ pub(crate) fn graph_listing(
                 .map_or(i64::MAX, provenant_core::WallTime::as_micros);
             let mut human = String::from("NAME STATE TEMPLATE NODES AGE\n");
             for graph in &listing.rows {
-                let age = graph
-                    .changed_micros
-                    .map_or_else(|| "-".to_owned(), |changed| age_text(now - changed));
+                let age = graph_age(now, graph);
                 human.push_str(&format!(
                     "{} {} {} {} {age}\n",
                     graph.name,
@@ -1793,6 +1814,12 @@ fn age_text(micros: i64) -> String {
     }
 }
 
+fn graph_age(now_micros: i64, graph: &ListedGraph) -> String {
+    graph
+        .created_micros
+        .map_or_else(|| "-".to_owned(), |created| age_text(now_micros - created))
+}
+
 /// Read the retained graph journal without consulting live providers. A
 /// numbered target keeps only that attempt's events.
 pub(crate) fn unified_graph_trace(
@@ -1811,7 +1838,13 @@ pub(crate) fn unified_graph_trace(
             add_cache_share(&mut data);
             return Ok(data);
         }
-        let factory = read_factory(globals, workers)?;
+        let factory = read_factory(globals, workers).map_err(|error| {
+            if missing_graph_context(error.as_ref()) {
+                Box::new(outside_project_fault(target)) as Box<dyn std::error::Error>
+            } else {
+                error
+            }
+        })?;
         let attempt = if factory.context.in_lane {
             None
         } else {
@@ -1896,9 +1929,7 @@ pub(crate) fn unified_graph_output(
         let read = || -> Result<provenant_cli::run::Reply, Box<dyn std::error::Error>> {
             let factory = read_factory(globals, workers).map_err(|error| {
                 if missing_graph_context(error.as_ref()) {
-                    Box::new(target_fault(ResolveError::NotFound(
-                        command.target.to_string(),
-                    )))
+                    Box::new(outside_project_fault(&command.target))
                 } else {
                     error
                 }
@@ -3118,6 +3149,23 @@ mod tests {
         assert_eq!(first.rows[0].name, "s4");
         let second = select_listing(graphs, 3 * day, true, 2, first.next);
         assert_eq!(second.rows[0].name, "s2");
+    }
+
+    #[test]
+    fn graph_age_uses_creation_time_after_later_changes() {
+        let mut graph = listed("running", false, 110_000_000);
+        graph.created_micros = Some(10_000_000);
+        assert_eq!(graph_age(120_000_000, &graph), "1m");
+    }
+
+    #[test]
+    fn missing_project_target_error_has_one_code_and_a_repair() {
+        let target = "graph-name".parse().expect("valid graph target");
+        let fault = outside_project_fault(&target);
+        assert_eq!(fault.code, "NOT_FOUND");
+        assert!(fault.message.contains("no project found"));
+        assert!(fault.message.contains("pass --project PATH"));
+        assert!(!fault.message.starts_with("NOT_FOUND:"));
     }
 
     #[test]

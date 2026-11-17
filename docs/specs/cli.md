@@ -66,12 +66,29 @@ Compact output uses semantic owner summaries and a detail command; JSON preserve
 
 A refusal carries a stable typed code independent of message wording. The
 command catalogue owns the list of codes and their meanings.
+An output or trace target read outside a project uses one `NOT_FOUND` code
+prefix, explains that no project was found, and names running from a checkout
+or passing `--project PATH` as the repair.
 
 - Why: consumers can act on a refusal without depending on prose.
 
+### Template name errors
+
+An unknown template or flavour names the supplied template and lists known
+matching template names or flavours. Only validated template identifiers are
+disclosed; unclassified graph input errors keep their generic message.
+
+- Why: a mistyped flavour should be repairable from the refusal without exposing
+  arbitrary graph input.
+
 ### Waits are readers
 
-Waiting observes work; timeout or cancellation does not stop it. A target
+Waiting observes work; timeout or cancellation does not stop it. `wait` defaults
+to `--all`, which waits for every target and returns the worst final result.
+`--any` returns at the first target that settles or needs input.
+`--fail-fast` returns at the first unsuccessful target, or after every target
+settles successfully or needs input. Human output names the selected mode and
+the terminal JSON envelope includes it. A target
 settles by its own state, so an older settlement cannot satisfy a wait for new
 work. Local graph waiters share one filesystem event source (inotify or kqueue)
 for settlement logs and store changes. When that source is unavailable, the result reports why
@@ -113,6 +130,8 @@ default, expands with `--full`, and exposes typed records and native presence
 with `--json`. Pagination uses `--limit` and `--cursor`; `--session` selects the
 exact chair session for the session-start digest. Settled custody leaves the
 active view. The digest reads this view instead of extracting PRs from prose.
+The graph-listing AGE column measures elapsed time since graph creation, even
+when the graph's state changed more recently.
 For graph nodes with a typed review result, the digest shows execution state
 separately from verdict, findings count and findings availability.
 
