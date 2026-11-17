@@ -6,6 +6,8 @@ use std::io::Read;
 
 pub const HOOK_INPUT_LIMIT: u64 = 1024 * 1024;
 pub const HOOK_OUTPUT_LIMIT: usize = 8 * 1024;
+const LANE_SESSION_CONTEXT: &str =
+    "The chair owns session checkpoints; record progress in the lane handoff.";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HookEvent {
     SessionStart,
@@ -139,6 +141,7 @@ pub fn hook_context(
             digest: "",
             commands: &CommandPrefix::default(),
             client: None,
+            in_lane: false,
         },
     )
 }
@@ -149,6 +152,8 @@ pub struct Advice<'a> {
     pub digest: &'a str,
     pub commands: &'a CommandPrefix,
     pub client: Option<provenant_records::Harness>,
+    /// The shared host signal used by chair-checkpoint writes to refuse lanes.
+    pub in_lane: bool,
 }
 
 /// As [`hook_context`], with a freshly derived `digest` of lane and pull
@@ -182,7 +187,24 @@ pub fn hook_context_with(
         digest,
         commands,
         client,
+        in_lane,
     } = advice;
+    if in_lane {
+        let (head, diagnostic) = if event == HookEvent::PreCompact {
+            (LANE_SESSION_CONTEXT, String::new())
+        } else {
+            ("", LANE_SESSION_CONTEXT.to_owned())
+        };
+        return render(
+            event,
+            parsed,
+            CheckpointStatus::Present,
+            head,
+            diagnostic,
+            None,
+            "",
+        );
+    }
     let Some(session) = parsed else {
         let head = head(event, transcript, None, None, digest);
         return render(event, None, CheckpointStatus::InvalidInput, &head,

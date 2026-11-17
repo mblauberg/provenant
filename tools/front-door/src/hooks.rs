@@ -1049,6 +1049,7 @@ fn checkpoint(
             digest: &digest,
             commands: &session::CommandPrefix::new(globals.state_dir.as_deref(), cwd),
             client,
+            in_lane,
         },
     ))
 }
