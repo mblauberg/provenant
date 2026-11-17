@@ -1549,7 +1549,11 @@ mod reboot_tests {
             spawned.set(spawned.get() + 1);
             Ok(())
         })?;
-        assert_eq!((reaped, spawned.get()), (0, 0));
+        // docs/specs/run-settlement.md#guardian-loss-proof: an unknown holder is
+        // queued for recovery, which settles only on positive proof of loss;
+        // the presence itself stays unknown and never reads as absent.
+        assert_eq!((reaped, spawned.get()), (1, 1));
+        assert!(!holder_absent(context.state_root.as_path(), &record));
         Ok(())
     }
 

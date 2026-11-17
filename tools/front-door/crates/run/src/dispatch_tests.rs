@@ -1328,11 +1328,13 @@ fn recover_rebooted_writer(case: RebootRecoveryCase) -> TestResult {
             false,
             16,
         )?;
+        // docs/specs/run-settlement.md#guardian-loss-proof: the unknown holder
+        // is queued for recovery, which settles only on positive proof of loss.
+        // The reconcile below must therefore still report it uncertain and the
+        // attempt must stay running with its reservation.
         assert_eq!(
-            store.reap_with_census_and_spawn(&call, &observer, Some(&census), |_, _| panic!(
-                "same-boot absence without a sealed exit is not reapable"
-            ))?,
-            0
+            store.reap_with_census_and_spawn(&call, &observer, Some(&census), |_, _| Ok(()))?,
+            1
         );
         assert!(matches!(
             store.reconcile_with_observer(run.attempt_id, &Fake::default(), &call, &observer)?.as_slice(),
