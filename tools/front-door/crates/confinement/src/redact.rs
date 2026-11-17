@@ -766,20 +766,22 @@ fn closing_quote(backslashes: usize, quote_slashes: usize, layer: usize) -> bool
     backslashes % layer == quote_slashes && (backslashes / layer).is_multiple_of(2)
 }
 
-// Only layers able to represent the opener are plausible. A quote is
-// definite when every such layer agrees it closes the value.
+// The opener's slashes give the shallowest layer that can represent it, but
+// the value may be escaped any number of layers deeper (an apostrophe, which
+// JSON never escapes, reveals nothing at all). A quote is a definite close
+// only when every power-of-two layer from the opener's up to the backslash run
+// agrees; a fixed depth cap would release a value escaped one layer deeper.
 fn quote_close(backslashes: usize, quote_slashes: usize) -> bool {
-    let mut definite = true;
-    let mut plausible = false;
-    for layer in [1, 2, 4] {
-        if quote_slashes >= layer {
-            continue;
+    let mut layer = quote_slashes.saturating_add(1).next_power_of_two();
+    loop {
+        if !closing_quote(backslashes, quote_slashes, layer) {
+            return false;
         }
-        plausible = true;
-        let closes = closing_quote(backslashes, quote_slashes, layer);
-        definite &= closes;
+        layer = layer.saturating_mul(2);
+        if layer > backslashes {
+            return true;
+        }
     }
-    plausible && definite
 }
 
 /// Bytes that end an unquoted value.
