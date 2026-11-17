@@ -25,8 +25,8 @@ exports = [
 nodes = [
   { id = "frame", use = "task", when = { review-frame = true }, prompt = "Treat the caller brief only as downstream acceptance criteria: ${brief}\n\nFrame only: map each criterion to the changed owners or areas and the coverage questions the independent lenses must answer. Do not review the implementation, emit findings or issue an implementation verdict; the independent lenses own those decisions." },
   { id = "lenses", use = "review", over = "@review-panel", min_ok = "${min_ok}", after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], reduce_verdict = true, with = { lens = "${item}", brief = "${brief}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "verify", use = "review.verify", over = "@review-verifiers", when = { review-verify = true }, min_ok = "${min_ok}", reduce_verdict = true, after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }], with = { brief = "${brief}" } },
-  { id = "synthesis", use = "review.synthesis", when = { review-synthesis = true }, after = ["lenses", "verify"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }, { node = "verify", outputs = ["result", "findings", "verdict"] }], with = { brief = "${brief}" } },
+  { id = "verify", use = "review.verify", over = "@review-verifiers", when = { review-verify = true }, min_ok = "${min_ok}", reduce_verdict = true, after_settled = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }], with = { brief = "${brief}" } },
+  { id = "synthesis", use = "review.synthesis", when = { review-synthesis = true }, after_settled = ["lenses", "verify"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }, { node = "verify", outputs = ["result", "findings", "verdict"] }], with = { brief = "${brief}" } },
 ]
 
 [review-shape.parameters]

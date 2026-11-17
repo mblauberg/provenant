@@ -649,6 +649,12 @@ fn order_only_edge_waits_for_failure_without_hiding_it() {
     let first = node("first", route("fixture"));
     let mut second = node("second", route("fixture"));
     second.after_settled = vec!["first".into()];
+    second.inputs.push(GraphInput {
+        extra: Default::default(),
+        node: "first".into(),
+        outputs: vec![OutputKind::Result],
+        required_outputs: vec![],
+    });
     let mut owner = FakeOwner {
         observations: VecDeque::from([
             terminal(AttemptOutcome::TaskFailed),

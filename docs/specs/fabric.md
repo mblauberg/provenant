@@ -154,7 +154,7 @@ An occupied concurrency threshold warns and proceeds unless its declared policy 
 
 `after_settled` orders a node after its predecessors settle in any state without
 propagating their failure. The predecessors remain visible in the graph outcome.
-Success dependencies and selected inputs retain their existing failure semantics.
+Inputs may select outputs from either kind of direct dependency; unavailable optional outputs remain absent, while required outputs still gate admission.
 
 ### Implementation planning
 

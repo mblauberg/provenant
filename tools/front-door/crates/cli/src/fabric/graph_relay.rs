@@ -918,25 +918,10 @@ fn with_repository_floors(
     review: &provenant_routing::ReviewConfig,
     checkout: &std::path::Path,
 ) -> Result<provenant_routing::ReviewConfig, String> {
-    use std::io::Read;
-    let root = provenant_os::fs::Directory::open_anchor(checkout).map_err(|e| e.to_string())?;
-    let directory = match root.open_verified_directory(std::ffi::OsStr::new(".provenant")) {
-        Ok(directory) => directory,
-        Err(error) if error.is_not_found() => return Ok(review.clone()),
-        Err(error) => return Err(error.to_string()),
+    let Some(text) = provenant_config::read_declaration(checkout).map_err(|e| e.to_string())?
+    else {
+        return Ok(review.clone());
     };
-    let file = match directory.open_read(std::ffi::OsStr::new("config.toml")) {
-        Ok(file) => file,
-        Err(error) if error.is_not_found() => return Ok(review.clone()),
-        Err(error) => return Err(error.to_string()),
-    };
-    let mut text = String::new();
-    file.take(64 * 1024 + 1)
-        .read_to_string(&mut text)
-        .map_err(|e| e.to_string())?;
-    if text.len() > 64 * 1024 {
-        return Err("project config exceeds 64 KiB".into());
-    }
     let config: toml_edit::DocumentMut = text
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| e.to_string())?;
