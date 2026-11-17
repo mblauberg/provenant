@@ -1541,6 +1541,12 @@ mod tests {
         let pr = world.forge.pull_requests.get_mut(&1).unwrap();
         pr.state = super::super::ports::PullRequestState::Merged;
         pr.merged_commit = Some("landed-1".into());
+        // The forge's merge commit carries the gated candidate's tree.
+        let candidate_tree = receipt::pending(world.state.path(), "fake-repository", "main")?[0]
+            .candidate
+            .tree
+            .clone();
+        world.repo.trees.insert("landed-1".into(), candidate_tree);
         let (_, recovered) = submit(&mut world, request)?;
         assert!(recovered.outcomes[&1].landed());
         assert!(receipt::pending(world.state.path(), "fake-repository", "main")?.is_empty());
