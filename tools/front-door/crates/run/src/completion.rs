@@ -11,6 +11,7 @@ use provenant_records::{
 };
 use std::{
     ffi::OsStr,
+    io::Write,
     path::{Component, Path},
 };
 
@@ -35,6 +36,18 @@ impl RunStore {
         decoded: &Decoded,
     ) -> Result<provenant_records::handoff::HandoffParse> {
         let parsed = decoded.handoff_report();
+        if let Some(repeated) =
+            provenant_records::handoff::Handoff::repeated_blocks(&decoded.result)
+            && parsed.handoff.as_ref().is_ok_and(Option::is_some)
+        {
+            // Accepted either way: the lane did its work and declared it.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: attempt {}: {}",
+                record.attempt_id,
+                repeated.warning()
+            );
+        }
         if let Some(handoff) = read_snapshot(attempt)? {
             let handoff = with_scope_report(attempt, handoff)?;
             return Ok(provenant_records::handoff::HandoffParse {

@@ -3422,13 +3422,36 @@ impl WriterLaunch {
             return Err(RunError::Validation("lane import cancelled"));
         }
         if settlement.phase() == crate::settlement::Phase::Publish {
-            crate::objects::publish_branch(
+            let request: crate::CanonicalRequest = crate::db::decode(
+                &crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
+                    .ok_or(RunError::NotFound)?,
+            )?;
+            let ancestor = crate::objects::publish_branch(
                 &git_executable,
                 self.worktree.repo(),
                 self.branch.as_str(),
                 base,
+                request.task.base_ref.as_deref(),
                 verified_tip,
             )?;
+            if let Some(warning) = ancestor.warning(self.branch.as_str(), base, verified_tip) {
+                // Best effort: the ancestor is also in the branch reflog.
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                let _ = attempt
+                    .atomic_write(
+                        OsStr::new("publication-ancestor.json"),
+                        ".run-",
+                        &crate::db::bytes(&serde_json::json!({
+                            "schema_version": 1,
+                            "branch": self.branch.as_str(),
+                            "tip": verified_tip,
+                            "launch_base": base,
+                            "warning": warning,
+                        }))?,
+                        provenant_os::fs::PublishMode::Replace,
+                    )
+                    .and_then(|publication| publication.require_durable());
+            }
             // Restore the private index only after receive succeeds.
             if !merge_objects.is_empty()
                 && crate::objects::resolve_ref(

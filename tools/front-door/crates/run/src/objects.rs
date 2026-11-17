@@ -297,13 +297,89 @@ pub(crate) fn is_ancestor(git: &Path, repo: &VerifiedRepo, ancestor: GitOid, hea
     .is_ok()
 }
 
+/// The known history a published lane tip descends from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Ancestor {
+    /// The pinned launch base: the expected case, nothing to report.
+    LaunchBase,
+    /// A rebase or merge onto other history the host already knows: the
+    /// origin default branch, the ref the lane launched against, or a
+    /// remote-tracking branch. Publication proceeds and reports it.
+    Known { reference: String, oid: GitOid },
+}
+
+impl Ancestor {
+    pub(crate) fn warning(&self, branch: &str, base: GitOid, head: GitOid) -> Option<String> {
+        match self {
+            Self::LaunchBase => None,
+            Self::Known { reference, oid } => Some(format!(
+                "lane tip {head} on {branch} no longer descends from its launch base {base}; \
+                 published because it descends from {reference} ({oid})"
+            )),
+        }
+    }
+}
+
+// Rebasing a lane onto the branch it feeds is a legitimate writer action, so
+// any history the host already knows is acceptable. Order is fixed: the launch
+// base, the origin default, the ref the lane launched against, then the first
+// pushed remote-tracking branch the tip contains.
+fn known_ancestor(
+    git: &Path,
+    repo: &VerifiedRepo,
+    base: GitOid,
+    launch_ref: Option<&str>,
+    head: GitOid,
+) -> Result<Option<Ancestor>> {
+    let descends = |ancestor| is_ancestor(git, repo, ancestor, head);
+    if descends(base) {
+        return Ok(Some(Ancestor::LaunchBase));
+    }
+    for reference in ["refs/remotes/origin/HEAD"].into_iter().chain(launch_ref) {
+        if let Ok(oid) = resolve_ref(git, repo, reference)
+            && descends(oid)
+        {
+            return Ok(Some(Ancestor::Known {
+                reference: reference.to_owned(),
+                oid,
+            }));
+        }
+    }
+    let merged = execute(
+        git,
+        repo.common_git_dir(),
+        repo.root_path(),
+        &args(&[
+            "for-each-ref",
+            "--merged",
+            &head.to_string(),
+            "--format=%(refname)",
+            "refs/remotes/",
+        ]),
+        None,
+    )?;
+    for line in String::from_utf8_lossy(&merged).lines() {
+        // origin/HEAD is a symbolic alias, already tried by name.
+        if !line.ends_with("/HEAD")
+            && let Ok(oid) = resolve_ref(git, repo, line)
+        {
+            return Ok(Some(Ancestor::Known {
+                reference: line.to_owned(),
+                oid,
+            }));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn publish_branch(
     git: &Path,
     repo: &VerifiedRepo,
     branch: &str,
     base: GitOid,
+    launch_ref: Option<&str>,
     head: GitOid,
-) -> Result<()> {
+) -> Result<Ancestor> {
     let current = resolve_ref(git, repo, branch)?;
     // Fast-forward from the launch base or from later lane commits, but not
     // from a branch rewound behind its base.
@@ -312,16 +388,25 @@ pub(crate) fn publish_branch(
     if !advances_current && !is_ancestor(git, repo, head, current) {
         return Err(invalid());
     }
-    let descends = |ancestor| is_ancestor(git, repo, ancestor, head);
-    if !descends(base) && !resolve_ref(git, repo, "refs/remotes/origin/HEAD").is_ok_and(descends) {
-        return Err(RunError::Validation(
-            "lane tip must descend from its launch base or origin default branch",
-        ));
-    }
+    // The tip and the host's refs do not change on retry, so a tip with no
+    // known ancestor is a final refusal, never a retryable one.
+    let ancestor = known_ancestor(git, repo, base, launch_ref, head)?.ok_or_else(|| {
+        RunError::LaneTipUnrooted {
+            tip: head,
+            base,
+            launch_ref: launch_ref.map(str::to_owned),
+        }
+    })?;
     // receive-pack has checked the graph. Git's CAS protects concurrent host
     // updates, including when a lane rebases or merges its private branch.
     {
         let target = if advances_current { head } else { current };
+        let message = match &ancestor {
+            Ancestor::LaunchBase => "provenant: verified lane objects".to_owned(),
+            Ancestor::Known { reference, oid } => {
+                format!("provenant: verified lane objects (descends from {reference} {oid})")
+            }
+        };
         command(
             git,
             repo.common_git_dir(),
@@ -330,7 +415,7 @@ pub(crate) fn publish_branch(
                 "update-ref",
                 "--no-deref",
                 "-m",
-                "provenant: verified lane objects",
+                &message,
                 branch,
                 &target.to_string(),
                 &current.to_string(),
@@ -345,7 +430,7 @@ pub(crate) fn publish_branch(
         &args(&["update-ref", "-d", &format!("refs/provenant/import/{head}")]),
         None,
     )?;
-    Ok(())
+    Ok(ancestor)
 }
 
 fn directory(parent: &Directory, name: &OsStr) -> Result<Directory> {

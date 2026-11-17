@@ -111,6 +111,7 @@ fn private_view_restarts_import_and_publication_in_shallow_repositories() -> Tes
                     fixture.worktree.repo(),
                     "refs/heads/lane",
                     fixture.base,
+                    None,
                     head,
                 )?;
             }
@@ -188,6 +189,7 @@ fn private_view_recovers_after_import_and_publication_acknowledgement_failures()
                 fixture.worktree.repo(),
                 "refs/heads/lane",
                 fixture.base,
+                None,
                 fixture.head
             )
             .is_err()
@@ -205,6 +207,7 @@ fn private_view_recovers_after_import_and_publication_acknowledgement_failures()
             fixture.worktree.repo(),
             "refs/heads/lane",
             fixture.base,
+            None,
             fixture.head,
         )?;
         assert!(super::resolve_ref(&fixture.git, fixture.worktree.repo(), &stage).is_err());
@@ -537,6 +540,7 @@ fn host_prepared_private_repository_reads_shared_base_and_imports_new_commit() -
             fixture.worktree.repo(),
             "refs/heads/lane",
             fixture.base,
+            None,
             head,
         )?;
         let content = git(
@@ -739,6 +743,7 @@ fn private_ref_overlay_keeps_host_and_sibling_fetch_usable_until_verified_public
         fixture.worktree.repo(),
         "refs/heads/lane",
         fixture.base,
+        None,
         fixture.head,
     )?;
     assert_eq!(shared_tip()?, fixture.head);
@@ -806,6 +811,7 @@ fn shared_branch_publication_compares_base_and_is_idempotent_for_the_same_head()
             fixture.worktree.repo(),
             "refs/heads/lane",
             fixture.base,
+            None,
             fixture.head,
         )?;
     }
@@ -857,6 +863,7 @@ fn shared_branch_publication_compares_base_and_is_idempotent_for_the_same_head()
             fixture.worktree.repo(),
             "refs/heads/lane",
             fixture.base,
+            None,
             fixture.head,
         )
         .is_err()
@@ -1529,6 +1536,7 @@ fn stopped_merge_restores_host_index_and_merge_metadata() -> TestResult {
         fixture.worktree.repo(),
         "refs/heads/lane",
         fixture.base,
+        None,
         fixture.head,
     )?;
     super::restore_index(&source, fixture.worktree.repo())?;
@@ -1617,6 +1625,7 @@ fn stopped_merge_restores_host_index_and_merge_metadata() -> TestResult {
         fixture.worktree.repo(),
         "refs/heads/lane",
         fixture.head,
+        None,
         tip,
     )?;
     super::restore_index(&next, fixture.worktree.repo())?;
@@ -1657,6 +1666,7 @@ fn restoring_private_index_clears_flags_that_hide_uncommitted_files() -> TestRes
             fixture.worktree.repo(),
             "refs/heads/lane",
             fixture.base,
+            None,
             fixture.head,
         )?;
         super::restore_index(&source, fixture.worktree.repo())?;
@@ -1717,6 +1727,7 @@ fn publication_rechecks_already_published_branch_before_removing_import_ref() ->
             fixture.worktree.repo(),
             "refs/heads/lane",
             fixture.base,
+            None,
             fixture.head
         )
         .is_err()
@@ -1759,16 +1770,193 @@ fn publication_refuses_orphan_history() -> TestResult {
             fixture.worktree.repo(),
             "refs/heads/lane",
             fixture.base,
+            None,
             orphan
         ),
-        Err(crate::RunError::Validation(
-            "lane tip must descend from its launch base or origin default branch"
-        ))
+        Err(crate::RunError::LaneTipUnrooted { tip, base, launch_ref: None })
+            if tip == orphan && base == fixture.base
     ));
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
         fixture.base
     );
+    Ok(())
+}
+
+// Child of `parent` with the base tree, so a rebase needs no checkout.
+fn child_of(fixture: &Fixture, parent: GitOid, message: &str) -> TestResult<GitOid> {
+    let tree = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["rev-parse", &format!("{}^{{tree}}", fixture.base)],
+    )?)?;
+    oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &[
+            "commit-tree",
+            &tree.to_string(),
+            "-p",
+            &parent.to_string(),
+            "-m",
+            message,
+        ],
+    )?)
+}
+
+fn update_ref(fixture: &Fixture, reference: &str, value: GitOid) -> TestResult {
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["update-ref", reference, &value.to_string()],
+    )?;
+    Ok(())
+}
+
+#[test]
+fn publication_refusal_of_an_unrooted_tip_is_final_and_names_the_tip() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let tree = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["rev-parse", &format!("{}^{{tree}}", fixture.base)],
+    )?)?;
+    let orphan = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["commit-tree", &tree.to_string(), "-m", "orphan"],
+    )?)?;
+    let error = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        "refs/heads/lane",
+        fixture.base,
+        Some("integration"),
+        orphan,
+    )
+    .expect_err("an unrooted tip is refused");
+    assert!(error.import_refusal_is_final());
+    let message = error.to_string();
+    assert!(message.contains(&orphan.to_string()), "{message}");
+    assert!(message.contains(&fixture.base.to_string()), "{message}");
+    assert!(message.contains("launch ref integration"), "{message}");
+    // The other publication refusal depends on a branch that can move, so a
+    // retry can change its answer: it must stay retryable.
+    assert!(!super::invalid().import_refusal_is_final());
+    Ok(())
+}
+
+#[test]
+fn publication_accepts_a_rebase_onto_a_pushed_non_default_branch() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let lane_base = child_of(&fixture, fixture.base, "lane start")?;
+    let feature = child_of(&fixture, fixture.base, "pushed feature branch")?;
+    let rebased = child_of(&fixture, feature, "rebased lane")?;
+    update_ref(&fixture, "refs/heads/lane", lane_base)?;
+    update_ref(&fixture, "refs/remotes/origin/feature", feature)?;
+    let ancestor = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        "refs/heads/lane",
+        lane_base,
+        None,
+        rebased,
+    )?;
+    assert_eq!(
+        ancestor,
+        super::Ancestor::Known {
+            reference: "refs/remotes/origin/feature".into(),
+            oid: feature
+        }
+    );
+    let warning = ancestor
+        .warning("refs/heads/lane", lane_base, rebased)
+        .ok_or("a rebase warns")?;
+    assert!(warning.contains("refs/remotes/origin/feature"), "{warning}");
+    assert!(warning.contains(&lane_base.to_string()), "{warning}");
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        rebased
+    );
+    let reflog = git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["reflog", "show", "--format=%gs", "refs/heads/lane"],
+    )?;
+    assert!(
+        String::from_utf8_lossy(&reflog.stdout)
+            .contains("descends from refs/remotes/origin/feature"),
+        "{}",
+        String::from_utf8_lossy(&reflog.stdout)
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let lane_base = child_of(&fixture, fixture.base, "lane start")?;
+    let integration = child_of(&fixture, fixture.base, "integration moved on")?;
+    let rebased = child_of(&fixture, integration, "rebased lane")?;
+    update_ref(&fixture, "refs/heads/lane", lane_base)?;
+    update_ref(&fixture, "refs/heads/integration", integration)?;
+    let ancestor = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        "refs/heads/lane",
+        lane_base,
+        Some("integration"),
+        rebased,
+    )?;
+    assert_eq!(
+        ancestor,
+        super::Ancestor::Known {
+            reference: "integration".into(),
+            oid: integration
+        }
+    );
+    // Without the launch ref the same tip descends from nothing known.
+    update_ref(&fixture, "refs/heads/lane", lane_base)?;
+    assert!(matches!(
+        super::publish_branch(
+            &fixture.git,
+            fixture.worktree.repo(),
+            "refs/heads/lane",
+            lane_base,
+            None,
+            rebased,
+        ),
+        Err(crate::RunError::LaneTipUnrooted { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn publication_from_the_launch_base_reports_no_ancestor_warning() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let tip = child_of(&fixture, fixture.base, "lane work")?;
+    let ancestor = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        "refs/heads/lane",
+        fixture.base,
+        None,
+        tip,
+    )?;
+    assert_eq!(ancestor, super::Ancestor::LaunchBase);
+    assert_eq!(ancestor.warning("refs/heads/lane", fixture.base, tip), None);
     Ok(())
 }
 
@@ -1829,6 +2017,7 @@ fn publication_accepts_a_rebase_onto_the_current_origin_default() -> TestResult 
         fixture.worktree.repo(),
         "refs/heads/lane",
         lane_base,
+        None,
         rebased,
     )?;
     assert_eq!(

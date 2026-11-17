@@ -433,6 +433,16 @@ impl Handoff {
         }
     }
 
+    /// Whether the answer repeats its handoff block, which the parser accepts
+    /// as one declaration: identical adjacent copies, or differing ones that
+    /// settle on the last. Prose between blocks is still refused.
+    pub fn repeated_blocks(result: &str) -> Option<Repeated> {
+        let mut capture = HandoffCapture::default();
+        capture.push(result.as_bytes());
+        capture.end_line();
+        capture.repeated
+    }
+
     pub fn unfinished(&self) -> bool {
         self.status != HandoffStatus::Done
     }
@@ -466,9 +476,33 @@ pub struct HandoffCapture {
     fence: Option<(u8, usize)>,
     json: Option<Vec<u8>>,
     declaration: Option<Handoff>,
+    /// The declaration a repeated block is compared with.
+    earlier: Option<Handoff>,
+    repeated: Option<Repeated>,
     trailing_verdict: bool,
     verdict: crate::result_capture::VerdictCapture,
     error: Option<HandoffError>,
+}
+
+/// A model, or a decoder, repeated the final declaration. Settlement accepts
+/// it and warns, since the work is done whichever copy it reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Repeated {
+    /// Blocks after the first.
+    pub extra: usize,
+    /// Whether any block differed; the last one is the declaration.
+    pub differing: bool,
+}
+
+impl Repeated {
+    pub fn warning(&self) -> String {
+        let blocks = self.extra + 1;
+        if self.differing {
+            format!("handoff block repeated {blocks} times with differing content; using the last")
+        } else {
+            format!("handoff block repeated {blocks} times with identical content; using it once")
+        }
+    }
 }
 
 impl HandoffCapture {
@@ -510,7 +544,12 @@ impl HandoffCapture {
         };
         let marker = text.trim_end_matches('\r');
         if self.declaration.is_some() {
-            if !marker.trim().is_empty() {
+            if marker == OPEN && !self.trailing_verdict {
+                // Only blank lines can have followed the declaration, or it
+                // would already have failed as not ending the answer.
+                self.earlier = self.declaration.take();
+                self.json = Some(Vec::new());
+            } else if !marker.trim().is_empty() {
                 if self.trailing_verdict || !crate::result_capture::is_standalone_verdict(marker) {
                     self.error = Some(HandoffError::new("$", "handoff must end the answer"));
                 } else {
@@ -528,7 +567,17 @@ impl HandoffCapture {
                     .or_else(|| json.strip_suffix(b"\n"))
                     .unwrap_or(json);
                 match Handoff::from_json(payload) {
-                    Ok(handoff) => self.declaration = Some(handoff),
+                    Ok(handoff) => {
+                        if let Some(earlier) = self.earlier.take() {
+                            let seen = self.repeated.get_or_insert(Repeated {
+                                extra: 0,
+                                differing: false,
+                            });
+                            seen.extra += 1;
+                            seen.differing |= earlier != handoff;
+                        }
+                        self.declaration = Some(handoff);
+                    }
                     Err(error) => self.error = Some(error),
                 }
                 self.json = None;
@@ -578,7 +627,7 @@ impl HandoffCapture {
         }
         if let Some(mut error) = self.error {
             if error.retained.is_empty()
-                && let Some(handoff) = self.declaration
+                && let Some(handoff) = self.declaration.or(self.earlier)
                 && let Ok(fields) = serde_json::from_value(serde_json::json!(handoff))
             {
                 error.retained = fields;
@@ -646,6 +695,74 @@ mod tests {
         let mut capture = HandoffCapture::default();
         capture.push(format!("{block}\n{}\n{block}", "x".repeat(28_000)).as_bytes());
         assert!(capture.finish().is_err());
+    }
+
+    #[test]
+    fn adjacent_repeated_blocks_are_one_declaration_with_a_warning() {
+        let single = Handoff::from_result(STOP).unwrap().unwrap();
+        // A decoder that doubles its text, with or without a separating blank line.
+        for text in [format!("{STOP}\n{STOP}"), format!("{STOP}\n\n{STOP}\n")] {
+            assert_eq!(Handoff::from_result(&text), Ok(Some(single.clone())));
+            let repeated = Handoff::repeated_blocks(&text).expect("a repeat is noted");
+            assert_eq!(
+                repeated,
+                Repeated {
+                    extra: 1,
+                    differing: false
+                }
+            );
+            assert!(
+                repeated.warning().contains("identical"),
+                "{}",
+                repeated.warning()
+            );
+        }
+        let triple = format!("{STOP}\n{STOP}\n{STOP}");
+        assert_eq!(
+            Handoff::repeated_blocks(&triple),
+            Some(Repeated {
+                extra: 2,
+                differing: false
+            })
+        );
+        // Differing blocks settle on the last.
+        let done = STOP.replace("stopped_early", "done");
+        let text = format!("{STOP}\n{done}");
+        assert_eq!(
+            Handoff::from_result(&text).unwrap().unwrap().status,
+            HandoffStatus::Done
+        );
+        let repeated = Handoff::repeated_blocks(&text).expect("a repeat is noted");
+        assert!(repeated.differing);
+        assert!(
+            repeated.warning().contains("differing"),
+            "{}",
+            repeated.warning()
+        );
+        // An ordinary single block raises no warning.
+        assert_eq!(Handoff::repeated_blocks(STOP), None);
+        // Split across a stream, the result is the same.
+        let mut capture = HandoffCapture::default();
+        for chunk in format!("{STOP}\n{STOP}").as_bytes().chunks(5) {
+            capture.push(chunk);
+        }
+        assert_eq!(capture.finish(), Ok(Some(single)));
+    }
+
+    #[test]
+    fn a_repeat_is_not_a_way_around_the_must_end_the_answer_rule() {
+        // Prose between or after blocks still makes the declaration ambiguous.
+        for text in [
+            format!("{STOP}\nNow more work.\n{STOP}"),
+            format!("{STOP}\n{STOP}\nTrailing prose."),
+        ] {
+            assert!(Handoff::from_result(&text).is_err(), "{text}");
+        }
+        // A malformed or unfinished repeat is explicit evidence, not a pass.
+        let broken = format!("{STOP}\n```handoff\n{{\"status\":\n```");
+        assert!(Handoff::from_result(&broken).is_err());
+        let open = format!("{STOP}\n```handoff\n{{}}");
+        assert!(Handoff::from_result(&open).is_err());
     }
 
     /// Join turns as the decoder does, recording where each one ended.
