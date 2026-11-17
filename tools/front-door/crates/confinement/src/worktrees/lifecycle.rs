@@ -155,7 +155,7 @@ fn list_impl(
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
     validate_binding(context)?;
     let entries = {
-        let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
+        let _lock = repository_lock(context, LockMode::Exclusive, cancel, "list worktrees")?;
         context.repo.revalidate()?;
         match reuse_inventory
             .then(|| context.facts.cached_inventory(context))
@@ -420,7 +420,7 @@ fn create_with_default(
     validate_binding(context)?;
     let branch = GitRefName::branch(&request.branch).map_err(|_| WorktreeError::InvalidRequest)?;
     let facts = context.facts;
-    let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
+    let _lock = repository_lock(context, LockMode::Exclusive, cancel, "create worktree")?;
     // Another setup may have changed configuration while this caller waited.
     // Retain structural custody, then take the dependent snapshots under the
     // mutation owner instead of rejecting a legitimate sibling's config write.
@@ -1179,7 +1179,12 @@ pub(super) fn remove_tree_when_before_delete_locked(
             if prepared {
                 eligible(true)?;
             }
-            Some(repository_lock(context, LockMode::Exclusive, cancel)?)
+            Some(repository_lock(
+                context,
+                LockMode::Exclusive,
+                cancel,
+                "remove worktree",
+            )?)
         }
     };
     context.repo.revalidate()?;
@@ -1645,7 +1650,12 @@ pub(super) fn remove_merged_candidate(
     // generation stable. Take repository custody before its durable intent and
     // hold it through the exact-tip branch settlement below.
     let repository = if entry.is_none() {
-        Some(repository_lock(context, LockMode::Exclusive, cancel)?)
+        Some(repository_lock(
+            context,
+            LockMode::Exclusive,
+            cancel,
+            "retire worktree ref",
+        )?)
     } else {
         None
     };

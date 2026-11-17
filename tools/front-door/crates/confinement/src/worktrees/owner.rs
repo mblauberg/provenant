@@ -425,7 +425,12 @@ pub fn prune_owned(
 
     collect(context, &lanes, &output_policy, cancel)?;
 
-    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
+    let _repository = repository_lock(
+        context,
+        LockMode::Exclusive,
+        cancel,
+        "retire worktree ownership",
+    )?;
     let entries = context.facts.read_inventory(context, cancel)?;
     let entry = entries
         .iter()

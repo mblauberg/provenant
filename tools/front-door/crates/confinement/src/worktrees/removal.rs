@@ -239,7 +239,12 @@ pub fn delete_ref_leased_when(
     if !(name.starts_with("refs/heads/") || name.starts_with("refs/remotes/")) {
         return Err(WorktreeError::InvalidRequest);
     }
-    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
+    let _repository = repository_lock(
+        context,
+        LockMode::Exclusive,
+        cancel,
+        "delete repository ref",
+    )?;
     context.repo.revalidate()?;
     if name.starts_with("refs/heads/") {
         let fresh = context.facts.fresh_inventory(context, cancel)?;

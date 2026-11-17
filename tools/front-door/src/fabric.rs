@@ -103,6 +103,10 @@ fn graph_writer_initialisation_error(
         };
     }
     match error {
+        WorktreeError::RepositoryLockBusy { path, operation } => FacadeError::RepositoryLockBusy {
+            path: Some(path.display().to_string()),
+            operation: operation.into(),
+        },
         WorktreeError::RegistryLockTimeout => FacadeError::WriterLockBusy,
         WorktreeError::LockBusy => FacadeError::WriterBusy { holder: None },
         WorktreeError::WriterBusy { holder } => FacadeError::WriterBusy { holder },

@@ -2923,6 +2923,52 @@ mod policy_reporting_tests {
         Ok(())
     }
 
+    // Spec: docs/specs/run-launch.md#admission-and-custody
+    #[test]
+    fn graph_retry_fence_rejects_a_launch_after_queued_observation()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let run = input();
+        store.create(&run, &call)?;
+        let queued = store.record(run.attempt_id, &call)?;
+        assert!(matches!(queued.state, AttemptState::Queued { .. }));
+        let dir = store.attempt_dir(run.attempt_id, true)?;
+        let launcher = dir.try_lock(
+            std::ffi::OsStr::new("launcher.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        store.claim_starting_for_preparation(&queued, &call)?;
+        drop(launcher);
+        assert!(matches!(
+            store.fence_graph_retry(run.attempt_id, &queued.key, &call),
+            Err(RunError::Conflict)
+        ));
+        assert!(matches!(
+            store.record(run.attempt_id, &call)?.state,
+            AttemptState::Starting { .. }
+        ));
+
+        let mut second = input();
+        second.attempt_id = AttemptId::from_bytes([9; 16]);
+        second.operation_id = provenant_core::OperationId::parse("graph-retry-fence")?;
+        crate::tests::rekey(&mut second);
+        store.create(&second, &call)?;
+        let queued = store.record(second.attempt_id, &call)?;
+        store.fence_graph_retry(second.attempt_id, &queued.key, &call)?;
+        store.fence_graph_retry(second.attempt_id, &queued.key, &call)?;
+        assert!(matches!(
+            store.record(second.attempt_id, &call)?.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Cancelled,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
     #[test]
     fn claimed_launch_reports_once_when_a_prepared_attempt_is_replayed()
     -> std::result::Result<(), Box<dyn std::error::Error>> {

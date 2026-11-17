@@ -708,6 +708,7 @@ fn recover_provisioning(
             let contention = matches!(
                 &error,
                 WorktreeError::RegistryLockTimeout
+                    | WorktreeError::RepositoryLockBusy { .. }
                     | WorktreeError::WriterBusy { .. }
                     | WorktreeError::LockBusy
             );
@@ -1406,6 +1407,12 @@ fn provisioning_refusal(error: provenant_confinement::worktrees::WorktreeError) 
             Some(DispatchRefusalFact::DetachedWriter)
         }
         WorktreeError::CheckedOut => Some(DispatchRefusalFact::CheckedOutWriter),
+        WorktreeError::RepositoryLockBusy { path, operation } => {
+            return ServiceError::Facade(FacadeError::RepositoryLockBusy {
+                path: Some(path.display().to_string()),
+                operation: (*operation).into(),
+            });
+        }
         WorktreeError::RegistryLockTimeout => {
             return ServiceError::Facade(FacadeError::WriterLockBusy);
         }

@@ -756,6 +756,7 @@ error_kinds! {
     WriterScope => "WRITER_SCOPE", "The writer worktree scope was refused.";
     WriterBusy => "WRITER_BUSY", "The writer or its lock is held by another operation.";
     WriterLockBusy => "WRITER_LOCK_BUSY", "The writer registry lock is held by another operation.";
+    RepositoryLockBusy => "REPOSITORY_LOCK_BUSY", "The repository lock is held by another operation.";
     WriterUnknown => "WRITER_UNKNOWN", "Writer custody could not be determined.";
     CredentialRoot => "CREDENTIAL_ROOT", "A requested grant overlaps a credential root.";
     WriterProjectMismatch => "WRITER_PROJECT_MISMATCH", "The writer worktree belongs to a different project than the selected one.";
@@ -814,6 +815,7 @@ impl ErrorKind {
             | Self::WriterScope
             | Self::WriterBusy
             | Self::WriterLockBusy
+            | Self::RepositoryLockBusy
             | Self::WriterUnknown
             | Self::RetainedWriterImport
             | Self::CredentialRoot
@@ -864,6 +866,9 @@ impl From<&RunError> for ErrorKind {
             RunError::WorktreeMissing(_) => Self::WorktreeMissing,
             RunError::WorktreeUnregistered(_) => Self::WorktreeUnregistered,
             RunError::WriterProjectMismatch { .. } => Self::WriterProjectMismatch,
+            RunError::Writer(
+                provenant_confinement::worktrees::WorktreeError::RepositoryLockBusy { .. },
+            ) => Self::RepositoryLockBusy,
             RunError::Writer(
                 provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout,
             ) => Self::WriterLockBusy,

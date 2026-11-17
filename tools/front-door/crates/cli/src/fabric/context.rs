@@ -1088,9 +1088,8 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         | FacadeError::GraphRelayRefused { .. }
         | FacadeError::RecordedRefusal { .. } => (Outcome::Refused, ErrorKind::Refused),
         FacadeError::WriterBusy { .. } => (Outcome::Refused, ErrorKind::WriterBusy),
-        FacadeError::WriterLockBusy | FacadeError::RepositoryLockBusy { .. } => {
-            (Outcome::Refused, ErrorKind::WriterLockBusy)
-        }
+        FacadeError::WriterLockBusy => (Outcome::Refused, ErrorKind::WriterLockBusy),
+        FacadeError::RepositoryLockBusy { .. } => (Outcome::Refused, ErrorKind::RepositoryLockBusy),
         FacadeError::WriterUnknown => (Outcome::Refused, ErrorKind::WriterUnknown),
         FacadeError::CredentialRoot { .. } => (Outcome::Refused, ErrorKind::CredentialRoot),
         FacadeError::DispatchRefused { .. } => (Outcome::Refused, ErrorKind::Refused),

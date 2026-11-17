@@ -2504,6 +2504,7 @@ impl Factory {
             } else {
                 let library = self.template_library(None)?;
                 let resolver = self.launch_resolvers(Some(&encode(&execution.document)?))?;
+                let before_retry = checkpoint.clone();
                 patch::retry_node_and_dependants(
                     &mut LiveGraph {
                         document: &execution.document,
@@ -2521,6 +2522,66 @@ impl Factory {
                     },
                 )
                 .map_err(retry_patch_error)?;
+                // The patch is still private under the journal lock. Fence each
+                // live reference it archived before publishing the reset.
+                let call = provenant_run::Request {
+                    clock: &self.clock,
+                    cancel,
+                };
+                let context = provenant_run::ExecutionContext {
+                    state_root: self.context.roots.state.clone(),
+                    project_id: self.context.identity.project,
+                    actor_id: self.context.identity.inbox.actor,
+                    read_prompts: false,
+                };
+                let mut store = None;
+                for old in &before_retry.nodes {
+                    let Some(new) = checkpoint.nodes.iter_mut().find(|new| new.id == old.id) else {
+                        continue;
+                    };
+                    if new.retry_generation == old.retry_generation {
+                        continue;
+                    }
+                    for (source, archived) in old.attempts.iter().zip(
+                        new.previous_attempts
+                            .iter_mut()
+                            .skip(old.previous_attempts.len()),
+                    ) {
+                        if source.state == provenant_fabric_runtime::graph::AttemptState::Terminal {
+                            continue;
+                        }
+                        let Some(reference) = &source.attempt_ref else {
+                            continue;
+                        };
+                        let (host, attempt) =
+                            reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+                        if host != self.context.identity.host.to_string() {
+                            return Err(graph_input_reason(
+                                "cannot fence a remote attempt for graph retry",
+                            ));
+                        }
+                        let attempt = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
+                        let key = source
+                            .key
+                            .work_key(self.context.identity.project)
+                            .map_err(|_| FacadeError::StateCorrupt)?;
+                        if store.is_none() {
+                            store = Some(
+                                provenant_run::RunStore::open(&context, &call)
+                                    .map_err(run_error)?
+                                    .with_writer_registry(self.context.roots.state.as_path()),
+                            );
+                        }
+                        store
+                            .as_ref()
+                            .unwrap()
+                            .fence_graph_retry(attempt, &key, &call)
+                            .map_err(run_error)?;
+                        archived.state = provenant_fabric_runtime::graph::AttemptState::Terminal;
+                        archived.outcome =
+                            Some(provenant_fabric_runtime::graph::AttemptOutcome::OtherFailure);
+                    }
+                }
             }
             target.node = Some(node);
         }

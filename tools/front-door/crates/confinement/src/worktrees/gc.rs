@@ -1927,9 +1927,9 @@ fn collect_impl(
                     WorktreeError::UnknownOccupancy { .. }
                     | WorktreeError::UnknownWriter
                     | WorktreeError::UnknownWriterAt { .. } => RemovalUncertainty::CustodyUnknown,
-                    WorktreeError::LockBusy | WorktreeError::RegistryLockTimeout => {
-                        RemovalUncertainty::Busy
-                    }
+                    WorktreeError::LockBusy
+                    | WorktreeError::RegistryLockTimeout
+                    | WorktreeError::RepositoryLockBusy { .. } => RemovalUncertainty::Busy,
                     WorktreeError::Dirty(_) | WorktreeError::IgnoredPaths(_) => {
                         RemovalUncertainty::DirtyWorktree
                     }

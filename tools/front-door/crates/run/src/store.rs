@@ -1081,6 +1081,60 @@ impl RunStore {
             Err(error) => Err(error),
         }
     }
+    /// Fence a graph retry against the same launcher lock that protects the
+    /// queued-to-starting claim. A repeated fence recognises only its own
+    /// durable withdrawal, never an unrelated terminal attempt.
+    pub fn fence_graph_retry(
+        &self,
+        id: AttemptId,
+        key: &provenant_records::WorkKey,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        const REASON: &str = "withdrawn for graph retry after repository lock exhaustion";
+        let dir = self.attempt_dir(id, true)?;
+        let _launcher = dir.try_lock(OsStr::new("launcher.lock"), LockMode::Exclusive)?;
+        let record = self.record(id, call)?;
+        if &record.key != key {
+            return Err(RunError::Conflict);
+        }
+        match &record.state {
+            AttemptState::Queued { .. }
+                if record.started_at.is_none() && record.provider_launched != Some(true) =>
+            {
+                let finished = call
+                    .clock
+                    .wall_now()
+                    .map_err(|_| RunError::Validation("wall clock"))?;
+                self.withdraw(
+                    id,
+                    record.state.clone(),
+                    Outcome::Cancelled,
+                    REASON,
+                    finished,
+                    call,
+                )?
+                .ok_or(RunError::Conflict)?;
+            }
+            AttemptState::Terminal {
+                outcome: Outcome::Cancelled,
+                reason: Some(reason),
+                ..
+            } if reason == REASON
+                && record.started_at.is_none()
+                && record.provider_launched == Some(false) => {}
+            _ => return Err(RunError::Conflict),
+        }
+        let retired = self.record(id, call)?;
+        if !matches!(&retired.state, AttemptState::Terminal { outcome: Outcome::Cancelled, reason: Some(reason), .. } if reason == REASON)
+            || retired.provider_launched != Some(false)
+            || retired.started_at.is_some()
+            || !self.custody_released(&retired, call)?
+        {
+            return Err(RunError::Conflict);
+        }
+        Ok(())
+    }
+
     /// End an attempt that never reached a provider: refused before spawn or
     /// cancelled while queued. It has no custody to release and no exit.
     /// `expected` names the state the caller observed; any other state is a

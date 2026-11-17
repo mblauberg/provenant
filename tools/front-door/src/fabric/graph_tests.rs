@@ -15,6 +15,14 @@ mod graph_writer_admission_tests {
                 timeout: Duration::from_secs(5),
             })
         };
+        // Spec: docs/specs/run-launch.md#admission-and-custody
+        let path = PathBuf::from("/repo/provenant-repository.lock");
+        let error = WorktreeError::RepositoryLockBusy { path: path.clone(), operation: "create worktree" };
+        assert!(matches!(graph_writer_initialisation_error("head", error),
+            FacadeError::RepositoryLockBusy { path: Some(actual), operation } if actual == path.display().to_string() && operation == "create worktree"));
+        let error = WorktreeError::RepositoryLockBusy { path: path.clone(), operation: "create worktree" };
+        assert!(matches!(run_error(error.into()),
+            FacadeError::RepositoryLockBusy { path: Some(actual), operation } if actual == path.display().to_string() && operation == "create worktree"));
         assert!(matches!(
             graph_writer_initialisation_error("head", WorktreeError::RegistryLockTimeout),
             FacadeError::WriterLockBusy

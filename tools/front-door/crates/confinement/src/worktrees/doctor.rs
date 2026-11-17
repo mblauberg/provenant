@@ -125,7 +125,7 @@ pub fn doctor(
         Err(error) => return Err(error.into()),
     };
     let entries = {
-        let _lock = repository_lock(context, LockMode::Shared, cancel)?;
+        let _lock = repository_lock(context, LockMode::Shared, cancel, "inspect worktrees")?;
         context.repo.revalidate()?;
         context.facts.read_inventory(context, cancel)?
     };

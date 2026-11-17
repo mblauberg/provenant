@@ -664,6 +664,10 @@ impl RunError {
     /// the filesystem acquire; a caller that knows the waiting phase replaces it.
     pub fn repository_lock_identity(&self) -> Option<(&std::path::Path, &'static str)> {
         let error = match self {
+            Self::Writer(provenant_confinement::worktrees::WorktreeError::RepositoryLockBusy {
+                path,
+                operation,
+            }) => return Some((path, operation)),
             Self::Filesystem(error)
             | Self::Writer(provenant_confinement::worktrees::WorktreeError::Filesystem(error)) => {
                 error
@@ -715,6 +719,14 @@ impl RunError {
         let kind = ErrorKind::from(self);
         let mut diagnostic = Diagnostic::new(kind.code()).category(kind.category());
         match self {
+            Self::Writer(WorktreeError::RepositoryLockBusy { path, operation }) => {
+                diagnostic = diagnostic
+                    .detail(match safe_path(path, destination) {
+                        Some(path) => format!("repository lock {path} is busy during {operation}"),
+                        None => format!("repository lock is busy during {operation}"),
+                    })
+                    .next("wait for the repository lock holder to finish, then retry");
+            }
             Self::AbandonBlocked(evidence) => {
                 diagnostic = diagnostic.detail(if matches!(destination, provenant_records::diagnostic::Destination::Local) {
                     evidence.to_string()

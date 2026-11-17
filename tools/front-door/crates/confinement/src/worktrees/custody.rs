@@ -762,9 +762,10 @@ pub(super) fn repository_lock<'a>(
     context: &WorktreeContext<'a>,
     mode: LockMode,
     cancel: &CancelToken,
+    operation: &'static str,
 ) -> Result<LockGuard, WorktreeError> {
     lock_repository(context.repo.common_dir(), mode, cancel).map_err(|error| match error {
-        FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
+        FsError::LockTimeout { path, .. } => WorktreeError::RepositoryLockBusy { path, operation },
         other => other.into(),
     })
 }

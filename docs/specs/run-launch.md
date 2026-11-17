@@ -32,6 +32,14 @@ A missing observation reference never erases a previously saved reference.
 - Why: one sibling's short repository mutation must not fail another writer or
   monopolise custody while waiting for it.
 
+Graph retry holds the graph journal before it acquires run-store launcher
+exclusion, then publication and custody locks. It withdraws a queued attempt
+under launcher exclusion before saving the graph reset. A started attempt or
+unreleased custody refuses the reset. A withdrawal bearing the retry fence is
+idempotent if interruption leaves the graph unreset; retry verifies the same
+attempt identity and custody again before archiving it. No run-store path may
+wait for the graph journal while holding those locks.
+
 Lock order is launcher exclusion (`launcher.lock`), publication reservation,
 then writer/custody exclusion in `RunStore::hand_off`. Git setup under that
 custody may only **try** the common-directory repository lock. In the reverse

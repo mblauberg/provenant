@@ -266,6 +266,11 @@ pub enum WorktreeError {
     LockBusy,
     #[error("worktree registry reservation timed out")]
     RegistryLockTimeout,
+    #[error("repository lock {} is busy during {operation}", .path.display())]
+    RepositoryLockBusy {
+        path: PathBuf,
+        operation: &'static str,
+    },
     #[error("worktree writer is live")]
     LiveWriter,
     #[error(
@@ -390,7 +395,9 @@ impl WorktreeError {
     /// by itself. The caller still owns deadlines and transition policy.
     pub fn admission_cause(&self) -> Option<AdmissionCause> {
         match self {
-            Self::RegistryLockTimeout => Some(AdmissionCause::RegistryLockTimeout),
+            Self::RegistryLockTimeout | Self::RepositoryLockBusy { .. } => {
+                Some(AdmissionCause::RegistryLockTimeout)
+            }
             Self::Filesystem(error) if repository_lock_busy(error) => {
                 Some(AdmissionCause::RegistryLockTimeout)
             }
@@ -442,6 +449,9 @@ impl WorktreeError {
             }
             Self::RegistryLockTimeout => {
                 "wait for the worktree registry lock holder to finish, then retry"
+            }
+            Self::RepositoryLockBusy { .. } => {
+                "wait for the repository lock holder to finish, then retry"
             }
             Self::LockBusy | Self::LiveWriter | Self::WriterBusy { .. } => {
                 "run `provenant status` and wait for the writer holding the lock to finish, then retry"

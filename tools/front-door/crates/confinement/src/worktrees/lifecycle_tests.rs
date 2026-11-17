@@ -1268,7 +1268,7 @@ fn worktree_creation_excludes_writer_configuration_updates() -> Result<(), Box<d
     };
     assert!(matches!(
         create(&context, request.clone(), &cancel),
-        Err(WorktreeError::RegistryLockTimeout)
+        Err(WorktreeError::RepositoryLockBusy { ref path, operation: "create worktree" }) if path == &context.repo.common_dir().anchored_path().join(REPOSITORY_LOCK)
     ));
     assert!(
         !fixture

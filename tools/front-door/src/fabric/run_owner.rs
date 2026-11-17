@@ -706,6 +706,10 @@ pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeErr
         | E::GuardianIdentity => FacadeError::ConfinementRefused { resource: None },
         E::WriterBusy => FacadeError::WriterBusy { holder: None },
         E::WriterLockBusy => FacadeError::WriterLockBusy,
+        E::RepositoryLockBusy => FacadeError::RepositoryLockBusy {
+            path: None,
+            operation: "acquire repository lock".into(),
+        },
         E::WriterUnknown => FacadeError::WriterUnknown,
         E::CredentialRoot => FacadeError::CredentialRoot {
             access: "requested".into(),
