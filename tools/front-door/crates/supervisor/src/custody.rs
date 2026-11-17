@@ -1284,6 +1284,21 @@ pub fn launch(
     if crate::process_os::provider::ensure_supported().is_err() {
         return Err(failure(CustodyError::UnsupportedPlatform, publication));
     }
+    // Death evidence precedes every native guardian process. A crash during
+    // preparation leaves Prepared custody, which has no child to fence.
+    let prepared = match owned.lease.lease.as_ref() {
+        Some(writer) => liveness::prepare_guardian_lifetime(
+            &owned.lease.directory,
+            &publication.directory,
+            scope,
+            writer,
+            &publication.custody,
+        ),
+        None => Err(CustodyError::Fenced),
+    };
+    if let Err(error) = prepared {
+        return Err(failure(error, publication));
+    }
     owned.lease.launched = true;
     owned.lease.reservation.launch_state = LaunchState::HandingOff;
     if let Err(error) = write_record(

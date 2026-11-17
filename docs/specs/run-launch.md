@@ -14,11 +14,14 @@ the same captured project and actor identity as the run store. Uncertain custody
 keeps its ownership until release is proved.
 - Why: admission must not create duplicate writers or hold coordination locks across external work.
 
-Before acknowledging custody or spawning the provider, the guardian acquires an
-exclusive per-attempt `guardian.lock` and durably records its inode alongside
-the attempt, writer and custody identities and its own native process identity.
-The lock record is sufficient even if the guardian dies before updating the
-pre-handoff reservation. Only the guardian holds this lock;
+Before entering handoff or spawning a guardian, the launcher durably prepares
+the per-attempt `guardian.lock` inode alongside the attempt, writer and custody
+identities. The guardian acquires and verifies that original inode before
+acknowledging custody or spawning the provider, then records its native process
+identity. The prepared record is sufficient even if the guardian dies before
+publishing its own identity or updating the pre-handoff reservation: the
+original free writer and custody leases exclude a live launcher or guardian.
+Only the guardian holds the life lock after preparation;
 the provider and its descendants never inherit it. The guardian retains it
 through terminal publication and custody release. Kernel process teardown
 releases it even when the guardian cannot publish an exit.

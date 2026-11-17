@@ -28,7 +28,7 @@ impl Identity {
 struct GuardianLock {
     schema_version: u64,
     scope: Scope,
-    guardian_process: ProcessIdentity,
+    guardian_process: Option<ProcessIdentity>,
     attempt: Identity,
     guardian: Identity,
     writer: Identity,
@@ -51,7 +51,30 @@ impl GuardianLock {
     }
 }
 
-/// Create death evidence before acknowledging custody or spawning a provider.
+/// Prepare the original lock identities before HandingOff or guardian spawn.
+/// Until this is durable the launch remains Prepared and has no native child.
+pub(crate) fn prepare_guardian_lifetime(
+    evidence: &Directory,
+    attempt: &Directory,
+    scope: Scope,
+    writer: &LockGuard,
+    custody: &LockGuard,
+) -> Result<()> {
+    let guardian = evidence.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
+    let record = GuardianLock {
+        schema_version: 1,
+        scope,
+        guardian_process: None,
+        attempt: Identity::of(attempt.metadata()?),
+        guardian: Identity::of(guardian.metadata()?),
+        writer: Identity::of(writer.metadata()?),
+        custody: Identity::of(custody.metadata()?),
+    };
+    write_record(evidence, RECORD, &record, PublishMode::NoReplace)?.require_durable()?;
+    Ok(())
+}
+
+/// Acquire the prepared lock before acknowledging custody or spawning a provider.
 /// Directory's owner locks are CLOEXEC; no provider inherits this description.
 pub(crate) fn hold_guardian_lifetime(
     evidence: &Directory,
@@ -70,17 +93,20 @@ pub(crate) fn hold_guardian_lifetime(
     {
         return Err(CustodyError::InvalidRecord);
     }
-    let guardian = evidence.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
-    let record = GuardianLock {
-        schema_version: 1,
-        scope,
-        guardian_process: guardian_process.clone(),
-        attempt: Identity::of(attempt.metadata()?),
-        guardian: Identity::of(guardian.metadata()?),
-        writer: Identity::of(writer.metadata()?),
-        custody: Identity::of(custody.metadata()?),
-    };
-    write_record(evidence, RECORD, &record, PublishMode::NoReplace)?.require_durable()?;
+    let guardian = evidence.try_lock_existing(OsStr::new(LOCK), LockMode::Exclusive)?;
+    let mut record: GuardianLock = read_record(evidence, RECORD, RECORD_LIMIT)?;
+    if record.schema_version != 1
+        || record.scope != scope
+        || record.guardian_process.is_some()
+        || !record.attempt.matches(attempt.metadata()?)
+        || !record.guardian.matches_lock(guardian.metadata()?)
+        || !record.writer.matches_lock(writer.metadata()?)
+        || !record.custody.matches_lock(custody.metadata()?)
+    {
+        return Err(CustodyError::Fenced);
+    }
+    record.guardian_process = Some(guardian_process.clone());
+    write_record(evidence, RECORD, &record, PublishMode::Replace)?.require_durable()?;
     Ok(guardian)
 }
 
@@ -128,16 +154,18 @@ impl Recovery {
         let metadata = attempt.metadata()?;
         if record.schema_version != 1
             || record.scope != self.scope()
-            || record.guardian_process.validate().is_err()
-            || record.guardian_process.native_start == 0
-            || record.guardian_process.group_id != record.guardian_process.pid
-            || record.guardian_process.session_id != record.guardian_process.pid
-            || record.guardian_process.boot != self.reservation.boot
+            || record.guardian_process.as_ref().is_some_and(|guardian| {
+                guardian.validate().is_err()
+                    || guardian.native_start == 0
+                    || guardian.group_id != guardian.pid
+                    || guardian.session_id != guardian.pid
+                    || guardian.boot != self.reservation.boot
+            })
             || self
                 .reservation
                 .guardian
                 .as_ref()
-                .is_some_and(|guardian| *guardian != record.guardian_process)
+                .is_some_and(|guardian| record.guardian_process.as_ref() != Some(guardian))
             || (self.reservation.guardian.is_none()
                 && self.reservation.launch_state != LaunchState::HandingOff)
             || self.reservation.attempt_device != Some(metadata.device)
@@ -184,7 +212,9 @@ impl Recovery {
         // Check live roots and every retained descendant as well as their
         // sessions/groups. PID reuse supplies no death evidence: the lock and
         // the worktree census establish quiescence independently of PID values.
-        let identities: Vec<_> = std::iter::once(&record.guardian_process)
+        let identities: Vec<_> = record
+            .guardian_process
+            .iter()
             .chain(self.reservation.provider.iter())
             .chain(self.reservation.descendants.iter())
             .collect();

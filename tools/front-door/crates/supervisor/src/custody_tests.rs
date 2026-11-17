@@ -1450,6 +1450,8 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
     for case in [
         "free",
         "before_reservation_publication",
+        "before_identity_publication",
+        "before_guardian_spawn",
         "guardian_identity_mismatch",
         "guardian_held",
         "custody_held",
@@ -1472,18 +1474,33 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
         let mut recovery = spawned_reboot_recovery(root.path(), &attempt, BOOT, 10, 20)?;
         let evidence = recovery.directory.try_clone()?;
         let mut custody = Some(attempt.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)?);
-        let mut guardian = Some(liveness::hold_guardian_lifetime(
+        liveness::prepare_guardian_lifetime(
             &evidence,
             &attempt,
             scope(),
-            recovery
-                .reservation
-                .guardian
-                .as_ref()
-                .ok_or(CustodyError::InvalidRecord)?,
             recovery.lease.as_ref().ok_or(CustodyError::Fenced)?,
             custody.as_ref().ok_or(CustodyError::Fenced)?,
-        )?);
+        )?;
+        let mut guardian = if case == "before_identity_publication" {
+            // The guardian has acquired the prepared inode but has not yet
+            // published its native identity. SIGKILL still frees this lock.
+            Some(evidence.try_lock_existing(OsStr::new("guardian.lock"), LockMode::Exclusive)?)
+        } else if case == "before_guardian_spawn" {
+            None
+        } else {
+            Some(liveness::hold_guardian_lifetime(
+                &evidence,
+                &attempt,
+                scope(),
+                recovery
+                    .reservation
+                    .guardian
+                    .as_ref()
+                    .ok_or(CustodyError::InvalidRecord)?,
+                recovery.lease.as_ref().ok_or(CustodyError::Fenced)?,
+                custody.as_ref().ok_or(CustodyError::Fenced)?,
+            )?)
+        };
         let provider = recovery
             .reservation
             .provider
@@ -1507,7 +1524,9 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
             Ok(())
         };
         match case {
-            "before_reservation_publication" => {
+            "before_reservation_publication"
+            | "before_identity_publication"
+            | "before_guardian_spawn" => {
                 // Crash after the lifetime record is durable but before the
                 // guardian identity replaces the pre-handoff reservation.
                 recovery.reservation.launch_state = LaunchState::HandingOff;
@@ -1538,7 +1557,27 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
             "custody_replaced" => replace_lock(&attempt, "custody.lock")?,
             "writer_replaced" => replace_lock(&recovery.lock_directory, "writer.lock")?,
             "lease_missing" => drop(recovery.lease.take()),
-            "record_missing" => evidence.unlink(OsStr::new("guardian-lock.json"))?,
+            "record_missing" => {
+                drop(guardian.take());
+                evidence.unlink(OsStr::new("guardian-lock.json"))?;
+                // An unprepared/missing record cannot start a guardian at all;
+                // the real launcher makes it durable before native spawn.
+                assert!(
+                    liveness::hold_guardian_lifetime(
+                        &evidence,
+                        &attempt,
+                        scope(),
+                        recovery
+                            .reservation
+                            .guardian
+                            .as_ref()
+                            .ok_or(CustodyError::InvalidRecord)?,
+                        recovery.lease.as_ref().ok_or(CustodyError::Fenced)?,
+                        custody.as_ref().ok_or(CustodyError::Fenced)?,
+                    )
+                    .is_err()
+                );
+            }
             "wrong_scope" => {
                 let mut record: serde_json::Value =
                     read_record(&evidence, "guardian-lock.json", RECORD_LIMIT)?;
@@ -1572,6 +1611,8 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                 case,
                 "free"
                     | "before_reservation_publication"
+                    | "before_identity_publication"
+                    | "before_guardian_spawn"
                     | "drop_without_commit"
                     | "replaced_after_proof"
             ),

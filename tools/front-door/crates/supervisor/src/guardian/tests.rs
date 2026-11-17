@@ -248,6 +248,14 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
         wall_ms: 5_000,
         ..CapturePlan::default()
     };
+    crate::custody::liveness::prepare_guardian_lifetime(
+        &writer.directory,
+        &publication.directory,
+        scope,
+        writer.lease.as_ref().unwrap(),
+        &publication.custody,
+    )
+    .unwrap();
     let message = LaunchMessage {
         policy: Default::default(),
         profile: None,
@@ -695,6 +703,14 @@ fn spawn_missing_attempt_guardian(
     )
     .unwrap();
     let executable_snapshot = snapshot_executable(OsStr::from_bytes(&argv[0])).unwrap();
+    crate::custody::liveness::prepare_guardian_lifetime(
+        &writer.directory,
+        &publication.directory,
+        scope,
+        writer.lease.as_ref().unwrap(),
+        &publication.custody,
+    )
+    .unwrap();
     let message = LaunchMessage {
         policy: Default::default(),
         profile: None,

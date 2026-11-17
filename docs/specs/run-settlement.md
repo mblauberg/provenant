@@ -96,7 +96,10 @@ prove worktree non-occupancy under exclusion; unknown or occupied is not free.
 For a read-only attempt there is no worktree to occupy.
 
 Missing, replaced or unreadable lock evidence never proves loss. The identities
-are rechecked after the host's worktree census. The capability retains all
+are durable before any guardian can spawn, so a valid handoff with no recorded
+guardian identity can still be recovered under all three original locks.
+Identities are rechecked after the host's worktree census and before release.
+The capability retains all
 three locks while the Run owner commits its canonical Lost outcome and warning;
 only then may the owner consume it to release the reservation. Dropping or
 failing to obtain the capability leaves the durable fence intact. A process
