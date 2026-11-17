@@ -577,10 +577,7 @@ pub fn release_progress(
             let name = census
                 .and_then(|census| match census.process(*pid) {
                     provenant_supervisor::census::ProcessLookup::Present(fact)
-                        if exit
-                            .unresolved_identities
-                            .iter()
-                            .any(|identity| *identity == fact.identity) =>
+                        if exit.unresolved_identities.contains(&fact.identity) =>
                     {
                         fact.command.as_deref()
                     }
