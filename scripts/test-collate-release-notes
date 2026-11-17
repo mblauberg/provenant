@@ -51,6 +51,22 @@ if grep -q '^### ' "$tmp/out"; then exit 1; fi
 actual=$(sed -n '/^## Fixes/,$p' "$tmp/out")
 [ "$actual" = "$expected" ] || { echo "unexpected flat order:" >&2; printf '%s\n' "$actual" >&2; exit 1; }
 
+# A blank line between the section heading and the area line still tags it.
+rm -f "$dir"/*.md
+printf 'Intro.\n' > "$dir/_intro.md"
+printf '## Fixes\n\n### Fabric\n\n- Spaced fabric fix.\n' > "$dir/a.md"
+printf '## Fixes\n\n### CLI and install\n\n- Spaced CLI fix.\n' > "$dir/b.md"
+"$script" --check 2> "$tmp/err"
+if grep -F 'unknown area' "$tmp/err" > /dev/null; then exit 1; fi
+"$script" > "$tmp/out"
+if grep -q '^### ' "$tmp/out"; then echo "spaced area line leaked into notes" >&2; exit 1; fi
+actual=$(sed -n '/^## Fixes/,$p' "$tmp/out")
+expected='## Fixes
+
+- Spaced CLI fix.
+- Spaced fabric fix.'
+[ "$actual" = "$expected" ] || { echo "unexpected spaced order:" >&2; printf '%s\n' "$actual" >&2; exit 1; }
+
 # A section with more than 12 entries renders area sub-headings.
 rm -f "$dir"/*.md
 printf 'Intro.\n' > "$dir/_intro.md"
