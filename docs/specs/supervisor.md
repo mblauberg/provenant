@@ -221,7 +221,9 @@ and path, including when an alias resolves into a lane root. An inventory does
 not replace or narrow the store denial. Stores without an inventory retain the
 same subtree boundary. Independent sibling profiles and file declarations keep
 exact scope. No grant may enclose a store or declared credential file, or open
-a store outside its lane carve-outs.
+a store outside its lane carve-outs. Selected authentication retains its
+explicit exact-file access; a broad authentication or configuration grant
+cannot reopen a shared store.
 Declared credential denials follow grants in the rendered profile. The
 standalone Codex release package read exception belongs only to the built-in
 default Codex home; relocated and registered stores retain whole-store

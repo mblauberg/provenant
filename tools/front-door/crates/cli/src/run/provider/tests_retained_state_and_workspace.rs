@@ -2052,7 +2052,7 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
         }
     }
 
-    let protected = home.join(".ssh/worktree");
+    let protected = home.join(".ssh");
     std::fs::create_dir_all(protected.parent().ok_or("credential parent")?)?;
     let argv: Vec<std::ffi::OsString> = [
         git.clone().into_os_string(),
