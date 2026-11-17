@@ -533,16 +533,16 @@ fn output_read_part(
     {
         // There may be useful admission evidence before a result exists. Do
         // not invent an artefact length, digest or completeness for it.
-        return Ok((
-            json!({
-                "attempt_id": id, "state": state_and_reason(&record.state).0,
-                "reason": reason, "part": "result", "offset": 0, "next_offset": 0,
-                "stop_work": record.stop_work,
-                "length": null, "eof": true, "clipped": null, "complete": null,
-                "digest": null, "bytes": json!({"encoding":"utf8", "data":""}),
-            }),
-            format!("{reason}\n"),
-        ));
+        let mut data = json!({
+            "attempt_id": id, "state": state_and_reason(&record.state).0,
+            "reason": reason, "part": "result", "offset": 0, "next_offset": 0,
+            "length": null, "eof": true, "clipped": null, "complete": null,
+            "digest": null, "bytes": json!({"encoding":"utf8", "data":""}),
+        });
+        if let Some(stop_work) = &record.stop_work {
+            data["stop_work"] = json!(stop_work);
+        }
+        return Ok((data, format!("{reason}\n")));
     }
     let evicted = status::artifact(
         session.context.state_root.as_path(),
@@ -644,7 +644,11 @@ fn output_read_part(
         let (paths, total) = changed_file_evidence(session, &record, call);
         data["changed_files"] = paths;
         data["changed_files_total"] = total;
-        data["stop_work"] = json!(record.stop_work);
+        // The wire schema declares `stop_work` an optional object: absent,
+        // never null, when no stop evidence was recorded.
+        if let Some(stop_work) = &record.stop_work {
+            data["stop_work"] = json!(stop_work);
+        }
     }
     if let Some(reason) = fallback_reason {
         add_planner_fallback(&mut data, &mut text, reason);
