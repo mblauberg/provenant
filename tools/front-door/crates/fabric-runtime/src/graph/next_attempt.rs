@@ -313,6 +313,7 @@ fn fallback_cause(outcome: AttemptOutcome) -> Option<provenant_records::StopCaus
         AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
             Some(StopCause::AdapterUnavailable)
         }
+        AttemptOutcome::Unclassified => Some(StopCause::Unclassified),
         _ => None,
     }
 }
@@ -404,6 +405,7 @@ pub(crate) fn fallback_denial(
         AttemptOutcome::UsageLimited => "The lane reached a usage limit.",
         AttemptOutcome::AdapterUnavailable => "The lane's adapter is unavailable.",
         AttemptOutcome::PreparationRefused(cause) => cause.detail(),
+        AttemptOutcome::Unclassified => "The provider reported an unclassified error.",
         _ => "The lane failed.",
     };
     let detail = cause.map(provenant_routing::exclusion_detail);

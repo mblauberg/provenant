@@ -1385,6 +1385,16 @@ impl Registry<'_> {
                 reason.push_str("; capacity cooldown configuration unavailable");
             }
             decoded.reason = Some(reason);
+        } else if let Some(message) = events.iter().find_map(|event| match event {
+            ProviderEvent::Unclassified { message } => Some(message),
+            _ => None,
+        }) {
+            decoded.outcome = run::Outcome::Unclassified;
+            decoded.reason = Some(if message.is_empty() {
+                "unclassified provider error".into()
+            } else {
+                format!("unclassified provider error: {message}")
+            });
         }
         if provenant_records::AdapterSpec::get(adapter.id())
             .is_some_and(|spec| spec.stdout_error_diagnostic)

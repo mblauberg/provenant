@@ -65,6 +65,9 @@ pub enum StopCause {
     /// while the account login stayed usable. A writer continues from its
     /// handoff on a new token; the successor's launch re-probes the account.
     LaneTokenLost,
+    /// An unknown provider error that does not match rate/quota, auth or model unavailability.
+    /// Retried once without marking the account exhausted, then falls back across eligible routes.
+    Unclassified,
 
     // The host refused before the provider started.
     SourceViewRefused,
@@ -294,13 +297,14 @@ pub const STOP_TABLE: &[StopRule] = {
         rule(Quarantined, CHAIR, crate::run::CauseSource::Host),
         rule(HandoffMalformed, CHAIR, crate::run::CauseSource::Provider),
         pinned(Steered, crate::run::CauseSource::Host),
+        rule(Unclassified, NEW, crate::run::CauseSource::Provider),
     ]
 };
 
 impl StopCause {
     /// Every cause. `ordinal` matches exhaustively, so a new variant fails to
     /// compile there, and the assertion below keeps this list in step.
-    pub const ALL: [StopCause; 43] = {
+    pub const ALL: [StopCause; 44] = {
         use StopCause::*;
         [
             StoppedEarly,
@@ -346,6 +350,7 @@ impl StopCause {
             Quarantined,
             HandoffMalformed,
             Steered,
+            Unclassified,
         ]
     };
 
@@ -395,6 +400,7 @@ impl StopCause {
             Quarantined => 40,
             HandoffMalformed => 41,
             Steered => 42,
+            Unclassified => 43,
         }
     }
 
@@ -460,6 +466,7 @@ impl StopCause {
             O::Unsettled => Some(Self::Unsettled),
             O::Uncommitted => Some(Self::Uncommitted),
             O::InputRequired => Some(Self::InputRequired),
+            O::Unclassified => Some(Self::Unclassified),
         }
     }
 
@@ -518,6 +525,7 @@ impl StopCause {
             Unsettled => "unsettled",
             Quarantined => "quarantined",
             Steered => "steered",
+            Unclassified => "unclassified",
         }
     }
 }

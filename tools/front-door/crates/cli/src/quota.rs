@@ -2040,12 +2040,21 @@ pub fn readiness_words(readiness: &ReadinessRead) -> String {
         provenant_quota::ReadinessState::Unavailable => "unavailable",
         provenant_quota::ReadinessState::Unknown => "unknown",
     };
-    let reason = readiness
-        .reason
-        .and_then(|reason| serde_json::to_value(reason).ok())
-        .and_then(|value| value.as_str().map(|text| text.replace('_', " ")));
+    let reason_text = match readiness.reason {
+        Some(provenant_quota::ReadinessReason::ProbedNoFigures) => {
+            Some("probed, provider reports no figures".to_string())
+        }
+        Some(
+            provenant_quota::ReadinessReason::CommandFailure
+            | provenant_quota::ReadinessReason::ProbeTimeout,
+        ) => Some("probed, failed".to_string()),
+        Some(reason) => serde_json::to_value(reason)
+            .ok()
+            .and_then(|value| value.as_str().map(|text| text.replace('_', " "))),
+        None => None,
+    };
     let mut result = state.to_owned();
-    if let Some(reason) = reason {
+    if let Some(reason) = reason_text {
         result.push_str(&format!(" ({reason})"));
     }
     if let Some(scope) = &readiness.observed_scope {
@@ -2060,7 +2069,10 @@ pub fn readiness_words(readiness: &ReadinessRead) -> String {
     if let Some(evidence) = &readiness.evidence_ref {
         result.push_str(&format!("; source {}", evidence.escape_debug()));
     }
-    if readiness.state == provenant_quota::ReadinessState::Unknown {
+    if readiness.state == provenant_quota::ReadinessState::Unknown
+        && (readiness.reason.is_none()
+            || readiness.reason == Some(provenant_quota::ReadinessReason::NotProbed))
+    {
         result.push_str("; run `provenant quota tick` to probe");
     }
     result

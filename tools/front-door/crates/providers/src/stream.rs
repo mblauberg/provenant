@@ -48,6 +48,9 @@ pub enum ProviderEvent {
         message: String,
     },
     AuthRequired,
+    Unclassified {
+        message: String,
+    },
     Denied {
         action: String,
     },

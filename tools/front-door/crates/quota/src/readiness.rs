@@ -68,6 +68,7 @@ declare_readiness_enum! {
         InvalidEvidence,
         UnreachablePeer,
         UnsupportedPeerVersion,
+        ProbedNoFigures,
     }
 }
 
@@ -335,6 +336,7 @@ impl ReadinessFile {
                             ReadinessReason::SignedOut
                                 | ReadinessReason::LoginExpired
                                 | ReadinessReason::AccountMismatch
+                                | ReadinessReason::ProbedNoFigures
                         )
                     ))
             {
@@ -473,6 +475,29 @@ impl ReadinessFile {
                 ),
                 state: ReadinessState::Unavailable,
                 reason: Some(reason),
+                observed_unix_seconds: now,
+                expires_unix_seconds: expires,
+                reset_unix_seconds: None,
+                evidence_ref: Some(QUOTA_PROBE.into()),
+            });
+        } else if account
+            .snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.windows.is_empty())
+        {
+            let interval = i64::try_from(interval_seconds).unwrap_or(i64::MAX);
+            let expires = now.saturating_add(interval.max(1));
+            self.records.push(RouteReadiness {
+                extra: previous
+                    .as_ref()
+                    .map_or_else(Default::default, |record| record.extra.clone()),
+                schema_version: SCHEMA_VERSION,
+                scope: previous.as_ref().map_or_else(
+                    || account_scope.clone(),
+                    |record| record.scope.updated_from(&account_scope),
+                ),
+                state: ReadinessState::Unknown,
+                reason: Some(ReadinessReason::ProbedNoFigures),
                 observed_unix_seconds: now,
                 expires_unix_seconds: expires,
                 reset_unix_seconds: None,
@@ -831,7 +856,8 @@ mod tests {
                 | ReadinessReason::UncalibratedPartialCoverage
                 | ReadinessReason::InvalidEvidence
                 | ReadinessReason::UnreachablePeer
-                | ReadinessReason::UnsupportedPeerVersion => E::UnknownAvailability,
+                | ReadinessReason::UnsupportedPeerVersion
+                | ReadinessReason::ProbedNoFigures => E::UnknownAvailability,
                 ReadinessReason::MissingExecutable => E::MissingExecutable,
                 ReadinessReason::SignedOut => E::AuthRequired,
                 ReadinessReason::LoginExpired => E::LoginExpired,

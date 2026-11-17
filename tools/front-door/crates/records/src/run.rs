@@ -1181,6 +1181,7 @@ pub enum Outcome {
     /// A writer succeeded but left uncommitted edits and no new commit.
     Uncommitted,
     InputRequired,
+    Unclassified,
 }
 impl Outcome {
     /// A safe status reason derived only from the typed terminal outcome.
@@ -1218,6 +1219,9 @@ impl Outcome {
             Self::InputRequired => {
                 "the lane needs input; inspect its request and provide the missing input"
             }
+            Self::Unclassified => {
+                "the provider reported an unclassified error; retrying or falling back to another route"
+            }
         }
     }
 }
@@ -1241,6 +1245,7 @@ impl From<Outcome> for crate::AttemptOutcome {
             Outcome::Unsettled => Self::Unsettled,
             Outcome::Uncommitted => Self::Uncommitted,
             Outcome::InputRequired => Self::InputRequired,
+            Outcome::Unclassified => Self::Unclassified,
         }
     }
 }
@@ -1848,6 +1853,8 @@ settlement_reasons! {
     Steered { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Steered) },
     Lost { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Lost) },
     Unsettled { source: Host, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unsettled) },
+    /// The provider reported an unclassified error.
+    Unclassified { source: Provider, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Unclassified) },
     /// The provider ran and ended in a non-success outcome.
     Failed { source: Provider, node: Failed, outcome: Preserve, stop: None },
 }
@@ -1864,6 +1871,7 @@ impl SettlementReason {
         match (evidence, outcome) {
             (_, Outcome::Lost) => Self::Lost,
             (_, Outcome::Unsettled) => Self::Unsettled,
+            (_, Outcome::Unclassified) => Self::Unclassified,
             (Some(TerminalEvidence::Lost { .. }), _) => Self::Lost,
             (Some(TerminalEvidence::Unsettled { .. }), _) => Self::Unsettled,
             (_, Outcome::Cancelled) if terminal_cause == Some(TerminalCause::Steered) => {

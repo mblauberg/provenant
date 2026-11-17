@@ -62,6 +62,7 @@ pub(super) fn stop_cause(
         AttemptOutcome::AdapterUnavailable => Some(StopCause::AdapterUnavailable),
         AttemptOutcome::PreparationRefused(cause) => Some(cause.into()),
         AttemptOutcome::DeadlineExceeded => Some(StopCause::Deadline),
+        AttemptOutcome::Unclassified => Some(StopCause::Unclassified),
         _ => None,
     }
 }
@@ -720,6 +721,7 @@ pub(super) fn settlement_fallback_decision(
         AttemptOutcome::AdapterUnavailable | AttemptOutcome::PreparationRefused(_) => {
             Some(StopCause::AdapterUnavailable)
         }
+        AttemptOutcome::Unclassified => Some(StopCause::Unclassified),
         _ => None,
     };
     let custody_released = live_fallback_allowed(outcome, launched, fallback_evidence);
@@ -754,6 +756,10 @@ pub(super) fn settlement_fallback_decision(
             AttemptOutcome::AdapterUnavailable => (
                 Some("adapter_unavailable"),
                 Some("The lane's adapter is unavailable.".into()),
+            ),
+            AttemptOutcome::Unclassified => (
+                Some("unclassified"),
+                Some("The provider reported an unclassified error.".into()),
             ),
             _ => (None, None),
         };

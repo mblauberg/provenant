@@ -931,6 +931,15 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                         .filter(|message| !message.is_empty())
                         .unwrap_or_else(|| "provider overloaded (HTTP 529)".into()),
                 }
+            } else if (error.kind == "unknown" || error.kind.is_empty())
+                && error.status.is_none()
+                && !auth
+                && !limited
+            {
+                let message = error
+                    .message
+                    .unwrap_or_else(|| "unclassified provider error".into());
+                E::Unclassified { message }
             } else {
                 E::Error
             };
