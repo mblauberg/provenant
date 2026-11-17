@@ -605,6 +605,15 @@ fn shared_host_stores_use_their_inventory_or_refuse_naming_the_variable()
         ..Registry::default()
     };
     let roots = credential_roots(&registry, &home, &Default::default(), &[&project])?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+    inputs.credential_roots = roots.clone();
+    // Default state is beneath HOME; a surviving host subtree would refuse it
+    // before a lane could even reach source admission.
+    assert!(
+        inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .is_ok()
+    );
     for name in ["hosts.yml", "config.yml"] {
         assert!(roots.refuses(&home.join(name), CredentialScope::Exact, true));
     }

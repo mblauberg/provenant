@@ -96,6 +96,8 @@ impl RootInputs {
 
 #[derive(Debug, Error)]
 pub enum RootError {
+    #[error("credential declarations unavailable: {0}")]
+    CredentialDeclarations(String),
     #[error("root input must be an absolute path with only normal components: {path}")]
     InvalidPath { path: PathBuf },
     #[error(

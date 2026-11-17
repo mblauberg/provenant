@@ -434,6 +434,11 @@ pub fn admit_source_root(
     Ok(SourceAdmission { path, warnings })
 }
 
+/// Built-in and host declarations classified before account configuration is available.
+pub fn host_credentials(home: &Path, project: &Path) -> Result<CredentialRoots, String> {
+    provider::host_credentials(home, project)
+}
+
 /// Resolve the full declared credential table for a launch edge, including
 /// account registrations and host environment overrides.
 pub fn declared_credentials(registry: &Registry<'_>) -> Result<CredentialRoots, String> {

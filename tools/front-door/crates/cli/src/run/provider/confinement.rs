@@ -888,6 +888,24 @@ pub(super) fn credential_roots(
     })
 }
 
+/// Initial state binding precedes account configuration reads, but must use
+/// the same built-in and host declaration classifier as launch preparation.
+pub fn host_credentials(
+    home: &Path,
+    project: &Path,
+) -> Result<provenant_core::CredentialRoots, String> {
+    credential_roots(
+        &Registry {
+            home: Some(home),
+            cwd: Some(project),
+            ..Registry::default()
+        },
+        home,
+        &provenant_providers::accounts::Settings::default(),
+        &[project],
+    )
+}
+
 pub fn declared_credentials(
     registry: &Registry<'_>,
 ) -> Result<provenant_core::CredentialRoots, String> {
