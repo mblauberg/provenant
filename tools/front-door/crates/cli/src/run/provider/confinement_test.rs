@@ -477,6 +477,14 @@ fn relocated_codex_stores_never_gain_the_builtin_package_exception()
         assert!(roots.is_codex_standalone_package(
             &home.join(".codex/packages/standalone/releases/1.0/bin/codex")
         ));
+        let nested = store.join("project");
+        std::fs::create_dir_all(&nested)?;
+        let shared = credential_roots(&registry, &home, &settings, &[&nested])?;
+        assert!(shared.refuses(&store.join("unlisted-secret"), CredentialScope::Exact, true), "{origin}");
+        assert!(shared.refuses(&package, CredentialScope::Exact, true), "{origin}");
+        assert!(!shared.refuses(&nested.join("ordinary"), CredentialScope::Exact, true), "{origin}");
+        assert!(crate::run::admit_source_root(&project, &state, &nested, &shared, crate::run::SourceAdmissionMode::Live).is_ok(), "{origin}");
+
     }
     Ok(())
 }
