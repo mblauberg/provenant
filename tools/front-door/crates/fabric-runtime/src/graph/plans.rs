@@ -669,18 +669,24 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
         .map(|plan| plan.review_min_successful);
     for node in &mut document.nodes {
         if node.dependencies().any(|name| name == &expansion.source) {
-            node.after_expansion.extend(
-                expansion
-                    .nodes
-                    .iter()
-                    .filter(|n| {
-                        !expansion.nodes.iter().any(|root| {
-                            root.detached
-                                && (n.id == root.id || n.id.starts_with(&format!("{}--", root.id)))
-                        })
+            let fragment = expansion
+                .nodes
+                .iter()
+                .filter(|n| {
+                    !expansion.nodes.iter().any(|root| {
+                        root.detached
+                            && (n.id == root.id || n.id.starts_with(&format!("{}--", root.id)))
                     })
-                    .map(|n| n.id.clone()),
-            );
+                })
+                .map(|n| n.id.clone());
+            if node.after_settled.contains(&expansion.source)
+                && !node.depends_on.contains(&expansion.source)
+                && !node.after_expansion.contains(&expansion.source)
+            {
+                node.after_settled.extend(fragment);
+            } else {
+                node.after_expansion.extend(fragment);
+            }
 
             if expansion.closes_producer() {
                 wire_exports(node, &expansion.source, &exported);
@@ -1269,6 +1275,7 @@ pub(super) fn flatten_fragment(
             let after = unit
                 .depends_on
                 .iter()
+                .chain(&unit.after_settled)
                 .chain(unit.inputs.iter().map(|i| &i.node));
             (unit.id.clone(), after.cloned().collect())
         })
@@ -1488,6 +1495,7 @@ pub(super) fn flatten_fragment(
             }
             child.id = id(&child.id);
             child.depends_on = child.depends_on.iter().map(|name| id(name)).collect();
+            child.after_settled = child.after_settled.iter().map(|name| id(name)).collect();
             // A planner's patch consumes its plan; a lane's children do not
             // wait for the lane that spawned them.
             if child.depends_on.is_empty() && spec.is_some() {

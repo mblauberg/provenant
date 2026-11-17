@@ -1381,7 +1381,10 @@ pub(super) fn dependency_state(
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Option<NodeState> {
-    let mut waiting = false;
+    let mut waiting = node
+        .after_settled
+        .iter()
+        .any(|parent| !checkpoint.nodes[positions[parent]].state.settled());
     let mut skipped = false;
     let mut blocked = false;
     if node

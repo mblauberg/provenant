@@ -150,6 +150,10 @@ An occupied concurrency threshold warns and proceeds unless its declared policy 
 - Why: a graph that starts must be able to finish within its bounds.
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
+`after_settled` orders a node after its predecessors settle in any state without
+propagating their failure. The predecessors remain visible in the graph outcome.
+Success dependencies and selected inputs retain their existing failure semantics.
+
 ### Implementation planning
 
 An `implement` or `implement.issue` brief is sized by a read-only plan node
@@ -166,6 +170,10 @@ any `implement` or `implement.*` template, and other templates ignore it.
 A composite's state, outputs and error summary derive from its members while its own `when` condition holds. A composite skipped by its own condition retains that state regardless of its members. An explicit `GraphPatch` skip of a composite remains authoritative until a later replacement or retry supersedes it; reconciliation still recomputes the other active composite boundaries in the same checkpoint. A patch that replaces or skips a member recomputes the affected active composite boundaries in the same checkpoint.
 - Why: recovery must validate a checkpoint against the topology it records.
 - Owner: `crates/fabric-runtime/src/graph/composites.rs`, `crates/fabric-runtime/src/graph/patch.rs`
+
+Launched review panels settle with partial coverage by default. When a selected lens fails, blocks or stops, the panel retains successful evidence, marks its verdict inconclusive unless blocking findings require changes, and names the unavailable lens in its result and coverage warning. Protected path floors carry their configured reviewer count and required lenses from launch into settlement; a shortfall against either fails the panel with `coverage_below_minimum`. An optional reviewer may be unavailable when the protected count and every required lens still succeed.
+- Why: one stopped reviewer must not discard useful independent coverage, while protected paths keep their declared minimum evidence.
+- Owner: `crates/routing/src/review.rs`, `crates/cli/src/fabric/graph_relay.rs`, `crates/fabric-runtime/src/graph/template.rs`, `crates/fabric-runtime/src/graph/composites.rs`
 
 ### Session-ready steering
 

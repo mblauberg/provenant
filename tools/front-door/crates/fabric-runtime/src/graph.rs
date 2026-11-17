@@ -911,6 +911,8 @@ struct PlannedNode {
     when: Vec<WhenTerm>,
     prompt: String,
     depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    after_settled: Vec<String>,
     #[serde(default, skip_serializing_if = "model::is_false")]
     advisory: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1016,11 +1018,12 @@ fn node_context(plan: &PlannedGraph, node: &PlannedNode) -> provenant_records::r
 
 impl PlannedNode {
     fn dependencies(&self) -> impl Iterator<Item = &String> {
-        self.depends_on.iter().chain(
-            self.after_expansion
-                .iter()
-                .filter(|name| !self.depends_on.contains(name)),
-        )
+        self.depends_on
+            .iter()
+            .chain(self.after_settled.iter())
+            .chain(self.after_expansion.iter().filter(|name| {
+                !self.depends_on.contains(name) && !self.after_settled.contains(name)
+            }))
     }
 }
 

@@ -2123,6 +2123,39 @@ fn fragment_gate_recovery_is_a_completion_dependency_for_consumers() {
     }
 }
 
+// Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
+#[test]
+fn order_only_planner_consumer_waits_for_failed_fragment_without_blocking() {
+    let mut document = planner(1);
+    document.nodes[1].depends_on.clear();
+    document.nodes[1].after_settled.push("plan".into());
+    let output = result(vec![slice("child", &[])]);
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &output),
+            terminal(AttemptOutcome::TaskFailed),
+            terminal_with_result(AttemptOutcome::Succeeded, "checked"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.calls.last().unwrap().0.node_id, "after");
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "after")
+            .unwrap()
+            .state,
+        NodeState::Succeeded
+    );
+    assert_eq!(run.checkpoint.outcome(), GraphOutcome::Failed);
+    let replay = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(replay.checkpoint, run.checkpoint);
+}
+
 #[test]
 fn an_inactive_recovery_writer_does_not_skip_an_overlapping_required_writer() {
     for (sibling, explicit_dependency) in [(true, false), (false, false), (false, true)] {

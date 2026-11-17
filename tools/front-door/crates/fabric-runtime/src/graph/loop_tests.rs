@@ -2721,6 +2721,9 @@ fn principal_recovery_completes_enclosing_composite_and_delivery_continues() {
             nodes: members,
             min_successful: None,
             reduce_verdict: false,
+            soft_review_coverage: false,
+            hard_review_coverage: false,
+            required_review_lenses: Vec::new(),
             exports: vec![],
         },
     ));
@@ -2775,6 +2778,9 @@ fn compiled_repair_design_continuation_keeps_the_original_writer() {
             nodes: vec![implement, initial, assurance],
             min_successful: None,
             reduce_verdict: false,
+            soft_review_coverage: false,
+            hard_review_coverage: false,
+            required_review_lenses: Vec::new(),
             exports: vec![],
         },
     )];

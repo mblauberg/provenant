@@ -776,6 +776,14 @@ pub enum CompositeBehaviour {
     ReviewRepair,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewCoverageFloor {
+    hard: bool,
+    minimum: usize,
+    required_lenses: Vec<String>,
+}
+
 /// One template document. A leaf sets `brief` (and usually `tier`); a
 /// composite sets `nodes`. Nodes stay JSON until their parameters are bound,
 /// because a typed list field such as `write_scope` may be one `${scope}`.
@@ -1862,6 +1870,7 @@ impl<'a> Compiler<'a> {
             "title",
             "after",
             "depends_on",
+            "after_settled",
             "inputs",
             "source",
             "read_roots",
@@ -1896,14 +1905,24 @@ impl<'a> Compiler<'a> {
         }
         let mut ids = BTreeSet::new();
         let mut children = Vec::with_capacity(items.len());
-        let panel_routes = if over.as_str() == Some("@review-panel")
+        let review_panel = over.as_str() == Some("@review-panel")
             && copy
                 .get("use")
                 .and_then(Value::as_str)
                 .and_then(|name| self.library.resolve(name).ok())
-                .is_some_and(|template| template.review == Some(ReviewBehaviour::Lens))
-        {
+                .is_some_and(|template| template.review == Some(ReviewBehaviour::Lens));
+        let panel_routes = if review_panel {
             self.resolvers.get("review-panel-routes")
+        } else {
+            None
+        };
+        let coverage_floor = if review_panel {
+            self.resolvers
+                .get("review-coverage-floor")
+                .and_then(|values| values.first())
+                .map(|value| serde_json::from_str::<ReviewCoverageFloor>(value))
+                .transpose()
+                .map_err(|_| "invalid review coverage floor")?
         } else {
             None
         };
@@ -1948,6 +1967,18 @@ impl<'a> Compiler<'a> {
         composite.insert("exports".into(), Value::Array(exports));
         if let Some(min_ok) = min_ok {
             composite.insert("min_successful".into(), min_ok);
+        }
+        if let Some(floor) = coverage_floor {
+            composite.insert("soft_review_coverage".into(), Value::Bool(true));
+            composite.insert("min_successful".into(), Value::from(floor.minimum));
+            if floor.hard {
+                composite.insert("hard_review_coverage".into(), Value::Bool(true));
+                composite.insert(
+                    "required_review_lenses".into(),
+                    serde_json::to_value(floor.required_lenses)
+                        .map_err(|_| "invalid review coverage floor")?,
+                );
+            }
         }
         if let Some(reduce_verdict) = reduce_verdict {
             composite.insert("reduce_verdict".into(), reduce_verdict);
@@ -2023,6 +2054,7 @@ impl<'a> Compiler<'a> {
             "title",
             "after",
             "depends_on",
+            "after_settled",
             "inputs",
             "skip_without_findings",
             "on_fail",
@@ -2090,6 +2122,17 @@ impl<'a> Compiler<'a> {
                 library: self.library,
                 resolvers: &resolvers,
             };
+            let review_coverage_floor =
+                if template.composite_behaviour == Some(CompositeBehaviour::ReviewPanel) {
+                    self.resolvers
+                        .get("review-coverage-floor")
+                        .and_then(|values| values.first())
+                        .map(|value| serde_json::from_str::<ReviewCoverageFloor>(value))
+                        .transpose()
+                        .map_err(|_| "invalid review coverage floor")?
+                } else {
+                    None
+                };
             for member in &compiler.bounded_plan_consumers(&template.nodes) {
                 children.push(compiler.lower_in(member, parameters, stack)?);
             }
@@ -2243,6 +2286,18 @@ impl<'a> Compiler<'a> {
             let mut composite = Map::new();
             composite.insert("nodes".into(), Value::Array(children));
             composite.insert("exports".into(), Value::Array(exports));
+            if let Some(floor) = review_coverage_floor {
+                composite.insert("soft_review_coverage".into(), Value::Bool(true));
+                composite.entry("min_successful").or_insert(Value::from(1));
+                if floor.hard {
+                    composite.insert("hard_review_coverage".into(), Value::Bool(true));
+                    composite.insert(
+                        "required_review_lenses".into(),
+                        serde_json::to_value(floor.required_lenses)
+                            .map_err(|_| "invalid review coverage floor")?,
+                    );
+                }
+            }
             if let Some(min_ok) = overrides
                 .remove("min_ok")
                 .or_else(|| template.min_ok.map(Value::from))
@@ -2339,6 +2394,7 @@ impl<'a> Compiler<'a> {
             "title",
             "after",
             "depends_on",
+            "after_settled",
             "inputs",
             "when",
             "source",

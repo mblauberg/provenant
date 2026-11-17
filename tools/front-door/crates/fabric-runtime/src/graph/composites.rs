@@ -14,6 +14,19 @@ pub struct CompositeSpec {
     /// Reduce successful exporting members' verdicts using the worst outcome.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reduce_verdict: bool,
+    /// Treat this review panel's coverage floor as advisory unless the host
+    /// marks its pinned path floor hard.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub soft_review_coverage: bool,
+    /// Enforce review coverage floors supplied by the pinned launch context.
+    /// Review composites without this flag settle with partial coverage and
+    /// report unavailable members; other composites retain their configured
+    /// `min_successful` behaviour.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hard_review_coverage: bool,
+    /// Named lenses that a protected path floor requires to succeed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_review_lenses: Vec<String>,
     pub nodes: Vec<GraphNode>,
     pub exports: Vec<GraphInput>,
 }
@@ -37,6 +50,7 @@ fn expand_document(
         &document.nodes,
         "",
         &BTreeMap::new(),
+        &[],
         &[],
         &[],
         None,
@@ -202,6 +216,7 @@ fn children(
     prefix: &str,
     inherited_names: &BTreeMap<String, String>,
     incoming: &[String],
+    incoming_settled: &[String],
     inputs: &[GraphInput],
     source: Option<&SourceBinding>,
     read_roots: &[String],
@@ -242,6 +257,9 @@ fn children(
             ));
         }
         for parent in &mut node.depends_on {
+            *parent = reference(prefix, parent, &locals, incoming).ok_or("dependency")?;
+        }
+        for parent in &mut node.after_settled {
             *parent = reference(prefix, parent, &locals, incoming).ok_or("dependency")?;
         }
         for input in &mut node.inputs {
@@ -327,6 +345,11 @@ fn children(
                     node.depends_on.push(parent.clone());
                 }
             }
+            for parent in incoming_settled {
+                if !node.after_settled.contains(parent) && !node.depends_on.contains(parent) {
+                    node.after_settled.push(parent.clone());
+                }
+            }
             for input in inputs {
                 if let Some(own) = node.inputs.iter_mut().find(|own| own.node == input.node) {
                     for kind in &input.outputs {
@@ -381,6 +404,7 @@ fn children(
                 &spec.body,
                 "",
                 &visible_names,
+                &[],
                 &[],
                 &[],
                 None,
@@ -451,6 +475,7 @@ fn children(
                 &node.id,
                 &visible_names,
                 &node.depends_on,
+                &node.after_settled,
                 &node.inputs,
                 node.source.as_ref(),
                 &node.read_roots,
@@ -473,6 +498,9 @@ fn children(
             node.composite = Some(CompositeSpec {
                 min_successful: spec.min_successful,
                 reduce_verdict: spec.reduce_verdict,
+                soft_review_coverage: spec.soft_review_coverage,
+                hard_review_coverage: spec.hard_review_coverage,
+                required_review_lenses: spec.required_review_lenses,
                 nodes: Vec::new(),
                 exports: spec
                     .exports
@@ -494,6 +522,7 @@ fn children(
 }
 
 fn outputs(
+    boundary: usize,
     spec: &CompositeSpec,
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
@@ -530,7 +559,12 @@ fn outputs(
     let mut family_notices = Vec::new();
     let mut truncation_warning_indices = Vec::new();
     let partial = spec.min_successful.is_some() || spec.reduce_verdict;
-    let unavailable = unavailable(spec, checkpoint, positions);
+    let unavailable = unavailable(spec, plan, checkpoint, positions);
+    let missing_review_lenses = if spec.soft_review_coverage {
+        missing_review_lenses(boundary, plan, checkpoint, positions)
+    } else {
+        Vec::new()
+    };
     let finding_exports: Vec<_> = spec
         .exports
         .iter()
@@ -684,8 +718,20 @@ fn outputs(
         .exports
         .iter()
         .any(|export| template::review_behaviour(&plan.nodes[positions[&export.node]]).is_some());
-    if (!unavailable.is_empty() && review_members) || review::partial(&selected) {
+    if (!unavailable.is_empty() && review_members)
+        || !missing_review_lenses.is_empty()
+        || review::partial(&selected)
+    {
         review::mark_partial(&mut selected);
+    }
+    if !missing_review_lenses.is_empty() && selected.warnings.len() < MAX_WARNINGS {
+        selected.warnings.push(bounded(
+            &format!(
+                "review_coverage_missing_lenses: {}",
+                missing_review_lenses.join("; ")
+            ),
+            WARNING_BYTES,
+        ));
     }
     if selected
         .findings
@@ -779,7 +825,11 @@ fn outputs(
                 warning_indices: truncation_warning_indices,
                 notice_lines: bounded(header, COMPOSITE_EXCERPT_BYTES).lines().count(),
             });
-    if !unavailable.is_empty() || truncation_header.is_some() || !family_notices.is_empty() {
+    if !unavailable.is_empty()
+        || !missing_review_lenses.is_empty()
+        || truncation_header.is_some()
+        || !family_notices.is_empty()
+    {
         // The unavailable list leads and is bounded on its own, so a long
         // review body can never truncate it away.
         let mut headers = Vec::new();
@@ -796,6 +846,12 @@ fn outputs(
         }
         if !unavailable.is_empty() {
             headers.push(format!("Unavailable members:\n{}", unavailable.join("\n")));
+        }
+        if !missing_review_lenses.is_empty() {
+            headers.push(format!(
+                "Missing review lenses:\n{}",
+                missing_review_lenses.join("\n")
+            ));
         }
         let full_header = headers.join("\n");
         let header = bounded(&full_header, header_limit);
@@ -929,6 +985,7 @@ fn exporting_members(spec: &CompositeSpec, positions: &BTreeMap<String, usize>) 
 /// Failed exporting members as `id: reason`.
 fn unavailable(
     spec: &CompositeSpec,
+    plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
 ) -> Vec<String> {
@@ -944,40 +1001,146 @@ fn unavailable(
                     && matches!(progress.state, NodeState::Blocked | NodeState::Skipped))
         })
         .map(|progress| {
+            let lens = plan.nodes[positions[&progress.id]]
+                .review_lens
+                .as_deref()
+                .map(|lens| format!(" (lens {lens})"))
+                .unwrap_or_default();
             let reason = progress.advance_error.as_deref().unwrap_or_else(|| {
                 match progress.attempts.last().and_then(|a| a.outcome.as_ref()) {
                     Some(AttemptOutcome::AdapterUnavailable) => "adapter unavailable",
                     _ => "member failed",
                 }
             });
-            format!("{}: {reason}", progress.id)
+            format!("{}{lens}: {reason}", progress.id)
         })
         .collect()
 }
 
+/// Missing lens evidence can sit below a verifier or synthesis node instead of
+/// being a direct member of the panel boundary. Walk the boundary's member
+/// tree so each enclosing review settlement retains those names.
+fn missing_review_lenses(
+    boundary: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+) -> Vec<String> {
+    let mut missing: Vec<_> = review_lens_statuses(boundary, plan, checkpoint, positions)
+        .into_values()
+        .flatten()
+        .flatten()
+        .collect();
+    missing.sort();
+    missing
+}
+
+/// Every panel-owned lens and whether it settled with usable evidence. The map
+/// lets hard floors find a required lens below the synthesis boundary without
+/// importing failures from unrelated upstream reviews.
+fn review_lens_statuses(
+    boundary: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+) -> BTreeMap<String, Vec<Option<String>>> {
+    // Only the boundary's expanded member tree belongs to this panel. A
+    // dependency may point at an upstream panel or other review graph, whose
+    // unavailable lenses must not contaminate this panel's coverage report.
+    let mut pending: Vec<_> = plan.nodes[boundary]
+        .composite_members
+        .iter()
+        .filter_map(|child| positions.get(child).copied())
+        .collect();
+    let mut seen = BTreeSet::new();
+    let mut statuses: BTreeMap<String, Vec<Option<String>>> = BTreeMap::new();
+    while let Some(index) = pending.pop() {
+        if !seen.insert(index) {
+            continue;
+        }
+        let node = &plan.nodes[index];
+        let progress = &checkpoint.nodes[index];
+        if let Some(lens) = node.review_lens.as_deref()
+            && !repair::intentionally_skipped_lens(index, plan, checkpoint)
+        {
+            let available = progress.state == NodeState::Succeeded;
+            let reason = (!available).then(|| {
+                let detail =
+                    progress
+                        .advance_error
+                        .as_deref()
+                        .unwrap_or_else(|| match progress.state {
+                            NodeState::Failed => "review did not succeed",
+                            NodeState::Blocked => "review was blocked",
+                            NodeState::Skipped => "review was skipped",
+                            _ => "review is unavailable",
+                        });
+                format!("{lens} (node {}): {detail}", progress.id)
+            });
+            statuses.entry(lens.to_owned()).or_default().push(reason);
+        }
+        pending.extend(
+            node.composite_members
+                .iter()
+                .filter_map(|child| positions.get(child).copied()),
+        );
+    }
+    statuses
+}
+
 /// The recorded reason when a partial composite has too few successful members.
 fn coverage_shortfall(
+    boundary: usize,
     spec: &CompositeSpec,
+    plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
 ) -> Option<String> {
     let members = exporting_members(spec, positions);
     let minimum = if spec.reduce_verdict {
         spec.min_successful.unwrap_or(members.len()).max(1)
+    } else if let Some(minimum) = spec.min_successful {
+        minimum.min(members.len())
+    } else if !spec.required_review_lenses.is_empty() {
+        0
     } else {
-        spec.min_successful?.min(members.len())
+        return None;
     };
     let succeeded = members
         .iter()
         .filter(|member| checkpoint.nodes[**member].state == NodeState::Succeeded)
         .count();
-    (succeeded < minimum).then(|| {
+    let lens_statuses = review_lens_statuses(boundary, plan, checkpoint, positions);
+    let missing_lenses: Vec<_> = spec
+        .required_review_lenses
+        .iter()
+        .filter(|lens| {
+            lens_statuses
+                .get(*lens)
+                .is_none_or(|instances| instances.iter().all(Option::is_some))
+        })
+        .cloned()
+        .collect();
+    let missing_required_lenses = !missing_lenses.is_empty();
+    (succeeded < minimum || missing_required_lenses).then(|| {
+        let mut unavailable = unavailable(spec, plan, checkpoint, positions);
+        unavailable.extend(missing_lenses.iter().map(|lens| format!("required lens {lens} unavailable")));
         format!(
             "coverage_below_minimum: {succeeded} of {} members succeeded, minimum {minimum}; unavailable: {}",
             members.len(),
-            unavailable(spec, checkpoint, positions).join("; ")
+            unavailable.join("; ")
         )
     })
+}
+
+fn hard_coverage(
+    spec: &CompositeSpec,
+    plan: &PlannedGraph,
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    !spec.soft_review_coverage
+        || !review::composite_review(spec, plan, positions)
+        || spec.hard_review_coverage
 }
 
 pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
@@ -1055,20 +1218,32 @@ fn reconcile_progress(
 ) -> bool {
     let mut state = state(node, plan, checkpoint, positions);
     let shortfall = (state == NodeState::Succeeded)
-        .then(|| coverage_shortfall(spec, checkpoint, positions))
+        .then(|| coverage_shortfall(index, spec, plan, checkpoint, positions))
         .flatten();
-    if shortfall.is_some() {
+    let hard_shortfall = shortfall.is_some() && hard_coverage(spec, plan, positions);
+    if hard_shortfall {
         state = NodeState::Failed;
     }
     let mut exported = None;
     let mut export_error = None;
     if state == NodeState::Succeeded
-        || (shortfall.is_some() && review::composite_review(spec, plan, positions))
+        || (hard_shortfall && review::composite_review(spec, plan, positions))
     {
-        match outputs(spec, plan, checkpoint, positions) {
+        match outputs(index, spec, plan, checkpoint, positions) {
             Ok(mut value) => {
-                if state == NodeState::Failed {
-                    review::mark_partial(&mut value.0);
+                if hard_shortfall || shortfall.is_some() {
+                    if state == NodeState::Failed {
+                        review::mark_partial(&mut value.0);
+                    }
+                    if let Some(reason) = &shortfall
+                        && spec.soft_review_coverage
+                        && value.0.warnings.len() < MAX_WARNINGS
+                    {
+                        value.0.warnings.push(bounded(
+                            &format!("review_coverage_below_floor: {reason}"),
+                            WARNING_BYTES,
+                        ));
+                    }
                 }
                 exported = Some(value);
             }
@@ -1080,16 +1255,17 @@ fn reconcile_progress(
     }
     let (exported, truncation_cause) =
         exported.map_or((None, None), |(output, cause)| (Some(output), cause));
-    let (advance_error_code, advance_error) = if let Some(reason) = shortfall {
-        (
-            Some("coverage_below_minimum".into()),
-            Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES)),
-        )
-    } else if let Some(reason) = export_error {
-        (Some("composite_findings_exceed_cap".into()), Some(reason))
-    } else {
-        (None, None)
-    };
+    let (advance_error_code, advance_error) =
+        if let Some(reason) = shortfall.filter(|_| hard_shortfall) {
+            (
+                Some("coverage_below_minimum".into()),
+                Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES)),
+            )
+        } else if let Some(reason) = export_error {
+            (Some("composite_findings_exceed_cap".into()), Some(reason))
+        } else {
+            (None, None)
+        };
     let progress = &mut checkpoint.nodes[index];
     let changed = progress.state != state
         || progress.outputs != exported
@@ -1110,13 +1286,21 @@ fn state(
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
 ) -> NodeState {
-    if node
-        .composite
-        .as_ref()
-        .is_some_and(|spec| spec.min_successful.is_some() || spec.reduce_verdict)
-    {
+    if node.composite.as_ref().is_some_and(|spec| {
+        spec.min_successful.is_some()
+            || spec.reduce_verdict
+            || spec.hard_review_coverage
+            || !spec.required_review_lenses.is_empty()
+    }) {
         // The group's own dependencies decide first; the rules below judge
         // its members, whose failures are the point of a partial group.
+        if node
+            .after_settled
+            .iter()
+            .any(|parent| !checkpoint.nodes[positions[parent]].state.settled())
+        {
+            return NodeState::Pending;
+        }
         let upstream: Vec<_> = node
             .depends_on
             .iter()
@@ -1201,22 +1385,45 @@ pub(super) fn validate_progress(
     let shortfall = node
         .composite
         .as_ref()
-        .and_then(|spec| coverage_shortfall(spec, checkpoint, positions))
+        .and_then(|spec| coverage_shortfall(positions[&node.id], spec, plan, checkpoint, positions))
         .map(|reason| bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+    let hard_shortfall = shortfall.is_some()
+        && node
+            .composite
+            .as_ref()
+            .is_some_and(|spec| hard_coverage(spec, plan, positions));
     let failed_for_coverage = progress.state == NodeState::Failed
         && state == NodeState::Succeeded
+        && hard_shortfall
         && progress.advance_error_code.as_deref() == Some("coverage_below_minimum")
         && progress.advance_error == shortfall;
     let mut export = node
         .composite
         .as_ref()
-        .map(|spec| outputs(spec, plan, checkpoint, positions));
+        .map(|spec| outputs(positions[&node.id], spec, plan, checkpoint, positions));
+    if shortfall.is_some()
+        && let Some(spec) = node.composite.as_ref()
+        && spec.soft_review_coverage
+        && let Some(Ok((output, _))) = &mut export
+    {
+        let spec = node.composite.as_ref().expect("checked composite");
+        let reason = coverage_shortfall(positions[&node.id], spec, plan, checkpoint, positions);
+        if let Some(reason) = reason {
+            let warning = bounded(
+                &format!("review_coverage_below_floor: {reason}"),
+                WARNING_BYTES,
+            );
+            if !output.warnings.contains(&warning) && output.warnings.len() < MAX_WARNINGS {
+                output.warnings.push(warning);
+            }
+        }
+    }
     if failed_for_coverage && let Some(Ok((output, _))) = &mut export {
         review::mark_partial(output);
     }
     let failed_for_export = progress.state == NodeState::Failed
         && state == NodeState::Succeeded
-        && shortfall.is_none()
+        && !hard_shortfall
         && progress.advance_error_code.as_deref() == Some("composite_findings_exceed_cap")
         && matches!(&export, Some(Err(reason)) if progress.advance_error.as_ref() == Some(reason));
     let valid = progress.attempts.is_empty()
@@ -1242,7 +1449,7 @@ pub(super) fn validate_progress(
             NodeState::Pending => progress.outputs.is_none(),
             NodeState::Running => state == NodeState::Running && progress.outputs.is_none(),
             NodeState::Succeeded => {
-                state == NodeState::Succeeded && shortfall.is_none() && {
+                state == NodeState::Succeeded && !hard_shortfall && {
                     export.and_then(Result::ok).is_some_and(|(output, cause)| {
                         progress.outputs.as_ref() == Some(&output)
                             && progress.truncation_cause == cause

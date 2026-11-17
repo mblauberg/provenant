@@ -215,6 +215,7 @@ pub(super) fn prune(document: &GraphDocument) -> Result<Option<GraphDocument>, A
             }
         }
         node.depends_on = depends_on;
+        node.after_settled.retain(|name| !mentions(name));
         node.inputs.retain(|input| !mentions(&input.node));
         node.composite_members.retain(|name| !mentions(name));
         node.after_expansion.retain(|name| !mentions(name));
