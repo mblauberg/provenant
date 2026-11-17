@@ -113,7 +113,7 @@ fn advance_reopened_prompt(prompt: &str) {
     let graph_id = "AKIAIOSFODNN7EXAMPLE";
     let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 2, "graph_id": graph_id,
-        "provenance": {"parameters": {"brief": prompt}},
+        "provenance": {"parameters": {"brief": prompt, "source": prompt}},
         "nodes": [{
             "id": "reader", "prompt": prompt, "acceptance_checks": [prompt],
             "access": "read_only", "route": {"adapter": "fixture", "model": "fixture/model"}
@@ -128,6 +128,10 @@ fn advance_reopened_prompt(prompt: &str) {
         provenant_config::PortTable::builtin().worktree_layout,
     )
     .unwrap();
+    assert_eq!(
+        document.provenance.as_ref().unwrap().parameters["source"],
+        prompt_text::normalise_prompt_text(prompt).unwrap()
+    );
     let first = {
         let mut journal = ReadableJournal(
             FileJournal::open(&root, project, graph_id, budget, &cancel, &clock).unwrap(),
@@ -204,6 +208,7 @@ fn checkpoint_external_text_round_trips_for_generated_prompts() {
     }
 }
 
+// Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
 fn landing_review_query_reads_typed_settlement_on_only_the_exact_head() {
     let temp = crate::test_support::tempdir().unwrap();
@@ -227,7 +232,7 @@ fn landing_review_query_reads_typed_settlement_on_only_the_exact_head() {
     fixture.checkpoint.nodes[0].state = NodeState::Succeeded;
     fixture.checkpoint.nodes[0].review_settlement = Some(review.clone());
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
-    journal.bind(fixture.execution).unwrap();
+    journal.bind(fixture.execution.clone()).unwrap();
     journal.save(&fixture.checkpoint).unwrap();
     let corrupt = root
         .as_path()
@@ -252,6 +257,31 @@ fn landing_review_query_reads_typed_settlement_on_only_the_exact_head() {
             .reviews
             .is_empty()
     );
+
+    let path = journal
+        .directory
+        .current_path()
+        .unwrap()
+        .join(journal.checkpoint_name());
+    let previous = std::fs::read(&path).unwrap();
+    fixture.checkpoint.nodes[0].state = NodeState::Succeeded;
+    fixture.checkpoint.plan_digest = "wrong-plan-digest".into();
+    let error = journal.save(&fixture.checkpoint).unwrap_err();
+    assert!(matches!(error.root_cause(), JournalError::BadDigest));
+    assert_eq!(std::fs::read(&path).unwrap(), previous);
+
+    // A valid envelope digest must not conceal an invalid plan digest on read.
+    fixture.digest = CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&fixture.checkpoint, &fixture.execution),
+    )
+    .unwrap()
+    .to_string();
+    std::fs::write(&path, CanonicalV1::bytes(&fixture).unwrap().as_bytes()).unwrap();
+    let found = landing_reviews(&root, project, head).unwrap();
+    assert!(found.reviews.is_empty());
+    assert!(found.unusable.iter().any(|error| error.contains("g-test")));
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

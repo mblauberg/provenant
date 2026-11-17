@@ -15,16 +15,40 @@ pub fn normalise_prompt_text(text: &str) -> Result<String, &'static str> {
 pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
     input: &T,
 ) -> Result<T, &'static str> {
-    fn visit(value: &mut serde_json::Value, content: bool) -> Result<(), &'static str> {
+    #[derive(Clone, Copy)]
+    enum Context {
+        Schema,
+        Content,
+        Finding,
+    }
+
+    fn visit(value: &mut serde_json::Value, context: Context) -> Result<(), &'static str> {
         match value {
-            serde_json::Value::String(value) if content => *value = normalise_prompt_text(value)?,
+            serde_json::Value::String(value) if !matches!(context, Context::Schema) => {
+                *value = normalise_prompt_text(value)?
+            }
             serde_json::Value::Array(values) => {
                 for value in values {
-                    visit(value, content)?;
+                    visit(value, context)?;
                 }
             }
             serde_json::Value::Object(values) => {
                 for (key, value) in values {
+                    // Once inside prose or a user-defined parameter map, every
+                    // descendant is content, regardless of its key or shape.
+                    if matches!(context, Context::Content) {
+                        visit(value, Context::Content)?;
+                        continue;
+                    }
+                    // Finding records carry schema identities alongside prose.
+                    // This context is entered only at the schema findings field,
+                    // never at a similarly named key inside parameter content.
+                    if matches!(context, Context::Finding) {
+                        if !matches!(key.as_str(), "id" | "file" | "path" | "lens") {
+                            visit(value, Context::Content)?;
+                        }
+                        continue;
+                    }
                     let identity = matches!(
                         key.as_str(),
                         "id" | "graph_id"
@@ -50,44 +74,51 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
                     if identity {
                         continue;
                     }
-                    let content = content
-                        || matches!(
-                            key.as_str(),
-                            "prompt"
-                                | "brief"
-                                | "spec"
-                                | "fragment"
-                                | "excerpt"
-                                | "_artifact_findings"
-                                | "_compact_disposition_findings"
-                                | "acceptance_checks"
-                                | "parameters"
-                                | "with"
-                                | "findings"
-                                | "repair_items"
-                                | "spec_concerns"
-                                | "failed_checks"
-                                | "summary"
-                                | "description"
-                                | "detail"
-                                | "reason"
-                                | "question"
-                                | "expected"
-                                | "required_verdict"
-                                | "verdict_error"
-                                | "note"
-                                | "remaining"
-                                | "decisions"
-                                | "verify"
-                                | "warnings"
-                                | "criterion"
-                                | "claim"
-                                | "evidence"
-                                | "proposed_change"
-                                | "alternative"
-                        )
-                        || value.as_str().is_some_and(|text| text.len() > 4096);
-                    visit(value, content)?;
+                    if key == "findings" {
+                        visit(value, Context::Finding)?;
+                        continue;
+                    }
+                    let content = matches!(
+                        key.as_str(),
+                        "prompt"
+                            | "brief"
+                            | "spec"
+                            | "fragment"
+                            | "excerpt"
+                            | "_artifact_findings"
+                            | "_compact_disposition_findings"
+                            | "acceptance_checks"
+                            | "parameters"
+                            | "with"
+                            | "spec_concerns"
+                            | "failed_checks"
+                            | "summary"
+                            | "description"
+                            | "detail"
+                            | "reason"
+                            | "question"
+                            | "expected"
+                            | "required_verdict"
+                            | "verdict_error"
+                            | "note"
+                            | "remaining"
+                            | "decisions"
+                            | "verify"
+                            | "warnings"
+                            | "criterion"
+                            | "claim"
+                            | "evidence"
+                            | "proposed_change"
+                            | "alternative"
+                    ) || value.as_str().is_some_and(|text| text.len() > 4096);
+                    visit(
+                        value,
+                        if content {
+                            Context::Content
+                        } else {
+                            Context::Schema
+                        },
+                    )?;
                 }
             }
             _ => {}
@@ -95,7 +126,7 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
         Ok(())
     }
     let mut value = serde_json::to_value(input).map_err(|_| "cannot encode graph text")?;
-    visit(&mut value, false)?;
+    visit(&mut value, Context::Schema)?;
     serde_json::from_value(value).map_err(|_| "cannot decode normalised graph text")
 }
 
@@ -145,7 +176,11 @@ mod tests {
             "graph_id": identity,
             "nodes": [{"id": identity, "prompt": identity,
                 "depends_on": [identity], "route": {"alias": identity}}],
-            "findings": [{"id": identity, "file": identity, "summary": identity}]
+            "findings": [{"id": identity, "file": identity, "summary": identity}],
+            "provenance": {"parameters": {"source": identity,
+                "nested": {"file": identity, "findings": [{"id": identity}]}}},
+            "with": {"source": identity, "path": [identity], "template": identity},
+            "repair_items": [{"id": identity, "reason": identity}]
         });
         let safe: serde_json::Value = normalise(&value).unwrap();
         assert_eq!(safe["graph_id"], identity);
@@ -156,6 +191,18 @@ mod tests {
         assert_eq!(safe["findings"][0]["file"], identity);
         assert_ne!(safe["nodes"][0]["prompt"], identity);
         assert_ne!(safe["findings"][0]["summary"], identity);
+        assert_eq!(safe["repair_items"][0]["id"], identity);
+        assert_ne!(safe["repair_items"][0]["reason"], identity);
+        for pointer in [
+            "/provenance/parameters/source",
+            "/provenance/parameters/nested/file",
+            "/provenance/parameters/nested/findings/0/id",
+            "/with/source",
+            "/with/path/0",
+            "/with/template",
+        ] {
+            assert_ne!(safe.pointer(pointer).unwrap(), identity);
+        }
         assert_eq!(safe, normalise(&safe).unwrap());
     }
 

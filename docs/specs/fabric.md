@@ -411,7 +411,11 @@ and result excerpts are normalised before becoming graph outputs or subsequent
 prompts. The immutable result artifact keeps its original digest. Planning,
 execution and persistence share the normalised text: content-addressed storage
 only externalises bytes and never rewrites digested content. The journal
-strictly validates the stored representation before publishing it.
+strictly validates the stored representation before publishing it. The strict
+checkpoint decoder verifies both the envelope digest and the base plan digest,
+so publication and landing review reads reject the same corrupt state.
+Identity exclusions apply only to schema fields; every value inside a parameter
+map is prompt content, including parameters named `source`, `path` or `template`.
 
 - Why: an accepted graph must be able to save its checkpoint.
 

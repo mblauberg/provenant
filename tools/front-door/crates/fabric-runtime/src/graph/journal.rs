@@ -1508,6 +1508,12 @@ fn decode_checkpoint_limited(
         expansion_depth: usize::MAX,
         ..Default::default()
     };
+    let (base, _) = validate_replay_plan(&stored.execution.document, &limits)
+        .map_err(|_| JournalError::InvalidTopology)?;
+    let plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &base)?;
+    if stored.checkpoint.plan_digest != plan_digest.to_string() {
+        return Err(JournalError::BadDigest);
+    }
     plans::validate_persisted_topology(
         &stored.execution.document,
         &stored.checkpoint.extensions,
