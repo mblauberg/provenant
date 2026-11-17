@@ -617,7 +617,8 @@ impl Factory {
                     )
                     .map_err(graph_journal_error)?;
                     let admitted = checkpoint.is_some();
-                    let requester_path = self.requester_lane_path()?;
+                    // Preflight checks topology only. Capture and admit the requester
+                    // PATH after the journal-locked submission replay decision below.
                     let extensions = match &input {
                         GraphInput::Resume { extend, .. } => extend.as_slice(),
                         _ => &[],
@@ -630,7 +631,7 @@ impl Factory {
                                 extensions,
                                 &self.context.config.graph.limits,
                                 &self.context.config.graph.budget,
-                                Some(&requester_path),
+                                None,
                             )
                         }
                         None => provenant_fabric_runtime::graph::admit_candidate(
@@ -639,7 +640,7 @@ impl Factory {
                             extensions,
                             &self.context.config.graph.limits,
                             &self.context.config.graph.budget,
-                            Some(&requester_path),
+                            None,
                         ),
                     }
                     .map_err(FacadeError::graph_candidate)?;

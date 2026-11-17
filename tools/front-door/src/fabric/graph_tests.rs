@@ -53,7 +53,7 @@ mod graph_writer_admission_tests {
                 "writer" => value["nodes"][0]["access"] = serde_json::json!("worktree_write"),
                 "output" => {
                     value["nodes"][1]["depends_on"] = serde_json::json!(["one"]);
-                    value["nodes"][1]["inputs"] = serde_json::json!([{"node":"one","outputs":["findings"],"required":["findings"]}]);
+                    value["nodes"][1]["inputs"] = serde_json::json!([{"node":"one","outputs":["commit"]}]);
                 }
                 "envelope" => {
                     factory.context.config.graph.limits.nodes = 2048;
@@ -88,18 +88,19 @@ mod graph_writer_admission_tests {
         Ok(())
     }
 
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     #[test]
     fn facade_resume_persists_lowered_structural_limit_and_recovers() -> Result<(), Box<dyn std::error::Error>> {
         use provenant_fabric_runtime::graph::{self, GraphJournal};
         use provenant_records::pause::PauseCause;
 
-        struct Pending;
+        struct Pending(provenant_core::ActorId);
         impl graph::AttemptOwner for Pending {
             type Error = std::convert::Infallible;
             fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
                 provenant_config::PortTable::builtin().worktree_layout
             }
-            fn actor(&self) -> String { "fixture".into() }
+            fn actor(&self) -> String { self.0.to_string() }
             fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute, _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> Result<graph::AttemptObservation, Self::Error> {
                 Ok(graph::AttemptObservation::Pending { attempt_ref: None })
             }
@@ -133,7 +134,7 @@ mod graph_writer_admission_tests {
             peer_origin_context: None, peer_submission_digest: None, requester_path: None,
             extra: Default::default(), bases: None, directory: rig.project.clone(), document: document.clone(),
         })?;
-        graph::advance_with_budget(&document, &mut Pending, &mut journal, &Default::default(), &Default::default())?;
+        graph::advance_with_budget(&document, &mut Pending(factory.context.identity.inbox.actor), &mut journal, &Default::default(), &Default::default())?;
         drop(journal);
         factory.context.config.graph.limits.nodes = 1;
         let resume = || GraphInput::Resume { extra: Default::default(), document: "limit-resume".into(), extend: vec![] };
