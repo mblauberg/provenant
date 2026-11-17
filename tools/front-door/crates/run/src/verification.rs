@@ -149,7 +149,11 @@ mod tests {
         );
         assert_eq!(resolved.scope.value, VerificationScope::Targeted);
         assert_eq!(resolved.scope.source, "brief");
-        assert!(resolved.conflict.is_none());
+        // docs/specs/run.md: a knob that disagrees with the brief line is a
+        // conflict; the paragraph follows the brief and the cause names both.
+        let cause = resolved.conflict.as_deref().expect("conflict");
+        assert!(cause.contains("lane guidance is check"), "{cause}");
+        assert!(cause.contains("the brief declares targeted"), "{cause}");
         let text = resolved.paragraph();
         assert!(text.contains("source: brief"));
         assert!(text.contains("tests that cover"));
