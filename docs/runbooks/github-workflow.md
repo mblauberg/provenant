@@ -82,6 +82,11 @@ Rerun the same request when a landing is pending or busy.
 
 Sharp edges:
 
+- A land waiting on a gate prints the candidate ref, checks URL and state, then
+  elapsed time every `progress_seconds`. A candidate whose tree already passed
+  the required checks on a member head skips the gate (`reuse_tested_tree`).
+  A land killed mid-gate leaves its candidate ref until the pull request is
+  merged or closed; the next land collects it.
 - Changing `candidate_ref_prefix` needs a matching CI trigger (the bundled one
   covers `land/**`). A command gate runs without `GH_TOKEN`, `GITHUB_TOKEN` and
   `GH_ENTERPRISE_TOKEN` unless `gate.env_passthrough` names them.

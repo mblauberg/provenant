@@ -700,6 +700,11 @@ impl Forge for GhForge {
     fn observation_interval(&self) -> Option<Duration> {
         self.poll_interval()
     }
+    fn checks_url(&mut self, commit: &str) -> Option<String> {
+        let repository = self.json("repos/{owner}/{repo}").ok()?;
+        let url = repository["html_url"].as_str()?;
+        Some(format!("{url}/commit/{commit}/checks"))
+    }
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
         let commit = object_id(commit)?;
         let repository = self.repository_name()?;
@@ -745,6 +750,7 @@ impl Forge for GhForge {
             result,
             pool: None,
             duration_seconds: None,
+            reused_from_commit: None,
             extra: Default::default(),
         }])
     }
@@ -989,6 +995,9 @@ impl<'a> GitRepo<'a> {
             return Err(LandingError::Failed(format!("unsafe ref name: {name}")));
         }
         Ok(format!("refs/heads/{name}"))
+    }
+    fn branch_pattern(prefix: &str) -> Result<String, LandingError> {
+        Ok(format!("{}*", Self::branch_ref(prefix)?))
     }
     fn lease_push(
         &mut self,
@@ -1298,6 +1307,19 @@ impl Repo for GitRepo<'_> {
             }
         }
     }
+    fn list_refs(&mut self, prefix: &str) -> Result<Vec<(String, String)>, LandingError> {
+        let remote = self.remote("")?;
+        let pattern = Self::branch_pattern(prefix)?;
+        let out = self.ok(&["ls-remote", "--heads", &remote, &pattern])?;
+        Ok(out
+            .lines()
+            .filter_map(|line| {
+                let (oid, full) = line.split_once('\t')?;
+                let name = full.strip_prefix("refs/heads/")?;
+                Some((name.to_owned(), oid.to_owned()))
+            })
+            .collect())
+    }
     fn is_ancestor(&mut self, ancestor: &str, descendant: &str) -> Result<bool, LandingError> {
         self.ensure(ancestor)?;
         self.ensure(descendant)?;
@@ -1406,6 +1428,7 @@ pub struct CheckGate {
     project: PathBuf,
     state: PathBuf,
     forge: GhForge,
+    progress: Duration,
 }
 impl CheckGate {
     pub fn new(project: &Path, state: &Path) -> Self {
@@ -1413,11 +1436,12 @@ impl CheckGate {
             project: project.to_owned(),
             state: state.to_owned(),
             forge: GhForge::new(project, state),
+            progress: Duration::from_secs(provenant_cli::domains::DEFAULT_LAND_PROGRESS_SECONDS),
         }
     }
 }
 /// Evidence for the required checks only, bound to the definition.
-fn bind_evidence(
+pub(super) fn bind_evidence(
     candidate: &Candidate,
     definition: &GateDefinition,
     observed: &GateEvidence,
@@ -1486,10 +1510,12 @@ fn bind_evidence(
         checks,
         coverage: definition.coverage.clone(),
         duration_seconds: None,
+        reused_from_commit: None,
         extra: Default::default(),
     })
 }
 /// Poll until the required checks settle or the budget (summed pauses) ends.
+#[cfg(test)]
 pub(super) fn observe_checks(
     forge: &mut dyn Forge,
     candidate: &Candidate,
@@ -1497,14 +1523,41 @@ pub(super) fn observe_checks(
     poll_seconds: u64,
     sleep: &mut dyn FnMut(Duration),
 ) -> Result<GateEvidence, LandingError> {
-    observe_checks_with(candidate, definition, poll_seconds, sleep, &mut || {
-        let checks = forge.checks(&candidate.commit);
-        let next_interval = forge.observation_interval();
-        CheckObservation {
-            checks,
-            next_interval,
-        }
-    })
+    observe_checks_reporting(
+        forge,
+        candidate,
+        definition,
+        poll_seconds,
+        sleep,
+        &mut |_, _| {},
+    )
+}
+
+/// As `observe_checks`, calling `report` with the elapsed wait and the
+/// unsettled state after every poll that does not settle the gate.
+pub(super) fn observe_checks_reporting(
+    forge: &mut dyn Forge,
+    candidate: &Candidate,
+    definition: &GateDefinition,
+    poll_seconds: u64,
+    sleep: &mut dyn FnMut(Duration),
+    report: &mut dyn FnMut(Duration, &GateResult),
+) -> Result<GateEvidence, LandingError> {
+    observe_checks_with(
+        candidate,
+        definition,
+        poll_seconds,
+        sleep,
+        report,
+        &mut || {
+            let checks = forge.checks(&candidate.commit);
+            let next_interval = forge.observation_interval();
+            CheckObservation {
+                checks,
+                next_interval,
+            }
+        },
+    )
 }
 
 struct CheckObservation {
@@ -1517,6 +1570,7 @@ fn observe_checks_with(
     definition: &GateDefinition,
     poll_seconds: u64,
     sleep: &mut dyn FnMut(Duration),
+    report: &mut dyn FnMut(Duration, &GateResult),
     read: &mut dyn FnMut() -> CheckObservation,
 ) -> Result<GateEvidence, LandingError> {
     let fallback = Duration::from_secs(poll_seconds);
@@ -1551,6 +1605,7 @@ fn observe_checks_with(
         if settled || elapsed >= timeout {
             return Ok(evidence);
         }
+        report(elapsed, &evidence.result);
         let pause = poll.min(timeout.saturating_sub(elapsed));
         sleep(pause);
         elapsed += pause;
@@ -1564,6 +1619,9 @@ impl GateRunner for CheckGate {
     fn set_poll_interval_override(&mut self, interval: Option<Duration>) {
         self.forge.set_poll_interval_override(interval);
     }
+    fn set_progress_interval(&mut self, interval: Duration) {
+        self.progress = interval;
+    }
     #[allow(clippy::disallowed_methods)]
     fn gate(
         &mut self,
@@ -1572,13 +1630,36 @@ impl GateRunner for CheckGate {
         poll_seconds: u64,
     ) -> Result<GateEvidence, LandingError> {
         match definition.kind {
-            provenant_cli::domains::GateKind::Checks => observe_checks(
-                &mut self.forge,
-                candidate,
-                definition,
-                poll_seconds,
-                &mut std::thread::sleep,
-            ),
+            provenant_cli::domains::GateKind::Checks => {
+                let progress = super::gate::ProgressReporter::new(
+                    format!(
+                        "candidate {} ({}) checks",
+                        candidate.ref_name, candidate.commit
+                    ),
+                    self.progress,
+                );
+                {
+                    use std::io::Write;
+                    let url = self
+                        .forge
+                        .checks_url(&candidate.commit)
+                        .unwrap_or_else(|| "(check URL unavailable)".into());
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "land: gate on candidate {} ({}), checks {url}",
+                        candidate.ref_name,
+                        candidate.commit
+                    );
+                }
+                observe_checks_reporting(
+                    &mut self.forge,
+                    candidate,
+                    definition,
+                    poll_seconds,
+                    &mut std::thread::sleep,
+                    &mut |_, state| progress.set_state(state),
+                )
+            }
             provenant_cli::domains::GateKind::Commands => {
                 super::gate::execute_commands(&self.project, &self.state, candidate, definition)
             }
@@ -1668,6 +1749,18 @@ fn deliver_alarm(
 )]
 mod tests {
     use super::*;
+
+    // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
+    #[test]
+    fn candidate_ref_prefix_builds_safe_remote_pattern() {
+        assert_eq!(
+            GitRepo::branch_pattern("land/candidate-").unwrap(),
+            "refs/heads/land/candidate-*"
+        );
+        for invalid in ["refs/heads/main", "bad*", "-option", ""] {
+            assert!(GitRepo::branch_pattern(invalid).is_err());
+        }
+    }
 
     #[test]
     fn explicit_poll_override_precedes_adaptive_interval_and_gate_forwards_it() {
@@ -2475,6 +2568,7 @@ esac
             result: GateResult::Pending,
             pool: None,
             duration_seconds: None,
+            reused_from_commit: None,
             extra: Default::default(),
         }
     }
@@ -2553,6 +2647,7 @@ esac
             &definition(&["ci"], None),
             3,
             &mut |pause| pauses.push(pause),
+            &mut |_, _| {},
             &mut || CheckObservation {
                 checks: Ok(vec![samples.pop_front().unwrap()]),
                 next_interval: None,
@@ -2582,6 +2677,7 @@ esac
             &definition(&["ci"], None),
             3,
             &mut |pause| pauses.push(pause),
+            &mut |_, _| {},
             &mut || CheckObservation {
                 checks: Ok(vec![samples.pop_front().unwrap()]),
                 next_interval: Some(fast),

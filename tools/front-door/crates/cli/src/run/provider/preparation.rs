@@ -736,6 +736,15 @@ pub(super) enum PrepareError {
     Other(String),
 }
 
+fn continuation_skip(
+    route: &str,
+    guard: provenant_records::diagnostic::ContinuationGuard,
+) -> SkippedRoute {
+    let mut skipped = skip(route, SkipKind::Refused, "");
+    skipped.set_continuation_guard(guard);
+    skipped
+}
+
 fn candidate_refusal_message(
     skipped_routes: &[SkippedRoute],
     fallback_outcome: Option<provenant_records::run::PreparationFailure>,
@@ -878,9 +887,22 @@ impl PrepareError {
                 } else {
                     provenant_records::diagnostic::BoundaryClass::None
                 };
-                let policy_code = policy_code_for_boundary(boundary_class)
-                    .map(str::to_owned)
-                    .or_else(|| policy_code_for_resource(candidate_resource));
+                let continuation_rule = skipped_routes.first().and_then(|first| {
+                    let rule = first.continuation_guard?.rule;
+                    skipped_routes
+                        .iter()
+                        .all(|route| {
+                            route
+                                .continuation_guard
+                                .is_some_and(|guard| guard.rule == rule)
+                        })
+                        .then_some(rule.code().to_owned())
+                });
+                let policy_code = continuation_rule.or_else(|| {
+                    policy_code_for_boundary(boundary_class)
+                        .map(str::to_owned)
+                        .or_else(|| policy_code_for_resource(candidate_resource))
+                });
                 let message =
                     candidate_refusal_message(&skipped_routes, fallback_outcome).unwrap_or(message);
                 let mut refusal = Box::new(run::PrepareRefusal {
@@ -935,12 +957,16 @@ impl PrepareError {
                 refusal
             }
             Self::ContinuationRequest(error) => {
+                let guard = error.guard();
                 let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::AccessPolicyRefused,
-                    error.to_string(),
+                    guard.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
-                refusal.policy_code = Some("CONTRACT_CONTINUATION_VALIDATE_AUTHORITY".into());
+                refusal.policy_code = Some(guard.rule.code().into());
+                refusal
+                    .skipped_routes
+                    .push(continuation_skip("continuation", guard));
                 refusal
             }
             Self::SourceHead(error) => {
@@ -969,11 +995,7 @@ impl PrepareError {
             }
             Self::Provider(error) => {
                 let policy_code = provider_policy_code(&error);
-                let boundary_class = if policy_code.is_some() {
-                    provenant_records::diagnostic::BoundaryClass::None
-                } else {
-                    error.boundary_class()
-                };
+                let boundary_class = error.boundary_class();
                 let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::HandoffRefused,
                     error.to_string(),
@@ -982,6 +1004,11 @@ impl PrepareError {
                 refusal.policy_code = policy_code
                     .or_else(|| policy_code_for_boundary(boundary_class).map(str::to_owned));
                 refusal.resource = error.resource_fact();
+                if let provenant_providers::ProviderError::ContinuationRefused(guard) = error {
+                    refusal
+                        .skipped_routes
+                        .push(continuation_skip("continuation", guard));
+                }
                 refusal
             }
             Self::Prompt(error) => {
@@ -1070,6 +1097,7 @@ impl PrepareError {
 
 #[cfg(test)]
 #[test]
+// Spec: docs/specs/fabric.md#session-ready-steering
 fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     use provenant_records::diagnostic::BoundaryClass;
     let error = run::RunError::Confinement(
@@ -1114,15 +1142,20 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         ContinuationRequestError::MissingRoute,
         ContinuationRequestError::MissingModel,
         ContinuationRequestError::MissingProvider,
-        ContinuationRequestError::InvalidModel("invalid".into()),
+        ContinuationRequestError::InvalidModel("TOKEN_SENTINEL /private/source".into()),
         ContinuationRequestError::ProviderMismatch,
     ] {
-        assert_eq!(
-            PrepareError::ContinuationRequest(error)
-                .into_refusal()
-                .boundary_class,
-            BoundaryClass::Authority
-        );
+        let guard = error.guard();
+        let refusal = PrepareError::ContinuationRequest(error).into_refusal();
+        assert_eq!(refusal.boundary_class, BoundaryClass::Authority);
+        assert_eq!(refusal.policy_code.as_deref(), Some(guard.rule.code()));
+        assert_eq!(refusal.skipped_routes[0].continuation_guard, Some(guard));
+        let error = run::RunError::ContinuationRefused { refusal };
+        let reason = error.to_string();
+        assert!(reason.contains(guard.rule.code()));
+        assert!(reason.contains(guard.field.name()));
+        assert!(!reason.contains("TOKEN_SENTINEL"));
+        assert!(!reason.contains("/private/source"));
     }
     let source =
         PrepareError::SourceCwd(SourceCwdError::Authority("source identity changed".into()))
@@ -1190,6 +1223,16 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         aggregate(vec![candidate(), unrelated]).boundary_class,
         BoundaryClass::None
     );
+    let guard = provenant_records::diagnostic::ContinuationGuard {
+        rule: provenant_records::diagnostic::ContinuationRule::RetainedRoute,
+        field: provenant_records::diagnostic::ContinuationField::Effort,
+        issue: provenant_records::diagnostic::ContinuationIssue::Mismatch,
+    };
+    let refused = aggregate(vec![continuation_skip("codex/gpt-6-luna", guard)]);
+    assert_eq!(refused.skipped_routes[0].continuation_guard, Some(guard));
+    assert_eq!(refused.policy_code.as_deref(), Some(guard.rule.code()));
+    assert!(refused.message.contains(guard.rule.code()));
+    assert!(refused.message.contains(guard.field.name()));
     let mut boundaries = std::collections::BTreeMap::new();
     boundaries.insert(0, BoundaryClass::Authority);
     assert_eq!(
@@ -3648,7 +3691,10 @@ pub(super) fn prepare_candidates(
                     if let Some(fact) = error.resource_fact() {
                         reason_resources.insert(reasons.len(), fact);
                     }
-                    reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+                    reasons.push(match error.guard() {
+                        Some(guard) => continuation_skip(&label, guard),
+                        None => skip(&label, SkipKind::Refused, error.to_string()),
+                    });
                     continue;
                 }
             },
@@ -3996,7 +4042,12 @@ pub(super) fn prepare_candidates(
                 } else {
                     SkipKind::Refused
                 };
-                reasons.push(skip(&label, kind, error.to_string()));
+                reasons.push(match error {
+                    provenant_providers::ProviderError::ContinuationRefused(guard) => {
+                        continuation_skip(&label, guard)
+                    }
+                    _ => skip(&label, kind, error.to_string()),
+                });
                 continue;
             }
         };
@@ -4024,7 +4075,12 @@ pub(super) fn prepare_candidates(
                         } else {
                             SkipKind::Refused
                         };
-                    reasons.push(skip(&label, kind, error.to_string()));
+                    reasons.push(match error {
+                        provenant_providers::ProviderError::ContinuationRefused(guard) => {
+                            continuation_skip(&label, guard)
+                        }
+                        _ => skip(&label, kind, error.to_string()),
+                    });
                     continue;
                 }
             };
@@ -4056,10 +4112,13 @@ pub(super) fn prepare_candidates(
                 .as_ref()
                 .is_some_and(|applied| prior_uses_native_session_state(applied, &route.adapter));
             if prior_native != native_root.is_some() {
-                reasons.push(skip(
+                reasons.push(continuation_skip(
                     &label,
-                    SkipKind::Refused,
-                    "the prior and prepared continuation use different native or private session-state locations",
+                    provenant_records::diagnostic::ContinuationGuard {
+                        rule: provenant_records::diagnostic::ContinuationRule::NativeSession,
+                        field: provenant_records::diagnostic::ContinuationField::SessionState,
+                        issue: provenant_records::diagnostic::ContinuationIssue::Mismatch,
+                    },
                 ));
                 reason_boundaries.insert(
                     reasons.len() - 1,
@@ -4071,7 +4130,10 @@ pub(super) fn prepare_candidates(
                 && let Err(error) = verify_native_continuation(prior, &route, root, state_root)
             {
                 let class = error.boundary_class();
-                reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+                reasons.push(match error.guard() {
+                    Some(guard) => continuation_skip(&label, guard),
+                    None => skip(&label, SkipKind::Refused, error.to_string()),
+                });
                 if class != provenant_records::diagnostic::BoundaryClass::None {
                     reason_boundaries.insert(reasons.len() - 1, class);
                 }

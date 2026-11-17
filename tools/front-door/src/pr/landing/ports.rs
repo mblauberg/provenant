@@ -99,6 +99,10 @@ pub trait Forge {
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError>;
     /// Adapter-selected cadence for the next observation, if it owns one.
     /// Callers use their declared policy cadence when the adapter has none.
+    /// Where the checks of `commit` can be watched, when the forge has one.
+    fn checks_url(&mut self, _commit: &str) -> Option<String> {
+        None
+    }
     fn observation_interval(&self) -> Option<std::time::Duration> {
         None
     }
@@ -196,6 +200,10 @@ pub trait Repo {
         expected_old: Option<&str>,
     ) -> Result<(), LandingError>;
     fn delete_ref(&mut self, name: &str, expected_old: &str) -> Result<(), LandingError>;
+    /// Remote branches whose name starts with `prefix`, as (name, commit).
+    fn list_refs(&mut self, _prefix: &str) -> Result<Vec<(String, String)>, LandingError> {
+        Ok(Vec::new())
+    }
     fn is_ancestor(&mut self, ancestor: &str, descendant: &str) -> Result<bool, LandingError>;
     fn tree_of(&mut self, commit: &str) -> Result<String, LandingError>;
     /// The paths that differ between two commits or trees, both names of a rename.
@@ -206,6 +214,8 @@ pub trait Repo {
 pub trait GateRunner {
     fn set_project_path(&mut self, _path: &std::path::Path) {}
     /// Forward the landing's explicit fixed cadence to an adapter-owned observer.
+    /// Interval between progress lines while a gate is awaited.
+    fn set_progress_interval(&mut self, _interval: std::time::Duration) {}
     fn set_poll_interval_override(&mut self, _interval: Option<std::time::Duration>) {}
     fn gate(
         &mut self,

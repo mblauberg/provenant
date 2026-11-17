@@ -16,9 +16,9 @@ fn advance(
 
 fn fixture(name: &str) -> GraphDocument {
     let text = match name {
-        "pass" => include_str!("../fixtures/loop-pass-round-two.json"),
-        "exhaust" => include_str!("../fixtures/loop-exhausts.json"),
-        "extend" => include_str!("../fixtures/loop-extends.json"),
+        "pass" => include_str!("../../fixtures/loop-pass-round-two.json"),
+        "exhaust" => include_str!("../../fixtures/loop-exhausts.json"),
+        "extend" => include_str!("../../fixtures/loop-extends.json"),
         _ => panic!("unknown fixture"),
     };
     serde_json::from_str(text).unwrap()
@@ -70,6 +70,33 @@ fn extension(
         values,
     )
     .unwrap()
+}
+
+// Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
+#[test]
+fn settled_loop_dependency_does_not_inherit_entry_inputs() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"settled-loop","nodes":[
+            {"id":"prior","access":"read_only","prompt":"prior","route":{"alias":"senior"}},
+            {"id":"cycle","kind":"loop","access":"read_only","depends_on":["prior"],
+             "inputs":[{"node":"prior","outputs":["findings"]}],
+             "loop":{"max_rounds":1,"until":"accepted","body":[
+                 {"id":"first","access":"read_only","prompt":"first","route":{"alias":"senior"}},
+                 {"id":"second","access":"read_only","prompt":"second","route":{"alias":"senior"},
+                  "after_settled":["first"],"inputs":[{"node":"first","outputs":["findings"]}]},
+                 {"id":"accepted","kind":"gate","access":"read_only","depends_on":["second"],
+                  "inputs":[{"node":"second","outputs":["verdict"]}],
+                  "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+             ]}}
+        ]
+    })).unwrap();
+    let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+    let first = expanded.nodes.iter().find(|node| node.id == "cycle--r1--first").unwrap();
+    let second = expanded.nodes.iter().find(|node| node.id == "cycle--r1--second").unwrap();
+    assert!(first.inputs.iter().any(|input| input.node == "prior"));
+    assert_eq!(second.after_settled, ["cycle--r1--first"]);
+    assert!(second.inputs.iter().all(|input| input.node != "prior"));
+    assert!(!second.depends_on.iter().any(|node| node == "prior"));
 }
 
 #[test]
@@ -2456,6 +2483,7 @@ fn omitted_delta_risk_assessment_cannot_accept_repair() {
     );
 }
 
+// Spec: docs/specs/fabric.md#composite-settlement
 #[test]
 fn repair_growth_resolves_and_runs_a_fresh_panel() {
     for (field, reviewer_passes) in [
@@ -2495,6 +2523,10 @@ fn repair_growth_resolves_and_runs_a_fresh_panel() {
         }
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let synthesis = run.checkpoint.nodes.iter().find(|node| {
+            node.id.ends_with("--panel--selected--synthesis")
+        }).unwrap();
+        assert_eq!(synthesis.state, NodeState::Succeeded, "{synthesis:?}");
         assert_eq!(owner.repair_panel_calls, 1);
         assert_eq!(owner.repair_growth_calls, 1);
         assert_eq!(

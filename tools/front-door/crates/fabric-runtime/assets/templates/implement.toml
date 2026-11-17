@@ -5,4 +5,4 @@ access = "worktree_write"
 outputs = ["result", "branch", "commit"]
 
 [parameters]
-bounded = { type = "boolean", default = false, doc = "The launcher has sized this brief as one implementation slice." }
+plan = { type = "boolean", default = false, doc = "Plan the brief before the writer starts." }

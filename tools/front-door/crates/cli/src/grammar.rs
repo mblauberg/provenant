@@ -639,9 +639,9 @@ pub struct GraphRunArgs {
     /// list or table as TOML; repeatable
     #[arg(long = "set")]
     pub set: Vec<String>,
-    /// Skip the planner for implementation templates by setting bounded=true
+    /// Plan before implementation (sets plan=true)
     #[arg(long)]
-    pub no_plan: bool,
+    pub plan: bool,
     /// Read a graph document (JSON or TOML)
     #[arg(long)]
     pub file: Option<PathBuf>,

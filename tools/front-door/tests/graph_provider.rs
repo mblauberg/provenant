@@ -1,5 +1,7 @@
 //! Graph provider composition with isolated, synthetic provider processes.
 #![allow(clippy::disallowed_methods)]
+// Unregistered private test functions must fail compilation in this harness.
+#![deny(dead_code)]
 mod support;
 use serde_json::{Value, json};
 use std::{
@@ -465,12 +467,36 @@ fn fixture() -> Result {
     // prior launch's evidence.
     let fixture_session = std::env::var("PROVENANT_PARENT_ATTEMPT_ID")?;
     let session = fixture_session.as_str();
-    if prompt.contains("fixture public bounded steer continuation") {
-        const STEER_SESSION: &str = "fixture-steer-session";
-        let resumed = args
-            .windows(2)
-            .any(|pair| pair[0] == "resume" && pair[1] == STEER_SESSION);
+    const STEER_SESSION: &str = "fixture-steer-session";
+    let resumed = args
+        .windows(2)
+        .any(|pair| pair[0] == "resume" && pair[1] == STEER_SESSION);
+    if prompt.contains("fixture public steer continuation") || resumed {
+        let sessions = home.join("sessions/2026/11/17");
+        let rollout = sessions.join(format!("rollout-2026-11-17T00-00-00-{STEER_SESSION}.jsonl"));
+        if !resumed {
+            fs::create_dir_all(&sessions)?;
+            fs::write(
+                &rollout,
+                format!(
+                    "{}\n{}\n",
+                    json!({"type":"session_meta","payload":{"id":STEER_SESSION}}),
+                    json!({"type":"turn_context","payload":{"model":"gpt-6-luna","effort":"low"}}),
+                ),
+            )?;
+        }
         if resumed {
+            // Preparation and predecessor settlement must preserve the session
+            // in the exact same native home before the resumed CLI starts.
+            let turn = provenant_providers::codex_rollout::observe(&home, STEER_SESSION)?;
+            assert_eq!(turn.model, "gpt-6-luna");
+            assert_eq!(turn.effort.as_deref(), Some("low"));
+            assert!(rollout.is_file());
+            assert_eq!(
+                fs::read("fixture-steer-home.txt")?,
+                home.as_os_str().as_encoded_bytes()
+            );
+
             assert!(prompt.contains("STEER_NOTE: finish the interrupted task"));
             assert_eq!(fs::read_to_string("before.txt")?, "before\n");
             assert_eq!(
@@ -481,7 +507,7 @@ fn fixture() -> Result {
             let committed = std::process::Command::new("/bin/sh")
                 .args([
                     "-c",
-                    "git add before.txt after.txt fixture-steer-worktree.txt && git -c user.name='Fixture' -c user.email='fixture@example.test' commit -qm 'test: finish steered work'",
+                    "git add before.txt after.txt fixture-steer-worktree.txt fixture-steer-home.txt && git -c user.name='Fixture' -c user.email='fixture@example.test' commit -qm 'test: finish steered work'",
                 ])
                 .output()?;
             assert!(
@@ -498,6 +524,10 @@ fn fixture() -> Result {
             }
         } else {
             assert!(!args.iter().any(|arg| arg == "resume"));
+            fs::write(
+                "fixture-steer-home.txt",
+                home.as_os_str().as_encoded_bytes(),
+            )?;
             fs::write("before.txt", "before\n")?;
             fs::write(
                 "fixture-steer-worktree.txt",
@@ -800,14 +830,13 @@ fn policy_codex_fixture() -> Result<TestRig> {
 }
 
 // Spec: docs/specs/fabric.md#session-ready-steering
-#[test]
-fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() -> Result {
+fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    use provenant_core::{CancelToken, Clock, RootInputs};
+    use provenant_core::{CancelToken, RootInputs};
 
-    let mut rig = policy_codex_fixture()?;
+    let rig = policy_codex_fixture()?;
     let cleanup = rig.process_cleanup();
     let auth = br#"{"tokens":{"account_id":"fixture-one"}}"#;
     let account_key = provenant_providers::identity::codex_account(auth).ok_or("account key")?;
@@ -836,7 +865,7 @@ fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() ->
     let base = std::str::from_utf8(&base.stdout.bytes)?.trim().to_owned();
     let ready = rig.root.join("steer-session-ready");
     let brief = format!(
-        "fixture public bounded steer continuation\nSTEER_READY_FILE: {}\n",
+        "fixture public steer continuation\nSTEER_READY_FILE: {}\n",
         ready.display()
     );
     let (launch, value) = rig.launch(&[
@@ -844,11 +873,13 @@ fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() ->
         "--brief",
         &brief,
         "--set",
-        "bounded=true",
+        "plan=false",
         "--name",
         "public-steer-local",
         "--model",
         "codex/gpt-6-luna",
+        "--effort",
+        "low",
         "--account",
         "fixture",
         "--no-sandbox",
@@ -911,7 +942,7 @@ fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() ->
         "{receipt}"
     );
     assert_eq!(
-        receipt["data"]["receipts"][0]["support"], "continuation_only",
+        receipt["data"]["receipts"][0]["support"], "continuation",
         "{receipt}"
     );
     assert!(!receipt.to_string().contains("STEER_NOTE"), "{receipt}");
@@ -924,8 +955,18 @@ fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() ->
         .as_array()
         .and_then(|nodes| nodes.first())
         .ok_or("graph node")?;
-    let attempts = node["attempts"].as_array().ok_or("attempts")?;
-    assert_eq!(attempts.len(), 2, "{checkpoint}");
+    // The checkpoint keeps the steered (superseded) attempt in
+    // previous_attempts and the resumed one in attempts; check both in order.
+    let previous = node["previous_attempts"]
+        .as_array()
+        .ok_or("previous attempts")?;
+    let current = node["attempts"].as_array().ok_or("attempts")?;
+    assert_eq!((previous.len(), current.len()), (1, 1), "{checkpoint}");
+    assert_eq!(
+        current[0]["key"]["previous_attempt_ref"], previous[0]["attempt_ref"],
+        "{checkpoint}"
+    );
+    let attempts: Vec<_> = previous.iter().chain(current).collect();
     assert_eq!(fs::read_to_string(worktree.join("before.txt"))?, "before\n");
     assert_eq!(fs::read_to_string(worktree.join("after.txt"))?, "after\n");
     let status = rig.execute(
@@ -940,6 +981,11 @@ fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() ->
     )?;
     assert_eq!(code(&status), 0, "{status:?}");
     assert!(status.stdout.bytes.is_empty(), "{status:?}");
+
+    let native_home = rig.root.join("codex");
+    let turn = provenant_providers::codex_rollout::observe(&native_home, "fixture-steer-session")?;
+    assert_eq!(turn.model, "gpt-6-luna");
+    assert_eq!(turn.effort.as_deref(), Some("low"));
 
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
@@ -981,18 +1027,21 @@ fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() ->
             Some(u32::try_from(ordinal + 1)?),
             "{request:?}"
         );
+        let route = record.applied_route.as_ref().ok_or("applied route")?;
         assert_eq!(
-            record.route.provider.as_deref(),
-            Some("codex"),
+            record.session.as_deref(),
+            Some("fixture-steer-session"),
             "{record:?}"
         );
+        assert_eq!(route.effort.as_deref(), Some("low"), "{record:?}");
+        assert_eq!(route.provider.as_deref(), Some("codex"), "{record:?}");
         assert_eq!(
-            record.route.model.as_deref(),
+            route.model.as_deref(),
             Some("codex/gpt-6-luna"),
             "{record:?}"
         );
         assert_eq!(
-            record.route.account_label.as_deref(),
+            route.account_label.as_deref(),
             Some("fixture"),
             "{record:?}"
         );
@@ -5318,6 +5367,23 @@ fn main() -> ExitCode {
     {
         fixture()
     } else {
+        // `#[test]` is stripped by rustc in this custom harness, before the
+        // dead-code lint can catch it. Test cases here are ordinary functions.
+        let source: String = include_str!("graph_provider.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(str::chars)
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let test_attribute = ["#", "[", "test", "]"].concat();
+        let conditional_attribute = ["#", "[", "cfg_attr"].concat();
+        if source.contains(&test_attribute) || source.contains(&conditional_attribute) {
+            let _ = writeln!(
+                io::stderr(),
+                "dispatch fixture: use ordinary functions, not test or cfg_attr attributes"
+            );
+            return ExitCode::FAILURE;
+        }
         type NamedTest = (&'static str, fn() -> Result);
         let tests: &[NamedTest] = &[
             (
@@ -5502,6 +5568,10 @@ fn main() -> ExitCode {
             (
                 "codex_capacity_settles_without_quota_refusal",
                 codex_capacity_settles_without_quota_refusal,
+            ),
+            (
+                "public_implement_steers_and_resumes_the_same_local_codex_session",
+                public_implement_steers_and_resumes_the_same_local_codex_session,
             ),
         ];
         let names: Vec<_> = tests.iter().map(|(name, _)| *name).collect();

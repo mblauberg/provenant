@@ -511,7 +511,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                         target.clone()
                     };
                 }
-                if child.depends_on.is_empty() {
+                if child.depends_on.is_empty() && child.after_settled.is_empty() {
                     if round == 1 {
                         child.depends_on.extend(node.depends_on.clone());
                         child.after_settled.extend(node.after_settled.clone());
@@ -532,7 +532,9 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                         // is selected afresh in every round.
                         input.node.clone()
                     };
-                    if !child.depends_on.contains(&input.node) {
+                    if !child.depends_on.contains(&input.node)
+                        && !child.after_settled.contains(&input.node)
+                    {
                         child.depends_on.push(input.node.clone());
                     }
                 }
@@ -567,7 +569,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                         .body
                         .iter()
                         .find(|n| n.id == local)
-                        .is_some_and(|n| n.depends_on.is_empty())
+                        .is_some_and(|n| n.depends_on.is_empty() && n.after_settled.is_empty())
                 {
                     child.skip_without_findings =
                         node.skip_without_findings.or(child.skip_without_findings);

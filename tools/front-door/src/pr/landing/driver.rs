@@ -242,6 +242,16 @@ fn run_inner(
     }
     let repository = forge.repository_identity()?;
     recover(forge, repo, runner, alarms, &request, &repository, report)?;
+    if !request.shadow {
+        report.warnings.extend(super::collect::collect_stale(
+            forge,
+            repo,
+            request.state,
+            &repository,
+            request.target,
+            &request.settings.candidate_ref_prefix,
+        ));
+    }
     let limit = usize::try_from(request.settings.batch_size)
         .map_err(|_| LandingError::Failed("batch size exceeds platform limit".into()))?;
     if limit == 0 {
@@ -338,6 +348,7 @@ fn run_inner(
             &required_ci,
             request.settings.poll_seconds,
             request.gate.timeout_seconds,
+            std::time::Duration::from_secs(request.settings.progress_seconds),
         )?;
         let mut rebuilds = 0;
         loop {
@@ -362,11 +373,25 @@ fn run_inner(
                 }
                 Err(error) => return Err(error),
             };
-            let evidence = cleanup_unpublished(
-                runner.gate(&candidate, request.gate, request.settings.poll_seconds),
-                repo,
-                &candidate,
-            )?;
+            let reused = if request.settings.reuse_tested_tree {
+                gate::reusable_evidence(forge, &candidate, request.gate)
+            } else {
+                None
+            };
+            let evidence = if let Some(reused) = reused {
+                report.warnings.push(format!(
+                    "candidate tree {} already passed the required checks on {}; gate skipped",
+                    candidate.tree,
+                    reused.reused_from_commit.as_deref().unwrap_or_default()
+                ));
+                reused
+            } else {
+                cleanup_unpublished(
+                    runner.gate(&candidate, request.gate, request.settings.poll_seconds),
+                    repo,
+                    &candidate,
+                )?
+            };
             let (result, unmet) = gate::assess_evidence(&candidate, request.gate, &evidence);
             let result = match result {
                 Ok(result) => result,
@@ -1186,6 +1211,77 @@ pub(super) mod tests {
         );
         assert!(result.is_err());
         assert!(forge.merges.is_empty() && repo.pushes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_tree_that_already_passed_skips_the_gate_unless_policy_disables_reuse()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for reuse in [true, false] {
+            let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(1);
+            settings.reuse_tested_tree = reuse;
+            let head = forge.pull_requests[&1].head.clone();
+            let mut tested = GateEvidence {
+                commit: head.clone(),
+                tree: format!("tree-{}-{head}", repo.target),
+                definition_digest: String::new(),
+                checks: vec![CheckEvidence {
+                    name: "ci-status".into(),
+                    issuer: None,
+                    result: GateResult::Passed,
+                }],
+                issuer: None,
+                coverage: Vec::new(),
+                result: GateResult::Passed,
+                pool: None,
+                duration_seconds: None,
+                reused_from_commit: None,
+                extra: Default::default(),
+            };
+            tested.definition_digest = definition.digest.clone();
+            forge.check_runs.insert(head.clone(), vec![tested]);
+            let state = tempfile::tempdir()?;
+            let report = exercise(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &settings,
+                &definition,
+                &[1],
+                false,
+                state.path(),
+            )?;
+            assert_eq!(gate.observed.is_empty(), reuse);
+            assert_eq!(
+                report.receipts[0]
+                    .gate_evidence
+                    .reused_from_commit
+                    .is_some(),
+                reuse
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stale_candidate_refs_of_closed_pull_requests_are_collected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut forge, mut repo, _gate, _settings, _definition) = fixture(2);
+        forge.pull_requests.get_mut(&1).unwrap().state =
+            super::super::ports::PullRequestState::Merged;
+        repo.refs.insert("land/1-abc-1".into(), "c1".into());
+        repo.refs.insert("land/2-abc-1".into(), "c2".into());
+        let state = tempfile::tempdir()?;
+        super::super::collect::collect_stale(
+            &mut forge,
+            &mut repo,
+            state.path(),
+            "fake-repository",
+            "main",
+            "land/",
+        );
+        assert!(!repo.refs.contains_key("land/1-abc-1"));
+        assert!(repo.refs.contains_key("land/2-abc-1"));
         Ok(())
     }
 

@@ -99,6 +99,9 @@ pub struct GateEvidence {
     pub result: GateResult,
     pub pool: Option<String>,
     pub duration_seconds: Option<u64>,
+    /// The commit whose passing checks were reused for this identical tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reused_from_commit: Option<String>,
     #[serde(flatten, default)]
     pub extra: provenant_records::ExtraFields,
 }

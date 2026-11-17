@@ -2,6 +2,8 @@
 //!
 //! Exact literal prefixes and incomplete token markers stay buffered across
 //! chunks. The capture filter's EOF hook releases any unmatched tail.
+//! `key=value` credential assignments are scanned byte by byte: keys stream
+//! through unchanged and only the value is withheld, so no replay is needed.
 use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
 use provenant_os::fs::{Directory, FileHandle, FileKind, Metadata};
 use std::collections::{BTreeMap, VecDeque};
@@ -481,11 +483,311 @@ fn url_delimiter(byte: u8) -> bool {
     byte.is_ascii_whitespace() || b"/?#\"'<>`\\".contains(&byte)
 }
 
+/// Credential keys, matched case-insensitively. A run of identifier bytes
+/// matches a key when it ends with the key and the byte before the key is a
+/// separator (or the run starts there): `db_password` and `x-api-key` match,
+/// while `compass` and `oauth` do not. `client_secret` matches through `secret`.
+/// The flag marks `Authorization`, whose scheme word (`Basic`, `Bearer`) stays.
+const ASSIGNMENT_KEYS: &[(&[u8], bool)] = &[
+    (b"password", false),
+    (b"passwd", false),
+    (b"pass", false),
+    (b"token", false),
+    (b"secret", false),
+    (b"api_key", false),
+    (b"api-key", false),
+    (b"apikey", false),
+    (b"access_key", false),
+    (b"access-key", false),
+    (b"auth", false),
+    (b"authorization", true),
+];
+/// The longest key is 13 bytes; the run keeps enough bytes before it to judge
+/// the separator that precedes it.
+const ASSIGNMENT_RUN: usize = 32;
+/// Scheme words longer than this are not `Basic` or `Bearer`.
+const SCHEME_WORD: usize = 16;
+
+/// Where the assignment scanner is. Only a value is withheld; keys, separators
+/// and quotes stream through, so state never has to be replayed across chunks.
+#[derive(Default)]
+enum Assignment {
+    #[default]
+    Scan,
+    /// After a credential key: quotes, escapes and whitespace may precede the separator.
+    Gap { scheme: bool },
+    /// After the separator: quotes, escapes and whitespace may precede the value.
+    Lead {
+        scheme: bool,
+        quote: Option<u8>,
+        quote_slashes: usize,
+        backslashes: usize,
+    },
+    /// Letters after `Authorization:`, held until the scheme is known.
+    Scheme { word: Vec<u8> },
+    /// Inside a value, which is replaced by one `[REDACTED]`. `line` values end
+    /// only at a newline, so an unknown `Authorization` scheme hides its whole line.
+    Value {
+        quote: Option<u8>,
+        quote_slashes: usize,
+        backslashes: usize,
+        line: bool,
+    },
+}
+
+// Redacts the values of credential keys. Quoted values end at their closing
+// quote; a JSON-escaped value (`\"…\"`) ends at the `\"`.
+#[derive(Default)]
+struct AssignmentScanner {
+    state: Assignment,
+    run: Vec<u8>,
+    after_backslash: bool,
+    matched: bool,
+}
+
+impl AssignmentScanner {
+    fn filter(&mut self, bytes: &[u8], output: &mut Vec<u8>) {
+        for byte in bytes {
+            self.step(*byte, output);
+        }
+    }
+
+    fn finish(&mut self, output: &mut Vec<u8>) {
+        // A held scheme word never reached its whitespace, so it is the credential.
+        if matches!(self.state, Assignment::Scheme { .. }) {
+            self.mask(output);
+        }
+        self.state = Assignment::Scan;
+        self.run.clear();
+        self.after_backslash = false;
+    }
+
+    fn mask(&mut self, output: &mut Vec<u8>) {
+        output.extend_from_slice(REDACTED);
+        self.matched = true;
+    }
+
+    // `std::mem::take` leaves `Scan`, so a branch that sets no state returns to scanning.
+    fn step(&mut self, byte: u8, output: &mut Vec<u8>) {
+        loop {
+            match std::mem::take(&mut self.state) {
+                Assignment::Scan => {
+                    let escaped = std::mem::take(&mut self.after_backslash);
+                    if escaped && byte.is_ascii_alphanumeric() {
+                        // The letter of a JSON escape such as `\n` is not part of a key.
+                        output.push(byte);
+                        return;
+                    }
+                    if byte.is_ascii_alphanumeric() || b"_-.".contains(&byte) {
+                        self.run.push(byte.to_ascii_lowercase());
+                        if self.run.len() > ASSIGNMENT_RUN {
+                            self.run.remove(0);
+                        }
+                        output.push(byte);
+                        return;
+                    }
+                    let key = self.key_ending_run();
+                    self.run.clear();
+                    if let Some(scheme) = key {
+                        self.state = Assignment::Gap { scheme };
+                        continue;
+                    }
+                    self.after_backslash = byte == b'\\' && !escaped;
+                    output.push(byte);
+                    return;
+                }
+                Assignment::Gap { scheme } => {
+                    if byte == b'=' || byte == b':' {
+                        output.push(byte);
+                        self.state = Assignment::Lead {
+                            scheme,
+                            quote: None,
+                            quote_slashes: 0,
+                            backslashes: 0,
+                        };
+                        return;
+                    }
+                    if byte.is_ascii_whitespace() || b"\"'\\".contains(&byte) {
+                        output.push(byte);
+                        self.state = Assignment::Gap { scheme };
+                        return;
+                    }
+                    // Not an assignment after all, so the byte is rescanned.
+                    continue;
+                }
+                Assignment::Lead {
+                    scheme,
+                    quote,
+                    quote_slashes,
+                    backslashes,
+                } => {
+                    if byte.is_ascii_whitespace() || byte == b'\\' {
+                        output.push(byte);
+                        self.state = Assignment::Lead {
+                            scheme,
+                            quote,
+                            quote_slashes,
+                            backslashes: if byte == b'\\' {
+                                backslashes.saturating_add(1)
+                            } else {
+                                0
+                            },
+                        };
+                        return;
+                    }
+                    if byte == b'"' || byte == b'\'' {
+                        if quote.is_some() && quote != Some(byte) {
+                            self.mask(output);
+                            self.state = Assignment::Value {
+                                quote,
+                                quote_slashes,
+                                backslashes: 0,
+                                line: scheme,
+                            };
+                            return;
+                        }
+                        // An empty quoted value has nothing to redact.
+                        if quote == Some(byte) {
+                            if closing_quote(backslashes, quote_slashes) {
+                                output.push(byte);
+                            } else {
+                                self.mask(output);
+                                self.state = Assignment::Value {
+                                    quote,
+                                    quote_slashes,
+                                    backslashes: 0,
+                                    line: scheme,
+                                };
+                            }
+                            return;
+                        }
+                        output.push(byte);
+                        self.state = Assignment::Lead {
+                            scheme,
+                            quote: Some(byte),
+                            quote_slashes: backslashes,
+                            backslashes: 0,
+                        };
+                        return;
+                    }
+                    if quote.is_none() && is_delimiter(byte) {
+                        continue;
+                    }
+                    if scheme && quote.is_none() && byte.is_ascii_alphabetic() {
+                        self.state = Assignment::Scheme { word: vec![byte] };
+                        return;
+                    }
+                    self.mask(output);
+                    self.state = Assignment::Value {
+                        quote,
+                        quote_slashes,
+                        backslashes: 0,
+                        line: scheme,
+                    };
+                    continue;
+                }
+                Assignment::Scheme { mut word } => {
+                    if byte.is_ascii_alphabetic() && word.len() < SCHEME_WORD {
+                        word.push(byte);
+                        self.state = Assignment::Scheme { word };
+                        return;
+                    }
+                    let known =
+                        word.eq_ignore_ascii_case(b"basic") || word.eq_ignore_ascii_case(b"bearer");
+                    if known && byte.is_ascii_whitespace() {
+                        output.extend_from_slice(&word);
+                        output.push(byte);
+                        self.state = Assignment::Lead {
+                            scheme: false,
+                            quote: None,
+                            quote_slashes: 0,
+                            backslashes: 0,
+                        };
+                        return;
+                    }
+                    self.mask(output);
+                    self.state = Assignment::Value {
+                        quote: None,
+                        quote_slashes: 0,
+                        backslashes: 0,
+                        line: true,
+                    };
+                    continue;
+                }
+                Assignment::Value {
+                    quote,
+                    quote_slashes,
+                    backslashes,
+                    line,
+                } => match quote {
+                    Some(quote) => {
+                        if byte == quote && closing_quote(backslashes, quote_slashes) {
+                            output.extend(std::iter::repeat_n(b'\\', quote_slashes));
+                            output.push(byte);
+                            return;
+                        }
+                        self.state = Assignment::Value {
+                            quote: Some(quote),
+                            quote_slashes,
+                            backslashes: if byte == b'\\' {
+                                backslashes.saturating_add(1)
+                            } else {
+                                0
+                            },
+                            line,
+                        };
+                        return;
+                    }
+                    None => {
+                        let ends = if line {
+                            byte == b'\n' || byte == b'\r'
+                        } else {
+                            is_delimiter(byte)
+                        };
+                        if ends {
+                            continue;
+                        }
+                        self.state = Assignment::Value {
+                            quote: None,
+                            quote_slashes: 0,
+                            backslashes: 0,
+                            line,
+                        };
+                        return;
+                    }
+                },
+            }
+        }
+    }
+
+    /// The scheme flag of the key that the run ends with, if any.
+    fn key_ending_run(&self) -> Option<bool> {
+        ASSIGNMENT_KEYS.iter().find_map(|(key, scheme)| {
+            let start = self.run.len().checked_sub(key.len())?;
+            let bounded = start == 0 || !self.run[start - 1].is_ascii_alphanumeric();
+            (bounded && self.run.ends_with(key)).then_some(*scheme)
+        })
+    }
+}
+
+// An encoded delimiter has N backslashes; a value-level escape adds N + 1.
+// Only an even number of those escapes leaves the delimiter unescaped.
+fn closing_quote(backslashes: usize, quote_slashes: usize) -> bool {
+    let layer = quote_slashes.saturating_add(1);
+    backslashes % layer == quote_slashes && (backslashes / layer).is_multiple_of(2)
+}
+
+/// Bytes that end an unquoted value.
+fn is_delimiter(byte: u8) -> bool {
+    byte.is_ascii_whitespace() || b"\"'\\&,;<>)]}`".contains(&byte)
+}
+
 /// Stateful filter used directly by supervisor capture. Values are never
 /// serialized or printed; malformed bounds make construction fail closed.
 pub struct Redactor {
     literals: LiteralAutomaton,
     tokens: TokenScanner,
+    assignments: AssignmentScanner,
     failed: bool,
 }
 
@@ -516,12 +818,13 @@ impl Redactor {
         Ok(Self {
             literals: LiteralAutomaton::new(&secrets),
             tokens: TokenScanner::default(),
+            assignments: AssignmentScanner::default(),
             failed: false,
         })
     }
 
     pub fn has_redaction(&self) -> bool {
-        self.literals.matched || self.tokens.matched
+        self.literals.matched || self.tokens.matched || self.assignments.matched
     }
 
     fn filter_bounded(&mut self, bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
@@ -535,11 +838,13 @@ impl Redactor {
             self.failed = true;
             return Err(FilterError);
         }
-        let mut filtered = Vec::with_capacity(literals.len());
-        self.tokens.filter(&literals, &mut filtered).map_err(|_| {
+        let mut tokens = Vec::with_capacity(literals.len());
+        self.tokens.filter(&literals, &mut tokens).map_err(|_| {
             self.failed = true;
             FilterError
         })?;
+        let mut filtered = Vec::with_capacity(tokens.len());
+        self.assignments.filter(&tokens, &mut filtered);
         if filtered.len() > FRAME_LIMIT {
             self.failed = true;
             return Err(FilterError);
@@ -553,15 +858,18 @@ impl Redactor {
         }
         let mut literals = Vec::new();
         self.literals.finish(&mut literals);
+        let mut tokens = Vec::new();
+        self.tokens.filter(&literals, &mut tokens).map_err(|_| {
+            self.failed = true;
+            FilterError
+        })?;
+        self.tokens.finish(&mut tokens).map_err(|_| {
+            self.failed = true;
+            FilterError
+        })?;
         let mut filtered = Vec::new();
-        self.tokens.filter(&literals, &mut filtered).map_err(|_| {
-            self.failed = true;
-            FilterError
-        })?;
-        self.tokens.finish(&mut filtered).map_err(|_| {
-            self.failed = true;
-            FilterError
-        })?;
+        self.assignments.filter(&tokens, &mut filtered);
+        self.assignments.finish(&mut filtered);
         if filtered.len() > FRAME_LIMIT {
             self.failed = true;
             return Err(FilterError);
@@ -1256,6 +1564,120 @@ mod tests {
         let output = joined(&mut redactor, &[b"https://user:@example.invalid/path"]);
         assert_eq!(output, b"https://[REDACTED]@example.invalid/path");
         assert!(redactor.has_redaction());
+    }
+
+    #[test]
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    fn credential_assignments_are_redacted_across_chunk_boundaries() {
+        let cases: &[(&str, &str)] = &[
+            ("password=hunter2 next", "password=[REDACTED] next"),
+            ("PASSWORD: hunter2\n", "PASSWORD: [REDACTED]\n"),
+            ("passwd = 'x y' end", "passwd = '[REDACTED]' end"),
+            ("pass:hunter2,", "pass:[REDACTED],"),
+            (
+                "db_password=\"correct horse\"",
+                "db_password=\"[REDACTED]\"",
+            ),
+            ("token=abc123&next=1", "token=[REDACTED]&next=1"),
+            ("x-auth-token=abc", "x-auth-token=[REDACTED]"),
+            ("secret: \"a\\\"b\"}", "secret: \"[REDACTED]\"}"),
+            (
+                "secret: \"'LEAK_SENTINEL\" end",
+                "secret: \"[REDACTED]\" end",
+            ),
+            ("client_secret=xyz", "client_secret=[REDACTED]"),
+            ("api_key=sk_live_123", "api_key=[REDACTED]"),
+            ("api-key: x123 done", "api-key: [REDACTED] done"),
+            ("apikey=abc", "apikey=[REDACTED]"),
+            ("access_key=AKX", "access_key=[REDACTED]"),
+            ("auth=abc", "auth=[REDACTED]"),
+            ("msg\\npassword=hunter2", "msg\\npassword=[REDACTED]"),
+            (
+                r#"{\"password\":\"hunter2\"}"#,
+                r#"{\"password\":\"[REDACTED]\"}"#,
+            ),
+            (
+                r#"{"content":"{\"password\":\"abc\\\"LEAK_SENTINEL\"}"}"#,
+                r#"{"content":"{\"password\":\"[REDACTED]\"}"}"#,
+            ),
+            (
+                r#"{\"password\":\"abc\\\\\\\"LEAK_SENTINEL\"}"#,
+                r#"{\"password\":\"[REDACTED]\"}"#,
+            ),
+            (
+                r#"{\"password\":\"abc\\\\\"} end"#,
+                r#"{\"password\":\"[REDACTED]\"} end"#,
+            ),
+            (
+                r#"\"{\\\"password\\\":\\\"abc\\\\\\\"LEAK_SENTINEL\\\"}\""#,
+                r#"\"{\\\"password\\\":\\\"[REDACTED]\\\"}\""#,
+            ),
+            (
+                "Authorization: Basic dXNlcjpwYXNz\n",
+                "Authorization: Basic [REDACTED]\n",
+            ),
+            (
+                "authorization: bearer abc.def\n",
+                "authorization: bearer [REDACTED]\n",
+            ),
+            (
+                "Authorization: Digest abc def\n",
+                "Authorization: [REDACTED]\n",
+            ),
+            ("Authorization: Basic", "Authorization: [REDACTED]"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                known_shapes(input.as_bytes()).expect("bounded input"),
+                expected.as_bytes()
+            );
+            for split in 0..=input.len() {
+                let mut redactor = Redactor::new([]).expect("empty secret set");
+                assert_eq!(
+                    joined(
+                        &mut redactor,
+                        &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                    ),
+                    expected.as_bytes(),
+                    "{input:?} split {split}"
+                );
+            }
+            let chunks: Vec<&[u8]> = input.as_bytes().chunks(1).collect();
+            let mut redactor = Redactor::new([]).expect("empty secret set");
+            assert_eq!(
+                joined(&mut redactor, &chunks),
+                expected.as_bytes(),
+                "{input:?} byte by byte"
+            );
+            assert!(redactor.has_redaction(), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn ordinary_prose_with_credential_words_is_preserved() {
+        let input = "token budget is 5; auth failed; oauth=1; compass=north; max_tokens=4096; passwords=3; tokenizer: fast; bypass: on";
+        for split in 0..=input.len() {
+            let mut redactor = Redactor::new([]).expect("empty secret set");
+            assert_eq!(
+                joined(
+                    &mut redactor,
+                    &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                ),
+                input.as_bytes(),
+                "split {split}"
+            );
+        }
+        let mut redactor = Redactor::new([]).expect("empty secret set");
+        assert_eq!(joined(&mut redactor, &[input.as_bytes()]), input.as_bytes());
+        assert!(!redactor.has_redaction());
+    }
+
+    #[test]
+    fn bounded_line_redacts_credential_assignments() {
+        assert_eq!(
+            bounded_line("unclassified; password=fixture-secret", 512),
+            "unclassified; password=[REDACTED]"
+        );
     }
 
     fn token_markers_redact_at_minimum_body_lengths_across_chunks() {

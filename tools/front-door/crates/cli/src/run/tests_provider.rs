@@ -163,11 +163,34 @@ fn unknown_opencode_error_settles_unclassified() {
         Path::new("/nonexistent"),
     ).unwrap();
     assert_eq!(decoded.outcome, run::Outcome::Unclassified);
-    // The adapter diagnostic names the route and error type; the provider's
-    // own untrusted text is not copied once a diagnostic explains it.
+    // The diagnostic replaces the provider message.
     let reason = decoded.reason.as_deref().unwrap_or_default();
     assert!(reason.contains("type=unknown"), "{reason}");
     assert!(!reason.contains("fixture failure"), "{reason}");
+}
+
+// Spec: docs/specs/routing.md#capacity-is-not-quota
+#[test]
+fn diagnosed_opencode_error_omits_private_provider_text() {
+    let route = run::RouteRecord {
+        provider: Some("opencode".into()),
+        model: Some("opencode/anthropic/test".into()),
+        ..Default::default()
+    };
+    let mut exit = clean_exit();
+    exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+    let decoded = Registry::default()
+        .decode(
+            &route,
+            br#"{"type":"error","error":{"type":"unknown","message":"PRIVATE_SENTINEL"}}"#,
+            &exit,
+            Path::new("/nonexistent"),
+        )
+        .unwrap();
+    let reason = decoded.reason.as_deref().unwrap();
+    assert_eq!(decoded.outcome, run::Outcome::Unclassified);
+    assert!(reason.contains("type=unknown"), "{reason}");
+    assert!(!reason.contains("PRIVATE_SENTINEL"), "{reason}");
 }
 
 #[test]
@@ -1180,5 +1203,8 @@ fn unsupported_opencode_reference_is_actionable_and_redacted_in_status_and_outpu
             assert!(text.contains("choose a supported model and variant"));
             assert!(!text.contains("fixture-secret") && !text.contains("user:secret"));
         }
+        // The diagnosed provider message is omitted entirely.
+        let reason = decoded.reason.as_deref().unwrap();
+        assert!(!reason.contains("password="), "{reason}");
     }
 }

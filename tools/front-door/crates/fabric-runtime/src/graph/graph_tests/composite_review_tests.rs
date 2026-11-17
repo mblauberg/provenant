@@ -116,27 +116,27 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
 
 // Spec: docs/specs/fabric.md#composite-settlement
 #[test]
-fn soft_nine_lens_panel_settles_and_names_its_stopped_lens() {
+fn soft_panel_settles_and_names_its_stopped_lens() {
     let clean = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n";
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "soft-nine-lens-review", "nodes": [{
             "id":"lenses", "kind":"composite", "access":"read_only",
-            "composite":{"min_successful":9,"reduce_verdict":true,"soft_review_coverage":true,
-                "nodes":(0..9).map(|index| serde_json::json!({
+            "composite":{"min_successful":3,"reduce_verdict":true,"soft_review_coverage":true,
+                "nodes":(0..3).map(|index| serde_json::json!({
                     "id":format!("lens-{}", index), "access":"read_only",
                     "review_lens":format!("lens-{}", index), "prompt":"review",
                     "review_behaviour":"lens", "route":{"alias":"fixture"}
                 })).collect::<Vec<_>>(),
-                "exports":(0..9).map(|index| serde_json::json!({
+                "exports":(0..3).map(|index| serde_json::json!({
                     "node":format!("lens-{}", index), "outputs":["result","findings","verdict"]
                 })).collect::<Vec<_>>()}
         }]
     }))
     .unwrap();
     let mut owner = FakeOwner {
-        observations: (0..9)
+        observations: (0..3)
             .map(|index| {
-                if index == 4 {
+                if index == 1 {
                     terminal(AttemptOutcome::DeclaredStop)
                 } else {
                     terminal_with_result(AttemptOutcome::Succeeded, clean)
@@ -157,11 +157,12 @@ fn soft_nine_lens_panel_settles_and_names_its_stopped_lens() {
     let output = panel.outputs.as_ref().unwrap();
     assert_eq!(output.verdict.as_deref(), Some("VERDICT: INCONCLUSIVE"));
     assert!(output.warnings.iter().any(|warning| {
-        warning.contains("review_coverage_missing_lenses") && warning.contains("lens-4")
+        warning.contains("review_coverage_missing_lenses") && warning.contains("lens-1")
     }));
     let excerpt = &output.result.as_ref().unwrap().excerpt;
     assert!(excerpt.contains("Missing review lenses:"), "{excerpt}");
-    assert!(excerpt.contains("lens-4"), "{excerpt}");
+    assert!(excerpt.contains("lens-1"), "{excerpt}");
+    assert!(output.warnings.iter().any(|warning| warning.contains("review_coverage_below_floor")));
     assert_eq!(panel.advance_error_code, None);
     assert_eq!(
         advance(&document, &mut owner, &mut journal)
@@ -196,6 +197,7 @@ fn final_panel_settlement_keeps_missing_lens_names_through_synthesis() {
                 "nodes":[
                     {"id":"lenses","kind":"composite","access":"read_only",
                      "composite":{"min_successful":1,"reduce_verdict":true,"soft_review_coverage":true,
+                        "hard_review_coverage":true,"required_review_lenses":["lens-security"],
                         "nodes":[lens("lens-correctness"),lens("lens-security")],
                         "exports":[
                             {"node":"lens-correctness","outputs":["result","findings","verdict"]},
@@ -203,12 +205,12 @@ fn final_panel_settlement_keeps_missing_lens_names_through_synthesis() {
                         ]}},
                     {"id":"verify","access":"read_only","review_behaviour":"verify",
                      "require_findings":true,"required_verdict":"VERDICT: PASS","prompt":"verify",
-                     "depends_on":["lenses"],"inputs":[{"node":"lenses","outputs":["result","findings"]}],
+                     "after_settled":["lenses"],"inputs":[{"node":"lenses","outputs":["result","findings"]}],
                      "route":{"alias":"fixture"}},
                     {"id":"synthesis","kind":"synthesise","access":"read_only",
                      "review_behaviour":"synthesis","require_findings":true,
                      "required_verdict":"VERDICT: PASS","dispositions":["accepted","rejected","deferred"],
-                     "prompt":"synthesis","depends_on":["lenses","verify","prior-panel"],
+                     "prompt":"synthesis","depends_on":["prior-panel"],"after_settled":["lenses","verify"],
                      "inputs":[{"node":"lenses","outputs":["result","findings"]},{"node":"verify","outputs":["result","findings","verdict"]}],
                      "route":{"alias":"fixture"}}
                 ],
@@ -228,6 +230,9 @@ fn final_panel_settlement_keeps_missing_lens_names_through_synthesis() {
         ..Default::default()
     };
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    for stage in ["panel--verify", "panel--synthesis"] {
+        assert_eq!(run.checkpoint.nodes.iter().find(|node| node.id == stage).unwrap().state, NodeState::Succeeded, "{stage}");
+    }
     let panel = run
         .checkpoint
         .nodes
@@ -259,23 +264,23 @@ fn protected_panel_hard_floor_requires_named_lens_even_when_count_is_met() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "protected-review-floor", "nodes": [{
             "id":"lenses", "kind":"composite", "access":"read_only",
-            "composite":{"min_successful":8,"reduce_verdict":true,"soft_review_coverage":true,
+            "composite":{"min_successful":1,"reduce_verdict":true,"soft_review_coverage":true,
                 "hard_review_coverage":true,"required_review_lenses":["security-privacy"],
-                "nodes":(0..9).map(|index| serde_json::json!({
-                    "id":if index == 4 {"security-privacy".to_owned()} else {format!("lens-{index}")},
-                    "access":"read_only", "review_lens":if index == 4 {"security-privacy".to_owned()} else {format!("lens-{index}")},
+                "nodes":(0..2).map(|index| serde_json::json!({
+                    "id":if index == 1 {"security-privacy".to_owned()} else {format!("lens-{index}")},
+                    "access":"read_only", "review_lens":if index == 1 {"security-privacy".to_owned()} else {format!("lens-{index}")},
                     "prompt":"review", "review_behaviour":"lens", "route":{"alias":"fixture"}
                 })).collect::<Vec<_>>(),
-                "exports":(0..9).map(|index| serde_json::json!({
-                    "node":if index == 4 {"security-privacy".to_owned()} else {format!("lens-{index}")},
+                "exports":(0..2).map(|index| serde_json::json!({
+                    "node":if index == 1 {"security-privacy".to_owned()} else {format!("lens-{index}")},
                     "outputs":["result","findings","verdict"]
                 })).collect::<Vec<_>>()}
         }]
     })).unwrap();
     let mut owner = FakeOwner {
-        observations: (0..9)
+        observations: (0..2)
             .map(|index| {
-                if index == 4 {
+                if index == 1 {
                     terminal(AttemptOutcome::DeclaredStop)
                 } else {
                     terminal_with_result(AttemptOutcome::Succeeded, clean)

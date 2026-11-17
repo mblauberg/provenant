@@ -411,7 +411,7 @@ fn failed_planner_runs_static_fallback_and_records_reason() {
     assert!(!summary.contains('\u{1b}'));
     assert_eq!(
         summary,
-        include_str!("../fixtures/plan-fallback-output.txt")
+        include_str!("../../fixtures/plan-fallback-output.txt")
     );
 }
 

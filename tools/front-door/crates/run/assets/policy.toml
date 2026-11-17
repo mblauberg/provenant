@@ -1093,3 +1093,300 @@ boundary = "none"
 strength = "warn"
 knob = "policy.WRITER_CENSUS"
 justification = "Process census is observational; the exclusive writer lease and retained-import fence establish writer admission authority."
+
+[[rule]]
+code = "WRITER_BRANCH_MOVED"
+site = "run/src/writer.rs#launch"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.WRITER_BRANCH_MOVED"
+justification = "The writer branch head moved between prepare and launch; the launch warns and relaunches against the new head."
+
+[[rule]]
+code = "STEER_SESSION"
+site = "run/src/admission.rs#steer_session"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.STEER_SESSION"
+justification = "Steering input is recorded when the session is unavailable or differs from the expected one; the lane continues without resume. Generation and route-digest checks stay continuation-authority refusals."
+
+[[rule]]
+code = "PROVIDER_STATE_EXPIRED"
+site = "run/src/retention.rs#provider_state"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.PROVIDER_STATE_EXPIRED"
+justification = "Provider state past retention but still readable continues as a fresh lane with context."
+
+[[rule]]
+code = "FRESH_FALLBACK_OWNER"
+site = "run/src/controls.rs#fresh_fallback"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.FRESH_FALLBACK_OWNER"
+justification = "A worktree with no owner marker is adopted with a warning; a different owner stays refused."
+
+[[rule]]
+code = "HANDOFF_RECEIPT_WORKTREES"
+site = "fabric-runtime/src/handoff/session.rs#receipt"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.HANDOFF_RECEIPT_WORKTREES"
+justification = "A handoff receipt whose worktree set differs continues with a warning."
+
+[[rule]]
+code = "LANE_DEPTH"
+site = "run/src/lib.rs#depth"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.LANE_DEPTH"
+justification = "Nested lane depth above domains.run.max_lane_depth warns."
+
+[[rule]]
+code = "IMPORT_TIME_BUDGET"
+site = "run/src/objects.rs#import"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.IMPORT_TIME_BUDGET"
+justification = "An exhausted object import time budget warns and retries; the byte cap stays a refusal."
+
+[[rule]]
+code = "PORT_COMMAND_EVIDENCE"
+site = "config/src/ports/forge.rs#evidence"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.PORT_COMMAND_EVIDENCE"
+justification = "A port command ran but its evidence record failed or was not durable; the result is returned with a warning."
+
+[[rule]]
+code = "INSTALL_HOOKS_UNAVAILABLE"
+site = "config/src/managed.rs#hooks"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.INSTALL_HOOKS_UNAVAILABLE"
+justification = "Hooks were requested but no selected harness has a HookSpec; hooks are skipped with a warning."
+
+[[rule]]
+code = "PUSH_PATCH_EVIDENCE"
+site = "confinement/src/push.rs#evidence"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.PUSH_PATCH_EVIDENCE"
+justification = "Optional patch evidence is unavailable; the push warns."
+
+[[rule]]
+code = "PUSH_CONFLICT_MARKERS"
+site = "confinement/src/push.rs#conflict_markers"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.PUSH_CONFLICT_MARKERS"
+justification = "A pushed patch contains conflict markers; the push warns with the line count."
+
+[[rule]]
+code = "PLAN_STATE_SCRATCH_OVERLAP"
+site = "confinement/src/permissions/render.rs#overlap"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.PLAN_STATE_SCRATCH_OVERLAP"
+justification = "Private state overlapping scratch warns."
+
+[[rule]]
+code = "WORKTREE_BASE_UNVERIFIED"
+site = "confinement/src/worktrees/lifecycle.rs#base"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.WORKTREE_BASE_UNVERIFIED"
+justification = "A base whose tracking ref the remote did not advertise is used with a warning naming the resolved object."
+
+[[rule]]
+code = "STREAM_IDENTITY_MISMATCH"
+site = "providers/src/stream.rs#identity"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.STREAM_IDENTITY_MISMATCH"
+justification = "A streamed model or session that differs from the expected one is recorded as a conflict and warns."
+
+[[rule]]
+code = "ROUTING_ALTERNATIVES"
+site = "routing/src/resolve.rs#alternatives"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.ROUTING_ALTERNATIVES"
+justification = "An alternative equal to the primary model is dropped with a warning."
+
+[[rule]]
+code = "ROUTING_EFFORT_UNCATALOGUED"
+site = "routing/src/resolve.rs#effort"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.ROUTING_EFFORT_UNCATALOGUED"
+justification = "Effort for an uncatalogued model cannot be verified and is passed through with a warning."
+
+[[rule]]
+code = "WORKFLOW_SESSION_PROJECT"
+site = "cli/src/workflow.rs#session_project"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.WORKFLOW_SESSION_PROJECT"
+justification = "A session registered under another project is saved under the selected project with a warning."
+
+[[rule]]
+code = "GRAPH_LAND_REQUIRES_GATES"
+site = "fabric-runtime/src/graph/land.rs#gates"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.GRAPH_LAND_REQUIRES_GATES"
+justification = "A land node without a verdict and CI gate after its writer warns; the landing grant is a separate authority check."
+
+[[rule]]
+code = "GRAPH_PR_EXCLUSIVE"
+site = "fabric-runtime/src/graph/validation.rs#pr_delivery"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.GRAPH_PR_EXCLUSIVE"
+justification = "Graph-level and node PR delivery both set: the node setting is ignored with a warning."
+
+[[rule]]
+code = "GRAPH_HOST_NATIVE_FALLBACK"
+site = "fabric-runtime/src/graph/validation.rs#host_native"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.GRAPH_HOST_NATIVE_FALLBACK"
+justification = "A host-native route without a fallback warns."
+
+[[rule]]
+code = "LAUNCH_FIELD_UNSUPPORTED"
+site = "cli/src/run/provider/preparation.rs#check_launch"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.LAUNCH_FIELD_UNSUPPORTED"
+justification = "A non-write launch field (model, effort, network, resume, skills) unsupported by the route is dropped with a warning; write support stays an authority refusal."
+
+[[rule]]
+code = "LANE_TIP_UNROOTED"
+site = "run/src/objects.rs#lane_tip"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.LANE_TIP_UNROOTED"
+justification = "A lane tip with no known ancestor publishes the lane's own branch with a warning, so no work is lost."
+
+[[rule]]
+code = "DIRTY_WRITER"
+site = "run/src/graph_relay.rs#dirty_writer"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.DIRTY_WRITER"
+justification = "A writer worktree with uncommitted edits launches and records the dirty state; checked-out and detached writers stay refused."
+
+[[rule]]
+code = "SOURCE_TREE_ENTRY_OMITTED"
+site = "cli/src/run/provider/source_tree.rs#entries"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.SOURCE_TREE_ENTRY_OMITTED"
+justification = "A gitlink, unsupported object or oversized entry is omitted from the read-only view with a warning naming it."
+
+[[rule]]
+code = "QUOTA_READINESS_STALE"
+site = "quota/src/admission.rs#readiness"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.QUOTA_READINESS_STALE"
+justification = "Expired quota readiness warns; an exhausted allowance still skips the route."
+
+[[rule]]
+code = "QUOTA_IDENTITY_UNKNOWN"
+site = "quota/src/admission.rs#identity"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.QUOTA_IDENTITY_UNKNOWN"
+justification = "An unknown quota identity warns."
+
+[[rule]]
+code = "STATE_DIR_MODE"
+site = "cli/src/quota.rs#state_dir"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.STATE_DIR_MODE"
+justification = "A state directory we own with a loose mode is chmod 0700 with a warning; a uid mismatch stays refused."
+
+[[rule]]
+code = "UTILITY_LANE_CONFIG"
+site = "confinement/src/utility.rs#lane_configuration"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.UTILITY_LANE_CONFIG"
+justification = "Lane Git configuration keys that only shape output warn; the file-count cap stays."
+
+[[rule]]
+code = "LOCK_FILE_PERMISSIONS"
+site = "os/src/fs.rs#lock_permissions"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.LOCK_FILE_PERMISSIONS"
+justification = "Loose lock file permissions warn and are tightened when the file is ours; owner and link-count refusals stay."
+
+[[rule]]
+code = "WORKTREE_BRANCH_ALIAS"
+site = "confinement/src/worktrees/lifecycle.rs#branch_collision"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.WORKTREE_BRANCH_ALIAS"
+justification = "A case-alias branch collision warns; a directory/file ref conflict stays a git-isolation refusal."
+
+[[rule]]
+code = "WORKTREE_MANAGED_PATH"
+site = "run/src/graph_relay.rs#managed_path"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.WORKTREE_MANAGED_PATH"
+justification = "A requested worktree path that differs from the managed layout is used with a warning."
+
+[[rule]]
+code = "PORTS_CONFIG_UNAVAILABLE"
+site = "config/src/ports.rs#read"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.PORTS_CONFIG_UNAVAILABLE"
+justification = "An unreadable or denied ports.json falls back to the compiled layout with a warning."
+
+[[rule]]
+code = "PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE"
+site = "run/src/settlement.rs#identity_evidence"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE"
+justification = "Incomplete provider identity evidence with no conflict warns and settles on the observed exit and result; a conflict still refuses."

@@ -59,7 +59,7 @@ pub use ports::{
 mod release;
 pub mod repository_files;
 mod repository_policy;
-pub use repository_policy::{REPOSITORY_CONFIG, RepositoryPolicy, read_land};
+pub use repository_policy::{REPOSITORY_CONFIG, RepositoryPolicy, read_declaration, read_land};
 pub mod removed;
 mod retention;
 pub use removed::{REMOVED, Removed};

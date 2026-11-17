@@ -25,8 +25,9 @@ Slice into bounded lanes with disjoint write scopes,
 merged into one integration branch. Settle shared contracts first; use waves
 only for real dependencies. Default slices to junior, contained design to
 senior and root constraints to principal; consult recorded cost per template.
-`implement` runs as junior only for a bounded brief, one from a plan node or a
-`batch` slice; an unplanned brief gets a plan node first unless `run implement --no-plan` sets bounded mode. A long writer is for
+`implement` starts a junior writer directly; use `--plan` when the brief
+needs sizing. A junior writer with no plan input, write scope or explicit plan
+parameter emits an advisory warning. A long writer is for
 coupled work that cannot split. Review each slice lightly and the integrated
 head with the full panel. For a complete configured review, use:
 

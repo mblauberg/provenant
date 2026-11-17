@@ -233,13 +233,13 @@ fn review_panel_binds_per_lens_resolver_values() {
     assert!(lenses[1].prompt.contains("mutation guidance"));
     assert_eq!(group.depends_on, ["frame"]);
     let verify = shape.nodes.iter().find(|node| node.id == "verify").unwrap();
-    assert_eq!(verify.depends_on, ["lenses"]);
+    assert!(verify.after_settled.iter().any(|id| id == "lenses"));
     let synthesis = shape
         .nodes
         .iter()
         .find(|node| node.id == "synthesis")
         .unwrap();
-    assert!(synthesis.depends_on.iter().any(|id| id == "verify"));
+    assert!(synthesis.after_settled.iter().any(|id| id == "verify"));
     for frame in [0, 1] {
         for verifier in [0, 1] {
             for synthesis in [0, 1] {
@@ -286,7 +286,14 @@ fn review_panel_binds_per_lens_resolver_values() {
     let panel = node.composite.unwrap();
     let shape = panel.nodes[0].composite.as_ref().unwrap();
     let verifier = shape.nodes.iter().find(|node| node.id == "verify").unwrap();
-    assert_eq!(verifier.composite.as_ref().unwrap().nodes.len(), 2);
+    let verifiers = &verifier.composite.as_ref().unwrap().nodes;
+    for id in &two["review-verifiers"] {
+        assert!(
+            verifiers.iter().any(
+                |node| &node.id == id && node.review_behaviour == Some(ReviewBehaviour::Verify)
+            )
+        );
+    }
     let mut single = resolvers.clone();
     single.extend(when::review_stages(false, false, false));
     single.insert("review-panel".into(), vec!["tests".into()]);
@@ -603,7 +610,7 @@ fn delivery_templates_admit_bounded_review_repairs() {
         let mut raw = json!({"id":"delivery", "use":template,
             "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":2}});
         if template == "deliver" {
-            raw["with"]["bounded"] = json!(true);
+            raw["with"]["plan"] = json!(false);
         }
         let node = compiler.compile(&raw).unwrap();
         let mut doc = document(vec![node]);

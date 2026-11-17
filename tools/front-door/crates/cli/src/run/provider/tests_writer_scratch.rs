@@ -43,15 +43,20 @@ fn writer_preparation_fixture(fence_only: bool) -> Result<(), Box<dyn std::error
         };
         for layout in layouts {
             #[allow(clippy::disallowed_methods)]
-            let status = std::process::Command::new(std::env::current_exe()?)
+            let output = std::process::Command::new(std::env::current_exe()?)
                 .arg(test)
                 .env(CHILD, layout)
                 .env("GH_TOKEN", "fixture-host-token")
                 .env_remove("GIT_CONFIG_GLOBAL")
                 .env_remove("GH_CONFIG_DIR")
                 .env_remove("XDG_CONFIG_HOME")
-                .status()?;
-            assert!(status.success(), "GitHub config layout {layout}");
+                .output()?;
+            assert!(
+                output.status.success(),
+                "GitHub config layout {layout}:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         return Ok(());
     }

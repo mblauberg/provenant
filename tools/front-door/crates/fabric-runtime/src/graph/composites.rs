@@ -338,6 +338,7 @@ fn children(
         if original
             .depends_on
             .iter()
+            .chain(&original.after_settled)
             .all(|parent| !locals.contains(parent.as_str()))
         {
             for parent in incoming {

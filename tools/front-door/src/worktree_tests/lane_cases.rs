@@ -180,7 +180,10 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
     for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
         fs::create_dir_all(home.join(path))?;
     }
-    fs::write(home.join(".rustup/settings.toml"), b"fixture settings")?;
+    fs::write(
+        home.join(".rustup/settings.toml"),
+        b"version = \"12\"\n[overrides]\n",
+    )?;
     for secret in ["credentials.toml", "credentials"] {
         fs::write(home.join(".cargo").join(secret), b"synthetic credential")?;
     }

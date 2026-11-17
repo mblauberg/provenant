@@ -1,4 +1,7 @@
 use super::*;
+use provenant_records::diagnostic::{
+    ContinuationField as F, ContinuationGuard, ContinuationIssue as I, ContinuationRule as R,
+};
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct NativeSessionLocation {
@@ -24,7 +27,23 @@ pub(super) enum NativeSessionLocationError {
     #[error(
         "the prior native session location differs from the selected provider, model, account, or home"
     )]
-    Mismatch,
+    Mismatch(F),
+}
+
+impl NativeSessionLocationError {
+    pub(super) fn guard(&self) -> ContinuationGuard {
+        let (field, issue) = match self {
+            Self::Missing => (F::NativeHome, I::Missing),
+            Self::Unavailable => (F::NativeHome, I::Unavailable),
+            Self::Invalid => (F::NativeHome, I::Invalid),
+            Self::Mismatch(field) => (*field, I::Mismatch),
+        };
+        ContinuationGuard {
+            rule: R::NativeSession,
+            field,
+            issue,
+        }
+    }
 }
 
 pub(super) fn write_native_session_location(
@@ -78,11 +97,14 @@ pub(super) fn native_session_location_for_route(
     if location.schema_version != 1 || location.provider.is_empty() || location.model.is_empty() {
         return Err(NativeSessionLocationError::Invalid);
     }
-    if location.provider != provider
-        || location.model != model
-        || location.account_key.as_deref() != account_key
-    {
-        return Err(NativeSessionLocationError::Mismatch);
+    for (changed, field) in [
+        (location.provider != provider, F::Provider),
+        (location.model != model, F::Model),
+        (location.account_key.as_deref() != account_key, F::Account),
+    ] {
+        if changed {
+            return Err(NativeSessionLocationError::Mismatch(field));
+        }
     }
     let root = location
         .root
@@ -115,7 +137,7 @@ pub(super) fn find_native_codex_rollout(
             Err(NativeSessionLocationError::Missing | NativeSessionLocationError::Unavailable) => {
                 return Ok(None);
             }
-            Err(NativeSessionLocationError::Invalid | NativeSessionLocationError::Mismatch) => {
+            Err(NativeSessionLocationError::Invalid | NativeSessionLocationError::Mismatch(_)) => {
                 return Err(ProviderError::IdentityMismatch);
             }
         };

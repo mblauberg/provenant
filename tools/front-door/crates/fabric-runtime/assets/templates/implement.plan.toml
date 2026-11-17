@@ -3,4 +3,4 @@ brief = "Implement the approved plan, verify its acceptance items, commit and ha
 tier = "junior"
 
 [parameters]
-bounded = { type = "boolean", default = true, doc = "The brief is an existing plan output." }
+plan = { type = "boolean", default = false, doc = "Plan the brief before the writer starts." }

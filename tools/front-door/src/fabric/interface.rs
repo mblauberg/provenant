@@ -8,6 +8,60 @@ use provenant_fabric_runtime::graph::{
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+// Advisory only: a direct junior writer can run without a sizing plan.
+fn implementation_warnings(
+    nodes: &[provenant_fabric_runtime::graph::GraphNode],
+    input: &Value,
+    enabled: bool,
+) -> Vec<String> {
+    if !enabled
+        || input.pointer("/set/plan").is_some()
+        || input.pointer("/document/with/plan").is_some()
+    {
+        return Vec::new();
+    }
+    fn has_plan_parameter(value: &Value, id: &str) -> bool {
+        match value {
+            Value::Object(fields) => {
+                let name = fields
+                    .get("id")
+                    .or_else(|| fields.get("item"))
+                    .and_then(Value::as_str);
+                if name.is_some_and(|name| id == name || id.ends_with(&format!("--{name}")))
+                    && fields
+                        .get("with")
+                        .and_then(|with| with.get("plan"))
+                        .is_some()
+                {
+                    return true;
+                }
+                fields.values().any(|value| has_plan_parameter(value, id))
+            }
+            Value::Array(values) => values.iter().any(|value| has_plan_parameter(value, id)),
+            _ => false,
+        }
+    }
+    let planners: std::collections::BTreeSet<_> = nodes
+        .iter()
+        .filter(|node| {
+            node.plan.is_some()
+                || node
+                    .template
+                    .as_deref()
+                    .is_some_and(|name| name == "plan" || name.starts_with("plan."))
+        })
+        .map(|node| node.id.as_str())
+        .collect();
+    nodes.iter().filter(|node| {
+        node.template.as_deref().is_some_and(|name| name == "implement" || name.starts_with("implement."))
+            && node.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+            && node.route.as_ref().and_then(|route| route.alias.as_deref()) == Some("junior")
+            && node.write_scope.is_empty()
+            && !has_plan_parameter(input, &node.id)
+            && !node.inputs.iter().any(|input| planners.contains(input.node.as_str()))
+    }).map(|node| format!("unbounded_brief_junior_writer: {} (brief source: launch input) has no plan input or write scope; use --plan to size the brief", node.id)).collect()
+}
+
 fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
 }
@@ -882,7 +936,7 @@ impl Factory {
         }
         let document: GraphDocument = serde_json::from_value(resolver_document)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-        provenant_cli::fabric::graph_relay::launch_resolvers_at_roots(
+        let mut resolvers = provenant_cli::fabric::graph_relay::launch_resolvers_at_roots(
             &self.context.roots,
             &self.cwd,
             &config.domains.routing.review,
@@ -893,7 +947,12 @@ impl Factory {
             fact: None,
             disk: None,
             reason,
-        })
+        })?;
+        resolvers.insert(
+            provenant_fabric_runtime::graph::template::IMPLEMENT_PLAN_DEFAULT.into(),
+            vec![config.domains.fabric.implement.plan.to_string()],
+        );
+        Ok(resolvers)
     }
 
     pub(crate) fn relay_document(
@@ -1174,6 +1233,30 @@ impl Factory {
             }
         }
         bind_directory(&mut compiled, &self.cwd);
+        // Child launches compile on the calling host; surface the same advisory
+        // before handing the node to the graph relay.
+        fn collect_nodes(
+            node: &provenant_fabric_runtime::graph::GraphNode,
+            out: &mut Vec<provenant_fabric_runtime::graph::GraphNode>,
+        ) {
+            out.push(node.clone());
+            if let Some(composite) = &node.composite {
+                for child in &composite.nodes {
+                    collect_nodes(child, out);
+                }
+            }
+        }
+        let typed: provenant_fabric_runtime::graph::GraphNode =
+            serde_json::from_value(compiled.clone()).map_err(|_| invalid())?;
+        let mut warning_nodes = Vec::new();
+        collect_nodes(&typed, &mut warning_nodes);
+        for warning in implementation_warnings(
+            &warning_nodes,
+            input,
+            self.context.config.implement.warn_unbounded_junior,
+        ) {
+            warn_operator(warning);
+        }
         let writer = compiled["access"] == "worktree_write"
             && compiled.get("composite").is_none()
             && compiled.get("loop").is_none();
@@ -1619,7 +1702,8 @@ impl Factory {
                 false,
             ),
         };
-        let templates = effective_templates(&library, template_name, input);
+        let mut templates = effective_templates(&library, template_name, input);
+        templates["$implement_plan_default"] = json!(self.context.config.implement.plan);
         let digest = submission_digest(input, source_commit.as_deref(), Some(&templates))?;
         let explain = input["explain"] == true;
         let (generated_id, taken) = if explain {
@@ -1895,6 +1979,18 @@ impl Factory {
             serde_json::to_string(&document).map_err(|_| FacadeError::StateCorrupt)?;
         patch::scan_for_secrets(&bound_document)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        let expanded_for_warnings = document
+            .expanded(&self.context.config.graph.limits)
+            .map_err(|error| FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: error.to_string(),
+            })?;
+        let warnings = implementation_warnings(
+            &expanded_for_warnings.nodes,
+            input,
+            self.context.config.implement.warn_unbounded_junior,
+        );
         if input["explain"] == true {
             let skipped = provenant_fabric_runtime::graph::when::skipped_rows(
                 &document,
@@ -1977,8 +2073,17 @@ impl Factory {
             return Ok(json!({
                 "document":document, "skipped":skipped, "writer_budgets":writer_budgets,
                 "status": if refused { "refused" } else { "admitted" },
-                "source_admission": source_admission,
+                "source_admission": source_admission, "warnings": warnings,
+                "implement_plan": {
+                    "value": input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).cloned().unwrap_or(json!(self.context.config.implement.plan)),
+                    "source": if input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).is_some() { json!("parameter (--plan or --set)") } else {
+                        config.origins.get("domains.fabric.implement.plan").map(|origin| json!(origin)).unwrap_or(json!("default"))
+                    }
+                },
             }));
+        }
+        for warning in &warnings {
+            warn_operator(warning);
         }
         let mut result = match self.launch_submission(document, input, budget, cancel, announce) {
             // A concurrent launch bound this name to other input between the
@@ -1992,6 +2097,7 @@ impl Factory {
         if let Some(object) = result.as_object_mut() {
             object.remove("replayed");
         }
+        result["warnings"] = json!(warnings);
         result["named"] = json!({
             "requested": requested, "graph": id, "replayed": replayed, "taken": taken,
         });
@@ -3919,6 +4025,10 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr.bytes)
             );
             assert!(!output.timed_out, "{output:?}");
+            super::super::peer_tests::assert_one_test_ran(
+                "replay_digest_tracks_launch_input_and_source_commit",
+                &output.stdout.bytes,
+            );
             return Ok(());
         }
         let rig = crate::worktree_tests::repository()?;
@@ -4627,7 +4737,7 @@ mod tests {
             json!({"branch":"fix","base":"origin/main"}),
         ] {
             let mut input =
-                json!({"op":"run","template":"implement","brief":"Fix it","set":{"bounded":true}});
+                json!({"op":"run","template":"implement","brief":"Fix it","set":{"plan":false}});
             input
                 .as_object_mut()
                 .unwrap()
@@ -4642,7 +4752,7 @@ mod tests {
             assert_eq!(node["access"], "worktree_write");
         }
 
-        let mut explicit_read = json!({"op":"run","template":"implement","brief":"Fix it","set":{"bounded":true},"access":"read_only","worktree":".worktrees/fix"});
+        let mut explicit_read = json!({"op":"run","template":"implement","brief":"Fix it","set":{"plan":false},"access":"read_only","worktree":".worktrees/fix"});
         assert!(factory.child_request(&explicit_read).is_err());
         explicit_read["access"] = json!("worktree_write");
         let explicit_write = factory.child_request(&explicit_read)?;
@@ -4911,9 +5021,9 @@ mod tests {
     fn child_launch_retains_writer_access_and_has_a_stable_logical_identity() -> Result {
         let rig = TestRig::new()?;
         let factory = factory(&rig)?;
-        let input = json!({"op":"run", "template":"implement", "brief":"Fix the parser", "set":{"bounded":true}, "idempotency_key":"parser-launch"});
+        let input = json!({"op":"run", "template":"implement", "brief":"Fix the parser", "set":{"plan":false}, "idempotency_key":"parser-launch"});
         let first = factory.child_request(&input)?;
-        let unkeyed = json!({"op":"run", "template":"implement", "brief":"Fix the parser", "set":{"bounded":true}});
+        let unkeyed = json!({"op":"run", "template":"implement", "brief":"Fix the parser", "set":{"plan":false}});
         assert_ne!(
             factory.child_request(&unkeyed)?.id,
             factory.child_request(&unkeyed)?.id
@@ -4944,12 +5054,12 @@ mod tests {
                 .id,
             first.id
         );
-        let bound = factory.child_request(&json!({"op":"run", "document":{"use":"implement", "with":{"bounded":true}, "prompt":"Bound writer", "worktree":".worktrees/existing"}}))?;
+        let bound = factory.child_request(&json!({"op":"run", "document":{"use":"implement", "with":{"plan":false}, "prompt":"Bound writer", "worktree":".worktrees/existing"}}))?;
         let controlled = factory.child_request(&json!({"op":"run", "template":"implement",
             "brief":"Bound controls", "branch":"fix/child", "base":"HEAD",
             "write_scope":["src"], "detached":true}))?;
-        // An unbounded implement gains a planner; the launch controls belong
-        // to its writer leaf wherever the plan boundary places it.
+        // The launch controls belong to the writer leaf, whether it is direct
+        // or nested below an explicitly requested planner.
         fn writer_leaf(node: &Value) -> Option<&Value> {
             match node.pointer("/composite/nodes").and_then(Value::as_array) {
                 Some(children) => children.iter().find_map(writer_leaf),
@@ -4969,7 +5079,7 @@ mod tests {
         assert_eq!(node["write_scope"], json!(["src"]));
         assert!(controlled.has_writers());
         assert!(controlled.detached);
-        let nested = json!({"op":"run", "document":{"use":"implement", "with":{"bounded":true}, "prompt":"Nested replay",
+        let nested = json!({"op":"run", "document":{"use":"implement", "with":{"plan":false}, "prompt":"Nested replay",
             "idempotency_key":"nested-child", "detached":true}});
         let nested_first = factory.child_request(&nested)?;
         assert_eq!(factory.child_request(&nested)?, nested_first);
@@ -5813,7 +5923,7 @@ mod tests {
                     "schema_version":2, "graph_id":format!("writer-review-{risk}"),
                     "review_base":original, "context":{"risk_tier":risk},
                     "nodes":[
-                        {"id":"writer", "use":"implement", "with":{"bounded":true}, "worktree":rig.project, "write_scope":["."], "delivery":"push"},
+                        {"id":"writer", "use":"implement", "with":{"plan":false}, "worktree":rig.project, "write_scope":["."], "delivery":"push"},
                         {"id":"review", "use":"review-panel", "after":["writer"], "source":{"type":"head","node":"writer"}}
                     ]
                 }
@@ -6270,4 +6380,10 @@ mod tests {
         assert!(!reason.contains("not both"), "{reason}");
         Ok(())
     }
+}
+
+/// Prints a launch warning for the operator; a warning never blocks a launch.
+fn warn_operator(warning: impl std::fmt::Display) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
 }

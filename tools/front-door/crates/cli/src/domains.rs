@@ -32,6 +32,7 @@ pub struct PrSettings {
     pub land: LandSettings,
 }
 pub const DEFAULT_LAND_POLL_SECONDS: u64 = 30;
+pub const DEFAULT_LAND_PROGRESS_SECONDS: u64 = 60;
 
 // Config reference: [domains.pr.land] selects one declared strategy. Optional
 // [domains.pr.land.compose] overrides plan dimensions; [[domains.pr.land.branches]]
@@ -42,6 +43,10 @@ pub const DEFAULT_LAND_POLL_SECONDS: u64 = 30;
 #[serde(default, deny_unknown_fields)]
 pub struct LandSettings {
     pub poll_seconds: u64,
+    /// Seconds between progress lines while a gate is awaited.
+    pub progress_seconds: u64,
+    /// Skip the gate when the candidate tree already passed the required checks.
+    pub reuse_tested_tree: bool,
     pub strategy: Strategy,
     pub compose: Compose,
     pub branches: Vec<LandBranch>,
@@ -69,6 +74,10 @@ pub struct LandSettings {
 pub struct LandOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub poll_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reuse_tested_tree: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strategy: Option<Strategy>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -297,6 +306,8 @@ impl Default for LandSettings {
     fn default() -> Self {
         Self {
             poll_seconds: DEFAULT_LAND_POLL_SECONDS,
+            progress_seconds: DEFAULT_LAND_PROGRESS_SECONDS,
+            reuse_tested_tree: true,
             strategy: Strategy::default(),
             compose: Compose::default(),
             branches: Vec::new(),
@@ -356,6 +367,7 @@ impl DomainConfig for PrSettings {
             "range",
         );
         check(land.poll_seconds == 0, "land.poll_seconds", "range");
+        check(land.progress_seconds == 0, "land.progress_seconds", "range");
         check(land.batch_size == 0, "land.batch_size", "range");
         check(
             land.gate.timeout_seconds == 0,
@@ -406,6 +418,7 @@ impl DomainConfig for PrSettings {
                         value.post_merge.as_ref().and_then(|p| p.timeout_seconds) == Some(0),
                     ),
                     ("poll_seconds", value.poll_seconds == Some(0)),
+                    ("progress_seconds", value.progress_seconds == Some(0)),
                     ("batch_size", value.batch_size == Some(0)),
                     (
                         "gate.timeout_seconds",
@@ -451,6 +464,8 @@ const PR_SECTION: DomainSection = DomainSection::new::<PrSettings>("pr", |_| {
         .get_or_init(|| {
             r#"[land]
 poll_seconds = 30
+progress_seconds = 60
+reuse_tested_tree = true
 strategy = "$strategy"
 batch_size = 8
 batch_wait_seconds = 0
@@ -488,6 +503,12 @@ timeout_seconds = 60
 })
 .with_fields(&[
     FieldMetadata::int("land.poll_seconds", 1, i64::MAX),
+    FieldMetadata::int("land.progress_seconds", 1, i64::MAX),
+    FieldMetadata::new("land.reuse_tested_tree", "bool"),
+    FieldMetadata::int("land.projects.{project}.progress_seconds", 1, i64::MAX),
+    FieldMetadata::int("land.tiers.{tier}.progress_seconds", 1, i64::MAX),
+    FieldMetadata::new("land.projects.{project}.reuse_tested_tree", "bool"),
+    FieldMetadata::new("land.tiers.{tier}.reuse_tested_tree", "bool"),
     FieldMetadata::enumeration("land.strategy", STRATEGY_CHOICES),
     FieldMetadata::new("land.compose", "table"),
     FieldMetadata::new("land.branches", "array"),

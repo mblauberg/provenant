@@ -1151,7 +1151,7 @@ fn constraints(path: &str) -> Vec<String> {
         "provenant run" => &[
             "run needs a template; `provenant templates` lists them",
             "--set binds a string parameter as written and any other type as TOML; quote nothing for a string",
-            "--no-plan sets bounded=true for implementation templates",
+            "--plan sets plan=true for implementation templates",
             "--file reads a graph document; a plain text brief goes in BRIEF, --brief or --brief-file",
             "inside a lane, work joins the calling node's graph as a child",
         ],
@@ -1207,7 +1207,7 @@ mod tests {
             "origin/main",
             "--route",
             "senior",
-            "--no-plan",
+            "--plan",
             "--write-scope",
             "src",
         ]);
@@ -1219,7 +1219,8 @@ mod tests {
         assert_eq!(request.base.as_deref(), Some("origin/main"));
         assert_eq!(request.template.as_deref(), Some("implement"));
         assert_eq!(request.route.as_deref(), Some("senior"));
-        assert!(request.no_plan);
+        assert!(request.plan);
+        invalid(&["run", "implement", "--no-plan"]);
         assert_eq!(request.write_scope, vec!["src"]);
         valid(&[
             "run",
@@ -1751,7 +1752,9 @@ mod tests {
         valid(&["templates", "review.security", "--file", "inline.toml"]);
         valid(&["edit", "example", "--file", "patch.toml"]);
         invalid(&["edit", "example"]);
-        for flag in ["--preset", "--prompt-file", "--manifest", "--plan"] {
+        // --plan is a graph-run flag; non-implementation templates ignore it.
+        valid(&["run", "task", "--plan", "example"]);
+        for flag in ["--preset", "--prompt-file", "--manifest"] {
             invalid(&["run", "task", flag, "example"]);
         }
     }

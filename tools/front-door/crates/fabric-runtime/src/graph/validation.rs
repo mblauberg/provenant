@@ -681,7 +681,7 @@ pub(super) fn validate_flat_plan(
                     "required output semantics are not supported",
                 ));
             }
-            if !node.depends_on.contains(&input.node)
+            if !(node.depends_on.contains(&input.node) || node.after_settled.contains(&input.node))
                 || !input_nodes.insert(&input.node)
                 || input.outputs.is_empty()
             {

@@ -527,6 +527,7 @@ fn lineage_uses_answering_position_and_exact_revision() -> Result<(), ProviderEr
 }
 
 #[test]
+// Spec: docs/specs/fabric.md#session-ready-steering
 fn continuation_preserves_session_and_rejects_changed_identity_and_grants()
 -> Result<(), ProviderError> {
     for (adapter, fresh, resumed) in [
@@ -553,24 +554,36 @@ fn continuation_preserves_session_and_rejects_changed_identity_and_grants()
         direct.session().ok_or(ProviderError::UnknownIdentity)?
     );
     continuation.validate(&route, "grants")?;
-    for change in 0..5 {
+    use provenant_records::diagnostic::{
+        ContinuationField as F, ContinuationGuard, ContinuationIssue as I, ContinuationRule as R,
+    };
+    for field in [
+        F::Provider,
+        F::Account,
+        F::Host,
+        F::Model,
+        F::Effort,
+        F::GrantDigest,
+    ] {
         let mut changed = route.clone();
-        match change {
-            0 => changed.adapter = "codex".into(),
-            1 => changed.account_key = Some("other".into()),
-            2 => changed.host = "other".into(),
-            3 => changed.model = "other".into(),
-            _ => changed.effort = Some("high".into()),
+        match field {
+            F::Provider => changed.adapter = "codex".into(),
+            F::Account => changed.account_key = Some("other".into()),
+            F::Host => changed.host = "other".into(),
+            F::Model => changed.model = "other".into(),
+            F::Effort => changed.effort = Some("high".into()),
+            _ => {}
         }
+        let grant = if field == F::GrantDigest {
+            "different"
+        } else {
+            "grants"
+        };
         assert!(matches!(
-            continuation.validate(&changed, "grants"),
-            Err(ProviderError::IdentityMismatch)
+            continuation.validate(&changed, grant),
+            Err(ProviderError::ContinuationRefused(guard)) if guard == ContinuationGuard { rule: R::Contract, field, issue: I::Mismatch }
         ));
     }
-    assert!(matches!(
-        continuation.validate(&route, "different"),
-        Err(ProviderError::IdentityMismatch)
-    ));
     // Codex's exec stream never names a model, so its continuation pins the
     // requested one; an adapter that reports models must have reported it.
     let codex = replay(&codex::Codex, fixture!("codex/success.jsonl"), EXIT)?.1;
@@ -583,9 +596,14 @@ fn continuation_preserves_session_and_rejects_changed_identity_and_grants()
         EXIT,
     )?
     .1;
+    // The auth-required stream names a session but no answering model.
     assert!(matches!(
         claude::Claude.continuation(&unanswered, &route, "grants"),
-        Err(ProviderError::UnknownIdentity)
+        Err(ProviderError::ContinuationRefused(ContinuationGuard {
+            field: F::Model,
+            issue: I::Missing,
+            ..
+        }))
     ));
     Ok(())
 }

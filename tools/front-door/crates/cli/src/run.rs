@@ -1390,8 +1390,7 @@ impl Registry<'_> {
             _ => None,
         }) {
             decoded.outcome = run::Outcome::Unclassified;
-            // An adapter diagnostic that already names the failing route and
-            // remedy replaces the provider's own text, which is not copied.
+            // A diagnostic replaces the provider's untrusted text.
             let diagnosed = provenant_records::AdapterSpec::get(adapter.id())
                 .is_some_and(|spec| spec.stdout_error_diagnostic)
                 && provenant_providers::opencode::stdout_error_diagnostic(
@@ -1403,8 +1402,6 @@ impl Registry<'_> {
             decoded.reason = Some(if message.is_empty() || diagnosed {
                 "unclassified provider error".into()
             } else {
-                // The provider's text is untrusted: redact known credential
-                // shapes and bound it before it reaches status or output.
                 format!(
                     "unclassified provider error: {}",
                     provenant_confinement::redact::bounded_line(message, 512)

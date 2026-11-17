@@ -18,8 +18,7 @@ pub const MAX_OVER_ITEMS: usize = 256;
 const ITEM: &str = "item";
 /// Host compilation context for a patch emitted by a planner. Every nested
 /// implementation in that patch has already been sized by its producer.
-pub(super) const BOUNDED_IMPLEMENTATION: &str = "implementation-brief-bounded";
-const PLAN_SOURCES: &str = "implementation-plan-sources";
+pub const IMPLEMENT_PLAN_DEFAULT: &str = "implement-plan-default";
 /// Node field naming the template a leaf was compiled from; carried to attempts.
 pub const TEMPLATE_FIELD: &str = "template";
 
@@ -1442,6 +1441,9 @@ fn implementation_template(name: &str) -> bool {
     name == "implement" || name.starts_with("implement.")
 }
 
+/// One batch item: its key and its per-item `with` overrides.
+type BatchItem = (String, Map<String, Value>);
+
 impl<'a> Compiler<'a> {
     pub fn new(library: &'a TemplateLibrary) -> Self {
         Self {
@@ -1469,106 +1471,7 @@ impl<'a> Compiler<'a> {
     }
 
     pub fn compile_all(&self, nodes: &[Value]) -> Result<Vec<GraphNode>, CompileError> {
-        let resolvers = self.scoped_plan_sources(nodes);
-        let compiler = Compiler {
-            library: self.library,
-            resolvers: &resolvers,
-        };
-        compiler
-            .bounded_plan_consumers(nodes)
-            .iter()
-            .map(|node| compiler.compile(node))
-            .collect()
-    }
-
-    /// Keep visible plan producers while descending into raw or template
-    /// composites. A local node shadows an outer producer of the same name.
-    pub(super) fn scoped_plan_sources(&self, nodes: &[Value]) -> BTreeMap<String, Vec<String>> {
-        let mut resolvers = self.resolvers.clone();
-        let locals: BTreeSet<&str> = nodes
-            .iter()
-            .filter_map(|node| node.get("id").and_then(Value::as_str))
-            .collect();
-        let mut sources = resolvers.remove(PLAN_SOURCES).unwrap_or_default();
-        sources.retain(|source| !locals.contains(source.as_str()));
-        sources.extend(
-            nodes
-                .iter()
-                .filter(|node| {
-                    node.get("plan").is_some_and(|plan| !plan.is_null())
-                        || node
-                            .get("use")
-                            .and_then(Value::as_str)
-                            .is_some_and(|name| name == "plan" || name.starts_with("plan."))
-                })
-                .filter_map(|node| node.get("id").and_then(Value::as_str).map(str::to_owned)),
-        );
-        sources.sort();
-        sources.dedup();
-        resolvers.insert(PLAN_SOURCES.into(), sources);
-        resolvers
-    }
-
-    /// A writer consuming a plan has already been sized. Other task outputs
-    /// do not imply a bounded brief, nor does a tier override.
-    pub(super) fn bounded_plan_consumers(&self, nodes: &[Value]) -> Vec<Value> {
-        let planners: BTreeSet<&str> = self
-            .resolvers
-            .get(PLAN_SOURCES)
-            .into_iter()
-            .flatten()
-            .map(String::as_str)
-            .collect();
-        nodes
-            .iter()
-            .map(|node| {
-                let mut node = node.clone();
-                if node
-                    .get("use")
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| implementation_template(name) || name == "deliver")
-                    && node
-                        .get("inputs")
-                        .and_then(Value::as_array)
-                        .is_some_and(|inputs| {
-                            inputs.iter().any(|input| {
-                                input
-                                    .get("node")
-                                    .and_then(Value::as_str)
-                                    .is_some_and(|id| planners.contains(id))
-                                    && input.get("outputs").and_then(Value::as_array).is_some_and(
-                                        |outputs| outputs.iter().any(|output| output == "result"),
-                                    )
-                            })
-                        })
-                {
-                    Self::mark_bounded_implementation(&mut node);
-                }
-                node
-            })
-            .collect()
-    }
-
-    pub(super) fn mark_bounded_implementation(node: &mut Value) {
-        if !node
-            .get("use")
-            .and_then(Value::as_str)
-            .is_some_and(|name| implementation_template(name) || name == "deliver")
-        {
-            return;
-        }
-        let Some(fields) = node.as_object_mut() else {
-            return;
-        };
-        let with = fields
-            .entry("with")
-            .or_insert_with(|| serde_json::json!({}));
-        if with.is_null() {
-            *with = serde_json::json!({});
-        }
-        if let Some(with) = with.as_object_mut() {
-            with.insert("bounded".into(), Value::Bool(true));
-        }
+        nodes.iter().map(|node| self.compile(node)).collect()
     }
 
     fn lower_in(
@@ -1706,14 +1609,15 @@ impl<'a> Compiler<'a> {
             // template, even when it is not a declared input parameter.
             if let Some(item) = bindings.get(ITEM) {
                 parameters.entry(ITEM).or_insert_with(|| item.clone());
-                if implementation_template(&name) {
-                    parameters.insert("bounded".into(), Value::Bool(true));
-                }
             }
-            if (implementation_template(&name) || name == "deliver")
-                && self.resolvers.contains_key(BOUNDED_IMPLEMENTATION)
+            if (implementation_template(&name) || name == "deliver" || name == "batch")
+                && with.get("plan").is_none()
+                && let Some(default) = self
+                    .resolvers
+                    .get(IMPLEMENT_PLAN_DEFAULT)
+                    .and_then(|v| v.first())
             {
-                parameters.insert("bounded".into(), Value::Bool(true));
+                parameters.insert("plan".into(), Value::Bool(default == "true"));
             }
             if template.composite_behaviour == Some(CompositeBehaviour::ReviewRepair)
                 && with.get("lenses").is_none()
@@ -1857,7 +1761,7 @@ impl<'a> Compiler<'a> {
             });
         let items = match self.items(over) {
             Ok(items) => items,
-            Err(_) if skipped => vec!["skipped".to_owned()],
+            Err(_) if skipped => vec![("skipped".to_owned(), Map::new())],
             Err(error) => return Err(error.into()),
         };
         let mut boundary = Map::new();
@@ -1929,10 +1833,17 @@ impl<'a> Compiler<'a> {
         if panel_routes.is_some_and(|routes| routes.len() != items.len()) {
             return Err("review panel routes do not match its lenses".into());
         }
-        for (index, item) in items.iter().enumerate() {
+        for (index, (item, overrides)) in items.iter().enumerate() {
             let mut scoped = bindings.clone();
             scoped.insert(ITEM.into(), Value::String(item.clone()));
             let mut member = copy.clone();
+            if !overrides.is_empty() {
+                let with = member
+                    .entry("with")
+                    .or_insert_with(|| serde_json::json!({}));
+                let fields = with.as_object_mut().ok_or("slice `with` must be a table")?;
+                fields.extend(overrides.clone());
+            }
             if let Some(routes) = panel_routes {
                 let fields: Map<String, Value> = serde_json::from_str(&routes[index])
                     .map_err(|_| "invalid review panel route")?;
@@ -1987,24 +1898,39 @@ impl<'a> Compiler<'a> {
         self.finish(boundary, stack)
     }
 
-    fn items(&self, over: &Value) -> Result<Vec<String>, String> {
-        let items: Vec<String> = match over {
+    fn items(&self, over: &Value) -> Result<Vec<BatchItem>, String> {
+        let items: Vec<BatchItem> = match over {
             Value::Array(values) => values
                 .iter()
                 .map(|value| match value {
-                    Value::String(text) => Ok(text.clone()),
-                    Value::Number(number) => Ok(number.to_string()),
-                    _ => Err("`over` items must be strings"),
+                    Value::String(text) => Ok((text.clone(), Map::new())),
+                    Value::Number(number) => Ok((number.to_string(), Map::new())),
+                    Value::Object(fields)
+                        if fields.keys().all(|key| key == "item" || key == "with") =>
+                    {
+                        let item = fields
+                            .get("item")
+                            .and_then(Value::as_str)
+                            .ok_or("slice item must be text")?;
+                        let with = fields
+                            .get("with")
+                            .and_then(Value::as_object)
+                            .ok_or("slice with must be a table")?;
+                        Ok((item.to_owned(), with.clone()))
+                    }
+                    _ => Err("`over` items must be strings or item/with tables"),
                 })
-                .collect::<Result<_, _>>()?,
+                .collect::<Result<Vec<_>, _>>()?,
             Value::String(text) => {
                 let name = text
                     .strip_prefix('@')
                     .ok_or("`over` takes a list or a resolver named `@name`")?;
                 self.resolvers
                     .get(name)
-                    .cloned()
                     .ok_or_else(|| format!("resolver @{name} is not available at this launch"))?
+                    .iter()
+                    .map(|item| (item.clone(), Map::new()))
+                    .collect()
             }
             _ => return Err("`over` takes a list or a resolver named `@name`".into()),
         };
@@ -2013,15 +1939,13 @@ impl<'a> Compiler<'a> {
         }
         if items
             .iter()
-            .any(|item| item.trim().is_empty() || item.contains('\0'))
+            .any(|(item, _)| item.trim().is_empty() || item.contains('\0'))
         {
             return Err("`over` items must be non-empty text".into());
         }
         Ok(items)
     }
 
-    /// `repeat` turns the node into a loop whose body is the node's members,
-    /// or the node itself for a leaf, until the named body gate passes.
     fn lower_repeat(
         &self,
         mut node: Map<String, Value>,
@@ -2117,11 +2041,6 @@ impl<'a> Compiler<'a> {
                 ).into());
             }
             let mut children = Vec::with_capacity(template.nodes.len());
-            let resolvers = self.scoped_plan_sources(&template.nodes);
-            let compiler = Compiler {
-                library: self.library,
-                resolvers: &resolvers,
-            };
             let review_coverage_floor =
                 if template.composite_behaviour == Some(CompositeBehaviour::ReviewPanel) {
                     self.resolvers
@@ -2133,8 +2052,8 @@ impl<'a> Compiler<'a> {
                 } else {
                     None
                 };
-            for member in &compiler.bounded_plan_consumers(&template.nodes) {
-                children.push(compiler.lower_in(member, parameters, stack)?);
+            for member in &template.nodes {
+                children.push(self.lower_in(member, parameters, stack)?);
             }
             if template.composite_behaviour == Some(CompositeBehaviour::ReviewPanel)
                 && overrides.get("repair_panel") == Some(&Value::Bool(true))
@@ -2375,7 +2294,7 @@ impl<'a> Compiler<'a> {
         if let Some(review) = template.review {
             review.apply(&mut leaf);
         }
-        if implementation_template(name) && parameters.get("bounded") != Some(&Value::Bool(true)) {
+        if implementation_template(name) && parameters.get("plan") == Some(&Value::Bool(true)) {
             return self.plan_implementation(leaf, stack);
         }
         self.finish(leaf, stack)
@@ -2459,15 +2378,9 @@ impl<'a> Compiler<'a> {
                 .and_then(|spec| spec.get_mut(key))
                 .and_then(Value::as_array_mut)
             {
-                let resolvers = self.scoped_plan_sources(members);
-                let compiler = Compiler {
-                    library: self.library,
-                    resolvers: &resolvers,
-                };
-                let authored = compiler.bounded_plan_consumers(members);
-                for (member, authored) in members.iter_mut().zip(authored) {
-                    if needs_lowering(&authored) {
-                        *member = compiler.lower_in(&authored, &Map::new(), stack)?;
+                for member in members.iter_mut() {
+                    if needs_lowering(member) {
+                        *member = self.lower_in(member, &Map::new(), stack)?;
                     }
                 }
             }

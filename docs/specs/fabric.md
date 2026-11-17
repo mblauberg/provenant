@@ -154,18 +154,22 @@ An occupied concurrency threshold warns and proceeds unless its declared policy 
 
 `after_settled` orders a node after its predecessors settle in any state without
 propagating their failure. The predecessors remain visible in the graph outcome.
-Success dependencies and selected inputs retain their existing failure semantics.
+Inputs may select outputs from either kind of direct dependency; unavailable optional outputs remain absent, while required outputs still gate admission.
 
 ### Implementation planning
 
-An `implement` or `implement.issue` brief is sized by a read-only plan node
-before its writer starts, unless the brief is bounded. `bounded=true` gives the
-writer the brief directly; `implement.plan` and `implement.fix` never add a
-plan node. `run implement --no-plan` is shorthand for `--set bounded=true` on
-any `implement` or `implement.*` template, and other templates ignore it.
-- Why: an open brief must be split before a junior writer takes it, while a
-  brief already sized as one slice should not pay for a planner.
-- Owner: `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`
+Implementation templates compile to a writer by default. `--plan` or the
+boolean template parameter `plan=true` adds a read-only planner whose result
+the writer consumes. `domains.fabric.implement.plan` sets the default and
+`--explain` reports its source; an explicit parameter takes precedence.
+`deliver` and `batch` accept `plan`, and a batch item may override it with
+`{ item = "slice", with = { plan = true } }`. A junior writer without a plan
+input, write scope or explicit plan parameter emits the advisory
+`unbounded_brief_junior_writer` warning. Set
+`domains.fabric.implement.warn_unbounded_junior=false` to suppress it.
+- Why: single writers start without an implicit planning stage; callers choose
+  when planning adds value.
+- Owner: `src/fabric/interface.rs`, `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`
 
 ### Composite settlement
 
@@ -173,8 +177,8 @@ A composite's state, outputs and error summary derive from its members while its
 - Why: recovery must validate a checkpoint against the topology it records.
 - Owner: `crates/fabric-runtime/src/graph/composites.rs`, `crates/fabric-runtime/src/graph/patch.rs`
 
-Launched review panels settle with partial coverage by default. When a selected lens fails, blocks or stops, the panel retains successful evidence, marks its verdict inconclusive unless blocking findings require changes, and names the unavailable lens in its result and coverage warning. Protected path floors carry their configured reviewer count and required lenses from launch into settlement; a shortfall against either fails the panel with `coverage_below_minimum`. An optional reviewer may be unavailable when the protected count and every required lens still succeed.
-- Why: one stopped reviewer must not discard useful independent coverage, while protected paths keep their declared minimum evidence.
+Launched review panels settle with partial coverage by default. The panel retains successful evidence, marks its verdict inconclusive unless blocking findings require changes, and names unavailable lenses in its result and coverage warning. Coverage shortfalls warn by default; a project floor declaring `hard = true` refuses when its required lenses or reviewer minimum are missing.
+- Why: an unavailable reviewer must not discard useful evidence; projects may explicitly require coverage for their own boundaries.
 - Owner: `crates/routing/src/review.rs`, `crates/cli/src/fabric/graph_relay.rs`, `crates/fabric-runtime/src/graph/template.rs`, `crates/fabric-runtime/src/graph/composites.rs`
 
 ### Session-ready steering
@@ -220,6 +224,11 @@ unreadable or contradictory state stays not-continued. Native account state is
 not scanned or copied into the successor. Sandboxed state continues from
 attempt-private storage; providers that explicitly retain state there, such as
 OpenCode, continue through that same private-state owner.
+Settlement scratch cleanup must preserve the predecessor's session state until
+the continuation has launched. A refused continuation retains closed facts
+identifying the authority rule, affected field and failure kind through
+preparation and into its settled reason. Provider output and identity values
+never supply that public explanation.
 The guardian preserves the typed `steered` stop through exit publication, and
 Run admits that continuation only when the intentional interrupt was delivered
 before exit. A stream identity error also leaves a route- and process-bound

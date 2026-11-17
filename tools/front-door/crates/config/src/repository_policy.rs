@@ -67,7 +67,7 @@ fn collect_unknown_toml_keys(
         } else {
             format!("{prefix}.{key}")
         };
-        if path == crate::repository_files::LAND_SECTION {
+        if path == crate::repository_files::LAND_SECTION || path == "domains.routing" {
             continue;
         }
         let Some(accepted) = accepted.get(key) else {
@@ -94,7 +94,7 @@ fn collect_unknown_inline_toml_keys(
 ) {
     for (key, value) in table.iter() {
         let path = format!("{prefix}.{key}");
-        if path == crate::repository_files::LAND_SECTION {
+        if path == crate::repository_files::LAND_SECTION || path == "domains.routing" {
             continue;
         }
         let Some(accepted) = accepted.get(key) else {
@@ -170,7 +170,8 @@ fn decode_land<T: serde::de::DeserializeOwned + Serialize>(
     Ok((land, warnings))
 }
 
-fn read_declaration(checkout: &Path) -> Result<Option<String>, ConfigError> {
+/// Read the bounded, no-follow repository configuration declaration.
+pub fn read_declaration(checkout: &Path) -> Result<Option<String>, ConfigError> {
     let root = Directory::open_anchor(checkout)?;
     let directory =
         match root.open_verified_directory(OsStr::new(crate::repository_files::DIRECTORY)) {
@@ -486,7 +487,7 @@ mod tests {
         }
 
         let text = format!(
-            "[{LAUNCH_POLICY_SECTION}]\nconfidential=true\nprotected_paths=[]\nundeclared=true\n[future_section]\nvalue=1\n"
+            "[{LAUNCH_POLICY_SECTION}]\nconfidential=true\nprotected_paths=[]\nundeclared=true\n[future_section]\nvalue=1\n[domains.routing.review.floors.example]\nhard=true\n"
         );
         std::fs::write(root.path().join(REPOSITORY_CONFIG), &text)?;
         assert!(RepositoryPolicy::read(root.path())?.is_some());

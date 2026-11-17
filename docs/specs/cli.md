@@ -224,6 +224,14 @@ at any supported configuration layer or using `land --poll` selects that fixed i
 all three waits. Source provenance decides this, so an explicit value is fixed even when it
 matches the bundled default.
 
+While a candidate gate waits, `land` prints the candidate ref, the checks URL and the state
+to standard error, then repeats the elapsed time and state every `progress_seconds`
+(default 60). When a candidate's tree equals the tree of a member head whose required
+checks already passed, the gate is skipped and the receipt's gate evidence records the head
+as `reused_from_commit`; `reuse_tested_tree = false` forces a gate run. Each land also
+removes pending records and `land/*` candidate refs whose pull requests are merged or
+closed.
+
 The effective `PortTable.land` declaration alone selects the publication backend.
 `none` returns typed unavailability before publication effects; `command` invokes
 its declared argv in the repository checkout. Candidate and ordering strategies
