@@ -863,7 +863,9 @@ impl AssignmentScanner {
                             let ends = if line {
                                 byte == b'\n' || byte == b'\r'
                             } else {
-                                is_delimiter(byte)
+                                // A backslash continues the credential, including
+                                // after an otherwise exact redaction marker.
+                                byte != b'\\' && is_delimiter(byte)
                             };
                             if ends {
                                 self.finish_marker(marker_length, 0, output);
@@ -1944,6 +1946,10 @@ mod tests {
         for input in [
             "token=[REDACTED]",
             "token=[REDACTED] next",
+            "token=[REDACTED]\nnext",
+            "token=[REDACTED]\r\nnext",
+            "token=[REDACTED]\"next\"",
+            "token=[REDACTED]'next'",
             "token='[REDACTED]'",
             "token=\"[REDACTED]\" next",
             "Authorization: Bearer [REDACTED]",
@@ -1967,6 +1973,19 @@ mod tests {
     // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     fn credential_assignments_are_redacted_across_chunk_boundaries() {
         let cases: &[(&str, &str)] = &[
+            (r"token=[REDACTED]\suffix", "token=[REDACTED]"),
+            (r"token=[REDACTED]\\suffix", "token=[REDACTED]"),
+            (r"token=[REDACTED]\suffix next", "token=[REDACTED] next"),
+            (r"token=[REDACTED]\", "token=[REDACTED]"),
+            ("token=[REDACTED]\\\nnext", "token=[REDACTED]\nnext"),
+            ("token=[REDACTED]\\\r\nnext", "token=[REDACTED]\r\nnext"),
+            (r#"token="[REDACTED]\suffix""#, r#"token="[REDACTED]""#),
+            (r"token='[REDACTED]\suffix'", "token='[REDACTED]'"),
+            (r#"token="[REDACTED]\suffix"#, r#"token="[REDACTED]"#),
+            (r"token='[REDACTED]\suffix", "token='[REDACTED]"),
+            (r"token='[REDACTED]\", "token='[REDACTED]"),
+            (r#"token=\"[REDACTED]\\suffix\""#, r#"token=\"[REDACTED]\""#),
+            (r#"token=\"[REDACTED]\\suffix"#, r#"token=\"[REDACTED]"#),
             ("token=\"[REDACTED]\\", "token=\"[REDACTED]"),
             ("token=\"[REDACTED]\\\nnext", "token=\"[REDACTED]\nnext"),
             (r#"token=\"[REDACTED]\"#, r#"token=\"[REDACTED]"#),
@@ -2046,6 +2065,7 @@ mod tests {
                     expected.as_bytes(),
                     "{input:?} split {split}"
                 );
+                assert!(redactor.has_redaction(), "{input:?} split {split}");
             }
             let chunks: Vec<&[u8]> = input.as_bytes().chunks(1).collect();
             let mut redactor = Redactor::new([]).expect("empty secret set");
