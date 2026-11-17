@@ -17,7 +17,9 @@ keeps its ownership until release is proved.
 A launch is uncertain only once its reservation may record a handoff. A host
 that cannot hold provider custody refuses before that point: the attempt ends
 with `unsupported_platform` and its custody is withdrawn, never reported as an
-unknown launch awaiting a receipt.
+unknown launch awaiting a receipt. A launch cancelled or refused before it
+spawns needs no custody, so it records `never_spawned` the same way on every
+host.
 - Why: a launch that cannot start must not look like a lost lane.
 
 Permanent pre-admission refusals are durable outcomes of their operation. Replay

@@ -1228,13 +1228,6 @@ pub fn launch(
     if owned.lease.launched {
         return Err(failure(CustodyError::Fenced, publication));
     }
-    // A host without provider custody refuses before the reservation records
-    // a handoff: the lease stays unlaunched, so the caller withdraws it rather
-    // than fencing an attempt whose launch can never be confirmed.
-    #[cfg(not(target_os = "macos"))]
-    if crate::process_os::provider::ensure_supported().is_err() {
-        return Err(failure(CustodyError::UnsupportedPlatform, publication));
-    }
     let scope = owned.lease.scope();
     let requester = owned.command.requester;
     let metadata = match publication.directory.metadata() {
@@ -1280,6 +1273,14 @@ pub fn launch(
             custody: publication,
             pending_exit: Some(Box::new(record)),
         });
+    }
+    // A host without provider custody refuses before the reservation records
+    // a handoff: the lease stays unlaunched, so the caller withdraws it rather
+    // than fencing an attempt whose launch can never be confirmed. A launch
+    // that never spawns needs no custody and settles above on every host.
+    #[cfg(not(target_os = "macos"))]
+    if crate::process_os::provider::ensure_supported().is_err() {
+        return Err(failure(CustodyError::UnsupportedPlatform, publication));
     }
     owned.lease.launched = true;
     owned.lease.reservation.launch_state = LaunchState::HandingOff;

@@ -843,6 +843,30 @@ fn two_recoverers_cannot_hold_the_same_writer_exclusion() -> TestResult {
     Ok(())
 }
 
+fn never_executed_command(root: &std::path::Path) -> ProviderCommand {
+    ProviderCommand {
+        policy: Default::default(),
+        profile_file: None,
+        priority: 0,
+        lane_ports: None,
+        resolved_route: "fixture/provider".into(),
+        permission_plan_digest: Digest::from_bytes([0; 32]),
+        key: crate::custody::fixture_key(3),
+        requester: ActorId::from_bytes([4; 16]),
+        protected_commands: vec![],
+        config_environment: vec![],
+        argv: vec!["/nonexistent-never-executed".into()],
+        environment: crate::fixture::environment(root),
+        cwd: root.into(),
+        stdin: vec![],
+        secret_input: None,
+        holder_context: Vec::new(),
+    }
+}
+
+// Spec: docs/specs/run-launch.md#admission-and-custody
+// A cancelled launch never spawns, so it settles the same way on every host,
+// including one without provider custody.
 #[test]
 fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
     let root = tempfile::tempdir()?;
@@ -860,24 +884,7 @@ fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
     token.cancel();
     let failure = launch(
         OwnedLaunch {
-            command: ProviderCommand {
-                policy: Default::default(),
-                profile_file: None,
-                priority: 0,
-                lane_ports: None,
-                resolved_route: "fixture/provider".into(),
-                permission_plan_digest: Digest::from_bytes([0; 32]),
-                key: crate::custody::fixture_key(3),
-                requester: ActorId::from_bytes([4; 16]),
-                protected_commands: vec![],
-                config_environment: vec![],
-                argv: vec!["/nonexistent-never-executed".into()],
-                environment: crate::fixture::environment(root.path()),
-                cwd: root.path().into(),
-                stdin: vec![],
-                secret_input: None,
-                holder_context: Vec::new(),
-            },
+            command: never_executed_command(root.path()),
             lease: &mut writer,
             handshake: WaitBudget::cli(clock.mono_now(), 1)?,
             cancel: &token,
@@ -909,6 +916,43 @@ fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
             .join("reservation.json")
             .is_file()
     );
+    Ok(())
+}
+
+// Spec: docs/specs/run-launch.md#admission-and-custody
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn unsupported_host_refuses_a_launch_before_the_reservation_records_a_handoff() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let attempt = tempfile::tempdir()?;
+    let mut writer = acquire(root.path())?;
+    let clock = SystemClock::new();
+    let token = CancelToken::new();
+    let publication = PublicationReservation::prepare(
+        Directory::open_anchor(attempt.path())?,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &token,
+        &clock,
+    )?;
+    let failure = launch(
+        OwnedLaunch {
+            command: never_executed_command(root.path()),
+            lease: &mut writer,
+            handshake: WaitBudget::cli(clock.mono_now(), 1)?,
+            cancel: &token,
+            clock: &clock,
+        },
+        CapturePlan::default(),
+        publication,
+    )
+    .err()
+    .ok_or("launch on a host without provider custody succeeded")?;
+    assert!(matches!(*failure.error, CustodyError::UnsupportedPlatform));
+    assert!(!writer.launched);
+    let evidence = Directory::open_anchor(&root.path().join(scope().attempt.to_string()))?;
+    let recorded: Reservation = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
+    assert_eq!(recorded.launch_state, LaunchState::Prepared);
+    assert!(!attempt.path().join("process-exit.json").exists());
     Ok(())
 }
 
