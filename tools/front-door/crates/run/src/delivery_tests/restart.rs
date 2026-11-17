@@ -661,7 +661,12 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
         &call,
     )?;
     let scope = RunStore::scope(&store.record(id, &call)?);
-    launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+    launch.snapshot(
+        execution.state_root.as_path(),
+        &attempt,
+        scope,
+        &provenant_records::policy::Policy::default(),
+    )?;
     let pin = format!("refs/provenant/lane-base/{id}");
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     assert_eq!(
@@ -918,7 +923,12 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
             execution.state_root.as_path(),
             execution.project_id,
         )?;
-        launch.snapshot(execution.state_root.as_path(), &attempt, exit.scope)?;
+        launch.snapshot(
+            execution.state_root.as_path(),
+            &attempt,
+            exit.scope,
+            &provenant_records::policy::Policy::default(),
+        )?;
         let pin = format!("refs/provenant/lane-base/{id}");
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         assert_eq!(

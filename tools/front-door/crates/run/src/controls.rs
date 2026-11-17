@@ -835,6 +835,7 @@ const ORPHAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg(test)]
 mod reboot_tests {
     use super::*;
+    use provenant_core::Clock;
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
