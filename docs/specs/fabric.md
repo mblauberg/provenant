@@ -237,7 +237,10 @@ that fence is not session-readiness evidence. The guardian seals this live
 conflict separately from the bounded stdout tail, so a failed ledger write or a
 discarded head frame cannot erase it. Oversized frames, undecodable
 delimiter-complete frames, unreadable output, or drain-truncated live output
-also seal incomplete identity evidence; settlement leaves that result
+also seal incomplete identity evidence; provider framing reports every oversized,
+unparseable or incomplete frame as a one-based, line-numbered `MalformedFrame`,
+including final fragments and command-execution items. No oversized item is
+silently discarded as successful protocol evidence. Settlement leaves that result
 unsettled instead of admitting a same-session continuation. The guardian
 immediately routes a live identity conflict through its existing protocol
 rejection stop path while preserving the separate conflict evidence for

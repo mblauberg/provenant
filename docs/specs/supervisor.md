@@ -306,6 +306,27 @@ from the opener's own up to the length of the backslash run, agrees is a close.
 No fixed depth cap applies, because a value can be escaped one layer deeper than
 any cap. Without a definite close, masking continues through the end of the raw line. Scanning resumes
 after a definite close or the line end.
+Provider JSONL uses a streaming tokenizer: keys and containers retain their
+structure, decoded string values pass through the plain redactor, and filtered
+bytes are JSON-escaped again. Escaped literals (including surrogate pairs) are
+matched after decoding. Credential-named fields mask scalar values, including leaves in nested
+containers, while retaining keys and container structure. The credential context
+survives malformed-input fallback and masks to the raw line boundary. Literal
+matches in non-string scalars become JSON string masks. Keys are protocol
+structure and are never redacted, even when a configured literal matches a key.
+Strings stream in bounded pieces; no line-size fallback changes their grammar.
+Tokenizer memory is bounded by a 128-level nesting stack, a 4 KiB decoded piece,
+a 16 KiB scalar prefix, and the plain redactor's existing detector bounds.
+Excess nesting fails capture closed. A scalar longer than its prefix buffer is
+conservatively masked if a configured literal could occur in a JSON scalar,
+even if that literal does not actually occur. Without such a literal the scalar
+streams unchanged. This avoids either retaining unbounded numbers or leaking a
+prefix that cannot be retracted when a later literal matches. Masking may
+change lengths: source-aligned detector decisions are internal to the plain
+redactor, not a constraint on the push-based capture interface. Malformed JSON
+switches to plain redaction for the remainder and retains invalid syntax (with
+an invalid-JSON sentinel where masking could repair it), so it cannot become
+successful protocol evidence. Non-JSON lines use the plain redactor.
 Host Git runs with
 hooks, filters, fsmonitor and external programs off, and refuses configuration
 from a lane-writable include. Host delivery pushes once, from the host, and

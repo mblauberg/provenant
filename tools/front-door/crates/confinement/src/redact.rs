@@ -9,7 +9,6 @@ use provenant_os::fs::{Directory, FileHandle, FileKind, Metadata};
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsStr;
 use std::io::{Read, Write};
-use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
@@ -593,32 +592,6 @@ impl AssignmentScanner {
         self.after_backslash = false;
     }
 
-    fn finish_value(&mut self, output: &mut DecisionQueue) {
-        match std::mem::take(&mut self.state) {
-            Assignment::Scheme { word } => {
-                self.mask_bytes(&word, output);
-                self.run.clear();
-                self.after_backslash = false;
-            }
-            Assignment::Value {
-                quote: Some(_),
-                pending_slashes,
-                ..
-            } => {
-                self.mask_slashes(pending_slashes, output);
-                self.run.clear();
-                self.after_backslash = false;
-            }
-            Assignment::Value { quote: None, .. } => {
-                self.run.clear();
-                self.after_backslash = false;
-            }
-            other => {
-                self.state = other;
-            }
-        }
-    }
-
     fn keep(&mut self, byte: u8, masked: bool, output: &mut DecisionQueue) {
         output.push((byte, masked));
         self.matched |= masked;
@@ -1030,6 +1003,18 @@ impl Redactor {
         })
     }
 
+    // Preserve a JSON credential field's context when syntax fails part-way
+    // through it. The fallback masks to the raw line boundary conservatively.
+    fn mask_line_remainder(&mut self) {
+        self.assignments.state = Assignment::Value {
+            quote: None,
+            quote_slashes: 0,
+            backslashes: 0,
+            pending_slashes: 0,
+            line: true,
+        };
+    }
+
     pub fn has_redaction(&self) -> bool {
         self.has_redacted
             || self.literals.matched
@@ -1195,80 +1180,6 @@ impl Redactor {
             for queue in &mut self.decisions {
                 queue.consume(count);
             }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn filter_json_frame_constrained(
-        &mut self,
-        line: &[u8],
-        ranges: &[Range<usize>],
-        sink: &mut dyn FnMut(&[u8]),
-    ) -> Result<(), FilterError> {
-        if self.failed {
-            return Err(FilterError);
-        }
-        let in_string = |idx: usize| -> bool { ranges.iter().any(|r| r.contains(&idx)) };
-
-        let mut literals = Vec::with_capacity(line.len());
-        self.literals.filter(line, &mut literals);
-        self.literals.finish(&mut literals);
-        for (i, item) in literals.iter_mut().enumerate() {
-            if !in_string(i) {
-                item.1 = false;
-            }
-        }
-
-        let mut tokens = Vec::with_capacity(line.len());
-        self.tokens.filter(line, &mut tokens).map_err(|_| {
-            self.failed = true;
-            FilterError
-        })?;
-        self.tokens.finish(&mut tokens).map_err(|_| {
-            self.failed = true;
-            FilterError
-        })?;
-        for (i, item) in tokens.iter_mut().enumerate() {
-            if !in_string(i) {
-                item.1 = false;
-            }
-        }
-
-        let mut range_idx = 0;
-        for (i, byte) in line.iter().enumerate() {
-            while range_idx < ranges.len() && ranges[range_idx].end < i {
-                range_idx += 1;
-            }
-            if range_idx < ranges.len() && ranges[range_idx].end == i {
-                self.assignments.finish_value(&mut self.decisions[2]);
-            }
-            self.assignments.step(*byte, &mut self.decisions[2]);
-        }
-        self.assignments.finish(&mut self.decisions[2]);
-
-        for (start, len) in self.tokens.replacements.drain(..) {
-            if in_string(start) && (len == 0 || in_string(start + len - 1)) {
-                self.replacements
-                    .push_back((self.token_source + start, len));
-            }
-        }
-        self.insertions.extend(
-            self.assignments
-                .insertions
-                .drain(..)
-                .filter(|&idx| in_string(idx)),
-        );
-
-        self.decisions[0].extend(literals);
-        self.token_source += tokens.len();
-        self.decisions[1].extend(tokens);
-
-        let mut emitter = FrameEmitter::new(sink);
-        self.emit_decided(&mut emitter)?;
-        emitter.flush();
-        if self.decisions.iter().any(|queue| !queue.runs.is_empty()) {
-            self.failed = true;
-            return Err(FilterError);
         }
         Ok(())
     }
@@ -1705,142 +1616,8 @@ impl CaptureFilter for Redactor {
     }
 }
 
-fn json_string_ranges(line: &[u8]) -> Option<Vec<Range<usize>>> {
-    if serde_json::from_slice::<serde_json::Value>(line).is_err() {
-        return None;
-    }
-    let mut ranges = Vec::new();
-    let mut in_string = false;
-    let mut start = 0;
-    let mut slashes = 0;
-    for (i, &byte) in line.iter().enumerate() {
-        if !in_string {
-            if byte == b'"' {
-                in_string = true;
-                start = i + 1;
-                slashes = 0;
-            }
-        } else if byte == b'\\' {
-            slashes += 1;
-        } else if byte == b'"' {
-            if slashes % 2 == 0 {
-                ranges.push(start..i);
-                in_string = false;
-            }
-            slashes = 0;
-        } else {
-            slashes = 0;
-        }
-    }
-    Some(ranges)
-}
-
-/// Stateful filter for JSONL provider streams.
-///
-/// Preserves JSON frame structure by constraining credential redactions to
-/// string value contents, preventing masking runs from destroying delimiters
-/// or trailing structural frames. Non-JSON lines and lines exceeding
-/// `FRAME_LIMIT` fall back to the standard redactor.
-pub struct JsonlRedactor {
-    secrets: Vec<Vec<u8>>,
-    buffer: Vec<u8>,
-    oversized: bool,
-    inner: Redactor,
-    has_redaction: bool,
-}
-
-impl JsonlRedactor {
-    pub fn new(secrets: impl IntoIterator<Item = Vec<u8>>) -> Result<Self, RedactorError> {
-        let secrets: Vec<Vec<u8>> = secrets.into_iter().collect();
-        let inner = Redactor::new(secrets.clone())?;
-        Ok(Self {
-            secrets,
-            buffer: Vec::new(),
-            oversized: false,
-            inner,
-            has_redaction: false,
-        })
-    }
-
-    pub fn has_redaction(&self) -> bool {
-        self.has_redaction || self.inner.has_redaction()
-    }
-
-    fn finish_inner(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
-        self.inner.finish(sink)?;
-        self.has_redaction |= self.inner.has_redaction();
-        self.inner = Redactor::new(self.secrets.clone()).map_err(|_| FilterError)?;
-        Ok(())
-    }
-
-    fn filter_single_line(
-        &mut self,
-        line: &[u8],
-        sink: &mut dyn FnMut(&[u8]),
-    ) -> Result<(), FilterError> {
-        if let Some(ranges) = json_string_ranges(line) {
-            let mut redactor = Redactor::new(self.secrets.clone()).map_err(|_| FilterError)?;
-            redactor.filter_json_frame_constrained(line, &ranges, sink)?;
-            self.has_redaction |= redactor.has_redaction();
-        } else {
-            self.inner.filter(line, sink)?;
-            self.finish_inner(sink)?;
-        }
-        Ok(())
-    }
-}
-
-impl CaptureFilter for JsonlRedactor {
-    fn filter(&mut self, bytes: &[u8], sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
-        if bytes.len() > FRAME_LIMIT {
-            return Err(FilterError);
-        }
-        let mut remaining = bytes;
-        while !remaining.is_empty() {
-            if self.oversized {
-                let count = remaining
-                    .iter()
-                    .position(|&b| b == b'\n')
-                    .map_or(remaining.len(), |i| i + 1);
-                self.inner.filter(&remaining[..count], sink)?;
-                if remaining[count - 1] == b'\n' {
-                    self.finish_inner(sink)?;
-                    self.oversized = false;
-                }
-                remaining = &remaining[count..];
-                continue;
-            }
-            let count = remaining
-                .iter()
-                .position(|&b| b == b'\n')
-                .map_or(remaining.len(), |i| i + 1);
-            let room = FRAME_LIMIT - self.buffer.len();
-            if count > room {
-                self.buffer.extend_from_slice(&remaining[..room]);
-                let buffered = std::mem::take(&mut self.buffer);
-                self.inner.filter(&buffered, sink)?;
-                self.oversized = true;
-                remaining = &remaining[room..];
-            } else {
-                self.buffer.extend_from_slice(&remaining[..count]);
-                remaining = &remaining[count..];
-                if self.buffer.last() == Some(&b'\n') {
-                    let line = std::mem::take(&mut self.buffer);
-                    self.filter_single_line(&line, sink)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn finish(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
-        if !self.buffer.is_empty() {
-            let line = std::mem::take(&mut self.buffer);
-            self.filter_single_line(&line, sink)?;
-        }
-        self.finish_inner(sink)
-    }
-}
+mod jsonl;
+pub use jsonl::JsonlRedactor;
 
 #[cfg(test)]
 mod tests {
