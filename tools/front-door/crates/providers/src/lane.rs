@@ -983,6 +983,9 @@ impl LaneRuntime<'_> {
         let mut fabric_reads = vec![
             exact(self.state.join("config.toml")),
             exact(self.state.join("host-id")),
+            // Host port overrides define lane worktree roots, which the
+            // repository include check reads.
+            exact(self.state.join("ports.json")),
             subtree(self.state.join("projects")),
         ];
         for name in [
