@@ -2937,7 +2937,7 @@ impl crate::RunStore {
         self.queue_reconcile_mode(attempt, call, spawn, false)
     }
 
-    fn queue_reconcile_mode(
+    pub(super) fn queue_reconcile_mode(
         &self,
         attempt: provenant_core::AttemptId,
         call: &crate::Request<'_>,

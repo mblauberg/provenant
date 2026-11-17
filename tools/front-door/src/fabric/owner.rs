@@ -3546,6 +3546,13 @@ impl BoundGraphOwner<'_> {
                 provenant_records::run::AttemptState::Queued { .. }
             )
         {
+            // Persist the never-started state and receipt before the first
+            // relaunch can report contention against this admitted attempt.
+            if replay.stored_ref.is_none() {
+                return Ok(AttemptObservation::Queued {
+                    attempt_ref: reference,
+                });
+            }
             // A deferred child or delayed worker can be queued after the
             // graph has already retained its reference. Observation must
             // relaunch that same admitted attempt rather than leave it
@@ -3833,6 +3840,9 @@ impl BoundGraphOwner<'_> {
                     settlement_reason: attempt.settlement_reason,
                 })
             }
+            AttemptState::Queued { .. } => Ok(AttemptObservation::Queued {
+                attempt_ref: reference,
+            }),
             _ => Ok(AttemptObservation::Pending {
                 attempt_ref: reference,
             }),

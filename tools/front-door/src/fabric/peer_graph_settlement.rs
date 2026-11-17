@@ -122,7 +122,8 @@ fn graph_review_launch_submits_pinned_source_and_base() -> Result<(), Box<dyn st
         assert_eq!(request.task.base.as_deref(), Some(expected_base.as_str()));
         assert_eq!(request.task.head.as_deref(), Some(head.as_str()));
         let reference = match observation {
-            graph::AttemptObservation::Pending { attempt_ref }
+            graph::AttemptObservation::Queued { attempt_ref }
+            | graph::AttemptObservation::Pending { attempt_ref }
             | graph::AttemptObservation::Unknown { attempt_ref }
             | graph::AttemptObservation::Terminal { attempt_ref, .. } => {
                 attempt_ref.ok_or("missing attempt reference")?
@@ -384,7 +385,8 @@ fn pinned_review_range_survives_moved_ref_and_another_checkout()
         )
         .map_err(|error| format!("first launch: {error:?}"))?;
     let reference = match first {
-        graph::AttemptObservation::Pending { attempt_ref }
+        graph::AttemptObservation::Queued { attempt_ref }
+        | graph::AttemptObservation::Pending { attempt_ref }
         | graph::AttemptObservation::Unknown { attempt_ref }
         | graph::AttemptObservation::Terminal { attempt_ref, .. } => {
             attempt_ref.ok_or("attempt reference")?
@@ -410,7 +412,8 @@ fn pinned_review_range_survives_moved_ref_and_another_checkout()
         )
         .map_err(|error| format!("operation replay: {error:?}"))?;
     let replayed = match reattached {
-        graph::AttemptObservation::Pending { attempt_ref }
+        graph::AttemptObservation::Queued { attempt_ref }
+        | graph::AttemptObservation::Pending { attempt_ref }
         | graph::AttemptObservation::Unknown { attempt_ref }
         | graph::AttemptObservation::Terminal { attempt_ref, .. } => {
             attempt_ref.ok_or("replay reference")?

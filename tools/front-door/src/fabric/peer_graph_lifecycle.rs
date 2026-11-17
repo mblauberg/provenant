@@ -874,7 +874,8 @@ fn accepted_attempt_observes_stable_host_after_alias_is_renamed()
         )
     })?;
     let reference = match first {
-        graph::AttemptObservation::Pending { attempt_ref }
+        graph::AttemptObservation::Queued { attempt_ref }
+        | graph::AttemptObservation::Pending { attempt_ref }
         | graph::AttemptObservation::Unknown { attempt_ref }
         | graph::AttemptObservation::Terminal { attempt_ref, .. } => {
             attempt_ref.ok_or("missing reference")?
@@ -905,7 +906,8 @@ fn accepted_attempt_observes_stable_host_after_alias_is_renamed()
         },
     )?;
     let replayed = match replayed {
-        graph::AttemptObservation::Pending { attempt_ref }
+        graph::AttemptObservation::Queued { attempt_ref }
+        | graph::AttemptObservation::Pending { attempt_ref }
         | graph::AttemptObservation::Unknown { attempt_ref }
         | graph::AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref,
     };

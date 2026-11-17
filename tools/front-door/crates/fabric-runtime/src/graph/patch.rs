@@ -865,15 +865,20 @@ fn exhausted_repository_lock(progress: &NodeProgress) -> bool {
         && progress.advance_owner_code.as_deref() == Some("repository_lock_busy")
         && progress.launch_retry.is_none()
         && progress.last_launch_retry.is_some()
-        && progress
-            .attempts
-            .iter()
-            .any(|attempt| attempt.state == AttemptState::Starting && attempt.attempt_ref.is_some())
+        && progress.attempts.iter().any(|attempt| {
+            attempt.state == AttemptState::Starting
+                && !attempt.launched
+                && attempt.attempt_ref.is_some()
+        })
         && progress
             .attempts
             .iter()
             .filter(|attempt| attempt.state != AttemptState::Terminal)
-            .all(|attempt| attempt.state == AttemptState::Starting && attempt.attempt_ref.is_some())
+            .all(|attempt| {
+                attempt.state == AttemptState::Starting
+                    && !attempt.launched
+                    && attempt.attempt_ref.is_some()
+            })
 }
 
 fn refused_before_launch(progress: &NodeProgress) -> bool {

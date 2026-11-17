@@ -3100,7 +3100,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 // Persist its reference before any later owner query can fail;
                 // leave the intent pending until the full observation saves.
                 let observed_reference = match &observation {
-                    AttemptObservation::Pending { attempt_ref }
+                    AttemptObservation::Queued { attempt_ref }
+                    | AttemptObservation::Pending { attempt_ref }
                     | AttemptObservation::Unknown { attempt_ref }
                     | AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref.clone(),
                 };
@@ -3115,7 +3116,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let warnings = owner.take_launch_warnings();
                 transitions::apply_launch_metadata(&mut checkpoint, node_index, warnings);
                 let applied_route = match &observation {
-                    AttemptObservation::Pending { attempt_ref }
+                    AttemptObservation::Queued { attempt_ref }
+                    | AttemptObservation::Pending { attempt_ref }
                     | AttemptObservation::Unknown { attempt_ref }
                     | AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref
                         .as_ref()

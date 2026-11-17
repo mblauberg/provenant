@@ -16,6 +16,8 @@ pub(super) use super::next_attempt::{
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AttemptObservation {
+    /// The admitted attempt has no live process or custody; it is safe to requeue.
+    Queued { attempt_ref: Option<String> },
     /// The same idempotency key has an accepted, nonterminal run.
     Pending { attempt_ref: Option<String> },
     /// Evidence is incomplete. Keep the attempt unresolved and observe the same

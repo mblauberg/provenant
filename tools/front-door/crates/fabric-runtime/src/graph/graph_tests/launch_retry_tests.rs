@@ -402,7 +402,7 @@ fn cancellation_during_repository_lock_backoff_does_not_relaunch() {
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
         errors: [(2, repository_lock_busy())].into(),
-        observations: VecDeque::from([AttemptObservation::Pending {
+        observations: VecDeque::from([AttemptObservation::Queued {
             attempt_ref: Some("host/queued".into()),
         }]),
         cancelled_attempt_settled: true,
@@ -857,8 +857,6 @@ fn a_saved_attempt_reference_keeps_its_deadline_without_retrying_other_errors() 
 // Spec: docs/specs/run-launch.md#admission-and-custody
 #[test]
 fn late_repository_lock_contention_retries_the_stored_attempt_with_its_original_deadline() {
-    use crate::coordination::facade::FacadeError;
-
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
@@ -866,7 +864,7 @@ fn late_repository_lock_contention_retries_the_stored_attempt_with_its_original_
         launch_deadline: Some(at(60)),
         errors: [(2, repository_lock_busy())].into(),
         observations: VecDeque::from([
-            AttemptObservation::Pending {
+            AttemptObservation::Queued {
                 attempt_ref: Some("host/queued".into()),
             },
             terminal(AttemptOutcome::Succeeded),
@@ -911,8 +909,6 @@ fn late_repository_lock_contention_retries_the_stored_attempt_with_its_original_
 // Spec: docs/specs/run-launch.md#admission-and-custody
 #[test]
 fn late_repository_lock_contention_exhausts_the_original_budget_with_reference_intact() {
-    use crate::coordination::facade::FacadeError;
-
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
@@ -920,7 +916,7 @@ fn late_repository_lock_contention_exhausts_the_original_budget_with_reference_i
         admission_seconds: Some(60),
         launch_deadline: Some(at(60)),
         errors: [(2, repository_lock_busy())].into(),
-        observations: VecDeque::from([AttemptObservation::Pending {
+        observations: VecDeque::from([AttemptObservation::Queued {
             attempt_ref: Some("host/queued".into()),
         }]),
         ..Default::default()
@@ -972,7 +968,7 @@ fn retry_after_repository_lock_exhaustion_releases_the_queued_attempt_and_relaun
         admission_seconds: Some(60),
         launch_deadline: Some(at(60)),
         errors: [(2, repository_lock_busy())].into(),
-        observations: VecDeque::from([AttemptObservation::Pending {
+        observations: VecDeque::from([AttemptObservation::Queued {
             attempt_ref: Some("host/queued".into()),
         }]),
         ..Default::default()
@@ -985,6 +981,8 @@ fn retry_after_repository_lock_exhaustion_releases_the_queued_attempt_and_relaun
         .attempt_ref
         .clone();
     assert_eq!(queued.as_deref(), Some("host/queued"));
+    assert_eq!(exhausted.checkpoint.nodes[0].attempts[0].state, AttemptState::Starting);
+    assert!(!exhausted.checkpoint.nodes[0].attempts[0].launched);
 
     let mut checkpoint = exhausted.checkpoint.clone();
     patch::retry_node(
@@ -1025,6 +1023,51 @@ fn retry_after_repository_lock_exhaustion_releases_the_queued_attempt_and_relaun
     assert_ne!(attempt.attempt_ref.as_deref(), Some("host/queued"));
     assert_eq!(owner.calls.len(), 3);
     assert_eq!(owner.stored_refs.last().map(Option::as_deref), Some(None));
+}
+
+// Spec: docs/specs/run-launch.md#admission-and-custody
+#[test]
+fn retry_after_repository_lock_exhaustion_refuses_a_running_attempt() {
+    // Pending is the owner's evidence of an accepted live process, unlike Queued.
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        now_after_error: Some(at(60)),
+        admission_seconds: Some(60),
+        launch_deadline: Some(at(60)),
+        errors: [(2, repository_lock_busy())].into(),
+        observations: VecDeque::from([AttemptObservation::Pending {
+            attempt_ref: Some("host/live-process".into()),
+        }]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let running = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(running.checkpoint.nodes[0].attempts[0].state, AttemptState::Running);
+    assert!(running.checkpoint.nodes[0].attempts[0].launched);
+    owner.now = Some(at(59));
+    let exhausted = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(exhausted.checkpoint.nodes[0].state, NodeState::Blocked);
+    let mut checkpoint = exhausted.checkpoint.clone();
+    let result = patch::retry_node(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
+        "one",
+        None,
+        &patch::PatchContext {
+            library: &template::TemplateLibrary::bundled(),
+            resolvers: &Default::default(),
+            scan: &|_| Ok(()),
+            journal: None,
+            limits: &plans::generous(),
+            worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+        },
+    );
+    assert!(result.is_err(), "a live process must settle before retry");
+    assert_eq!(checkpoint, exhausted.checkpoint, "refusal must be atomic");
+    assert_eq!(owner.calls.len(), 2, "retry must not start a second process");
 }
 
 #[test]

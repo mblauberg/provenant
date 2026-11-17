@@ -11,7 +11,10 @@ pub(super) fn apply_pending_observation(
     reference: Option<String>,
 ) {
     attempt.state = AttemptState::Running;
-    attempt.attempt_ref = reference;
+    attempt.launched = true;
+    if let Some(reference) = reference {
+        attempt.attempt_ref = Some(reference);
+    }
     *state = NodeState::Running;
 }
 
@@ -22,7 +25,9 @@ pub(super) fn apply_unknown_observation(
     reference: Option<String>,
 ) {
     attempt.state = AttemptState::Unresolved;
-    attempt.attempt_ref = reference;
+    if let Some(reference) = reference {
+        attempt.attempt_ref = Some(reference);
+    }
     *state = NodeState::Running;
 }
 
@@ -288,6 +293,16 @@ pub(super) fn apply_attempt_observation(
             progress.advance_owner_code = None;
         }
         match observation {
+            AttemptObservation::Queued { attempt_ref } => {
+                progress.review_settlement = None;
+                attempt.state = AttemptState::Starting;
+                attempt.launched = false;
+                if let Some(reference) = attempt_ref {
+                    attempt.attempt_ref = Some(reference);
+                }
+                progress.state = NodeState::Running;
+                false
+            }
             AttemptObservation::Pending { attempt_ref } => {
                 progress.review_settlement = None;
                 apply_pending_observation(attempt, &mut progress.state, attempt_ref);
@@ -316,7 +331,9 @@ pub(super) fn apply_attempt_observation(
                 attempt.launched = launched;
                 attempt.stop = stop;
                 attempt.state = AttemptState::Terminal;
-                attempt.attempt_ref = attempt_ref;
+                if let Some(reference) = attempt_ref {
+                    attempt.attempt_ref = Some(reference);
+                }
                 // Provider success alone does not satisfy an explicit result contract.
                 let warned = result_warning.is_some();
                 let mut outputs = make_outputs_with_upstream(
