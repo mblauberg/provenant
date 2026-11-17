@@ -909,16 +909,34 @@ pub fn launch_resolvers_at_roots(
         Some(Ok(diff)) => ReviewDiffSelection::Captured(vec![diff]),
         Some(Err(_)) => ReviewDiffSelection::Incomplete(Vec::new()),
     };
-    launch_resolvers_at_roots_with_selection(roots, review, document, pinned_diff)
+    launch_resolvers_at_roots_with_selection(roots, cwd, review, document, pinned_diff)
+}
+
+/// The host review configuration with the checkout's own floors layered over
+/// it, from `[domains.routing.review.floors]` in `.provenant/config.toml`.
+fn with_repository_floors(
+    review: &provenant_routing::ReviewConfig,
+    checkout: &std::path::Path,
+) -> Result<provenant_routing::ReviewConfig, String> {
+    let floors = provenant_config::read_section::<
+        std::collections::BTreeMap<String, provenant_routing::ReviewFloor>,
+    >(checkout, provenant_config::repository_files::REVIEW_FLOORS_SECTION)
+    .map_err(|error| error.to_string())?;
+    match floors {
+        Some(floors) => review.with_project_floors(floors),
+        None => Ok(review.clone()),
+    }
 }
 
 fn launch_resolvers_at_roots_with_selection(
     roots: &provenant_core::Roots,
+    cwd: &std::path::Path,
     review: &provenant_routing::ReviewConfig,
     document: &provenant_fabric_runtime::graph::GraphDocument,
     pinned_diff: ReviewDiffSelection,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
     let exclude = document.exclude.clone();
+    let review = &with_repository_floors(review, cwd)?;
     launch_resolvers_with(review, document, pinned_diff, |slot, family| {
         crate::route::resolve_review_family(roots, &slot.tier, family, &exclude)
     })
@@ -937,7 +955,7 @@ fn launch_resolvers_for_relay(
     subjects: &[Option<provenant_fabric_runtime::graph::SourceBinding>],
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
     let pinned_diff = relay_review_diffs(cwd, checkpoint, subjects);
-    launch_resolvers_at_roots_with_selection(roots, review, document, pinned_diff)
+    launch_resolvers_at_roots_with_selection(roots, cwd, review, document, pinned_diff)
 }
 
 fn relay_child_review_subjects(
@@ -1179,13 +1197,11 @@ fn launch_resolvers_with(
         "terminal" => 3,
         _ => 0,
     };
+    // Only a floor the project declared `hard = true` refuses; every other
+    // class warns about a shortfall and names the missing lenses.
     for path in &paths {
-        let floors = selection_review.path_floors(std::slice::from_ref(path));
-        let protected = floors
-            .classes
-            .iter()
-            .any(|class| !matches!(class.as_str(), "routine" | "unknown"));
-        if !protected {
+        let floors = selection_review.hard_path_floors(std::slice::from_ref(path));
+        if floors.classes.is_empty() {
             continue;
         }
         hard_review_coverage = true;
@@ -3294,6 +3310,7 @@ mod panel_tests {
                 paths: vec!["docs/private/**".into()],
                 tier: "routine".into(),
                 lenses: vec!["tests".into()],
+                hard: false,
             },
         );
         let configured_floor_lenses = review
@@ -3302,13 +3319,6 @@ mod panel_tests {
             .flat_map(|floor| floor.lenses.iter().cloned())
             .collect::<std::collections::BTreeSet<_>>();
         assert!(configured_floor_lenses.contains("tests"));
-        // Protected paths resolve to the `crucial` shape; its reviewer total is
-        // the coverage minimum the floors must enforce.
-        let crucial_reviewers: usize = review.shapes[&review.select.by_risk["crucial"]]
-            .reviewers
-            .iter()
-            .map(|group| group.count)
-            .sum();
         let document = serde_json::from_value(json!({
             "schema_version": 1, "graph_id": "incomplete-review-context",
             "nodes": [{"id": "anchor", "access": "read_only", "prompt": "Review", "route": {"alias": "senior"}}],
@@ -3341,8 +3351,8 @@ mod panel_tests {
             assert_eq!(resolvers["review-synthesis"], vec!["true".to_owned()]);
             let floor: Value =
                 serde_json::from_str(&resolvers["review-coverage-floor"][0]).unwrap();
-            assert_eq!(floor["hard"], true);
-            assert!(!floor["required_lenses"].as_array().unwrap().is_empty());
+            assert_eq!(floor["hard"], false, "bundled floors never refuse");
+            assert!(floor["required_lenses"].as_array().unwrap().is_empty());
             assert!(
                 resolvers["review-advice-correctness-spec"][0]
                     .contains("configured unreadable-path floors were applied")
@@ -3367,53 +3377,50 @@ mod panel_tests {
         let quick_floor: Value = serde_json::from_str(&quick["review-coverage-floor"][0]).unwrap();
         assert_eq!(quick_floor["hard"], false);
 
-        let protected = launch_resolvers_with(
-            &review,
-            &document,
-            ReviewDiffSelection::Captured(vec![provenant_run::ReviewDiffContext {
-                paths: vec!["credentials/token.json".into()],
-                numstat: Some("1\t0\tcredentials/token.json\0".into()),
-                tree: Some("tools/front-door/Cargo.toml".into()),
-            }]),
-            |_, _| Ok("fixture".into()),
-        )
-        .unwrap();
-        let floor: Value = serde_json::from_str(&protected["review-coverage-floor"][0]).unwrap();
-        assert_eq!(floor["hard"], true);
-        assert_eq!(floor["minimum"], crucial_reviewers);
-        assert!(
-            floor["required_lenses"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|lens| lens == "security-privacy")
-        );
-
-        let mut mixed_review = review.clone();
-        mixed_review.floors.get_mut("unknown").unwrap().lenses = vec!["adversarial".into()];
-        let mixed_paths = launch_resolvers_with(
-            &mixed_review,
-            &document,
+        let boundary_diff = || {
             ReviewDiffSelection::Captured(vec![provenant_run::ReviewDiffContext {
                 paths: vec!["credentials/token.json".into(), "src/unmatched.rs".into()],
                 numstat: Some(
                     concat!("1\t0\tcredentials/token.json\0", "1\t0\tsrc/unmatched.rs\0").into(),
                 ),
                 tree: Some("tools/front-door/Cargo.toml".into()),
-            }]),
-            |_, _| Ok("fixture".into()),
-        )
-        .unwrap();
-        let floor: Value = serde_json::from_str(&mixed_paths["review-coverage-floor"][0]).unwrap();
-        assert_eq!(floor["hard"], true);
-        assert_eq!(floor["minimum"], crucial_reviewers);
-        assert!(
-            !floor["required_lenses"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|lens| lens == "adversarial")
+            }])
+        };
+        // A bundled boundary floor adds its lens, never deep, and never refuses.
+        let bundled =
+            launch_resolvers_with(&review, &document, boundary_diff(), |_, _| Ok("fixture".into()))
+                .unwrap();
+        let floor: Value = serde_json::from_str(&bundled["review-coverage-floor"][0]).unwrap();
+        assert_eq!(floor["hard"], false);
+        assert!(floor["required_lenses"].as_array().unwrap().is_empty());
+        assert!(bundled["review-panel"].iter().any(|lens| lens == "security-privacy"));
+        let deep_reviewers: usize = review.shapes["deep"].reviewers.iter().map(|g| g.count).sum();
+        assert!(floor["minimum"].as_u64().unwrap() < deep_reviewers as u64);
+
+        // Only a floor the project declares hard refuses, and only its own
+        // lenses are required: the unknown class's lens is not.
+        let mut project = review.clone();
+        project.floors.insert(
+            "project-boundary".into(),
+            provenant_routing::ReviewFloor {
+                paths: vec!["credentials/**".into()],
+                tier: "crucial".into(),
+                lenses: vec!["correctness-spec".into(), "adversarial".into()],
+                hard: true,
+            },
         );
+        project.floors.get_mut("unknown").unwrap().lenses = vec!["tests".into()];
+        let protected =
+            launch_resolvers_with(&project, &document, boundary_diff(), |_, _| Ok("fixture".into()))
+                .unwrap();
+        let floor: Value = serde_json::from_str(&protected["review-coverage-floor"][0]).unwrap();
+        assert_eq!(floor["hard"], true);
+        let required = floor["required_lenses"].as_array().unwrap();
+        assert!(required.iter().any(|lens| lens == "adversarial"));
+        assert!(!required.iter().any(|lens| lens == "tests"));
+        let hard_reviewers: usize =
+            project.shapes[&project.select.by_risk["crucial"]].reviewers.iter().map(|g| g.count).sum();
+        assert_eq!(floor["minimum"], hard_reviewers);
 
         let library = TemplateLibrary::bundled();
         let compiled = provenant_fabric_runtime::graph::template::Compiler {
@@ -3423,23 +3430,14 @@ mod panel_tests {
         .compile(&json!({"id":"protected-panel", "use":"review-panel", "min_ok":1}))
         .unwrap();
         let root = compiled.composite.as_ref().unwrap();
-        assert!(root.soft_review_coverage);
         assert!(root.hard_review_coverage);
-        assert!(
-            root.required_review_lenses
-                .contains(&"security-privacy".into())
-        );
+        assert!(root.required_review_lenses.contains(&"adversarial".into()));
         let shape = root.nodes[0].composite.as_ref().unwrap();
         let lenses = shape.nodes.iter().find(|node| node.id == "lenses").unwrap();
         let lens_floor = lenses.composite.as_ref().unwrap();
-        assert!(lens_floor.soft_review_coverage);
         assert!(lens_floor.hard_review_coverage);
-        assert_eq!(lens_floor.min_successful, Some(crucial_reviewers));
-        assert!(
-            lens_floor
-                .required_review_lenses
-                .contains(&"security-privacy".into())
-        );
+        assert_eq!(lens_floor.min_successful, Some(hard_reviewers));
+        assert!(lens_floor.required_review_lenses.contains(&"adversarial".into()));
 
         let docs_policy = launch_resolvers_with(
             &review,

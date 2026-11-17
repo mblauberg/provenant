@@ -1143,6 +1143,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("review.floors.{floor}.paths", "list"),
     FieldMetadata::enumeration("review.floors.{floor}.tier", &crate::review::FLOOR_TIERS),
     FieldMetadata::new("review.floors.{floor}.lenses", "list"),
+    FieldMetadata::new("review.floors.{floor}.hard", "bool"),
     FieldMetadata::new("review.shapes.{shape}.frame", "bool"),
     FieldMetadata::int("review.shapes.{shape}.verifiers", 0, 32),
     FieldMetadata::enumeration("review.shapes.{shape}.synthesis", &["model", "reduce"]),

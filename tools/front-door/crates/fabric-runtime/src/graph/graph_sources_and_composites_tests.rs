@@ -854,7 +854,6 @@ fn typed_composite_constructor_matches_decoded_graph_node() {
         CompositeSpec {
             min_successful: Some(1),
             reduce_verdict: true,
-            soft_review_coverage: false,
             hard_review_coverage: false,
             required_review_lenses: Vec::new(),
             nodes: Vec::new(),

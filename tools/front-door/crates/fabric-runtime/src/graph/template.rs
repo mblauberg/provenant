@@ -1871,6 +1871,7 @@ impl<'a> Compiler<'a> {
             "after",
             "depends_on",
             "after_settled",
+            "advisory",
             "inputs",
             "source",
             "read_roots",
@@ -1969,7 +1970,6 @@ impl<'a> Compiler<'a> {
             composite.insert("min_successful".into(), min_ok);
         }
         if let Some(floor) = coverage_floor {
-            composite.insert("soft_review_coverage".into(), Value::Bool(true));
             composite.insert("min_successful".into(), Value::from(floor.minimum));
             if floor.hard {
                 composite.insert("hard_review_coverage".into(), Value::Bool(true));
@@ -2055,6 +2055,7 @@ impl<'a> Compiler<'a> {
             "after",
             "depends_on",
             "after_settled",
+            "advisory",
             "inputs",
             "skip_without_findings",
             "on_fail",
@@ -2287,8 +2288,7 @@ impl<'a> Compiler<'a> {
             composite.insert("nodes".into(), Value::Array(children));
             composite.insert("exports".into(), Value::Array(exports));
             if let Some(floor) = review_coverage_floor {
-                composite.insert("soft_review_coverage".into(), Value::Bool(true));
-                composite.entry("min_successful").or_insert(Value::from(1));
+                    composite.entry("min_successful").or_insert(Value::from(1));
                 if floor.hard {
                     composite.insert("hard_review_coverage".into(), Value::Bool(true));
                     composite.insert(
@@ -2395,6 +2395,7 @@ impl<'a> Compiler<'a> {
             "after",
             "depends_on",
             "after_settled",
+            "advisory",
             "inputs",
             "when",
             "source",

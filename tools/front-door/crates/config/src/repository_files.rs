@@ -24,6 +24,11 @@ pub const SCRATCH: &str = ".provenant/scratch";
 pub const LAUNCH_POLICY_SECTION: &str = "launch_policy";
 pub const LAUNCH_POLICY_KEYS: &[&str] = &["confidential", "protected_paths"];
 pub const LAND_SECTION: &str = "domains.pr.land";
+/// Review floors a project declares for its own boundaries, in the shape of
+/// the host's `[domains.routing.review.floors]` table.
+pub const REVIEW_FLOORS_SECTION: &str = "domains.routing.review.floors";
+/// Sections their owners decode, so the launch-policy reader does not flag them.
+pub const DECODED_SECTIONS: &[&str] = &[LAND_SECTION, REVIEW_FLOORS_SECTION];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,7 +78,7 @@ pub const REPOSITORY_FILES: &[RepositoryFile] = &[
         Entry::File,
         Access::Read,
         Stability::Evolving,
-        "Repository settings: `[launch_policy]` and `[domains.pr.land]`.",
+        "Repository settings: `[launch_policy]`, `[domains.pr.land]` and `[domains.routing.review.floors]`.",
     ),
     file(
         crate::PORTS_CONFIG,

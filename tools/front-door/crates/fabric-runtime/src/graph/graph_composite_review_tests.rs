@@ -121,7 +121,7 @@ fn soft_nine_lens_panel_settles_and_names_its_stopped_lens() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "soft-nine-lens-review", "nodes": [{
             "id":"lenses", "kind":"composite", "access":"read_only",
-            "composite":{"min_successful":9,"reduce_verdict":true,"soft_review_coverage":true,
+            "composite":{"min_successful":9,"reduce_verdict":true,
                 "nodes":(0..9).map(|index| serde_json::json!({
                     "id":format!("lens-{}", index), "access":"read_only",
                     "review_lens":format!("lens-{}", index), "prompt":"review",
@@ -186,16 +186,16 @@ fn final_panel_settlement_keeps_missing_lens_names_through_synthesis() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "synthesis-missing-lens", "nodes": [
           {"id":"prior-panel", "kind":"composite", "access":"read_only",
-           "composite":{"min_successful":1,"reduce_verdict":true,"soft_review_coverage":true,
+           "composite":{"min_successful":1,"reduce_verdict":true,
              "nodes":[lens("lens-prior")],
              "exports":[{"node":"lens-prior","outputs":["result","findings","verdict"]}]}},
           {
             "id":"panel", "kind":"composite", "access":"read_only",
             "depends_on":["prior-panel"],
-            "composite":{"min_successful":1,"reduce_verdict":true,"soft_review_coverage":true,
+            "composite":{"min_successful":1,"reduce_verdict":true,
                 "nodes":[
                     {"id":"lenses","kind":"composite","access":"read_only",
-                     "composite":{"min_successful":1,"reduce_verdict":true,"soft_review_coverage":true,
+                     "composite":{"min_successful":1,"reduce_verdict":true,
                         "nodes":[lens("lens-correctness"),lens("lens-security")],
                         "exports":[
                             {"node":"lens-correctness","outputs":["result","findings","verdict"]},
@@ -259,7 +259,7 @@ fn protected_panel_hard_floor_requires_named_lens_even_when_count_is_met() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "protected-review-floor", "nodes": [{
             "id":"lenses", "kind":"composite", "access":"read_only",
-            "composite":{"min_successful":8,"reduce_verdict":true,"soft_review_coverage":true,
+            "composite":{"min_successful":8,"reduce_verdict":true,
                 "hard_review_coverage":true,"required_review_lenses":["security-privacy"],
                 "nodes":(0..9).map(|index| serde_json::json!({
                     "id":if index == 4 {"security-privacy".to_owned()} else {format!("lens-{index}")},

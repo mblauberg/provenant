@@ -33,10 +33,22 @@ struct ProjectConfig {
 struct ProjectDomains {
     #[serde(default)]
     pr: ProjectPrDomains,
+    #[serde(default)]
+    routing: ProjectRoutingDomains,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct ProjectPrDomains {}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct ProjectRoutingDomains {
+    #[serde(default)]
+    review: ProjectReview,
+}
+
+/// `floors` is decoded by the routing owner through [`read_section`].
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct ProjectReview {}
 
 fn decode_project_config(
     source: &str,
@@ -67,7 +79,7 @@ fn collect_unknown_toml_keys(
         } else {
             format!("{prefix}.{key}")
         };
-        if path == crate::repository_files::LAND_SECTION {
+        if crate::repository_files::DECODED_SECTIONS.contains(&path.as_str()) {
             continue;
         }
         let Some(accepted) = accepted.get(key) else {
@@ -94,7 +106,7 @@ fn collect_unknown_inline_toml_keys(
 ) {
     for (key, value) in table.iter() {
         let path = format!("{prefix}.{key}");
-        if path == crate::repository_files::LAND_SECTION {
+        if crate::repository_files::DECODED_SECTIONS.contains(&path.as_str()) {
             continue;
         }
         let Some(accepted) = accepted.get(key) else {
@@ -123,9 +135,17 @@ fn warn_project_config(warnings: &[provenant_records::InputWarning]) {
 }
 
 /// Read the landing declaration from the same project file as launch policy.
-/// Known type errors remain errors; unknown keys are diagnosed and ignored.
 pub fn read_land<T: serde::de::DeserializeOwned + Serialize>(
     checkout: &Path,
+) -> Result<Option<T>, ConfigError> {
+    read_section(checkout, crate::repository_files::LAND_SECTION)
+}
+
+/// Read one dotted section of the project file for its owner to decode.
+/// Known type errors remain errors; unknown keys are diagnosed and ignored.
+pub fn read_section<T: serde::de::DeserializeOwned + Serialize>(
+    checkout: &Path,
+    section: &str,
 ) -> Result<Option<T>, ConfigError> {
     let Some(text) = read_declaration(checkout)? else {
         return Ok(None);
@@ -134,40 +154,39 @@ pub fn read_land<T: serde::de::DeserializeOwned + Serialize>(
     let (_, mut warnings) = decode_project_config(&source, &text)?;
     let config: serde_json::Value =
         toml_edit::de::from_str(&text).map_err(|_| ConfigError::InvalidRepositoryPolicy)?;
-    let land = config
-        .pointer(&crate::repository_files::section_pointer(
-            crate::repository_files::LAND_SECTION,
-        ))
+    let value = config
+        .pointer(&crate::repository_files::section_pointer(section))
         .cloned();
-    let Some(land) = land else {
+    let Some(value) = value else {
         warn_project_config(&warnings);
         return Ok(None);
     };
-    let (land, land_warnings) = decode_land(&source, &land)?;
-    warnings.extend(land_warnings);
+    let (decoded, section_warnings) = decode_section(&source, section, &value)?;
+    warnings.extend(section_warnings);
     warn_project_config(&warnings);
-    Ok(Some(land))
+    Ok(Some(decoded))
 }
 
-fn decode_land<T: serde::de::DeserializeOwned + Serialize>(
+fn decode_section<T: serde::de::DeserializeOwned + Serialize>(
     source: &str,
+    section: &str,
     value: &serde_json::Value,
 ) -> Result<(T, Vec<provenant_records::InputWarning>), ConfigError> {
     let bytes = serde_json::to_vec(value).map_err(|_| ConfigError::InvalidRepositoryPolicy)?;
-    let (land, warnings) = provenant_records::decode_input(source, &bytes)
+    let (decoded, warnings) = provenant_records::decode_input(source, &bytes)
         .map_err(|_| ConfigError::InvalidRepositoryPolicy)?;
     let warnings = warnings
         .into_iter()
         .map(|mut warning| {
             warning.key = if warning.key.is_empty() {
-                crate::repository_files::LAND_SECTION.into()
+                section.into()
             } else {
-                format!("{}.{}", crate::repository_files::LAND_SECTION, warning.key)
+                format!("{section}.{}", warning.key)
             };
             warning
         })
         .collect();
-    Ok((land, warnings))
+    Ok((decoded, warnings))
 }
 
 fn read_declaration(checkout: &Path) -> Result<Option<String>, ConfigError> {

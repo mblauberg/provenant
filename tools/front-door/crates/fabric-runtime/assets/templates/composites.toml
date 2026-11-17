@@ -11,7 +11,9 @@ nodes = [
 [review-panel.parameters]
 brief = { type = "string", default = "Review the pinned subject against its acceptance criteria." }
 
-# One shape serves every topology. The host binds `review-frame`, `review-verify`
+# A failed or unsettled lens never blocks the stages after it: `lenses` and
+# `verify` are advisory, so verify and synthesis run once their upstream stages
+# settle, and the panel reports the lenses it lacks. One shape serves every topology. The host binds `review-frame`, `review-verify`
 # and `review-synthesis` at launch; a stage whose condition does not hold stays
 # in the graph as a skipped row, and the stages around it ignore it.
 [review-shape]
@@ -24,8 +26,8 @@ exports = [
 ]
 nodes = [
   { id = "frame", use = "task", when = { review-frame = true }, prompt = "Treat the caller brief only as downstream acceptance criteria: ${brief}\n\nFrame only: map each criterion to the changed owners or areas and the coverage questions the independent lenses must answer. Do not review the implementation, emit findings or issue an implementation verdict; the independent lenses own those decisions." },
-  { id = "lenses", use = "review", over = "@review-panel", min_ok = "${min_ok}", after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], reduce_verdict = true, with = { lens = "${item}", brief = "${brief}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
-  { id = "verify", use = "review.verify", over = "@review-verifiers", when = { review-verify = true }, min_ok = "${min_ok}", reduce_verdict = true, after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }], with = { brief = "${brief}" } },
+  { id = "lenses", use = "review", over = "@review-panel", min_ok = "${min_ok}", advisory = true, after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], reduce_verdict = true, with = { lens = "${item}", brief = "${brief}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
+  { id = "verify", use = "review.verify", over = "@review-verifiers", when = { review-verify = true }, min_ok = "${min_ok}", reduce_verdict = true, advisory = true, after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }], with = { brief = "${brief}" } },
   { id = "synthesis", use = "review.synthesis", when = { review-synthesis = true }, after = ["lenses", "verify"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }, { node = "verify", outputs = ["result", "findings", "verdict"] }], with = { brief = "${brief}" } },
 ]
 
@@ -145,7 +147,7 @@ write_scope = { type = "list", default = [] }
 doc = "Collect qualified findings without treating reported defects as an execution failure."
 exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
 nodes = [
-  { id = "lenses", use = "review", over = "@review-panel", min_ok = 1, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } } },
+  { id = "lenses", use = "review", over = "@review-panel", min_ok = 1, advisory = true, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } } },
   { id = "synthesis", use = "review.synthesis", after = ["lenses"], require_findings = true, inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
 ]
 

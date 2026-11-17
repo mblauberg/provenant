@@ -14,13 +14,9 @@ pub struct CompositeSpec {
     /// Reduce successful exporting members' verdicts using the worst outcome.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reduce_verdict: bool,
-    /// Treat this review panel's coverage floor as advisory unless the host
-    /// marks its pinned path floor hard.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub soft_review_coverage: bool,
-    /// Enforce review coverage floors supplied by the pinned launch context.
-    /// Review composites without this flag settle with partial coverage and
-    /// report unavailable members; other composites retain their configured
+    /// Enforce review coverage floors that a project declared hard. Review
+    /// composites without this flag settle with partial coverage, warn and name
+    /// the unavailable lenses; other composites retain their configured
     /// `min_successful` behaviour.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hard_review_coverage: bool,
@@ -498,7 +494,6 @@ fn children(
             node.composite = Some(CompositeSpec {
                 min_successful: spec.min_successful,
                 reduce_verdict: spec.reduce_verdict,
-                soft_review_coverage: spec.soft_review_coverage,
                 hard_review_coverage: spec.hard_review_coverage,
                 required_review_lenses: spec.required_review_lenses,
                 nodes: Vec::new(),
@@ -560,7 +555,7 @@ fn outputs(
     let mut truncation_warning_indices = Vec::new();
     let partial = spec.min_successful.is_some() || spec.reduce_verdict;
     let unavailable = unavailable(spec, plan, checkpoint, positions);
-    let missing_review_lenses = if spec.soft_review_coverage {
+    let missing_review_lenses = if review::composite_review(spec, plan, positions) {
         missing_review_lenses(boundary, plan, checkpoint, positions)
     } else {
         Vec::new()
@@ -1137,9 +1132,7 @@ fn hard_coverage(
     plan: &PlannedGraph,
     positions: &BTreeMap<String, usize>,
 ) -> bool {
-    !spec.soft_review_coverage
-        || !review::composite_review(spec, plan, positions)
-        || spec.hard_review_coverage
+    !review::composite_review(spec, plan, positions) || spec.hard_review_coverage
 }
 
 pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
@@ -1235,7 +1228,7 @@ fn reconcile_progress(
                         review::mark_partial(&mut value.0);
                     }
                     if let Some(reason) = &shortfall
-                        && spec.soft_review_coverage
+                        && review::composite_review(spec, plan, positions)
                         && value.0.warnings.len() < MAX_WARNINGS
                     {
                         value.0.warnings.push(bounded(
@@ -1402,7 +1395,7 @@ pub(super) fn validate_progress(
         .map(|spec| outputs(positions[&node.id], spec, plan, checkpoint, positions));
     if shortfall.is_some()
         && let Some(spec) = node.composite.as_ref()
-        && spec.soft_review_coverage
+        && review::composite_review(spec, plan, positions)
         && let Some(Ok((output, _))) = &mut export
     {
         let reason = coverage_shortfall(positions[&node.id], spec, plan, checkpoint, positions);

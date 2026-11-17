@@ -36,6 +36,9 @@ pub struct ReviewFloor {
     pub paths: Vec<String>,
     pub tier: String,
     pub lenses: Vec<String>,
+    /// A shortfall against this floor refuses the panel instead of warning.
+    /// Only a project's own floor sets it; the bundled defaults declare none.
+    pub hard: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -724,6 +727,41 @@ impl ReviewConfig {
     /// The configured minimum coverage for each changed path. Routine applies
     /// only when no other class matches; unmatched paths use unknown.
     pub fn path_floors(&self, paths: &[String]) -> AppliedFloors {
+        self.floors_matching(paths, false)
+    }
+
+    /// Layer a project's own floors over this configuration. A project floor
+    /// replaces a floor of the same name; the project is the only layer that
+    /// may declare `hard = true`.
+    pub fn with_project_floors(
+        &self,
+        floors: BTreeMap<String, ReviewFloor>,
+    ) -> Result<Self, String> {
+        let mut layered = self.clone();
+        for (name, floor) in floors {
+            if !identifier(&name) {
+                return Err(format!("review floor name {name:?} is not an identifier"));
+            }
+            if !FLOOR_TIERS.contains(&floor.tier.as_str()) {
+                return Err(format!(
+                    "review floor {name}: tier must be one of {FLOOR_TIERS:?}"
+                ));
+            }
+            if floor.lenses.iter().any(|lens| !identifier(lens)) {
+                return Err(format!("review floor {name}: invalid lens name"));
+            }
+            layered.floors.insert(name, floor);
+        }
+        Ok(layered)
+    }
+
+    /// The floors a project declared `hard = true`, applied to one path set.
+    /// Only these refuse a panel that falls short of them.
+    pub fn hard_path_floors(&self, paths: &[String]) -> AppliedFloors {
+        self.floors_matching(paths, true)
+    }
+
+    fn floors_matching(&self, paths: &[String], only_hard: bool) -> AppliedFloors {
         fn rank(tier: &str) -> usize {
             FLOOR_TIERS
                 .iter()
@@ -743,6 +781,7 @@ impl ReviewConfig {
             let mut matched = false;
             for (name, floor) in &self.floors {
                 if name == "unknown"
+                    || (only_hard && !floor.hard)
                     || !floor
                         .paths
                         .iter()
@@ -769,7 +808,10 @@ impl ReviewConfig {
                     }
                 }
             }
-            if !matched && let Some(floor) = self.floors.get("unknown") {
+            if !matched
+                && !only_hard
+                && let Some(floor) = self.floors.get("unknown")
+            {
                 if !result.classes.iter().any(|name| name == "unknown") {
                     result.classes.push("unknown".into());
                 }
@@ -1632,6 +1674,78 @@ mod tests {
         assert_eq!(panel.shape, "deep");
     }
 
+    /// The floor names this repository declares in its own project routing
+    /// configuration.
+    fn project_floor_names() -> Vec<String> {
+        let document: toml_edit::DocumentMut = include_str!("../../../../../.provenant/config.toml")
+            .parse()
+            .unwrap();
+        document["domains"]["routing"]["review"]["floors"]
+            .as_table()
+            .unwrap()
+            .iter()
+            .map(|(name, _)| name.to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn bundled_floors_are_repo_neutral_and_never_refuse_or_select_deep() {
+        let review = ReviewConfig::default();
+        let names = project_floor_names();
+        assert!(!names.is_empty());
+        let prefixes: std::collections::BTreeSet<_> = names
+            .iter()
+            .filter_map(|name| name.split_once('_').map(|(prefix, _)| prefix))
+            .collect();
+        assert!(!prefixes.is_empty(), "{names:?}");
+        for (name, floor) in &review.floors {
+            assert!(
+                prefixes.iter().all(|prefix| !name.starts_with(prefix)),
+                "bundled floor {name} carries a project prefix"
+            );
+            assert!(!floor.hard, "bundled floor {name} declares hard");
+            assert!(
+                !matches!(floor.tier.as_str(), "crucial" | "terminal"),
+                "bundled floor {name} selects deep"
+            );
+        }
+    }
+
+    #[test]
+    fn project_floors_layer_over_bundled_and_may_declare_hard() {
+        let review = ReviewConfig::default();
+        #[derive(Deserialize)]
+        struct File {
+            domains: Domains,
+        }
+        #[derive(Deserialize)]
+        struct Domains {
+            routing: Routing,
+        }
+        #[derive(Deserialize)]
+        struct Routing {
+            review: Floors,
+        }
+        #[derive(Deserialize)]
+        struct Floors {
+            floors: BTreeMap<String, ReviewFloor>,
+        }
+        let file: File =
+            toml_edit::de::from_str(include_str!("../../../../../.provenant/config.toml")).unwrap();
+        let floors = file.domains.routing.review.floors;
+        let layered = review.with_project_floors(floors.clone()).unwrap();
+        for (name, floor) in &floors {
+            assert_eq!(layered.floors[name].paths, floor.paths);
+        }
+        let path = floors.values().flat_map(|floor| floor.paths.first()).next().unwrap();
+        let hard = layered.hard_path_floors(std::slice::from_ref(path));
+        assert!(!hard.classes.is_empty());
+        assert!(review.hard_path_floors(std::slice::from_ref(path)).classes.is_empty());
+        let mut invalid = floors;
+        invalid.values_mut().next().unwrap().tier = "bogus".into();
+        assert!(review.with_project_floors(invalid).is_err());
+    }
+
     #[test]
     fn protected_floors_raise_shapes_and_extend_caller_lists() {
         let review = ReviewConfig::default();
@@ -1657,51 +1771,6 @@ mod tests {
                 "external_effects",
             ),
             (".github/CODEOWNERS", "authority"),
-            (
-                "tools/front-door/crates/cli/src/run/provider/gh_auth.rs",
-                "provenant_credentials",
-            ),
-            (
-                "tools/front-door/crates/run/src/delivery.rs",
-                "provenant_credentials",
-            ),
-            (
-                "tools/front-door/crates/confinement/src/utility.rs",
-                "provenant_lane_git",
-            ),
-            ("tools/front-door/src/pr/git.rs", "provenant_lane_git"),
-            (
-                "tools/front-door/src/pr/landing/gate.rs",
-                "provenant_authority",
-            ),
-            (
-                "tools/front-door/crates/confinement/src/worktrees/refs.rs",
-                "provenant_lane_git",
-            ),
-            (
-                "tools/front-door/crates/confinement/src/run_config.rs",
-                "provenant_lane_git",
-            ),
-            (
-                "tools/front-door/crates/confinement/src/permissions/grants.rs",
-                "provenant_lane_git",
-            ),
-            (
-                "tools/front-door/crates/run/src/objects/view.rs",
-                "provenant_object_integrity",
-            ),
-            (
-                "tools/front-door/src/pr/landing/publish.rs",
-                "provenant_authority",
-            ),
-            (
-                "tools/front-door/crates/fabric-runtime/src/handoff/session.rs",
-                "provenant_authority",
-            ),
-            (
-                "tools/front-door/src/bin/package-release.rs",
-                "provenant_release",
-            ),
             ("src/config/parser.rs", "contract"),
             ("src/cli/run.rs", "contract"),
         ] {
@@ -1735,19 +1804,11 @@ mod tests {
         }
         let paths = vec!["src/credentials/store.rs".into()];
         let panel = review.resolve_panel(&request, None, &paths, false).unwrap();
-        assert_eq!(panel.shape, "deep");
+        assert_eq!(panel.shape, "standard", "bundled floors never select deep");
         let names: Vec<_> = panel.slots.iter().map(|slot| slot.lens.as_str()).collect();
         assert!(names.contains(&"tests"));
         assert!(names.contains(&"security-privacy"));
         assert!(names.contains(&"correctness-spec"));
-        // Floors raise the shape to the one `crucial` resolves to; the panel
-        // holds at least that shape's reviewer slots, plus floor lenses.
-        let crucial_reviewers: usize = review.shapes[&review.select.by_risk["crucial"]]
-            .reviewers
-            .iter()
-            .map(|group| group.count)
-            .sum();
-        assert!(names.len() >= crucial_reviewers, "{names:?}");
         assert!(
             review
                 .path_floors(&paths)
@@ -1794,6 +1855,7 @@ mod tests {
                 paths: vec!["docs/private.md".into()],
                 tier: "terminal".into(),
                 lenses: vec!["adversarial".into()],
+                hard: false,
             },
         );
         let request = ReviewRequest {
