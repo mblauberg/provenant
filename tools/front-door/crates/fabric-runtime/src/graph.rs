@@ -1127,6 +1127,91 @@ pub fn resume_with_budget<R: AttemptOwner, J: GraphJournal>(
     )
 }
 
+/// Validate extensions against the document and checkpoint before committing a resume or retry.
+pub fn validate_resume_extensions(
+    document: &GraphDocument,
+    checkpoint: &GraphCheckpoint,
+    extensions: &[String],
+    limits: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+) -> Result<(), String> {
+    let unbounded = crate::config::GraphLimits {
+        nodes: usize::MAX,
+        edges: usize::MAX,
+        routes_per_node: u16::MAX as usize,
+        node_prompt_bytes: usize::MAX,
+        graph_prompt_bytes: usize::MAX,
+        fan_out_width: usize::MAX,
+        expansion_depth: usize::MAX,
+        ..limits.clone()
+    };
+    let expanded = plans::expand(
+        document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &unbounded,
+    )
+    .map_err(|reason| reason.to_string())?;
+    let (plan, _) =
+        validate_flat_plan(&expanded, &unbounded).map_err(|reason| reason.to_string())?;
+
+    if extensions
+        .iter()
+        .any(|e| !checkpoint.extensions.contains(e))
+    {
+        let mut all = checkpoint.extensions.clone();
+        all.extend(
+            extensions
+                .iter()
+                .filter(|e| !checkpoint.extensions.contains(e))
+                .cloned(),
+        );
+        if let Some(reason) = graph_envelope_reason(document, &checkpoint.expansions, &all, &plan) {
+            return Err(reason);
+        }
+    }
+    let mut effective_budget = budget.clone();
+    for (extension, replay) in
+        checkpoint
+            .extensions
+            .iter()
+            .map(|e| (e, true))
+            .chain(extensions.iter().map(|e| {
+                (
+                    e,
+                    e.starts_with("limits.") && checkpoint.extensions.contains(e),
+                )
+            }))
+    {
+        if extension.starts_with("loop.") {
+            loops::validate_extension(document, extension, &unbounded)?;
+        } else if extension.starts_with("limits.") {
+            if !replay {
+                return Err(format!(
+                    "{extension}: graph limits are configured by the host"
+                ));
+            }
+        } else {
+            apply_extension(&mut effective_budget, extension, replay)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    let mut resume_view = checkpoint.clone();
+    restore_cancelled_nodes(&mut resume_view)
+        .map_err(|(_node, invariant)| invariant.to_string())?;
+    if extensions.iter().any(|e| e.starts_with("loop.")) {
+        let mut prospective = resume_view.clone();
+        for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
+            loops::validate_resume_extension(document, &resume_view, extension, &unbounded)?;
+            loops::validate_resume_extension(document, &prospective, extension, &unbounded)?;
+            if !prospective.extensions.contains(extension) {
+                prospective.extensions.push(extension.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Revert cancellation-only state changes without altering attempt records.
 fn restore_cancelled_nodes(checkpoint: &mut GraphCheckpoint) -> Result<(), (String, &'static str)> {
     let saved_wake = checkpoint.wake_at;

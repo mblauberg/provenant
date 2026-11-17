@@ -207,19 +207,36 @@ pub struct PatchError {
     pub admission: Option<AdmissionError>,
     /// The supplied parameter a template refused, when compilation failed on one.
     pub parameter: Option<Box<ParameterRefusal>>,
+    pub field: Option<String>,
+    pub rule: Option<String>,
 }
 
 impl PatchError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
             cause: None,
             admission: None,
             parameter: None,
+            field: None,
+            rule: None,
         }
     }
-    fn invalid(message: impl Into<String>) -> Self {
+    pub fn secret(field: impl Into<String>, rule: impl Into<String>) -> Self {
+        let field = field.into();
+        let rule = rule.into();
+        Self {
+            code: "secret",
+            message: format!("the {field} contains a credential-shaped value (rule {rule})"),
+            cause: None,
+            admission: None,
+            parameter: None,
+            field: Some(field),
+            rule: Some(rule),
+        }
+    }
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self::new("invalid", message)
     }
 }
@@ -1119,27 +1136,67 @@ pub(super) struct Admission {
     pub warnings: Vec<String>,
 }
 
+fn safe_field_path(path: &str) -> String {
+    let clean = if let Some(suffix) = path.strip_prefix("replace[") {
+        if let Some((_, field)) = suffix.split_once("].") {
+            field
+        } else {
+            path
+        }
+    } else {
+        path
+    };
+    clean.to_string()
+}
+
 fn scan(patch: &Patch, context: &PatchContext<'_>) -> Result<(), PatchError> {
-    fn strings(value: &Value, context: &PatchContext<'_>) -> Result<(), PatchError> {
+    fn scan_fields(
+        path: &str,
+        value: &Value,
+        context: &PatchContext<'_>,
+    ) -> Result<(), PatchError> {
         match value {
             Value::String(text) => {
-                (context.scan)(text).map_err(|reason| PatchError::new("secret", reason))
+                if (context.scan)(text).is_err() {
+                    let field = safe_field_path(path);
+                    return Err(PatchError::secret(field, "secret"));
+                }
+                Ok(())
             }
-            Value::Array(values) => values.iter().try_for_each(|value| strings(value, context)),
-            Value::Object(values) => values
-                .values()
-                .try_for_each(|value| strings(value, context)),
+            Value::Array(values) => {
+                for (i, val) in values.iter().enumerate() {
+                    let field_path = if path.is_empty() {
+                        format!("[{i}]")
+                    } else {
+                        format!("{path}[{i}]")
+                    };
+                    scan_fields(&field_path, val, context)?;
+                }
+                Ok(())
+            }
+            Value::Object(map) => {
+                for (key, val) in map {
+                    let field_path = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    scan_fields(&field_path, val, context)?;
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
     let value =
         serde_json::to_value(patch).map_err(|error| PatchError::invalid(error.to_string()))?;
-    let text =
-        serde_json::to_string(&value).map_err(|error| PatchError::invalid(error.to_string()))?;
-    (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))?;
     // JSON escaping can hide a credential in a prompt. Scan each original
     // string too, before admission can publish the candidate checkpoint.
-    strings(&value, context)
+    scan_fields("", &value, context)?;
+    let text =
+        serde_json::to_string(&value).map_err(|error| PatchError::invalid(error.to_string()))?;
+    (context.scan)(&text).map_err(|_| PatchError::secret("patch", "secret"))?;
+    Ok(())
 }
 
 /// Compile and check a patch against the current expansion without changing
@@ -1490,26 +1547,18 @@ pub(super) fn prepare(
         .map_err(|reason| classify(reason.to_string()))?;
     validate_output_kinds(&preview).map_err(|error| PatchError::invalid(error.to_string()))?;
     if let Some(limit) = structural_limit(&preview, &plan, context.limits) {
-        return Err(PatchError {
-            code: "invalid",
-            message: limit.to_string(),
-            cause: Some(PlanFailureFact::Structural(limit)),
-            admission: None,
-            parameter: None,
-        });
+        let mut err = PatchError::new("invalid", limit.to_string());
+        err.cause = Some(PlanFailureFact::Structural(limit));
+        return Err(err);
     }
     let mut expansions = checkpoint.expansions.clone();
     expansions.push(expansion.clone());
     let bound = graph_envelope_bound(source, &expansions, &checkpoint.extensions, &plan);
     if bound > MAX_CHECKPOINT_BYTES as usize {
         let limit = GraphEnvelopeLimit { bound };
-        return Err(PatchError {
-            code: "invalid",
-            message: limit.to_string(),
-            cause: Some(PlanFailureFact::Envelope(limit)),
-            admission: None,
-            parameter: None,
-        });
+        let mut err = PatchError::new("invalid", limit.to_string());
+        err.cause = Some(PlanFailureFact::Envelope(limit));
+        return Err(err);
     }
     Ok(Prepared::Ready(Box::new(Admission {
         expansion,

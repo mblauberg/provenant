@@ -39,7 +39,10 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
         "invalid_template" => Some(Cause::InvalidTemplate),
         "invalid_config" => Some(Cause::InvalidConfig),
         "invalid_review" => Some(Cause::InvalidReview),
-        "secret" => Some(Cause::Secret),
+        "secret" => Some(Cause::Secret {
+            field: "brief".to_string(),
+            rule: "secret".to_string(),
+        }),
         "cycle" => Some(Cause::Cycle),
         "conflict" => Some(Cause::Conflict),
         "invalid" if message.ends_with("writer worktree") => Some(Cause::WriterWorktree),

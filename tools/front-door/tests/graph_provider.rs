@@ -4191,7 +4191,7 @@ fn declared_stop_writer_retry_uses_the_public_cli() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    let rig = policy_codex_fixture()?;
+    let mut rig = policy_codex_fixture()?;
     let _cleanup = rig.process_cleanup();
     let account =
         provenant_providers::identity::codex_account(br#"{"tokens":{"account_id":"fixture-one"}}"#)
@@ -4253,6 +4253,12 @@ fn declared_stop_writer_retry_uses_the_public_cli() -> Result {
     let brief = rig.root.join("retry-brief.md");
     let secret = "password=\"fixture-secret-3391\"";
     fs::write(&brief, secret)?;
+    let saved_env = rig.env.clone();
+    for (k, v) in &mut rig.env {
+        if k == "PATH" {
+            *v = std::ffi::OsString::from("/fixture/changed/path");
+        }
+    }
     let out = rig.command(&[
         "retry",
         "retry-stop/writer",
@@ -4264,8 +4270,23 @@ fn declared_stop_writer_retry_uses_the_public_cli() -> Result {
     assert_ne!(code(&out), 0, "{reply}");
     let output = String::from_utf8_lossy(&out.stdout.bytes);
     assert!(output.contains("credential-shaped value"), "{output}");
+    assert!(output.contains("prompt"), "{output}");
+    assert!(output.contains("secret"), "{output}");
     assert!(!output.contains("fixture-secret-3391"), "{output}");
     assert_eq!(snapshot()?, before);
+
+    // Also assert that a refused retry with invalid extension from a changed PATH leaves checkpoint unchanged
+    let out = rig.command(&[
+        "retry",
+        "retry-stop",
+        "--extend",
+        "limits.unconfigured=1",
+        "--json",
+    ])?;
+    assert_ne!(code(&out), 0, "{out:?}");
+    assert_eq!(snapshot()?, before);
+
+    rig.env = saved_env;
     fs::write(&brief, "Complete the original task.")?;
     let out = rig.command(&[
         "retry",

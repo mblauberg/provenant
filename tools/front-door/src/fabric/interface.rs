@@ -153,7 +153,11 @@ fn graph_patch_error(error: patch::PatchError) -> FacadeError {
         return FacadeError::invalid(InvalidInputDetail::Parameter(refusal));
     }
     let cause = match error.code {
-        "secret" => Some(GraphRelayCause::Secret),
+        "secret" => {
+            let field = error.field.clone().unwrap_or_else(|| "brief".to_string());
+            let rule = error.rule.clone().unwrap_or_else(|| "secret".to_string());
+            Some(GraphRelayCause::Secret { field, rule })
+        }
         "cycle" => Some(GraphRelayCause::Cycle),
         "conflict" | "stale_revision" | "idempotency_conflict" => Some(GraphRelayCause::Conflict),
         "started" => Some(GraphRelayCause::StartedNode),
@@ -1613,6 +1617,24 @@ impl Factory {
             })
             .to_owned();
         let template_name = template_name.as_str();
+        if let Some(brief) = input.get("brief").and_then(Value::as_str) {
+            if patch::scan_for_secrets(brief).is_err() {
+                return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
+                    provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
+                        field: "brief".to_string(),
+                        rule: "secret".to_string(),
+                    },
+                )));
+            }
+        }
+        if patch::scan_for_secrets(template_name).is_err() {
+            return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
+                provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
+                    field: "template".to_string(),
+                    rule: "secret".to_string(),
+                },
+            )));
+        }
         // Type each `--set` value once, by the template's declaration, before
         // the launch is hashed or compiled.
         let declared = library.resolve(template_name).map_err(graph_input_reason)?;
@@ -1986,13 +2008,57 @@ impl Factory {
         // Patch admission scans nodes and parameters. Graph-wide metadata is
         // retained separately, so scan the complete bound record before any
         // preview or publication can expose or persist it.
+        let bound_value = serde_json::to_value(&document).map_err(|_| FacadeError::StateCorrupt)?;
         let bound_document =
-            serde_json::to_string(&document).map_err(|_| FacadeError::StateCorrupt)?;
-        patch::scan_for_secrets(&bound_document).map_err(|_| {
-            FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
-                provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret,
-            ))
-        })?;
+            serde_json::to_string(&bound_value).map_err(|_| FacadeError::StateCorrupt)?;
+        if patch::scan_for_secrets(&bound_document).is_err() {
+            fn find_secret_field(path: &str, val: &Value) -> Option<String> {
+                match val {
+                    Value::String(text) => {
+                        if patch::scan_for_secrets(text).is_err() {
+                            Some(path.to_string())
+                        } else {
+                            None
+                        }
+                    }
+                    Value::Array(items) => {
+                        for (i, item) in items.iter().enumerate() {
+                            let p = if path.is_empty() {
+                                format!("[{i}]")
+                            } else {
+                                format!("{path}[{i}]")
+                            };
+                            if let Some(f) = find_secret_field(&p, item) {
+                                return Some(f);
+                            }
+                        }
+                        None
+                    }
+                    Value::Object(map) => {
+                        for (k, v) in map {
+                            let p = if path.is_empty() {
+                                k.clone()
+                            } else {
+                                format!("{path}.{k}")
+                            };
+                            if let Some(f) = find_secret_field(&p, v) {
+                                return Some(f);
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
+            }
+            let field =
+                find_secret_field("", &bound_value).unwrap_or_else(|| "document".to_string());
+            return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
+                provenant_fabric_runtime::coordination::facade::GraphRelayCause::Secret {
+                    field,
+                    rule: "secret".to_string(),
+                },
+            )));
+        }
         let expanded_for_warnings = document
             .expanded(&self.context.config.graph.limits)
             .map_err(|error| FacadeError::DispatchRefused {
@@ -2507,6 +2573,20 @@ impl Factory {
                 .map_err(retry_patch_error)?;
             }
             target.node = Some(node);
+        }
+        if !extend.is_empty() {
+            provenant_fabric_runtime::graph::validate_resume_extensions(
+                &execution.document,
+                &checkpoint,
+                &extend,
+                &self.context.config.graph.limits,
+                &self.context.config.graph.budget,
+            )
+            .map_err(|reason| FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason,
+            })?;
         }
         // Publish the requester's PATH with any retry patch under the same
         // journal lock, including graph-wide retries with no node patch. A

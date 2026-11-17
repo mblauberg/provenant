@@ -246,13 +246,7 @@ fn writer_worktree(
 fn request_key(parent: &str, request: &ChildRequest) -> Result<String, PatchError> {
     CanonicalV1::record_digest("graph-child-key", 1, &(parent, &request.idempotency_key))
         .map(|digest| format!("child:{}", digest))
-        .map_err(|error| PatchError {
-            cause: None,
-            admission: None,
-            parameter: None,
-            code: "invalid",
-            message: error.to_string(),
-        })
+        .map_err(|error| PatchError::invalid(error.to_string()))
 }
 
 /// The earlier receipt for this request's idempotency key, if any. It compares
@@ -265,13 +259,7 @@ pub fn replay_child(
     parent: &str,
     request: &ChildRequest,
 ) -> Result<Option<ChildReceipt>, PatchError> {
-    let invalid = |message: String| PatchError {
-        cause: None,
-        admission: None,
-        parameter: None,
-        code: "invalid",
-        message,
-    };
+    let invalid = |message: String| PatchError::invalid(message);
     let digest = CanonicalV1::record_digest("fabric-relay-child", 1, request)
         .map_err(|error| invalid(error.to_string()))?
         .to_string();
@@ -289,13 +277,10 @@ pub fn replay_child(
         .as_ref()
         .ok_or_else(|| invalid("stored child receipt is missing".into()))?;
     if stored.request_digest != digest {
-        return Err(PatchError {
-            cause: None,
-            admission: None,
-            parameter: None,
-            code: "idempotency_conflict",
-            message: "child idempotency key was used for a different request".into(),
-        });
+        return Err(PatchError::new(
+            "idempotency_conflict",
+            "child idempotency key was used for a different request",
+        ));
     }
 
     let expected_node = format!("{parent}{SEPARATOR}{}", request.id);
@@ -419,13 +404,7 @@ pub fn admit_child_bound(
     context: &PatchContext<'_>,
     writer_base: Option<(&str, &str)>,
 ) -> Result<ChildReceipt, PatchError> {
-    let invalid = |message: String| PatchError {
-        cause: None,
-        admission: None,
-        parameter: None,
-        code: "invalid",
-        message,
-    };
+    let invalid = |message: String| PatchError::invalid(message);
     if request.id.is_empty()
         || request.id.len() > ID_BYTES
         || request.id.contains(SEPARATOR)
@@ -495,26 +474,20 @@ pub fn admit_child_bound(
             .find(|progress| progress.id == parent)
             .ok_or_else(|| invalid(format!("unknown parent node {parent}")))?;
         if progress.state != NodeState::Running {
-            return Err(PatchError {
-                cause: None,
-                admission: None,
-                parameter: None,
-                code: "parent_settled",
-                message: format!("parent node {parent} is not running"),
-            });
+            return Err(PatchError::new(
+                "parent_settled",
+                format!("parent node {parent} is not running"),
+            ));
         }
         let limit = child_depth(graph.document);
         if depth(&node) > limit {
-            return Err(PatchError {
-                cause: None,
-                admission: None,
-                parameter: None,
-                code: "child_depth",
-                message: format!(
+            return Err(PatchError::new(
+                "child_depth",
+                format!(
                     "child {node} is {} levels deep; limits.child_depth={limit}",
                     depth(&node)
                 ),
-            });
+            ));
         }
     }
     let receipt_for = |revision| ChildReceipt {
@@ -638,13 +611,9 @@ fn child_patch(
         && template.is_composite()
     {
         if request.writer {
-            return Err(PatchError {
-                cause: None,
-                admission: None,
-                parameter: None,
-                code: "invalid",
-                message: "writer composite children require explicit per-node work bindings".into(),
-            });
+            return Err(PatchError::invalid(
+                "writer composite children require explicit per-node work bindings",
+            ));
         }
         node.remove("prompt");
         node.remove("tier");

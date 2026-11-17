@@ -25,7 +25,53 @@ fn run_refuses_secret_brief_with_safe_cause() -> Result {
     assert!(!output.status.success(), "{value}");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("credential-shaped value"), "{text}");
+    assert!(text.contains("brief"), "{text}");
+    assert!(text.contains("secret"), "{text}");
     assert!(!text.contains("fixture-secret-3391"), "{text}");
+    assert!(graph_records(&rig.state())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn run_refuses_secret_non_brief_field_with_safe_cause() -> Result {
+    let rig = GraphProject::new()?;
+    let path = rig.project.join("graph.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string(&json!({
+            "graph_id": "test-prompt-secret",
+            "nodes": [{
+                "id": "task",
+                "use": "task",
+                "prompt": "password=\"fixture-secret-3391\""
+            }]
+        }))?,
+    )?;
+    let output = rig.command().args(["run", "--file"]).arg(&path).output()?;
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(!output.status.success(), "{value}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("credential-shaped value"), "{text}");
+    assert!(text.contains("prompt"), "{text}");
+    assert!(text.contains("secret"), "{text}");
+    assert!(!text.contains("fixture-secret-3391"), "{text}");
+    assert!(graph_records(&rig.state())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn run_refuses_credential_shaped_template_name() -> Result {
+    let rig = GraphProject::new()?;
+    let secret = "ghp_fixturesecret3391launch123456789";
+    let output = rig.command().args(["run", secret]).output()?;
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let all = format!("{stdout}\n{stderr}");
+    assert!(!all.contains(secret), "secret echoed in response: {all}");
+    assert!(all.contains("credential-shaped value"), "{all}");
+    assert!(all.contains("template"), "{all}");
+    assert!(all.contains("secret"), "{all}");
     assert!(graph_records(&rig.state())?.is_empty());
     Ok(())
 }
