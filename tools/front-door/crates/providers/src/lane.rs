@@ -2607,7 +2607,7 @@ mod tests {
 
     #[test]
     fn the_cargo_shim_refuses_settings_that_cannot_be_trusted() {
-        for (state, slots) in [("/s", 0), ("/s", 65)] {
+        for (state, slots) in [("/s", 65)] {
             let mut spec = bare_spec("/usr/bin");
             let gate = BuildSlotGate {
                 disk_gate: None,
@@ -2627,6 +2627,24 @@ mod tests {
             );
             assert!(spec.setup.is_empty());
         }
+        // Zero disables the shared build cap (max_concurrent_builds = 0), so it
+        // is a trusted setting that still installs the shim.
+        let mut spec = bare_spec("/usr/bin");
+        let gate = BuildSlotGate {
+            disk_gate: None,
+            provenant: Path::new("/p"),
+            state: Path::new("/s"),
+            slots: 0,
+            cargo: Path::new("/c"),
+            local_cargo: "all",
+            project: Path::new("/p"),
+            backend: provenant_config::PortBackend::Builtin,
+            source: provenant_config::PortSource::Builtin,
+        };
+        assert!(
+            spec.configure_build_slots(Path::new("/scratch"), &gate)
+                .is_ok()
+        );
         for state in ["relative", "/s\nx"] {
             let mut spec = bare_spec("/usr/bin");
             let gate = BuildSlotGate {
