@@ -1199,6 +1199,26 @@ fn pre_push_boundary(refusal: &provenant_confinement::push::PushRefusal) -> bool
     )
 }
 
+/// Select the policy for the registered project at this Git location.
+fn push_policy(
+    roots: &provenant_core::Roots,
+    location: Option<&provenant_config::ProjectLocation>,
+) -> provenant_records::policy::Policy {
+    let project_id = location
+        .and_then(|location| {
+            provenant_config::lookup_project(roots, location)
+                .ok()
+                .flatten()
+        })
+        .map(|binding| binding.project_id().to_string());
+    // Without a registered project, the hook has only host policy.
+    provenant_config::policy::read(
+        roots.state.as_path(),
+        project_id.as_deref().unwrap_or(""),
+        &Default::default(),
+    )
+}
+
 fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Error> {
     let bytes = match hook_io::read_stdin(INPUT_CAP, deadline) {
         Ok(bytes) => bytes,
@@ -1272,6 +1292,13 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
         resolved.roots.state.as_path(),
         |runtime, executor, budget, cancel| {
             let repo = runtime.open_read_repo(executor, &project, budget, cancel)?;
+            let location = runtime
+                .project_location(executor, &project, budget, cancel)
+                .ok();
+            let policy = push_policy(
+                &resolved.roots,
+                location.as_ref().map(|location| &location.location),
+            );
             // The default-branch check contacts the remote and needs a network budget.
             let budget = UtilityBudget::bounded(Duration::from_secs(30))?;
             let result = PushContext {
@@ -1280,6 +1307,7 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
                 executor,
                 budget,
                 cancel,
+                policy: &policy,
                 check_conflict_markers,
             }
             .check(remote, &updates);
@@ -1463,6 +1491,47 @@ mod answer_delivery_tests {
     use super::*;
     #[allow(unused_imports)]
     use serde_json::json;
+
+    // Spec: docs/specs/cli.md#pre-push-refuses-data-loss
+    #[test]
+    fn push_policy_uses_registered_project_override() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let project = temp.path().join("project");
+        let state = temp.path().join("state");
+        for path in [&home, &project, &state] {
+            std::fs::create_dir_all(path)?;
+        }
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        let mut inputs = provenant_core::RootInputs::new(home, project.clone());
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let location = provenant_config::ProjectLocation::new(project.canonicalize()?)?;
+        let binding = provenant_config::bind_project(&roots, location.clone())?;
+        std::fs::write(
+            state.join("config.toml"),
+            format!(
+                "schema_version=1\n[domains.policy.projects.\"{}\".rules]\nPUSH_PATCH_EVIDENCE='refuse'\n",
+                binding.project_id()
+            ),
+        )?;
+        let policy = push_policy(&roots, Some(&location));
+        assert_eq!(
+            policy.rule("PUSH_PATCH_EVIDENCE").rule.strength,
+            provenant_records::policy::Strength::Refuse
+        );
+        assert_eq!(
+            policy.rule("PUSH_PATCH_EVIDENCE").source,
+            provenant_records::policy::Source::Project
+        );
+        let host = push_policy(&roots, None);
+        assert_ne!(
+            host.rule("PUSH_PATCH_EVIDENCE").source,
+            provenant_records::policy::Source::Project
+        );
+        Ok(())
+    }
 
     #[test]
     fn local_gate_modes_and_checkout() -> Result<(), Error> {

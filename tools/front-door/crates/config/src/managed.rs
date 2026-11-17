@@ -177,6 +177,8 @@ pub struct HookRegistration {
 }
 #[derive(Debug, Clone)]
 pub struct Targets {
+    /// Effective host policy for this installation operation.
+    pub policy: std::sync::Arc<provenant_records::policy::Policy>,
     pub roots: Roots,
     pub home: PathBuf,
     pub bin_dir: PathBuf,
@@ -238,7 +240,12 @@ pub(crate) fn recorded_id(target: &ResolvedHarnessTarget) -> Result<TargetId, In
 impl Targets {
     /// Defaults from captured HOME. Composition applies explicit config/flag
     /// paths once before snapshotting; no environment is read in this crate.
-    pub fn new(roots: Roots, home: &Path, harnesses: &[Harness]) -> Self {
+    pub fn new(
+        roots: Roots,
+        home: &Path,
+        harnesses: &[Harness],
+        policy: std::sync::Arc<provenant_records::policy::Policy>,
+    ) -> Self {
         let targets: Vec<_> = harnesses
             .iter()
             .filter(|h| h.spec().install.is_some())
@@ -253,6 +260,7 @@ impl Targets {
             .collect::<Vec<_>>();
         let hook_specs = crate::hooks::registrations(&hook_harnesses);
         Self {
+            policy,
             roots,
             home: home.to_path_buf(),
             bin_dir: home.join(".local/bin"),
@@ -2042,7 +2050,12 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
             .as_deref()
             .and_then(|root| before_tail(root, Path::new(provenant_core::DEFAULT_STATE_SUFFIX))),
     ];
-    let defaults = Targets::new(targets.roots.clone(), &home, &receipt.harnesses);
+    let defaults = Targets::new(
+        targets.roots.clone(),
+        &home,
+        &receipt.harnesses,
+        targets.policy.clone(),
+    );
     for recorded in &receipt.harness_targets {
         let Some(default) = defaults
             .harnesses

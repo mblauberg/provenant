@@ -73,7 +73,13 @@ pub fn configured_targets(
     claude_config_dir: Option<&Path>,
     codex_home: Option<&Path>,
 ) -> Result<Targets, InstallError> {
-    let mut targets = Targets::new(roots, home, harnesses);
+    // Installation is host-only: it has no project policy binding.
+    let policy = std::sync::Arc::new(provenant_config::policy::read(
+        roots.state.as_path(),
+        "",
+        &Default::default(),
+    ));
+    let mut targets = Targets::new(roots, home, harnesses, policy);
     // Read installation dependencies only; unrelated domain settings remain
     // advisory and cannot block installation.
     config::apply_install_config_with_domains(

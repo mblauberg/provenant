@@ -106,6 +106,8 @@ pub fn land_backend(port: &LandPort) -> (Port, Option<Duration>) {
 }
 
 pub struct Adapter {
+    /// Effective policy for the entire port execution.
+    pub policy: std::sync::Arc<provenant_records::policy::Policy>,
     owner: &'static str,
     port_source: PortSource,
     backend: PortBackend,
@@ -117,8 +119,14 @@ pub struct Adapter {
     request: Option<super::Request>,
 }
 impl Adapter {
-    pub fn new(port: Port, owner: &'static str, project: &Path, state: &Path) -> io::Result<Self> {
-        Self::from_parts(port, owner, project, state, None)
+    pub fn new(
+        port: Port,
+        owner: &'static str,
+        project: &Path,
+        state: &Path,
+        policy: std::sync::Arc<provenant_records::policy::Policy>,
+    ) -> io::Result<Self> {
+        Self::from_parts(port, owner, project, state, None, policy)
     }
 
     pub fn from_land_port(
@@ -126,9 +134,10 @@ impl Adapter {
         owner: &'static str,
         project: &Path,
         state: &Path,
+        policy: std::sync::Arc<provenant_records::policy::Policy>,
     ) -> io::Result<Self> {
         let (port, ceiling) = land_backend(&port);
-        Self::from_parts(port, owner, project, state, ceiling)
+        Self::from_parts(port, owner, project, state, ceiling, policy)
     }
 
     fn from_parts(
@@ -137,8 +146,10 @@ impl Adapter {
         project: &Path,
         state: &Path,
         budget_ceiling: Option<Duration>,
+        policy: std::sync::Arc<provenant_records::policy::Policy>,
     ) -> io::Result<Self> {
         Ok(Self {
+            policy,
             owner,
             port_source: port.source,
             backend: port.backend,
@@ -369,9 +380,15 @@ pub struct ForgePort {
     adapter: Adapter,
 }
 impl ForgePort {
-    pub fn new(port: Port, owner: &'static str, project: &Path, state: &Path) -> io::Result<Self> {
+    pub fn new(
+        port: Port,
+        owner: &'static str,
+        project: &Path,
+        state: &Path,
+        policy: std::sync::Arc<provenant_records::policy::Policy>,
+    ) -> io::Result<Self> {
         Ok(Self {
-            adapter: Adapter::new(port, owner, project, state)?,
+            adapter: Adapter::new(port, owner, project, state, policy)?,
         })
     }
 
@@ -380,9 +397,10 @@ impl ForgePort {
         owner: &'static str,
         project: &Path,
         state: &Path,
+        policy: std::sync::Arc<provenant_records::policy::Policy>,
     ) -> io::Result<Self> {
         Ok(Self {
-            adapter: Adapter::from_land_port(port, owner, project, state)?,
+            adapter: Adapter::from_land_port(port, owner, project, state, policy)?,
         })
     }
 
@@ -1103,6 +1121,40 @@ esac
         }
     }
 
+    // Spec: docs/specs/state.md#config-never-widens-authority
+    #[test]
+    fn adapter_retains_project_policy() {
+        use provenant_records::policy::{Source, Strength};
+        let mut settings = crate::policy::Settings::default();
+        settings.projects.insert(
+            "project".into(),
+            crate::policy::Project {
+                rules: std::collections::BTreeMap::from([(
+                    "PORT_COMMAND_EVIDENCE".into(),
+                    Strength::Refuse,
+                )]),
+            },
+        );
+        let policy = std::sync::Arc::new(settings.resolve("project", &Default::default()));
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = Adapter::new(
+            port(PortBackend::Builtin),
+            "forge",
+            dir.path(),
+            dir.path(),
+            policy,
+        )
+        .unwrap();
+        assert_eq!(
+            adapter.policy.rule("PORT_COMMAND_EVIDENCE").rule.strength,
+            Strength::Refuse
+        );
+        assert_eq!(
+            adapter.policy.rule("PORT_COMMAND_EVIDENCE").source,
+            Source::Project
+        );
+    }
+
     #[test]
     fn every_forge_operation_uses_each_backend_and_preserves_typed_headers() {
         let dir = tempfile::tempdir().unwrap();
@@ -1117,6 +1169,7 @@ esac
                 "tracker",
                 dir.path(),
                 &dir.path().join("state"),
+                std::sync::Arc::new(provenant_records::policy::Policy::default()),
             )
             .unwrap();
             let response = builtin_port
@@ -1146,6 +1199,7 @@ esac
                 "tracker",
                 dir.path(),
                 &dir.path().join("state"),
+                std::sync::Arc::new(provenant_records::policy::Policy::default()),
             )
             .unwrap();
             let response = command_port
@@ -1176,6 +1230,7 @@ esac
                 "tracker",
                 dir.path(),
                 &dir.path().join("state"),
+                std::sync::Arc::new(provenant_records::policy::Policy::default()),
             )
             .unwrap();
             let error = none_port
@@ -1201,8 +1256,14 @@ esac
             "gh",
             "#!/bin/sh\nprintf 'HTTP/2 429\\r\\nRetry-After: 60\\r\\n\\r\\n{}'\nexit 1\n",
         );
-        let mut forge =
-            ForgePort::new(port(PortBackend::Builtin), "forge", dir.path(), dir.path()).unwrap();
+        let mut forge = ForgePort::new(
+            port(PortBackend::Builtin),
+            "forge",
+            dir.path(),
+            dir.path(),
+            std::sync::Arc::new(provenant_records::policy::Policy::default()),
+        )
+        .unwrap();
         let response = forge
             .request_with(
                 ForgeOperation::Api {
@@ -1245,6 +1306,7 @@ esac
                 "tracker",
                 dir.path(),
                 &state,
+                std::sync::Arc::new(provenant_records::policy::Policy::default()),
             )
             .unwrap();
             let execution = forge
