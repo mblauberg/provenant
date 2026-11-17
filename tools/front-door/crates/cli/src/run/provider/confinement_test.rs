@@ -515,10 +515,16 @@ fn alternate_sources_inside_builtin_stores_keep_only_actual_launch_carveouts()
         let mut inputs = provenant_core::RootInputs::new(home.clone(), base.join("initial-project"));
         inputs.state_dir = Some(state.clone());
         let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let mandatory = provenant_confinement::permissions::MandatoryRoots::for_host_with_scratch_mode(
-            &host_roots, &home, &project, &base.join("scratch"), &roots, &[], &[], false,
-        )?;
-        assert!(!mandatory.credential_roots().refuses(&project, CredentialScope::Subtree, true));
+        let ordinary = project.join("ordinary-file");
+        std::fs::write(&ordinary, b"ordinary lane data")?;
+        std::os::unix::fs::symlink(&ordinary, store.join("ordinary-link"))?;
+        for sandboxed in [false, true] {
+            let mandatory = provenant_confinement::permissions::MandatoryRoots::for_host_with_scratch_mode(
+                &host_roots, &home, &project, &base.join("scratch"), &roots, &[], &[], sandboxed,
+            )?;
+            assert!(!mandatory.credential_roots().refuses(&project, CredentialScope::Subtree, true));
+            assert!(!mandatory.credential_roots().refuses(&ordinary, CredentialScope::Exact, true));
+        }
         assert!(roots.refuses(&store.join(credential), CredentialScope::Exact, true));
         assert!(!roots.refuses(&project, CredentialScope::Subtree, true));
         assert!(

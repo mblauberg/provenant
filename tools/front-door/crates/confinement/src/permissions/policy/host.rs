@@ -323,6 +323,17 @@ fn inventory_links(
                     summary.record_unresolved(&root.path, &path);
                     continue;
                 };
+                // Declared credential endpoints resolving into a lane already
+                // refused during classification. An undeclared link to ordinary
+                // lane data must not turn that target into a credential denial.
+                if mandatory
+                    .credential_roots()
+                    .lane_roots()
+                    .iter()
+                    .any(|lane| target.starts_with(lane))
+                {
+                    continue;
+                }
                 let scope = if metadata.is_dir() {
                     PathScope::Subtree
                 } else {

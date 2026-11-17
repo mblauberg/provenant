@@ -96,8 +96,6 @@ impl RootInputs {
 
 #[derive(Debug, Error)]
 pub enum RootError {
-    #[error("credential declarations unavailable: {0}")]
-    CredentialDeclarations(String),
     #[error("root input must be an absolute path with only normal components: {path}")]
     InvalidPath { path: PathBuf },
     #[error(
@@ -176,7 +174,8 @@ impl StateRoot {
         for root in &protected {
             absolute_normal(&root.path)?;
         }
-        let mut warnings = classify(&candidate, &protected)?;
+        let normal_state = inputs.home.join(DEFAULT_STATE_SUFFIX);
+        let mut warnings = classify(&candidate, &protected, &inputs.home, Some(&normal_state))?;
         let resolve = |path: &Path| -> Result<PathBuf, RootError> {
             let bound = resolver.resolve_existing_ancestor(path).map_err(|source| {
                 RootError::Resolution {
@@ -196,7 +195,9 @@ impl StateRoot {
             })
             .collect::<Result<Vec<_>, RootError>>()?;
         let bound = resolve(&candidate)?;
-        for warning in classify(&bound, &bound_protected)? {
+        let bound_home = resolve(&inputs.home).unwrap_or_else(|_| inputs.home.clone());
+        let default = resolve(&normal_state).ok();
+        for warning in classify(&bound, &bound_protected, &bound_home, default.as_deref())? {
             if !warnings.contains(&warning) {
                 warnings.push(warning);
             }
@@ -204,7 +205,6 @@ impl StateRoot {
         // The normal home-relative store remains normal even when the caller's
         // working directory is HOME or an ancestor (as in scheduled ticks).
         // Other advisory overlaps, including project configuration, still warn.
-        let default = resolve(&inputs.home.join(DEFAULT_STATE_SUFFIX)).ok();
         if default.as_ref() == Some(&bound) {
             let home = resolve(&inputs.home).unwrap_or_else(|_| inputs.home.clone());
             warnings.retain(|warning| {
@@ -469,6 +469,7 @@ fn codex_standalone_path(path: &Path, codex_home: &Path) -> bool {
 struct ProtectedRoot {
     path: PathBuf,
     boundary: Option<RootBoundary>,
+    credential_directory: bool,
     source: String,
 }
 
@@ -479,21 +480,25 @@ fn protected_roots(inputs: &RootInputs) -> Vec<ProtectedRoot> {
         ProtectedRoot {
             path: inputs.checkout.clone(),
             boundary: None,
+            credential_directory: false,
             source: "root inputs: checkout".into(),
         },
         ProtectedRoot {
             path: inputs.home.join(".local/state/agent-harness"),
             boundary: None,
+            credential_directory: false,
             source: "built-in retired agent-harness location".into(),
         },
         ProtectedRoot {
             path: inputs.home.join(".local/state/provenant"),
             boundary: Some(DataIntegrity),
+            credential_directory: false,
             source: "built-in previous state root".into(),
         },
         ProtectedRoot {
             path: inputs.home.join(LEGACY_V1_STATE_SUFFIX),
             boundary: Some(DataIntegrity),
+            credential_directory: false,
             source: "built-in 1.x state root".into(),
         },
     ];
@@ -503,6 +508,7 @@ fn protected_roots(inputs: &RootInputs) -> Vec<ProtectedRoot> {
             .map(|name| ProtectedRoot {
                 path: inputs.checkout.join(name),
                 boundary: None,
+                credential_directory: false,
                 source: format!("project-local agent configuration: {name}"),
             }),
     );
@@ -514,22 +520,26 @@ fn protected_roots(inputs: &RootInputs) -> Vec<ProtectedRoot> {
             .map(|entry| ProtectedRoot {
                 path: entry.path.clone(),
                 boundary: Some(Credentials),
+                credential_directory: entry.scope == CredentialScope::Subtree,
                 source: entry.source.clone(),
             }),
     );
     roots.extend(inputs.workspaces.iter().map(|path| ProtectedRoot {
         path: path.clone(),
         boundary: None,
+        credential_directory: false,
         source: "root inputs: workspace".into(),
     }));
     roots.extend(inputs.git_metadata.iter().map(|path| ProtectedRoot {
         path: path.clone(),
         boundary: Some(GitIsolation),
+        credential_directory: false,
         source: "root inputs: existing Git metadata".into(),
     }));
     roots.extend(inputs.old_roots.iter().map(|path| ProtectedRoot {
         path: path.clone(),
         boundary: Some(DataIntegrity),
+        credential_directory: false,
         source: "root inputs: old state root".into(),
     }));
     roots
@@ -541,9 +551,23 @@ fn protected_roots(inputs: &RootInputs) -> Vec<ProtectedRoot> {
 /// metadata, a credential store or an advisory location is expected; only a
 /// state root inside one is refused, and a state root inside an advisory
 /// location warns and proceeds.
-fn classify(candidate: &Path, protected: &[ProtectedRoot]) -> Result<Vec<RootWarning>, RootError> {
+fn classify(
+    candidate: &Path,
+    protected: &[ProtectedRoot],
+    home: &Path,
+    normal_state: Option<&Path>,
+) -> Result<Vec<RootWarning>, RootError> {
     let mut warnings = Vec::new();
     for root in protected {
+        // A home-rooted account must not displace Provenant's own normal
+        // state tree. This is host state admission, not a launch carve-out;
+        // raw declarations stay intact and every other store still refuses.
+        if root.credential_directory
+            && root.path == home
+            && normal_state.is_some_and(|state| candidate.starts_with(state))
+        {
+            continue;
+        }
         let inside = candidate.starts_with(&root.path);
         if !inside && !root.path.starts_with(candidate) {
             continue;
@@ -589,6 +613,63 @@ mod tests {
         inputs.git_metadata.push(inputs.checkout.join(".git"));
         inputs
     }
+    // Spec: docs/specs/supervisor.md#plans-refuse-unsafe-roots
+    #[test]
+    fn raw_host_stores_protect_state_without_classifying_a_launch() -> Result<(), RootError> {
+        let mut input = inputs();
+        input.credential_roots.add(
+            "/private/codex",
+            CredentialScope::Subtree,
+            "provider environment: CODEX_HOME",
+            CredentialKind::Store,
+        );
+        input.state_dir = Some("/private/codex/provenant-state".into());
+        assert!(
+            matches!(input.resolve(&Resolver), Err(RootError::Protected { policy_source, .. }) if policy_source.contains("CODEX_HOME"))
+        );
+        input.credential_roots.add(
+            input.home.clone(),
+            CredentialScope::Subtree,
+            "home-rooted account",
+            CredentialKind::Store,
+        );
+        input.state_dir = None;
+        let roots = input.resolve(&Resolver)?;
+        assert!(
+            roots
+                .credential_roots()
+                .entries()
+                .iter()
+                .any(|root| root.path == input.home && root.scope == CredentialScope::Subtree)
+        );
+        input.state_dir = Some(input.home.join("auth.json"));
+        assert!(matches!(
+            input.resolve(&Resolver),
+            Err(RootError::Protected { .. })
+        ));
+        input.state_dir = None;
+        input.credential_roots.add(
+            input
+                .home
+                .join(DEFAULT_STATE_SUFFIX)
+                .join("credential-file"),
+            CredentialScope::Exact,
+            "explicit credential",
+            CredentialKind::Store,
+        );
+        input.state_dir = Some(
+            input
+                .home
+                .join(DEFAULT_STATE_SUFFIX)
+                .join("credential-file"),
+        );
+        assert!(matches!(
+            input.resolve(&Resolver),
+            Err(RootError::Protected { .. })
+        ));
+        Ok(())
+    }
+
     #[test]
     fn explicit_selection_has_priority_and_never_falls_back_on_invalid_input() {
         let mut input = inputs();

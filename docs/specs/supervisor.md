@@ -201,7 +201,11 @@ files. Roots carry declarations; launch preparation classifies built-in,
 provider, host-variable and account declarations once, using the actual launch
 source and cwd, scratch, and the derived writer cache, without unioning an
 earlier project classification. Scratch and the writer cache are lane roots
-just as the source and cwd are.
+just as the source and cwd are. Host state admission also consumes raw host
+declarations and refuses state roots inside dedicated stores. A declaration
+exactly at HOME does not displace Provenant's normal home-relative state tree;
+exact credential declarations there retain their hold. This host-state rule
+does not classify or narrow the later launch boundary.
 
 A store containing no lane root retains whole-subtree protection. A store
 strictly containing lane roots retains whole-subtree protection minus those

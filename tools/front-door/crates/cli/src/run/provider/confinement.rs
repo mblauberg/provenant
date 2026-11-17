@@ -915,29 +915,11 @@ pub(super) fn credential_roots(
     lanes.dedup();
     let roots = roots.with_lane_roots(lanes);
 
-    let sources: std::collections::BTreeMap<PathBuf, String> = roots
-        .entries()
-        .iter()
-        .map(|root| (root.path.clone(), root.source.clone()))
-        .collect();
-    roots.with_aliases(|path| {
-        resolve(path).map_err(|error| match sources.get(path) {
-            Some(source) => format!(
-                "{source} at {} cannot be resolved precisely: {error}",
-                path.display()
-            ),
-            None => error,
-        })
-    })
+    bind_credential_roots(roots)
 }
 
+/// Resolve declarations for source admission without classifying a launch.
 pub fn declared_credentials(
-    registry: &Registry<'_>,
-) -> Result<provenant_core::CredentialRoots, String> {
-    declared_credentials_for(registry)
-}
-
-fn declared_credentials_for(
     registry: &Registry<'_>,
 ) -> Result<provenant_core::CredentialRoots, String> {
     let home = registry.home.ok_or("home directory is unavailable")?;
@@ -953,9 +935,27 @@ fn declared_credentials_for(
     for declaration in credential_declarations(registry, home, &settings) {
         roots.add_entry(declaration.root);
     }
+    bind_credential_roots(roots)
+}
+
+fn bind_credential_roots(
+    roots: provenant_core::CredentialRoots,
+) -> Result<provenant_core::CredentialRoots, String> {
+    let sources: std::collections::BTreeMap<PathBuf, String> = roots
+        .entries()
+        .iter()
+        .map(|root| (root.path.clone(), root.source.clone()))
+        .collect();
     roots.with_aliases(|path| {
-        provenant_confinement::permissions::resolve_boundary_path(path)
-            .map_err(|error| error.to_string())
+        provenant_confinement::permissions::resolve_boundary_path(path).map_err(|error| {
+            match sources.get(path) {
+                Some(source) => format!(
+                    "{source} at {} cannot be resolved precisely: {error}",
+                    path.display()
+                ),
+                None => error.to_string(),
+            }
+        })
     })
 }
 
@@ -1228,7 +1228,7 @@ pub(super) fn source_cwd(
     let state = registry
         .state_root
         .ok_or_else(|| SourceCwdError::Operational("state root is unavailable".into()))?;
-    let credentials = declared_credentials_for(registry).map_err(|error| {
+    let credentials = declared_credentials(registry).map_err(|error| {
         source_cwd_authority(format!("credential declarations unavailable: {error}"))
     })?;
     let Some(source) = &task.access.source_root else {

@@ -249,6 +249,13 @@ pub fn resolve(
         None => product_root().unwrap_or_else(|_| project.clone()),
     };
     let mut inputs = RootInputs::new(home.clone(), assets.clone());
+    // State admission consumes declarations, never an initial project's launch
+    // classification. Launch preparation binds its own actual lane roots.
+    for declaration in provenant_confinement::permissions::host_credential_declarations(|name| {
+        std::env::var_os(name)
+    }) {
+        inputs.credential_roots.add_entry(declaration.root);
+    }
     inputs.state_dir = globals.state_dir.clone();
     inputs.environment_state_dir =
         std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
