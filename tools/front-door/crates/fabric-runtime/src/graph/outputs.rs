@@ -873,10 +873,14 @@ pub(super) fn valid_compacted_findings(
         return true;
     };
     if outputs.full_artifact_findings.is_some() {
-        return true;
+        return outputs.artifact_findings.is_none()
+            && outputs.full_disposition_findings.is_none()
+            && outputs.compact_disposition_findings.is_none();
     }
     if let Some(findings) = outputs.full_disposition_findings.as_ref() {
-        return outputs.findings.is_empty()
+        return outputs.artifact_findings.is_none()
+            && outputs.compact_disposition_findings.is_none()
+            && outputs.findings.is_empty()
             && !findings.is_empty()
             && (!plan.nodes[index].dispositions.is_empty()
                 || template::review_verifier(&plan.nodes[index]));

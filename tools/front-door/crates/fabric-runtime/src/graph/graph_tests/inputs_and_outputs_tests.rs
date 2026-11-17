@@ -426,8 +426,8 @@ fn findings_and_verdict_at_the_end_of_a_large_result_are_parsed() {
     assert!(outputs.warnings.is_empty());
 
     let finding = serde_json::json!({
-        "id": "AKIAIOSFODNN7EXAMPLE", "severity": "high", "file": "AKIAIOSFODNN7EXAMPLE", "line": 1,
-        "propagates": "AKIAIOSFODNN7EXAMPLE", "summary": "issue", "status": "open"
+        "id": "finding-identity", "severity": "high", "file": "src/large.rs", "line": 1,
+        "propagates": "source:finding-identity", "summary": "issue", "status": "open"
     });
     let many = vec![finding.clone(); MAX_FINDINGS + 1];
     let block = serde_json::json!({"schema_version": 1, "findings": many});

@@ -219,8 +219,7 @@ pub(super) fn normalise<T: Serialize + serde::de::DeserializeOwned>(
     validate_identities(&value, context)?;
     visit(&mut value, context)?;
     let text = serde_json::to_string(&value).map_err(|_| "cannot encode graph text")?;
-    provenant_confinement::disclosure::scan_snapshot(text.as_bytes(), &[])
-        .map_err(|_| "graph text matches a secret pattern")?;
+    super::patch::scan_for_secrets(&text).map_err(|_| "graph text matches a secret pattern")?;
     serde_json::from_value(value).map_err(|_| "cannot decode normalised graph text")
 }
 

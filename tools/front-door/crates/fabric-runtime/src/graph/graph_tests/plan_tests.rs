@@ -3364,7 +3364,7 @@ fn live_patch_normalises_docs_and_extensions_once() {
                 "templates": {"probe": {"doc": doc, "brief": "new work", "parameters": {
                     "value": {"type": "string", "doc": parameter_doc, "default": "ok"}
                 }}},
-                "nodes": [{"id": "probe", "use": "probe", "comment": comment}]
+                "nodes": [{"id": "probe", "use": "probe", "extensions": {"comment": comment}}]
             }),
         )
         .unwrap()
@@ -3455,7 +3455,7 @@ fn captured_patch_normalises_once_before_storage_and_replays_unchanged() {
     let document = planner(8);
     let mut journal = MemoryJournal::default();
     let mut limits = plans::generous();
-    limits.nodes = 1;
+    limits.nodes = document.nodes.len();
     let (run, calls) = prompt_text::trace(|| {
         advance_with_budget(
             &document,

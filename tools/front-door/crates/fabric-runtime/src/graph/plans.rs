@@ -1858,11 +1858,14 @@ pub(super) fn settle(
         let json = if let Some(capture) = capture {
             let _ = capture;
             match final_patch.unwrap_or(Ok(None)) {
-                Ok(Some(json)) => normalise_fragment(&json).and_then(|json| {
-                    super::patch::scan_for_secrets(&json)?;
-                    checkpoint.nodes[index].fragment = Some(json.clone());
-                    Ok(json)
-                }),
+                Ok(Some(json)) => {
+                    safe_reason = PlanFailureFact::InvalidFragment;
+                    normalise_fragment(&json).and_then(|json| {
+                        super::patch::scan_for_secrets(&json)?;
+                        checkpoint.nodes[index].fragment = Some(json.clone());
+                        Ok(json)
+                    })
+                }
                 Ok(None) => {
                     safe_reason = PlanFailureFact::MissingBlock;
                     Err("fragment block missing".into())

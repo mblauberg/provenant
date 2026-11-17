@@ -261,8 +261,15 @@ pub struct PatchContext<'a> {
 
 /// The confinement secret scan, as submission applies it.
 pub fn scan_for_secrets(text: &str) -> Result<(), String> {
-    provenant_confinement::disclosure::scan_snapshot(text.as_bytes(), &[])
-        .map_err(|_| "patch matches a secret pattern; remove the secret and retry".to_owned())
+    // The shared redactor can match an already masked assignment. Only refuse
+    // when it would change bytes, preserving normalised text on later scans.
+    let filtered = provenant_confinement::redact::known_shapes(text.as_bytes())
+        .map_err(|_| "patch secret scan failed".to_owned())?;
+    if filtered == text.as_bytes() {
+        Ok(())
+    } else {
+        Err("patch matches a secret pattern; remove the secret and retry".to_owned())
+    }
 }
 
 /// A running graph: its submitted document and its checkpoint.

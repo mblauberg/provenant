@@ -60,6 +60,13 @@ fn stored_fixture() -> StoredCheckpoint {
     decode_checkpoint_in(&journal.directory, &bytes, "g-test").unwrap()
 }
 
+fn fixture_plan_digest(document: &GraphDocument) -> String {
+    let (plan, _) = validate_replay_plan(document, &plans::generous()).unwrap();
+    CanonicalV1::record_digest("fabric-graph-plan", 1, &plan)
+        .unwrap()
+        .to_string()
+}
+
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 // Check every intermediate publication, not just the final advance result.
 struct ReadableJournal(FileJournal);
@@ -110,7 +117,7 @@ fn advance_reopened_prompt(prompt: &str) {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
-    let graph_id = "AKIAIOSFODNN7EXAMPLE";
+    let graph_id = "graph-reader";
     let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 2, "graph_id": graph_id,
         "provenance": {"parameters": {"brief": prompt, "source": prompt}},
@@ -392,10 +399,11 @@ fn round_2_checkpoint_with_identity_key_in_parameters_resumes_and_lands() {
     assert!(document.nodes[0].template.is_none());
     assert_eq!(found.reviews, vec![review]);
     assert!(found.unusable.is_empty());
-    assert_eq!(
-        std::fs::read(&path).unwrap(),
-        CanonicalV1::bytes(&fixture).unwrap().as_bytes()
-    );
+    let reopened = FileJournal::execution(&root, project, graph_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reopened.document, document);
+    assert_eq!(run.checkpoint.plan_digest, fixture.checkpoint.plan_digest);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -816,6 +824,7 @@ fn checkpoint_scale_fixture() -> (tempfile::TempDir, StateRoot, ProjectId) {
         let id = format!("graph-{number:04}");
         stored.checkpoint.graph_id = id.clone();
         stored.execution.document.graph_id = id.clone();
+        stored.checkpoint.plan_digest = fixture_plan_digest(&stored.execution.document);
         stored.checkpoint.nodes[0].state = if number < 5000 {
             NodeState::Succeeded
         } else {
@@ -951,7 +960,15 @@ fn checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names() {
     let mut delivery = fixture.execution.clone();
     delivery.document.graph_id = "g-delivery".into();
     delivery.document.delivery = Some(provenant_records::run::DeliveryMode::Pr);
+    delivery.document.integration_branch = Some("main".into());
+    delivery.bases = GraphBaseBinding::new(
+        None,
+        Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
+    );
     let mut delivery_checkpoint = fixture.checkpoint.clone();
+    delivery_checkpoint.plan_digest = fixture_plan_digest(&delivery.document);
+    delivery_checkpoint.bases = delivery.bases;
+    delivery_checkpoint.delivery_required = true;
     delivery_checkpoint.graph_id = "g-delivery".into();
     delivery_checkpoint.asks.clear();
     let mut journal =
@@ -1440,6 +1457,14 @@ fn tick_reports_undecodable_undelivered_pr_with_skipped_node() {
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
     let mut fixture: StoredCheckpoint = stored_fixture();
     fixture.execution.document.delivery = Some(provenant_records::run::DeliveryMode::Pr);
+    fixture.execution.document.integration_branch = Some("main".into());
+    fixture.execution.bases = GraphBaseBinding::new(
+        None,
+        Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
+    );
+    fixture.checkpoint.bases = fixture.execution.bases;
+    fixture.checkpoint.delivery_required = true;
+    fixture.checkpoint.plan_digest = fixture_plan_digest(&fixture.execution.document);
     fixture.checkpoint.nodes[0].state = NodeState::Skipped;
     fixture.checkpoint.delivered = false;
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
@@ -2034,6 +2059,7 @@ fn prompts_are_stored_by_digest_and_collected_with_the_graph() {
         state.id = format!("n{index}");
         fixture.checkpoint.nodes.push(state);
     }
+    fixture.checkpoint.plan_digest = fixture_plan_digest(&fixture.execution.document);
     let inline = CanonicalV1::bytes(&fixture).unwrap().as_bytes().len();
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     journal.bind(fixture.execution.clone()).unwrap();
