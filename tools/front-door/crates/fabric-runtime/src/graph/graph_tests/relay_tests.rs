@@ -1675,77 +1675,93 @@ fn honest_stop_continuation_replays_its_logical_parents_writer_child() {
     assert_eq!(progress(&checkpoint, &parent).state, NodeState::Running);
 }
 
+// Spec: docs/specs/fabric.md#implementation-planning
 #[test]
-fn bound_document_child_preserves_explicit_worktree_and_upstream_source() {
-    let (document, mut checkpoint) = live(None);
-    let library = template::TemplateLibrary::bundled();
-    let resolvers = Default::default();
-    let limits = plans::generous();
-    let context = patch::PatchContext {
-        journal: None,
-        library: &library,
-        resolvers: &resolvers,
-        scan: &|_| Ok(()),
-        limits: &limits,
-        worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
-    };
-    let request: ChildRequest = serde_json::from_value(json!({
-        "id":"bound", "prompt":"", "writer":true, "idempotency_key":"bound", "launch":{
-            "node":{"id":"bound", "use":"implement", "prompt":"Preserve existing work", "worktree":".worktrees/existing",
-                "source":{"type":"node", "node":"a"}, "depends_on":["a"], "delivery":"push"}
+fn bound_direct_and_planned_child_preserves_explicit_worktree_and_upstream_source() {
+    for plan in [false, true] {
+        let (document, mut checkpoint) = live(None);
+        let library = template::TemplateLibrary::bundled();
+        let resolvers = Default::default();
+        let limits = plans::generous();
+        let context = patch::PatchContext {
+            journal: None,
+            library: &library,
+            resolvers: &resolvers,
+            scan: &|_| Ok(()),
+            limits: &limits,
+            worktree_layout: provenant_config::PortTable::builtin().worktree_layout,
+        };
+        let mut input = json!({
+            "id":"bound", "prompt":"", "writer":true, "idempotency_key":"bound", "launch":{
+                "node":{"id":"bound", "use":"implement", "prompt":"Preserve existing work", "worktree":".worktrees/existing",
+                    "source":{"type":"node", "node":"a"}, "depends_on":["a"], "delivery":"push"}
+            }
+        });
+        if plan {
+            input["launch"]["node"]["with"] = json!({"plan": true});
         }
-    })).unwrap();
-    assert!(!request.needs_worktree_provisioning());
-    let receipt = relay::admit_child_bound(
-        &mut patch::LiveGraph {
-            document: &document,
-            checkpoint: &mut checkpoint,
-        },
-        "a",
-        &request,
-        &context,
-        Some(("parent", &"a".repeat(40))),
-    )
-    .unwrap();
-    assert_eq!(receipt.worktree.as_deref(), Some(".worktrees/existing"));
-    let expanded = plans::expand(
-        &document,
-        &checkpoint.extensions,
-        &checkpoint.expansions,
-        &limits,
-    )
-    .unwrap();
-    let boundary = expanded
-        .nodes
-        .iter()
-        .find(|node| node.id == receipt.node)
+        let request: ChildRequest = serde_json::from_value(input).unwrap();
+        assert!(!request.needs_worktree_provisioning());
+        let receipt = relay::admit_child_bound(
+            &mut patch::LiveGraph {
+                document: &document,
+                checkpoint: &mut checkpoint,
+            },
+            "a",
+            &request,
+            &context,
+            Some(("parent", &"a".repeat(40))),
+        )
         .unwrap();
-    let writer = boundary
-        .composite
-        .as_ref()
-        .unwrap()
-        .exports
-        .iter()
-        .find(|export| export.outputs.contains(&OutputKind::Commit))
+        assert_eq!(receipt.worktree.as_deref(), Some(".worktrees/existing"));
+        let expanded = plans::expand(
+            &document,
+            &checkpoint.extensions,
+            &checkpoint.expansions,
+            &limits,
+        )
         .unwrap();
-    let node = expanded
-        .nodes
-        .iter()
-        .find(|node| node.id == writer.node)
-        .unwrap();
-    assert_eq!(node.worktree, receipt.worktree);
-    assert_eq!(node.source, Some(SourceBinding::Node { node: "a".into() }));
-    assert_eq!(
-        node.delivery,
-        Some(provenant_records::run::DeliveryMode::Push)
-    );
-    assert!(
-        expanded
+        let boundary = expanded
             .nodes
             .iter()
-            .filter(|node| node.template.as_deref() == Some("plan"))
-            .all(|node| node.source == Some(SourceBinding::Node { node: "a".into() }))
-    );
+            .find(|node| node.id == receipt.node)
+            .unwrap();
+        let node = if plan {
+            let writer = boundary
+                .composite
+                .as_ref()
+                .unwrap()
+                .exports
+                .iter()
+                .find(|export| export.outputs.contains(&OutputKind::Commit))
+                .unwrap();
+            expanded
+                .nodes
+                .iter()
+                .find(|node| node.id == writer.node)
+                .unwrap()
+        } else {
+            assert!(boundary.composite.is_none());
+            boundary
+        };
+        assert_eq!(node.worktree, receipt.worktree);
+        assert_eq!(node.source, Some(SourceBinding::Node { node: "a".into() }));
+        assert_eq!(
+            node.delivery,
+            Some(provenant_records::run::DeliveryMode::Push)
+        );
+        let planner = expanded
+            .nodes
+            .iter()
+            .find(|node| node.template.as_deref() == Some("plan"));
+        assert_eq!(planner.is_some(), plan);
+        if let Some(planner) = planner {
+            assert_eq!(
+                planner.source,
+                Some(SourceBinding::Node { node: "a".into() })
+            );
+        }
+    }
 }
 
 #[test]
