@@ -3161,9 +3161,118 @@ fn append_owned_expansion_child(rig: &TestRig, graph_id: &str, owner: &str, chil
     Ok(())
 }
 
+// Spec: docs/specs/run-launch.md#admission-and-custody
+fn retry_fences_retired_dynamic_descendant_against_launcher() -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
+    use provenant_os::{
+        clock::SystemClock,
+        fs::{Directory, LockMode, SystemPathResolver},
+    };
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let (rig, queued) = persisted_attempt_with(
+        "codex",
+        "gpt-6-luna",
+        ("fixture", "fixture"),
+        b"",
+        b"",
+        0,
+        PersistedAttemptOptions {
+            dynamic_queued: true,
+            ..Default::default()
+        },
+    )?;
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&SystemPathResolver)?;
+    let identity =
+        provenant_cli::fabric::Context::open(roots.clone(), &rig.home, &rig.project)?.identity;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+    let mut journal = FileJournal::open(
+        &roots.state,
+        identity.project,
+        PERSISTED_GRAPH,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    let mut checkpoint = journal.load(PERSISTED_GRAPH)?.ok_or("checkpoint")?;
+    let parent = &mut checkpoint.nodes[0];
+    let mut child = parent.clone();
+    child.id = "review--child".into();
+    child.state = provenant_fabric_runtime::graph::NodeState::Blocked;
+    child.advance_error_code = Some("launch_retry_exhausted".into());
+    child.advance_owner_code = Some("repository_lock_busy".into());
+    child.last_launch_retry = Some(serde_json::from_value(
+        json!({"policy":{"limit":1,"limit_source":"host","first_seconds":5,"max_seconds":60},"failures":2}),
+    )?);
+    child.attempts[0].key.node_id = child.id.clone();
+    child.attempts[0].state = provenant_fabric_runtime::graph::AttemptState::Starting;
+    child.attempts[0].launched = false;
+    parent.attempts.clear();
+    parent.state = provenant_fabric_runtime::graph::NodeState::Blocked;
+    checkpoint.nodes.push(child);
+    checkpoint.expansions.push(serde_json::from_value(json!({"source":"review", "nodes":[{"id":"review--child","kind":"task","access":"read_only","prompt":"child","route":{"alias":"senior"}}]}))?);
+    journal.save(&checkpoint)?;
+    drop(journal);
+    // A concurrent launcher holds exclusion after observing the queued attempt.
+    let dir = Directory::open_anchor(
+        &rig.state
+            .join("attempts")
+            .join(queued.attempt_id.to_string()),
+    )?;
+    let launcher = dir.try_lock(std::ffi::OsStr::new("launcher.lock"), LockMode::Exclusive)?;
+    let blocked = rig.command(&["retry", "persisted-graph/review", "--json"])?;
+    assert_ne!(code(&blocked), 0, "{blocked:?}");
+    assert_eq!(
+        FileJournal::read_checkpoint(&roots.state, identity.project, PERSISTED_GRAPH)?
+            .ok_or("checkpoint")?,
+        checkpoint
+    );
+    drop(launcher);
+    let _ = rig.command(&["retry", "persisted-graph/review", "--json"])?;
+    let after = FileJournal::read_checkpoint(&roots.state, identity.project, PERSISTED_GRAPH)?
+        .ok_or("checkpoint")?;
+    let retired = after
+        .expansions
+        .iter()
+        .filter_map(|e| e.retired.as_ref())
+        .flat_map(|e| &e.progress)
+        .find(|row| row.id == "review--child")
+        .ok_or("retired child")?;
+    assert_eq!(
+        retired.attempts[0].state,
+        provenant_fabric_runtime::graph::AttemptState::Terminal
+    );
+    let context = provenant_run::ExecutionContext {
+        state_root: roots.state,
+        project_id: identity.project,
+        actor_id: identity.inbox.actor,
+        read_prompts: false,
+    };
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = provenant_run::RunStore::open(&context, &call)?;
+    assert!(matches!(
+        store.record(queued.attempt_id, &call)?.state,
+        provenant_run::AttemptState::Terminal {
+            outcome: provenant_run::Outcome::Cancelled,
+            ..
+        }
+    ));
+    Ok(())
+}
+
 #[derive(Default)]
 struct PersistedAttemptOptions {
     host_registry: bool,
+    dynamic_queued: bool,
     writer: bool,
     nonterminal: bool,
     lost_before_route: bool,
@@ -3268,7 +3377,14 @@ fn persisted_attempt_with(
                 limit_extensions: Default::default(),
                 context: Some(provenant_records::run::WorkContext {
                     graph_id: Some(PERSISTED_GRAPH.into()),
-                    node_id: Some(PERSISTED_NODE.into()),
+                    node_id: Some(
+                        if options.dynamic_queued {
+                            "review--child"
+                        } else {
+                            PERSISTED_NODE
+                        }
+                        .into(),
+                    ),
                     attempt: Some(1),
                     ..Default::default()
                 }),
@@ -3323,6 +3439,9 @@ fn persisted_attempt_with(
         format!("{host}/{attempt_id}"),
         &rig.project,
     )?;
+    if options.dynamic_queued {
+        return Ok((rig, store.record(attempt_id, &call)?));
+    }
     let started_at = clock.wall_now()?;
     let mut running = store.record(attempt_id, &call)?;
     running.revision = 2;
@@ -5542,6 +5661,10 @@ fn main() -> ExitCode {
         }
         type NamedTest = (&'static str, fn() -> Result);
         let tests: &[NamedTest] = &[
+            (
+                "retry_fences_retired_dynamic_descendant_against_launcher",
+                retry_fences_retired_dynamic_descendant_against_launcher,
+            ),
             (
                 "provider_checks_preserve_routes_and_settlement_causes",
                 provider_checks_preserve_routes_and_settlement_causes,

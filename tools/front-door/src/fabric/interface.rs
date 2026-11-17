@@ -2535,52 +2535,43 @@ impl Factory {
                     read_prompts: false,
                 };
                 let mut store = None;
-                for old in &before_retry.nodes {
-                    let Some(new) = checkpoint.nodes.iter_mut().find(|new| new.id == old.id) else {
+                for archived in retry_archived_attempts(&before_retry, &mut checkpoint)? {
+                    if archived.state == provenant_fabric_runtime::graph::AttemptState::Terminal {
                         continue;
+                    }
+                    let Some(reference) = &archived.attempt_ref else {
+                        if archived.host_refused_before_acceptance {
+                            continue;
+                        }
+                        return Err(FacadeError::StateCorrupt);
                     };
-                    if new.retry_generation == old.retry_generation {
-                        continue;
+                    let (host, attempt) =
+                        reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+                    if host != self.context.identity.host.to_string() {
+                        return Err(graph_input_reason(
+                            "cannot fence a remote attempt for graph retry",
+                        ));
                     }
-                    for (source, archived) in old.attempts.iter().zip(
-                        new.previous_attempts
-                            .iter_mut()
-                            .skip(old.previous_attempts.len()),
-                    ) {
-                        if source.state == provenant_fabric_runtime::graph::AttemptState::Terminal {
-                            continue;
-                        }
-                        let Some(reference) = &source.attempt_ref else {
-                            continue;
-                        };
-                        let (host, attempt) =
-                            reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
-                        if host != self.context.identity.host.to_string() {
-                            return Err(graph_input_reason(
-                                "cannot fence a remote attempt for graph retry",
-                            ));
-                        }
-                        let attempt = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
-                        let key = source
-                            .key
-                            .work_key(self.context.identity.project)
-                            .map_err(|_| FacadeError::StateCorrupt)?;
-                        if store.is_none() {
-                            store = Some(
-                                provenant_run::RunStore::open(&context, &call)
-                                    .map_err(run_error)?
-                                    .with_writer_registry(self.context.roots.state.as_path()),
-                            );
-                        }
-                        store
-                            .as_ref()
-                            .unwrap()
-                            .fence_graph_retry(attempt, &key, &call)
-                            .map_err(run_error)?;
-                        archived.state = provenant_fabric_runtime::graph::AttemptState::Terminal;
-                        archived.outcome =
-                            Some(provenant_fabric_runtime::graph::AttemptOutcome::OtherFailure);
+                    let attempt = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
+                    let key = archived
+                        .key
+                        .work_key(self.context.identity.project)
+                        .map_err(|_| FacadeError::StateCorrupt)?;
+                    if store.is_none() {
+                        store = Some(
+                            provenant_run::RunStore::open(&context, &call)
+                                .map_err(run_error)?
+                                .with_writer_registry(self.context.roots.state.as_path()),
+                        );
                     }
+                    store
+                        .as_ref()
+                        .unwrap()
+                        .fence_graph_retry(attempt, &key, &call)
+                        .map_err(run_error)?;
+                    archived.state = provenant_fabric_runtime::graph::AttemptState::Terminal;
+                    archived.outcome =
+                        Some(provenant_fabric_runtime::graph::AttemptOutcome::OtherFailure);
                 }
             }
             target.node = Some(node);
@@ -2987,6 +2978,64 @@ impl Factory {
         }
         Ok(json!({"by":by,"groups":groups.into_values().collect::<Vec<_>>()}))
     }
+}
+
+// Match the patch's destinations, including newly retired dynamic rows. A
+// missing, duplicated or modified attempt is not evidence of released custody.
+fn retry_archived_attempts<'a>(
+    before: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    after: &'a mut provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> Result<Vec<&'a mut provenant_fabric_runtime::graph::GraphAttempt>, FacadeError> {
+    let mut destinations: Vec<_> = after
+        .nodes
+        .iter_mut()
+        .flat_map(|row| {
+            row.attempts
+                .iter_mut()
+                .map(|attempt| (true, attempt))
+                .chain(
+                    row.previous_attempts
+                        .iter_mut()
+                        .map(|attempt| (false, attempt)),
+                )
+        })
+        .collect();
+    for (index, expansion) in after.expansions.iter_mut().enumerate() {
+        if before
+            .expansions
+            .get(index)
+            .is_some_and(|old| old.retired.is_none())
+        {
+            if let Some(retired) = expansion.retired.as_mut() {
+                destinations.extend(
+                    retired
+                        .progress
+                        .iter_mut()
+                        .flat_map(|row| row.attempts.iter_mut().map(|attempt| (false, attempt))),
+                );
+            }
+        }
+    }
+    let mut archived = Vec::new();
+    for source in before.nodes.iter().flat_map(|row| &row.attempts) {
+        let matches: Vec<_> = destinations
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, attempt))| attempt.key == source.key)
+            .map(|(index, _)| index)
+            .collect();
+        if matches.len() != 1 || *destinations[matches[0]].1 != *source {
+            return Err(FacadeError::StateCorrupt);
+        }
+        if !destinations[matches[0]].0 {
+            archived.push(matches[0]);
+        }
+    }
+    Ok(destinations
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, (_, attempt))| archived.contains(&index).then_some(attempt))
+        .collect())
 }
 
 fn bind_read_roots(

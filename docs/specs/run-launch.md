@@ -37,8 +37,10 @@ exclusion, then publication and custody locks. It withdraws a queued attempt
 under launcher exclusion before saving the graph reset. A started attempt or
 unreleased custody refuses the reset. A withdrawal bearing the retry fence is
 idempotent if interruption leaves the graph unreset; retry verifies the same
-attempt identity and custody again before archiving it. No run-store path may
-wait for the graph journal while holding those locks.
+attempt identity and custody again before archiving it. This includes attempts in
+dynamic descendant rows moved into retired expansion records; a missing or
+inconsistent destination refuses the reset. No run-store path may wait for the
+graph journal while holding those locks.
 
 Lock order is launcher exclusion (`launcher.lock`), publication reservation,
 then writer/custody exclusion in `RunStore::hand_off`. Git setup under that
