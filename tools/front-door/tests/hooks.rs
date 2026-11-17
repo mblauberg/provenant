@@ -447,13 +447,15 @@ fn pre_push_local_gate_resolves_config_and_refuses_enforce() -> Result {
         "{stderr}"
     );
 
+    // Unreadable configuration never blocks the push, but the operator is told
+    // that policy fell back to compiled defaults.
     fs::write(&config, "schema_version = [")?;
     let output = run()?;
-    assert_eq!(code(&output), 0);
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    assert_eq!(code(&output), 0, "{stderr}");
     assert!(
-        output.stderr.bytes.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr.bytes)
+        stderr.contains("policy settings unavailable") && stderr.contains("compiled defaults"),
+        "{stderr}"
     );
     Ok(())
 }
