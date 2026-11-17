@@ -942,23 +942,6 @@ fn check_fallback(
     );
 }
 
-mod loop_tests {
-    include!("loop_tests.rs");
-}
-mod plan_tests {
-    include!("plan_tests.rs");
-    include!("planner_implement_invariants.rs");
-}
-mod relay_tests {
-    include!("relay_tests.rs");
-    include!("relay_implement_invariants.rs");
-}
-mod envelope_tests {
-    include!("envelope_tests.rs");
-}
-mod ask_tests {
-    include!("ask_tests.rs");
-}
 fn at(seconds: i64) -> provenant_core::WallTime {
     provenant_core::WallTime::from_micros(1_800_000_000_000_000 + seconds * 1_000_000).unwrap()
 }
@@ -1063,70 +1046,5 @@ fn retry_of(checkpoint: &GraphCheckpoint) -> &LaunchRetry {
         .expect("a pending launch retry")
 }
 
-mod retry_tests {
-    include!("retry_tests.rs");
-}
-
-mod launch_and_separation_tests {
-    include!("graph_launch_and_separation_tests.rs");
-}
-
-mod synthesis_findings_tests {
-    include!("graph_synthesis_findings_tests.rs");
-}
-
-mod finding_propagation_tests {
-    include!("graph_finding_propagation_tests.rs");
-}
-
-mod sources_and_composites_tests {
-    include!("graph_sources_and_composites_tests.rs");
-}
-
-mod composite_review_tests {
-    include!("graph_composite_review_tests.rs");
-}
-
-mod plan_and_gates_tests {
-    include!("graph_plan_and_gates_tests.rs");
-}
-
-mod limits_and_budget_tests {
-    include!("graph_limits_and_budget_tests.rs");
-}
-
-mod upstream_materialisation_tests {
-    include!("graph_upstream_materialisation_tests.rs");
-}
-
-mod delivery_and_routes_tests {
-    include!("graph_delivery_and_routes_tests.rs");
-}
-
-mod retry_and_substitution_tests {
-    include!("graph_retry_and_substitution_tests.rs");
-}
-
-mod inputs_and_outputs_tests {
-    include!("graph_inputs_and_outputs_tests.rs");
-}
-
-mod launch_retry_tests {
-    include!("graph_launch_retry_tests.rs");
-}
-
-mod composite_and_allowance_tests {
-    include!("graph_composite_and_allowance_tests.rs");
-}
-
-mod launch_refusals_tests {
-    include!("graph_launch_refusals_tests.rs");
-}
-
-mod quota_and_review_tests {
-    include!("graph_quota_and_review_tests.rs");
-}
-
-mod review_contract_tests {
-    include!("graph_review_contract_tests.rs");
-}
+// Every file in `graph_tests/` becomes a module; see build.rs.
+include!(concat!(env!("OUT_DIR"), "/graph_test_modules.rs"));

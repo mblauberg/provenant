@@ -1,5 +1,7 @@
 //! Graph provider composition with isolated, synthetic provider processes.
 #![allow(clippy::disallowed_methods)]
+// Unregistered private test functions must fail compilation in this harness.
+#![deny(dead_code)]
 mod support;
 use serde_json::{Value, json};
 use std::{
@@ -800,14 +802,13 @@ fn policy_codex_fixture() -> Result<TestRig> {
 }
 
 // Spec: docs/specs/fabric.md#session-ready-steering
-#[test]
 fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    use provenant_core::{CancelToken, Clock, RootInputs};
+    use provenant_core::{CancelToken, RootInputs};
 
-    let mut rig = policy_codex_fixture()?;
+    let rig = policy_codex_fixture()?;
     let cleanup = rig.process_cleanup();
     let auth = br#"{"tokens":{"account_id":"fixture-one"}}"#;
     let account_key = provenant_providers::identity::codex_account(auth).ok_or("account key")?;
@@ -981,18 +982,15 @@ fn public_bounded_implement_steers_and_resumes_the_same_local_codex_session() ->
             Some(u32::try_from(ordinal + 1)?),
             "{request:?}"
         );
+        let route = record.applied_route.as_ref().ok_or("applied route")?;
+        assert_eq!(route.provider.as_deref(), Some("codex"), "{record:?}");
         assert_eq!(
-            record.route.provider.as_deref(),
-            Some("codex"),
-            "{record:?}"
-        );
-        assert_eq!(
-            record.route.model.as_deref(),
+            route.model.as_deref(),
             Some("codex/gpt-6-luna"),
             "{record:?}"
         );
         assert_eq!(
-            record.route.account_label.as_deref(),
+            route.account_label.as_deref(),
             Some("fixture"),
             "{record:?}"
         );
@@ -5318,6 +5316,23 @@ fn main() -> ExitCode {
     {
         fixture()
     } else {
+        // `#[test]` is stripped by rustc in this custom harness, before the
+        // dead-code lint can catch it. Test cases here are ordinary functions.
+        let source: String = include_str!("graph_provider.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(str::chars)
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let test_attribute = ["#", "[", "test", "]"].concat();
+        let conditional_attribute = ["#", "[", "cfg_attr"].concat();
+        if source.contains(&test_attribute) || source.contains(&conditional_attribute) {
+            let _ = writeln!(
+                io::stderr(),
+                "dispatch fixture: use ordinary functions, not test or cfg_attr attributes"
+            );
+            return ExitCode::FAILURE;
+        }
         type NamedTest = (&'static str, fn() -> Result);
         let tests: &[NamedTest] = &[
             (
@@ -5502,6 +5517,10 @@ fn main() -> ExitCode {
             (
                 "codex_capacity_settles_without_quota_refusal",
                 codex_capacity_settles_without_quota_refusal,
+            ),
+            (
+                "public_bounded_implement_steers_and_resumes_the_same_local_codex_session",
+                public_bounded_implement_steers_and_resumes_the_same_local_codex_session,
             ),
         ];
         let names: Vec<_> = tests.iter().map(|(name, _)| *name).collect();

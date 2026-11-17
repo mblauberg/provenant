@@ -417,6 +417,7 @@ mod tests {
     #[test]
     fn pipe_descriptor_fixture() -> io::Result<()> {
         let Ok(value) = std::env::var("PROVENANT_PROFILE_PIPE_FIXTURE") else {
+            eprintln!("SKIP: pipe descriptor fixture runs as a child of its parent test");
             return Ok(());
         };
         let fds = value

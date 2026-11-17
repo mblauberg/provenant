@@ -954,7 +954,7 @@ mod tests {
     }
 
     #[test]
-    fn inventory_summary_limits_roots_and_deduplicates_unresolved_paths() {
+    fn inventory_summary_records_roots_and_deduplicates_unresolved_paths() {
         let mut summary = InventorySummary::default();
         for index in 0..5 {
             let root = PathBuf::from(format!("/root{index}"));

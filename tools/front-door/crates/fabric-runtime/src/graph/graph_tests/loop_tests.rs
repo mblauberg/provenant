@@ -16,9 +16,9 @@ fn advance(
 
 fn fixture(name: &str) -> GraphDocument {
     let text = match name {
-        "pass" => include_str!("../fixtures/loop-pass-round-two.json"),
-        "exhaust" => include_str!("../fixtures/loop-exhausts.json"),
-        "extend" => include_str!("../fixtures/loop-extends.json"),
+        "pass" => include_str!("../../fixtures/loop-pass-round-two.json"),
+        "exhaust" => include_str!("../../fixtures/loop-exhausts.json"),
+        "extend" => include_str!("../../fixtures/loop-extends.json"),
         _ => panic!("unknown fixture"),
     };
     serde_json::from_str(text).unwrap()

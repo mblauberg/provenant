@@ -406,7 +406,7 @@ fn composite_redo_recovers_nested_subtree_after_checkpoint_before_launch_crash()
 #[test]
 fn loop_redo_restarts_rounds_after_checkpoint_before_launch_crash() {
     let mut document: GraphDocument =
-        serde_json::from_str(include_str!("../fixtures/loop-pass-round-two.json")).unwrap();
+        serde_json::from_str(include_str!("../../fixtures/loop-pass-round-two.json")).unwrap();
     let mut sibling = node("sibling", route("first"));
     sibling.depends_on = vec!["revise".into()];
     document.nodes.push(sibling);
@@ -1020,7 +1020,7 @@ fn node_redo_planner_admits_a_new_fragment_without_losing_the_first_expansion() 
 #[test]
 fn node_redo_can_launch_a_leaf_from_an_inactive_loop_round() {
     let document: GraphDocument =
-        serde_json::from_str(include_str!("../fixtures/loop-pass-round-two.json")).unwrap();
+        serde_json::from_str(include_str!("../../fixtures/loop-pass-round-two.json")).unwrap();
     let mut owner = FakeOwner {
         observations: [
             terminal_from("VERDICT: FAIL", "first-review"),

@@ -469,6 +469,7 @@ fn create_list_remove_keeps_branch_and_refuses_primary() -> Result<(), Box<dyn E
         &cancellation,
     )?;
     assert!(!created.path.exists());
+    assert!(branch_exists(&fixture, "feature/lifecycle"));
     Ok(())
 }
 
