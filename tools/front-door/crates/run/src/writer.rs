@@ -3456,6 +3456,7 @@ impl WriterLaunch {
                 base,
                 request.task.base_ref.as_deref(),
                 verified_tip,
+                &writer_policy_for_attempt(state, attempt),
             )?;
             if let Some(warning) = ancestor.warning(self.branch.as_str(), base, verified_tip) {
                 // Best effort: the ancestor is also in the branch reflog.

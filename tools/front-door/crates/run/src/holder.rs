@@ -7249,7 +7249,8 @@ mod writer_recovery_tests {
                             launch.branch.as_str(),
                             launch.base,
                             None,
-                            head
+                            head,
+                            &provenant_records::policy::Policy::default()
                         )
                         .is_err()
                     );

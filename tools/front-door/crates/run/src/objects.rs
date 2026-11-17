@@ -156,7 +156,8 @@ pub(crate) fn execute_bounded(
         || output.stdout.truncated
         || output.stdout.read_failed
         || output.stderr.read_failed
-        || settings.clean_stderr && !output.stderr.bytes.is_empty()
+        || settings.clean_stderr
+            && (output.stderr.truncated || !only_graft_hint(&output.stderr.bytes))
     {
         if String::from_utf8_lossy(&output.stderr.bytes)
             .contains("pack exceeds maximum allowed size")
@@ -173,7 +174,36 @@ pub(crate) fn execute_bounded(
             ),
         });
     }
+    if !output.stderr.bytes.is_empty() {
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: lane Git import: {}",
+            String::from_utf8_lossy(&output.stderr.bytes).trim_end()
+        );
+    }
     Ok(output.stdout.bytes)
+}
+
+// `cat-file --batch` can exit zero for a corrupt object, reporting it as
+// missing on stdout and an error on stderr. Its output is deliberately streamed
+// to discard, so retain the stderr integrity check except for Git's known hint.
+fn only_graft_hint(stderr: &[u8]) -> bool {
+    let Ok(stderr) = std::str::from_utf8(stderr) else {
+        return false;
+    };
+    stderr.lines().all(|line| {
+        matches!(
+            line,
+            "hint:"
+                | "hint: Support for <GIT_DIR>/info/grafts is deprecated"
+                | "hint: and will be removed in a future Git version."
+                | "hint: Please use \"git replace --convert-graft-file\""
+                | "hint: to convert the grafts into replace refs."
+                | "hint: Turn this message off by running"
+                | "hint: \"git config set advice.graftFileDeprecated false\""
+        )
+    })
 }
 
 pub(crate) fn quote_alternate(path: &Path) -> String {
@@ -302,6 +332,8 @@ pub(crate) fn is_ancestor(git: &Path, repo: &VerifiedRepo, ancestor: GitOid, hea
 pub(crate) enum Ancestor {
     /// The pinned launch base: the expected case, nothing to report.
     LaunchBase,
+    /// The tip has no known ancestor but is retained on the lane branch.
+    Unrooted,
     /// A rebase or merge onto other history the host already knows: the
     /// origin default branch, the ref the lane launched against, or a
     /// remote-tracking branch. Publication proceeds and reports it.
@@ -312,6 +344,7 @@ impl Ancestor {
     pub(crate) fn warning(&self, branch: &str, base: GitOid, head: GitOid) -> Option<String> {
         match self {
             Self::LaunchBase => None,
+            Self::Unrooted => None,
             Self::Known { reference, oid } => Some(format!(
                 "lane tip {head} on {branch} no longer descends from its launch base {base}; \
                  published because it descends from {reference} ({oid})"
@@ -379,6 +412,7 @@ pub(crate) fn publish_branch(
     base: GitOid,
     launch_ref: Option<&str>,
     head: GitOid,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<Ancestor> {
     let current = resolve_ref(git, repo, branch)?;
     // Fast-forward from the launch base or from later lane commits, but not
@@ -388,21 +422,30 @@ pub(crate) fn publish_branch(
     if !advances_current && !is_ancestor(git, repo, head, current) {
         return Err(invalid());
     }
-    // The tip and the host's refs do not change on retry, so a tip with no
-    // known ancestor is a final refusal, never a retryable one.
-    let ancestor = known_ancestor(git, repo, base, launch_ref, head)?.ok_or_else(|| {
-        RunError::LaneTipUnrooted {
-            tip: head,
-            base,
-            launch_ref: launch_ref.map(str::to_owned),
+    let ancestor = match known_ancestor(git, repo, base, launch_ref, head)? {
+        Some(ancestor) => ancestor,
+        None => {
+            policy.warn_or(
+                "LANE_TIP_UNROOTED",
+                provenant_records::policy::Facts::violation(format!(
+                    "lane tip {head} has no known ancestor; publishing lane branch anyway"
+                )),
+                |_| RunError::LaneTipUnrooted {
+                    tip: head,
+                    base,
+                    launch_ref: launch_ref.map(str::to_owned),
+                },
+            )?;
+            Ancestor::Unrooted
         }
-    })?;
+    };
     // receive-pack has checked the graph. Git's CAS protects concurrent host
     // updates, including when a lane rebases or merges its private branch.
     {
         let target = if advances_current { head } else { current };
         let message = match &ancestor {
             Ancestor::LaunchBase => "provenant: verified lane objects".to_owned(),
+            Ancestor::Unrooted => "provenant: verified lane objects (no known ancestor)".to_owned(),
             Ancestor::Known { reference, oid } => {
                 format!("provenant: verified lane objects (descends from {reference} {oid})")
             }
