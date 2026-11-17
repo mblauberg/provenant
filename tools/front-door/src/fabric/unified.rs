@@ -3159,6 +3159,16 @@ mod tests {
     }
 
     #[test]
+    fn missing_project_target_error_has_one_code_and_a_repair() {
+        let target = "graph-name".parse().expect("valid graph target");
+        let fault = outside_project_fault(&target);
+        assert_eq!(fault.code, "NOT_FOUND");
+        assert!(fault.message.contains("no project found"));
+        assert!(fault.message.contains("pass --project PATH"));
+        assert!(!fault.message.starts_with("NOT_FOUND:"));
+    }
+
+    #[test]
     fn a_stop_cause_is_one_bounded_line_that_names_it() {
         let row = json!({"state":"failed","cause_code":"budget_exhausted",
             "reason":"x".repeat(4096),"waiting_for":null});

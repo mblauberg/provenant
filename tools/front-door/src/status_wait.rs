@@ -64,9 +64,27 @@ impl WaitMode {
         match self {
             Self::All => "all",
             Self::Any => "any",
-            Self::FailFast => "fail_fast",
+            Self::FailFast => "fail-fast",
         }
     }
+}
+
+fn mode_heading(mode: WaitMode) -> String {
+    format!("wait mode: {}\n", mode.as_str())
+}
+
+fn terminal_data(
+    mode: WaitMode,
+    targets: Vec<Value>,
+    timed_out: bool,
+    local_observation: Option<&str>,
+) -> Value {
+    json!({
+        "mode": mode.as_str(),
+        "targets": targets,
+        "timed_out": timed_out,
+        "local_observation": local_observation,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1415,7 +1433,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         return crate::fail("wait", Outcome::Error, "IO", &error.to_string(), globals);
     }
     let outcome = outcome(&latest, &settled, done, mode);
-    let mut human = format!("wait mode: {}\n", mode.as_str());
+    let mut human = mode_heading(mode);
     let rows: Vec<_> = sources
         .iter()
         .zip(&latest)
@@ -1460,7 +1478,12 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         &provenant_records::CommandResult::new(
             "wait",
             outcome,
-            json!({"mode":mode.as_str(),"targets":rows,"timed_out":!done,"local_observation":if graph_indices.is_empty(){Value::Null}else{json!(observation)}}),
+            terminal_data(
+                mode,
+                rows,
+                !done,
+                (!graph_indices.is_empty()).then_some(observation.as_str()),
+            ),
         ),
         globals,
         &human,
@@ -1963,6 +1986,17 @@ mod tests {
         assert_eq!(provenant_cli::exit_status(&outcome), 0);
         let (outcome, _) = wait_on(&[(0, NeedsInput), (1, Unsuccessful)], 2, WaitMode::All);
         assert_eq!(provenant_cli::exit_status(&outcome), 1);
+        let (outcome, settled) = wait_on(
+            &[(1, Unsuccessful), (0, Pending), (0, Succeeded)],
+            2,
+            WaitMode::All,
+        );
+        assert_eq!(
+            settled,
+            [1, 0],
+            "all mode reads the remaining target after failure"
+        );
+        assert_eq!(outcome, Outcome::Failed);
         assert_eq!(
             provenant_cli::exit_status(&wait_on(&[], 1, WaitMode::Any).0),
             124
@@ -1991,6 +2025,21 @@ mod tests {
         );
         assert_eq!(settled, [1, 0]);
         assert_eq!(outcome, Outcome::Ok);
+    }
+
+    #[test]
+    fn selected_mode_is_named_in_human_and_terminal_json_output() {
+        for (mode, label) in [
+            (WaitMode::All, "all"),
+            (WaitMode::Any, "any"),
+            (WaitMode::FailFast, "fail-fast"),
+        ] {
+            assert_eq!(mode_heading(mode), format!("wait mode: {label}\n"));
+            let data = terminal_data(mode, Vec::new(), false, None);
+            assert_eq!(data["mode"], label);
+            assert_eq!(data["timed_out"], false);
+            assert!(data["local_observation"].is_null());
+        }
     }
 
     #[test]
