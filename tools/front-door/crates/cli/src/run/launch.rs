@@ -587,8 +587,15 @@ pub(super) fn launch_on_host_with_wait(
     let project = session.context.project_id;
     let (graph, node) = (key.graph().to_owned(), key.node().to_owned());
     let launch_cancel = call.cancel.linked(move || {
-        provenant_fabric_runtime::graph::FileJournal::launch_cancellation_requested(
-            &root, project, &graph, &node,
+        let Ok(now) = provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock) else {
+            return true;
+        };
+        provenant_fabric_runtime::graph::FileJournal::launch_preparation_stopped(
+            &root,
+            project,
+            &graph,
+            &node,
+            Some(now),
         )
         .unwrap_or(true)
     });

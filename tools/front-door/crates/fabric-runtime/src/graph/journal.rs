@@ -169,14 +169,17 @@ impl FileJournal {
         super::cancellation_intent::record(root, project, target, budget, cancel, clock)
     }
 
-    /// Whether durable graph or subtree intent fences this provider launch.
-    pub fn launch_cancellation_requested(
+    /// Whether durable intent fences this launch. Supplying a clock also fences
+    /// active preparation at its original deadline; observers omit it so they
+    /// can still reconcile an expired attempt.
+    pub fn launch_preparation_stopped(
         root: &StateRoot,
         project: ProjectId,
         graph_id: &str,
         node_id: &str,
+        now: Option<provenant_core::WallTime>,
     ) -> Result<bool, JournalError> {
-        super::cancellation_intent::launch_requested(root, project, graph_id, node_id)
+        super::cancellation_intent::launch_stopped(root, project, graph_id, node_id, now)
     }
 
     /// Whether one particular stop request still awaits graph-lock acknowledgement.

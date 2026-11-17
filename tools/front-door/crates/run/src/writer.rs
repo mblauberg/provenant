@@ -59,27 +59,32 @@ fn utility_error(
     path: Option<&Path>,
 ) -> impl FnOnce(provenant_confinement::utility::UtilityError) -> RunError {
     let path = path.map(Path::to_path_buf);
-    move |source| match source {
+    move |source| {
+        use provenant_confinement::{repo::RepoError, utility::UtilityError};
         // Repository verification refusals are confinement decisions, not
-        // transport failures. Keep their typed source so the public boundary
-        // renders the refusal code without disclosing the selected path.
-        provenant_confinement::utility::UtilityError::Repo(
-            error @ (provenant_confinement::repo::RepoError::InvalidPath
-            | provenant_confinement::repo::RepoError::InvalidRoot
-            | provenant_confinement::repo::RepoError::InvalidGitMarker
-            | provenant_confinement::repo::RepoError::InvalidRegistration
-            | provenant_confinement::repo::RepoError::InvalidGitDirectory
-            | provenant_confinement::repo::RepoError::AlternateObjects
-            | provenant_confinement::repo::RepoError::MetadataTooLarge
-            | provenant_confinement::repo::RepoError::Unprobed),
-        ) => RunError::Writer(worktrees::WorktreeError::Utility(
-            provenant_confinement::utility::UtilityError::Repo(error),
-        )),
-        source => RunError::OperationIo {
-            operation,
-            path,
-            source: crate::CausedSource::io(source.to_string(), source.safe_cause()),
-        },
+        // transport failures. Preserve their typed source and redact paths at
+        // the public boundary. Only OS/transport failures get I/O metadata.
+        let refusal = match &source {
+            UtilityError::Repo(error) => !matches!(
+                error,
+                RepoError::Fs(_) | RepoError::ConfigNormalisationExecution(_)
+            ),
+            UtilityError::InvalidExecutable { .. }
+            | UtilityError::InvalidHome
+            | UtilityError::LaneConfiguration { .. }
+            | UtilityError::UnprobedRepository
+            | UtilityError::Path(_) => true,
+            _ => false,
+        };
+        if refusal {
+            RunError::Writer(worktrees::WorktreeError::Utility(source))
+        } else {
+            RunError::OperationIo {
+                operation,
+                path,
+                source: crate::CausedSource::io(source.to_string(), source.safe_cause()),
+            }
+        }
     }
 }
 /// Held-directory errors name paths relative to their anchor. Retain a known

@@ -2231,3 +2231,52 @@ mod launch_recovery {
         assert_eq!(ledger.lock().unwrap().starts.len(), 2);
     }
 }
+
+// Spec: docs/specs/cli.md#waits-are-readers
+#[test]
+fn persisted_launch_deadline_stops_preparation_without_stopping_recovery_reads() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let now = clock.wall_now().unwrap();
+    let deadline = now
+        .checked_add(provenant_core::DurationMicros::from_seconds(60).unwrap())
+        .unwrap();
+    let mut fixture = stored_fixture();
+    let node = &mut fixture.checkpoint.nodes[0];
+    node.state = NodeState::Running;
+    node.attempts[0].state = AttemptState::Starting;
+    node.attempts[0].outcome = None;
+    node.attempts[0].launched = false;
+    node.launch_retry = Some(LaunchRetry {
+        extra: Default::default(),
+        policy: LaunchRetryPolicy::default(),
+        failures: 0,
+        deadline: Some(deadline),
+        wake_at: Some(now),
+        reason: None,
+    });
+    fixture.checkpoint.wake_at = Some(now);
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    // Preparation can read its fence while the scheduler owns the journal lock.
+    assert!(
+        !FileJournal::launch_preparation_stopped(&root, project, "g-test", "reader", Some(now))
+            .unwrap()
+    );
+    assert!(
+        FileJournal::launch_preparation_stopped(&root, project, "g-test", "reader", Some(deadline))
+            .unwrap()
+    );
+    // Expiry forbids a new provider launch but leaves recovery able to settle it.
+    assert!(
+        !FileJournal::launch_preparation_stopped(&root, project, "g-test", "reader", None).unwrap()
+    );
+}

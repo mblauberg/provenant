@@ -2571,8 +2571,8 @@ impl BoundGraphOwner<'_> {
         let project = self.factory.context.identity.project;
         let (graph, node_id) = (key.graph_id.clone(), key.node_id.clone());
         let launch_cancel = self.cancel.linked(move || {
-            provenant_fabric_runtime::graph::FileJournal::launch_cancellation_requested(
-                &root, project, &graph, &node_id,
+            provenant_fabric_runtime::graph::FileJournal::launch_preparation_stopped(
+                &root, project, &graph, &node_id, None,
             )
             .unwrap_or(true)
         });

@@ -175,11 +175,12 @@ pub(super) fn pending(
 
 /// Read the independent intent sidecar while preparation holds the journal lock.
 /// Match the saved graph incarnation so an obsolete request cannot stop new work.
-pub(super) fn launch_requested(
+pub(super) fn launch_stopped(
     root: &StateRoot,
     project: ProjectId,
     graph_id: &str,
     node_id: &str,
+    now: Option<provenant_core::WallTime>,
 ) -> Result<bool, JournalError> {
     let Some(checkpoint) = FileJournal::read_checkpoint(root, project, graph_id)? else {
         return Ok(false);
@@ -187,6 +188,15 @@ pub(super) fn launch_requested(
     let Some(node) = checkpoint.nodes.iter().find(|node| node.id == node_id) else {
         return Ok(false);
     };
+    if node
+        .launch_retry
+        .as_ref()
+        .and_then(|retry| retry.deadline)
+        .zip(now)
+        .is_some_and(|(deadline, now)| now >= deadline)
+    {
+        return Ok(true);
+    }
     if checkpoint.cancelled && !node.detached_from_graph_cancel || node.stop_fence {
         return Ok(true);
     }
