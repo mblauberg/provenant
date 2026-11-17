@@ -741,6 +741,19 @@ fn retry_node_scope(
         node.route = None;
         node.routes = Some(routes.to_vec());
     }
+    // A reset removes its expansion-pause marker. Move the graph pause to
+    // another waiting node, or clear it, before removing that marker.
+    for index in 0..candidate.nodes.len() {
+        if reset_ids.contains(&candidate.nodes[index].id)
+            && (candidate.nodes[index].expansion_pause.is_some()
+                || matches!(
+                    &candidate.nodes[index].expansion_cause,
+                    Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
+                ))
+        {
+            plans::clear_expansion_pause(&mut candidate, index, true);
+        }
+    }
     for progress in &mut candidate.nodes {
         if reset_ids.contains(&progress.id) {
             let container = expanded.nodes.iter().any(|node| {

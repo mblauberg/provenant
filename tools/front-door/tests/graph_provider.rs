@@ -4186,6 +4186,56 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
     Ok(())
 }
 
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+fn declared_stop_writer_retry_uses_the_public_cli() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let _cleanup = rig.process_cleanup();
+    let account =
+        provenant_providers::identity::codex_account(br#"{"tokens":{"account_id":"fixture-one"}}"#)
+            .ok_or("account key")?;
+    support::register_account(&rig, "codex", "fixture", &account, &rig.root.join("codex"))?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let out = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    let tree = rig.project.join(".worktrees/retry-stop");
+    let out = rig.execute(
+        &git,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "retry-stop",
+            tree.to_str().ok_or("tree")?,
+        ],
+        None,
+    )?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    let lane = run_graph_provider_with_wait(
+        &rig,
+        "retry-stop",
+        json!({
+            "id":"writer", "prompt":"fixture partial stop", "access":"worktree_write",
+            "worktree":tree, "route":{"adapter":"codex","model":"gpt-6-luna"},
+            "on_stop":{"stopped_early":"chair"}
+        }),
+        "30s",
+    )?;
+    assert_eq!(lane["state"], "review_required", "{lane}");
+    let out = rig.command(&["retry", "retry-stop/writer", "--json"])?;
+    let reply: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(code(&out), 0, "{reply}; {out:?}");
+    let rows = reply["data"]["rows"].as_array().ok_or("retry rows")?;
+    assert!(
+        rows.iter()
+            .any(|row| row["kind"] == "attempt" && row["attempt_number"] == 2),
+        "{reply}"
+    );
+    Ok(())
+}
+
 fn graph_writer_restarts_fresh() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -5511,6 +5561,10 @@ fn main() -> ExitCode {
             (
                 "opencode_usage_limit_settlement_is_bounded",
                 opencode_usage_limit_settlement_is_bounded,
+            ),
+            (
+                "declared_stop_writer_retry_uses_the_public_cli",
+                declared_stop_writer_retry_uses_the_public_cli,
             ),
             ("graph_writer_restarts_fresh", graph_writer_restarts_fresh),
             (
